@@ -1,0 +1,48 @@
+# AirPlay Controller
+
+## Purpose
+
+A macOS app (native AppKit, planned) for sending system audio to multiple AirPlay
+2 speakers at once with per-device volume, mute/solo, saved groups, and perfect
+multi-room sync — capabilities Apple's own Music/TV apps have but the rest of macOS
+lacks. The product requirements, phased build plan, and UI design are fully
+specified in [SPEC.md](SPEC.md); this file only orients an agent to *where things
+live in the repo*, not what the product should do.
+
+Status (see SPEC.md §5 "Phased build plan" and §8 for detail): Phase 0 feasibility
+spike is complete — the hard technical risks (AirPlay-2 sender path, OwnTone pipe
+input, single-machine dev limitations) have been proven out. Physical speakers are
+currently unavailable, so the mock backend is the primary development target.
+Phase 1 (the actual AppKit app) has not been started — there is no UI code in this
+repo yet.
+
+Keep this file up to date when: a new top-level folder is added (e.g. the AppKit
+app target), SPEC.md's phase status materially changes, or the dev tooling gains a
+new layer.
+
+## Folder Map
+
+- [AirPlayControllerCore/](AirPlayControllerCore/AGENTS.md) — the Swift package: the
+  `Device` model, the `OutputBackend` protocol seam, a fully-working `MockBackend`
+  for offline UI work, and a not-yet-implemented `OwnToneBackend` stub. This is the
+  only code in the repo today; a future AppKit app target will link against it.
+- [dev/](dev/AGENTS.md) — offline dev tooling: an optional shairport-sync "fake
+  speaker" script for sanity-checking the real Bonjour/AirPlay-1 wire path
+  (single-device only — see that folder's docs for why).
+- [SPEC.md](SPEC.md) — the product spec: problem statement, confirmed requirements,
+  feature list (v1/v2/later), technical architecture, phased build plan, Phase 0
+  feasibility findings, and the full UI design (menu bar, groups, mixer window).
+  Treat this as the source of truth for *what* to build; code comments across the
+  repo cite specific sections (e.g. "SPEC.md §9") for the reasoning behind a
+  decision.
+
+## Notable Patterns
+
+- **No speakers, by design.** There are no real AirPlay devices in this dev
+  environment. Anything that needs to "see" a device — UI work, control logic,
+  discovery — should be developed and tested against `MockBackend`
+  ([AirPlayControllerCore/AGENTS.md](AirPlayControllerCore/AGENTS.md)), not assumed
+  to require hardware.
+- **The core package knows nothing about AppKit.** `AirPlayControllerCore` is pure
+  logic (`Foundation` only); UI code, when it exists, will be a separate target that
+  depends on it — not the other way around.

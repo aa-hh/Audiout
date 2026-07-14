@@ -1,0 +1,16 @@
+AirPlayEngine is licensed under the GNU General Public License, version 2
+or later (GPL-2.0-or-later). See COPYING in this directory for the full
+license text.
+
+AirPlayEngine vendors third-party source code under MIT and BSD-3-Clause
+licenses (pair_ap, libairptp, evrtsp). Those licenses are compatible with
+GPL-2.0-or-later and do not change the license of this package as a whole,
+but their original copyright notices and license text are preserved
+verbatim in each source file, per their terms. See NOTICE for the full
+per-component attribution and docs/license-inventory.md for the detailed
+inventory this file and NOTICE are derived from.
+
+This is a RESOLVED DECISION (PLAN-PHASE-2.md, Q4, 2026-07-13): the project
+is open source under GPL-2.0-or-later. Vendoring the GPL-2.0-or-later
+sender cluster is therefore permitted; a prior "personal use only, never
+distribute" posture was superseded.

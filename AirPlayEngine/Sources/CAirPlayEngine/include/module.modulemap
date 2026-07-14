@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Module map for the CAirPlayEngine C target. Exposes the umbrella header
+// so the Swift target (Sources/AirPlayEngine) can `import CAirPlayEngine`.
+//
+// TODO(T-BUILD-1): if the umbrella header approach proves too coarse once
+// the vendored sender/evrtsp/pair_ap/libairptp sources are wired in (e.g.
+// symbol collisions, or wanting a narrower public surface for Swift), split
+// this into multiple explicit top-level headers instead of one umbrella.
+
+module CAirPlayEngine {
+    umbrella header "CAirPlayEngine.h"
+    export *
+    module * { export * }
+}

@@ -1,0 +1,93 @@
+# Third-Party Licenses and Attribution — AirPlayEngine
+
+AirPlayEngine is licensed under **GPL-2.0-or-later**. See `LICENSE` and
+`COPYING` (full GPL v2 text) in this directory. This NOTICE lists every
+vendored component and its original license/copyright, per
+`docs/license-inventory.md` (the full inventory this file summarizes).
+
+## GPL-2.0-or-later components — the sender core
+
+Source: derived from OwnTone Server (https://github.com/owntone/owntone-server),
+tag `29.2`. Vendored into `Sources/CAirPlayEngine/sender/`.
+
+- `sender/airplay.c` — OwnTone Project. GPL-2.0-or-later.
+- `sender/airplay_events.c` (+ `.h`) — OwnTone Project. GPL-2.0-or-later.
+- `sender/rtp_common.c` — Copyright (C) 2019- Espen Jürgensen
+  <espenjurgensen@gmail.com>. GPL-2.0-or-later.
+- `sender/rtp_common.h` — paired with `rtp_common.c`; no license header in
+  upstream OwnTone. Treated as GPL-2.0-or-later by inheritance; an SPDX
+  header has been added in this vendored copy.
+- `sender/plist_wrap.h` — self-contained libplist wrapper, OwnTone Project.
+  GPL-2.0-or-later by inheritance (part of the sender cluster).
+- `Sources/CAirPlayEngine/shims/*` — new code written for this project
+  (not derived from OwnTone). GPL-2.0-or-later, copyright the AirPlay
+  Controller project.
+
+Distribution of this GPL-2.0-or-later component requires: retaining the
+original headers (done — verbatim), providing source availability (this
+repository), and preserving copyright notices in derivative works.
+
+## BSD-3-Clause components — evrtsp (RTSP protocol layer)
+
+Source: OwnTone Server, based on evhttp from libevent 1.4.x. Vendored into
+`Sources/CAirPlayEngine/evrtsp/`.
+
+- `evrtsp/rtsp.c`, `evrtsp/evrtsp.h` — Copyright (C) 2010 Julien BLACHE
+  <jb@jblache.org>; Copyright (c) 2002-2006 Niels Provos
+  <provos@citi.umich.edu>. BSD-3-Clause.
+- `evrtsp/log.h` — Copyright (c) 2000-2004 Niels Provos. BSD-3-Clause.
+- `evrtsp/rtsp-internal.h` — Copyright (C) 2010 Julien BLACHE; Copyright
+  2001 Niels Provos. No explicit license grant text in upstream OwnTone;
+  treated as BSD-3-Clause by context (same authors/directory as rtsp.c).
+  An SPDX header has been added in this vendored copy.
+
+## MIT components — pair_ap (AirPlay 2 pairing)
+
+Source: OwnTone Server. Vendored into `Sources/CAirPlayEngine/pair_ap/`.
+
+- `pair_ap/pair.c`, `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
+  `pair_ap/pair-tlv.c` — MIT License (OwnTone Project).
+  - `pair_fruit.c` includes adaptations of Tom Cocagne's csrp (SRP6a) — MIT.
+  - `pair_homekit.c` includes adaptations of ViktoriiaKh's ap2-sender and
+    maximkulkin's esp-homekit — MIT.
+  - `pair-tlv.c` includes adaptations of maximkulkin's esp-homekit
+    (TLV encoding) — MIT.
+- `pair_ap/pair.h`, `pair_ap/pair-internal.h`, `pair_ap/pair-tlv.h` — no
+  license header in upstream OwnTone; MIT by directory/cluster context.
+  SPDX headers have been added in these vendored copies.
+
+## MIT components — libairptp (PTP clock library)
+
+Source: OwnTone Server. Vendored into `Sources/CAirPlayEngine/libairptp/`.
+Full upstream `LICENSE` file preserved at
+`Sources/CAirPlayEngine/libairptp/LICENSE`.
+
+- `libairptp/LICENSE` — MIT License, Copyright (c) 2026 OwnTone.
+- `libairptp/src/airptp.c`, `libairptp/src/daemon.c` — explicit MIT headers,
+  Copyright (c) 2026 OwnTone.
+- `libairptp/src/ptp_msg_handle.c`, `libairptp/src/utils.c` — explicit MIT
+  headers, Copyright (c) 2026 OwnTone.
+- `libairptp/airptp.h`, `libairptp/src/ptp_definitions.h`,
+  `libairptp/src/ptp_msg_handle.h`, `libairptp/src/airptp_internal.h`,
+  `libairptp/src/utils.h`, `libairptp/src/daemon.h` — no license header in
+  upstream OwnTone; MIT by the directory's `LICENSE` file. SPDX headers
+  have been added in these vendored copies.
+
+**Severability note:** libairptp does not link the GPL sender cluster. Per
+GPL-2.0 Section 3, the tiny privileged PTP helper (SMAppService daemon,
+design in `docs/` — see T-HELPER-DESIGN-1 in PLAN-PHASE-2.md) built purely
+from libairptp can ship as a separate, standalone MIT-licensed binary.
+
+## Summary
+
+This project combines:
+- **GPL-2.0-or-later** — the sender core (OwnTone-derived) + shims (new).
+- **BSD-3-Clause** — the RTSP transport layer (evrtsp), compatible with GPL.
+- **MIT** — pairing (pair_ap) and PTP clock sync (libairptp), compatible
+  with GPL.
+
+All components retain their original copyright notices and license text
+in the vendored source tree (`Sources/CAirPlayEngine/`). The combined
+linked work (AirPlayEngine + AirPlayControllerCore + the app) is
+GPL-2.0-or-later, per RESOLVED DECISIONS Q4 in `../PLAN-PHASE-2.md`. For
+the full GPL-2.0 text, see `COPYING` in this directory.

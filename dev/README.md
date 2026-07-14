@@ -38,6 +38,27 @@ at `makeBackend(.mock)`. Options on `MockBackend.init`:
 
 ---
 
+## Runtime dev toggle — `AIRPLAY_BACKEND`
+
+`makeBackend()` (`OwnToneBackend.swift`) resolves which `OutputBackend` to use,
+in order: an explicit argument → the `AIRPLAY_BACKEND` env var → default `mock`.
+
+```bash
+AIRPLAY_BACKEND=mock    swift run mock-speakers-demo   # default, same as unset
+AIRPLAY_BACKEND=owntone swift run mock-speakers-demo   # see caveat below
+```
+
+- Values are case-insensitive: `mock` | `owntone`.
+- An unrecognized value (or anything else unexpected) prints one warning to
+  stderr and falls back to `mock` rather than crashing.
+- **Caveat:** `owntone` currently traps. `OwnToneBackend` is still a stub whose
+  methods `assertionFailure` — wiring it to real OwnTone/AirPlay is 0f/Phase 1
+  work (see `PLAN-0e-0f.md`, T-TOGGLE-1). Use `mock` for all offline work today.
+- This maps onto a future hidden Developer setting in the app — the app will
+  always hold an `OutputBackend`, never a concrete type (SPEC.md §4 seam).
+
+---
+
 ## Layer 2 — shairport-sync fake speaker (optional, one device)
 
 A real AirPlay-1 receiver on this Mac, advertised over Bonjour, for occasionally

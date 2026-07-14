@@ -2,7 +2,7 @@ import Foundation
 
 /// An `OutputBackend` with no network and no audio — it fabricates a fleet of
 /// devices and behaves the way the real one will, so the entire AppKit UI
-/// (menu bar, mixer, groups, sliders, mute/solo, level meters) can be built and
+/// (menu bar, mixer, groups, sliders, mute, level meters) can be built and
 /// iterated with no AirPlay speakers anywhere in sight.
 ///
 /// It deliberately imitates the *awkward* parts of reality, not just the happy
@@ -102,10 +102,6 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         mutate(id) { $0.isMuted = muted }
     }
 
-    public func setSoloed(_ soloed: Bool, for id: String) {
-        mutate(id) { $0.isSoloed = soloed }
-    }
-
     public func setOutputSet(_ ids: Set<String>) {
         queue.async {
             for id in self.fleet.map(\.id) {
@@ -149,8 +145,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
     private func emitLevels() {
         tick &+= 1
-        let soloActive = live.values.contains { $0.isSelected && $0.isAvailable && $0.isSoloed }
-        for device in live.values where device.isPlaying(soloActive: soloActive) {
+        for device in live.values where device.isPlaying {
             // A gentle wobble around the device's volume so meters look alive.
             let seed = Double(abs(device.id.hashValue) % 1000) / 1000.0
             let phase = Double(tick) * 0.35 + seed * 6.28
@@ -193,11 +188,9 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
 private extension Device {
     /// Would this device be producing sound right now? Mirrors the pipeline:
-    /// selected + reachable + not muted, and — if any selected device is soloed —
-    /// this one must be the soloed one.
-    func isPlaying(soloActive: Bool) -> Bool {
-        guard isAvailable, isSelected, !isMuted else { return false }
-        return soloActive ? isSoloed : true
+    /// selected + reachable + not muted.
+    var isPlaying: Bool {
+        isAvailable && isSelected && !isMuted
     }
 }
 
@@ -208,6 +201,11 @@ public extension Array where Element == Device {
     /// the groups UI has enough to work with.
     static var demoFleet: [Device] {
         [
+            // The Mac's own output. Not an AirPlay receiver — it is the
+            // MainOutTarget.localSpeakers target (passthrough). Starts unselected
+            // (it can't join a mixed Selected-Speakers set pre-engine; SPEC §9).
+            Device(id: "local-mac",    name: "MacBook Pro Speakers", kind: .localMac,
+                   supportsAirPlay2: false, volume: 65, isLocalDevice: true),
             Device(id: "sonos-move",   name: "Sonos Move",    kind: .sonos,          volume: 40, isSelected: true),
             Device(id: "sonos-move-2", name: "Move 2",        kind: .sonos,          volume: 55, isSelected: true),
             Device(id: "airport-mixer", name: "Mixer",        kind: .airportExpress, supportsAirPlay2: false, volume: 30),

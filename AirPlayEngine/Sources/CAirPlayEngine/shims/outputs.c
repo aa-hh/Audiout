@@ -1,0 +1,470 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// outputs.c — the registry/runner shim (T-BUILD-1 MINIMAL scaffolding).
+//
+// This is the load-bearing shim (seam-map §2, risk R-A). For T-BUILD-1
+// (compile+link only) it provides:
+//   - A trivial singly-linked device registry (add/remove/get/list/free) — a
+//     REAL minimal registry so airplay.c's outputs_list()/outputs_device_get()
+//     resolve to actual lookups. Not thread-safe, not the final shape.
+//   - outputs_device_session_add/remove: attach/detach the opaque session
+//     pointer on the matching device (minimal but real).
+//   - outputs_cb + the callback-id registry: **REAL** as of T-SHIM-1 — the R-A
+//     async-callback dispatcher. It reproduces OwnTone outputs.c's callback
+//     machinery (OUTPUTS_MAX_CALLBACKS slots, replace-on-add-per-device,
+//     deferred delivery on evbase_player, device re-resolved by device_id) and
+//     adds the engine completion hook that unblocks T-API-1's async waiter.
+//     Implemented against docs/outputs-dispatcher-contract.md (N ∈ {0,1},
+//     exactly once, keyed by callback_id). See that doc + §4 of build-notes.md.
+//   - outputs_name / quality_subscribe/unsubscribe / buffer_duration_ms_get /
+//     exclusive_mode_get: trivial correct values (name string, 0, default
+//     2250 ms, false).
+//
+// TODO(T-SHIM-1): the REAL registry ownership/merge semantics + string-freeing
+// outputs_device_free remain (see build-notes §4); those are independent of the
+// R-A dispatcher, which is now complete.
+
+#include "outputs.h"
+#include "logger.h" /* DPRINTF / L_AIRPLAY / E_* — real logging on the R-A path */
+#include "misc.h"   /* ARRAY_SIZE */
+
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h> /* memset */
+
+/* The player thread's libevent base. airplay.c declares `extern struct
+ * event_base *evbase_player;` (airplay.c:459) and uses it to own the timing/
+ * control UDP services, every RTSP connection, and its timers (seam-map §8).
+ * The engine owns one event_base on one dedicated thread and sets this at
+ * airplay_init. For T-BUILD-1 (compile+link only, nothing runs) it is NULL.
+ * TODO(T-API-1): set this to the engine thread's event_base before
+ * airplay_init runs, per seam-map §8's threading model. */
+struct event_base *evbase_player = NULL;
+
+/* Minimal global device registry (single linked list). Not thread-safe by
+ * design — all access is on the single engine thread that owns evbase_player
+ * (seam-map §8). */
+static struct output_device *device_list = NULL;
+
+/* The single backend the engine ships. airplay.c defines this
+ * (airplay.c:4385); we reference it here only to reach its device_free_extra
+ * hook (which frees airplay_extra: mdns_name + the struct). Declared extern
+ * because the shim can't include airplay.h (there isn't one for the sender). */
+extern struct output_definition output_airplay;
+
+struct output_device *
+outputs_list(void)
+{
+  return device_list;
+}
+
+struct output_device *
+outputs_device_get(uint64_t device_id)
+{
+  struct output_device *d;
+  for (d = device_list; d; d = d->next)
+    if (d->id == device_id)
+      return d;
+  return NULL;
+}
+
+struct output_device *
+outputs_device_add(struct output_device *add, bool new_deselect)
+{
+  struct output_device *device;
+
+  if (!add)
+    return NULL;
+
+  // Ported from OwnTone outputs.c:outputs_device_add (the AP1/AP2 dual-type
+  // priority merge is dropped — this engine has a single backend, so a device
+  // with the same id is always the same type). Two cases: brand-new device
+  // (take ownership, prepend), or re-appearing device (merge addresses/name/
+  // password into the existing entry, then free `add`).
+  device = outputs_device_get(add->id);
+
+  if (!device)
+    {
+      // New device — ownership of `add` transfers to the registry.
+      device = add;
+
+      if (new_deselect)
+        device->selected = 0;
+
+      device->next = device_list;
+      device_list = device;
+    }
+  else
+    {
+      // Update an existing entry. Move the freshly-resolved addresses over
+      // (freeing the old ones), and hand ownership of those strings to `device`
+      // by NULLing them on `add` so outputs_device_free(add) doesn't free them.
+      if (add->v4_address)
+        {
+          free(device->v4_address);
+          device->v4_address = add->v4_address;
+          device->v4_port = add->v4_port;
+          add->v4_address = NULL;
+        }
+
+      if (add->v6_address)
+        {
+          free(device->v6_address);
+          device->v6_address = add->v6_address;
+          device->v6_port = add->v6_port;
+          add->v6_address = NULL;
+        }
+
+      free(device->name);
+      device->name = add->name;
+      add->name = NULL;
+
+      device->has_password = add->has_password;
+      device->password = add->password;
+
+      outputs_device_free(add);
+    }
+
+  device->advertised = 1;
+
+  return device;
+}
+
+void
+outputs_device_remove(struct output_device *remove)
+{
+  struct output_device **pp;
+  if (!remove)
+    return;
+
+  for (pp = &device_list; *pp; pp = &(*pp)->next)
+    {
+      if (*pp == remove)
+        {
+          *pp = remove->next;
+          break;
+        }
+    }
+  outputs_device_free(remove);
+}
+
+void
+outputs_device_free(struct output_device *device)
+{
+  if (!device)
+    return;
+
+  // Ported from OwnTone outputs.c:outputs_device_free. Free the backend's
+  // per-device extra (airplay_extra: mdns_name + struct) via device_free_extra,
+  // then the stop_timer event, then the owned strings, then the struct.
+  if (device->session)
+    DPRINTF(E_LOG, L_PLAYER, "BUG! Freeing device with active session?\n");
+
+  // device_free_extra frees airplay_extra (mdns_name + struct). Guard on
+  // extra_device_info: airplay.c always sets it on a real device, but a device
+  // created without it (e.g. a bare registry entry in a unit test, or a
+  // partially-built device on an early error path) would otherwise NULL-deref
+  // inside airplay_device_free_extra (which does `free(extra->mdns_name)`
+  // unconditionally). This guard is the registry's responsibility.
+  if (device->extra_device_info && output_airplay.device_free_extra)
+    output_airplay.device_free_extra(device);
+
+  if (device->stop_timer)
+    event_free(device->stop_timer);
+
+  free(device->name);
+  free(device->auth_key);
+  free(device->v4_address);
+  free(device->v6_address);
+
+  free(device);
+}
+
+int
+outputs_device_session_add(uint64_t device_id, void *session)
+{
+  struct output_device *d = outputs_device_get(device_id);
+  if (!d)
+    return -1;
+  d->session = session;
+  return 0;
+}
+
+void
+outputs_device_session_remove(uint64_t device_id)
+{
+  struct output_device *d = outputs_device_get(device_id);
+  if (d)
+    d->session = NULL;
+}
+
+/* ============================ R-A CALLBACK DISPATCHER ======================
+ *
+ * Port of OwnTone src/outputs.c's callback-accounting machinery, narrowed to the
+ * single-backend AirPlay engine and extended with an engine completion hook.
+ *
+ * Contract (docs/outputs-dispatcher-contract.md): every device_* op that returns
+ * a positive N promises exactly N outputs_cb() calls for the callback_id it was
+ * handed, and in this cluster N is always 0 or 1. The registry keys on a stable
+ * callback_id (int slot index) and re-resolves the device by device_id at
+ * delivery time — so the start_retry id-hand-off (§4c) still delivers exactly
+ * one completion even though the original session was torn down.
+ *
+ * CRITICAL (§4c): a waiter is released ONLY through outputs_cb -> deferred
+ * delivery. Session teardown must never clear a pending slot. We therefore do
+ * NOT call outputs_callback_remove() on session_cleanup; the slot is cleared
+ * only when its deferred completion is delivered (or explicitly by the issuer
+ * before it hands the id to the backend).
+ */
+
+#define OUTPUTS_MAX_CALLBACKS 64
+
+struct outputs_callback_register
+{
+  output_status_cb cb;          /* who to notify (the player/engine status cb) */
+  struct output_device *device; /* which device armed it (pointer used only for
+                                 * add/remove matching — never dereferenced at
+                                 * delivery time; it may have been freed) */
+  bool ready;                   /* backend has reported via outputs_cb */
+  uint64_t device_id;           /* captured at report time (stable across free) */
+  enum output_device_state state;
+};
+
+static struct outputs_callback_register outputs_cb_register[OUTPUTS_MAX_CALLBACKS];
+
+/* The engine-thread deferred-delivery event on evbase_player. outputs_cb marks a
+ * slot ready and event_active()s this; the loop then runs deferred_cb -> the
+ * shared drain. NULL until outputs_dispatcher_init runs (T-API-1). When NULL
+ * (unit test, or pre-init) callers drive delivery via outputs_cb_deferred_run(). */
+static struct event *outputs_deferredev = NULL;
+
+/* Engine completion hook (T-API-1 registers a C shim that resumes the async
+ * Swift continuation waiting on callback_id). */
+static outputs_engine_completion_cb outputs_engine_completion = NULL;
+static void *outputs_engine_completion_ctx = NULL;
+
+output_status_cb
+outputs_callback_get(struct output_device *device)
+{
+  unsigned int callback_id;
+
+  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
+    if (outputs_cb_register[callback_id].device == device)
+      return outputs_cb_register[callback_id].cb;
+
+  return NULL;
+}
+
+void
+outputs_callback_remove(struct output_device *device)
+{
+  unsigned int callback_id;
+
+  if (!device)
+    return;
+
+  /* Match OwnTone: clear EVERY slot for this device. Note: this must NOT be
+   * called from session teardown (§4c) — only by the issuer aborting an op
+   * before the backend was invoked. */
+  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
+    if (outputs_cb_register[callback_id].device == device)
+      memset(&outputs_cb_register[callback_id], 0, sizeof(outputs_cb_register[callback_id]));
+}
+
+int
+outputs_callback_add(struct output_device *device, output_status_cb cb)
+{
+  unsigned int callback_id;
+
+  if (!cb)
+    return -1;
+
+  /* Replace any previously registered callback for this device — one pending
+   * callback per device, "since that's what the player expects". */
+  outputs_callback_remove(device);
+
+  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
+    if (outputs_cb_register[callback_id].cb == NULL)
+      break;
+
+  if (callback_id == ARRAY_SIZE(outputs_cb_register))
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Output callback queue is full! (size is %d)\n", OUTPUTS_MAX_CALLBACKS);
+      return -1;
+    }
+
+  outputs_cb_register[callback_id].cb = cb;
+  outputs_cb_register[callback_id].device = device; /* don't dereference later! */
+
+  return (int)callback_id;
+}
+
+/* The shared deferred-delivery pass. Runs on the engine thread (either from the
+ * libevent deferred event, or synchronously from outputs_cb_deferred_run in the
+ * unit test). Copies each ready slot, clears it, re-resolves the device by id,
+ * updates device->state, invokes the status cb, then fires the engine hook. */
+static void
+outputs_cb_deferred_drain(void)
+{
+  struct output_device *device;
+  output_status_cb cb;
+  enum output_device_state state;
+  uint64_t device_id;
+  unsigned int callback_id;
+
+  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
+    {
+      if (!outputs_cb_register[callback_id].ready)
+        continue;
+
+      /* Copy out BEFORE the callback runs — the cb may re-enter (issue a new op
+       * that reallocates this very slot). */
+      cb = outputs_cb_register[callback_id].cb;
+      state = outputs_cb_register[callback_id].state;
+      device_id = outputs_cb_register[callback_id].device_id;
+
+      /* NULL if the device disappeared between report and delivery. */
+      device = outputs_device_get(device_id);
+
+      memset(&outputs_cb_register[callback_id], 0, sizeof(outputs_cb_register[callback_id]));
+
+      /* Device has left the building (stopped/failed) and the backend no longer
+       * holds it — drop it from the registry, deliver a NULL device. */
+      if (device && !device->advertised && !device->session)
+        {
+          outputs_device_remove(device);
+          device = NULL;
+        }
+      else if (device)
+        device->state = state;
+
+      if (cb)
+        cb(device, state);
+
+      /* Engine completion hook LAST: unblock the async waiter on this id. */
+      if (outputs_engine_completion)
+        outputs_engine_completion((int)callback_id, device_id, state, outputs_engine_completion_ctx);
+    }
+}
+
+/* libevent entry point (production). */
+static void
+deferred_cb(int fd, short what, void *arg)
+{
+  (void)fd;
+  (void)what;
+  (void)arg;
+  outputs_cb_deferred_drain();
+}
+
+void
+outputs_cb(int callback_id, uint64_t device_id, enum output_device_state state)
+{
+  /* Defensive: negative / out-of-range / empty-slot ids are a no-op, never a
+   * hang. A negative id is the legitimate "no callback promised" sentinel that
+   * airplay.c clears to -1 after firing (contract §1). */
+  if (callback_id < 0)
+    return;
+
+  if (!((unsigned int)callback_id < ARRAY_SIZE(outputs_cb_register)) ||
+      !outputs_cb_register[callback_id].cb)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Bug! Output backend called us with an illegal callback id (%d)\n", callback_id);
+      return;
+    }
+
+  outputs_cb_register[callback_id].ready = true;
+  outputs_cb_register[callback_id].device_id = device_id;
+  outputs_cb_register[callback_id].state = state;
+
+  /* Hop onto the engine loop (never deliver inline — re-entrancy safety). If the
+   * loop event isn't wired yet (pre-init / unit test), the caller drives the
+   * drain explicitly via outputs_cb_deferred_run(). */
+  if (outputs_deferredev)
+    event_active(outputs_deferredev, 0, 0);
+}
+
+void
+outputs_engine_completion_set(outputs_engine_completion_cb cb, void *context)
+{
+  outputs_engine_completion = cb;
+  outputs_engine_completion_ctx = context;
+}
+
+void
+outputs_cb_deferred_run(void)
+{
+  outputs_cb_deferred_drain();
+}
+
+void
+outputs_dispatcher_reset(void)
+{
+  memset(outputs_cb_register, 0, sizeof(outputs_cb_register));
+  outputs_engine_completion = NULL;
+  outputs_engine_completion_ctx = NULL;
+}
+
+/* Wire the deferred event to evbase_player. T-API-1 calls this after setting
+ * evbase_player and before airplay_init. Kept separate from outputs_cb so the
+ * dispatcher is testable without a libevent base. */
+int
+outputs_dispatcher_init(void)
+{
+  if (!evbase_player)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "outputs_dispatcher_init: evbase_player not set\n");
+      return -1;
+    }
+  if (outputs_deferredev)
+    return 0; /* already initialised */
+
+  outputs_deferredev = evtimer_new(evbase_player, deferred_cb, NULL);
+  if (!outputs_deferredev)
+    return -1;
+  return 0;
+}
+
+void
+outputs_dispatcher_deinit(void)
+{
+  if (outputs_deferredev)
+    {
+      event_free(outputs_deferredev);
+      outputs_deferredev = NULL;
+    }
+}
+
+const char *
+outputs_name(enum output_types type)
+{
+  (void)type;
+  return "AirPlay 2"; // neutral rename happens at the Swift/product layer
+}
+
+int
+outputs_quality_subscribe(struct media_quality *quality)
+{
+  (void)quality;
+  // TODO(T-SHIM-1): track the single 44100/16/2 quality. Stub: success.
+  return 0;
+}
+
+void
+outputs_quality_unsubscribe(struct media_quality *quality)
+{
+  (void)quality;
+}
+
+uint64_t
+outputs_buffer_duration_ms_get(void)
+{
+  // seam-map §3.1: general.start_buffer_ms default 2250.
+  return 2250;
+}
+
+bool
+outputs_exclusive_mode_get(void)
+{
+  return false; // single-purpose engine
+}

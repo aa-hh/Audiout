@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>AirPlay Controller captures system audio to stream it to AirPlay devices.</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.airplaycontroller.audiocap</string>
+    <key>CFBundleName</key>
+    <string>audiocap</string>
+</dict>
+</plist>

@@ -50,7 +50,6 @@ public protocol OutputBackend: AnyObject {
 
     func setVolume(_ volume: Int, for id: String)
     func setMuted(_ muted: Bool, for id: String)
-    func setSoloed(_ soloed: Bool, for id: String)
 
     /// Replace the output set with exactly these devices. Activating a saved
     /// group calls this with the group's members — "one active group at a time,"

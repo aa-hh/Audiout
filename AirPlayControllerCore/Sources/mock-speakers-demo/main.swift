@@ -1,15 +1,20 @@
 import AirPlayControllerCore
 import Foundation
 
-// A tiny headless driver so you can *watch* the mock backend behave with no UI.
-// It starts discovery, prints every event, then scripts a few control changes
-// (volume, mute, solo, output-set) so you can see the echoes. Run it with:
+// A tiny headless driver so you can *watch* a backend behave with no UI. It
+// starts discovery, prints every event, then scripts a few control changes
+// (volume, mute, output-set) so you can see the echoes. Run it with:
 //
 //     swift run mock-speakers-demo
 //
+// Talks only to `OutputBackend`, resolved via `makeBackend()`: an explicit
+// arg (none here) → the AIRPLAY_BACKEND env var (mock|owntone) → default
+// mock. See dev/README.md. `AIRPLAY_BACKEND=owntone` currently traps —
+// `OwnToneBackend` is a stub whose methods `assertionFailure` until 0f/Phase 1.
+//
 // Ctrl-C to quit (it also auto-exits after ~8s).
 
-let backend = MockBackend(simulatesDropouts: true)
+let backend = makeBackend()
 
 func stamp() -> String {
     let ms = Int(Date().timeIntervalSince1970 * 1000) % 100000
@@ -27,7 +32,6 @@ func describe(_ event: BackendEvent) -> String? {
         var flags: [String] = []
         if !d.isAvailable { flags.append("offline") }
         if d.isMuted { flags.append("muted") }
-        if d.isSoloed { flags.append("SOLO") }
         if d.isSelected { flags.append("selected") }
         return "≈ updated     \(d.name.padding(toLength: 18, withPad: " ", startingAt: 0)) vol \(d.volume)  [\(flags.joined(separator: ","))]"
     case .level:
@@ -62,10 +66,6 @@ Task {
     try? await Task.sleep(nanoseconds: 800_000_000)
     print("\n— activating a 'Downstairs' group: Sonos Move + Office —")
     backend.setOutputSet(["sonos-move", "office"])
-
-    try? await Task.sleep(nanoseconds: 800_000_000)
-    print("\n— soloing Office —")
-    backend.setSoloed(true, for: "office")
 
     try? await Task.sleep(nanoseconds: 2_000_000_000)
     print("\n(level meters are firing continuously for playing devices — hidden here to keep the log readable)")

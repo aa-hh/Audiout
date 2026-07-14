@@ -12,6 +12,7 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// What kind of receiver this is — drives the SF Symbol and hints at quirks
     /// (e.g. Sonos requires AirPlay-2 PTP timing; see SPEC.md §8 "0b").
     public enum Kind: String, Sendable, CaseIterable {
+        case localMac         // this Mac's own built-in / default output
         case homePod
         case appleTV
         case airportExpress
@@ -22,6 +23,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         /// symbols — see SPEC.md §9 "Device row").
         public var symbolName: String {
             switch self {
+            case .localMac:       return "laptopcomputer"
             case .homePod:        return "homepod.fill"
             case .appleTV:        return "appletv.fill"
             case .airportExpress: return "wifi.router.fill"
@@ -48,14 +50,24 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Express in the Phase-0 notes = AirPlay-1 only.
     public var supportsAirPlay2: Bool
 
+    /// This is the Mac's own output (built-in speakers / whatever the system
+    /// default is), NOT an AirPlay receiver. It is the target of
+    /// `MainOutTarget.localSpeakers` (passthrough). SPEC.md §9 (2026-07-14): the
+    /// local device may be targeted ALONE but is BLOCKED from joining the
+    /// Selected Speakers set while that set contains AirPlay devices (pre-engine
+    /// sync limit). Exactly one device in a fleet should carry this flag.
+    public var isLocalDevice: Bool
+
     // MARK: Control state (0–100 volume model, matching the UI sliders)
 
     public var volume: Int
     public var isMuted: Bool
-    public var isSoloed: Bool
 
-    /// In the current output set (the members of the active group). The pipeline
-    /// streams to exactly the selected devices — see SPEC.md §9 interaction model.
+    /// In the backend's current OUTPUT set — i.e. this device is currently being
+    /// streamed to. Under the SPEC §9b Main Out model this is decided by the Main
+    /// Out target (a group's members, or the AirPlay members of Selected Devices),
+    /// NOT by the per-device toggle (which composes the *Selected Devices* set, a
+    /// separate thing tracked in `GroupController.selectedDeviceIDs`).
     public var isSelected: Bool
 
     public init(
@@ -66,8 +78,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         supportsAirPlay2: Bool = true,
         volume: Int = 50,
         isMuted: Bool = false,
-        isSoloed: Bool = false,
-        isSelected: Bool = false
+        isSelected: Bool = false,
+        isLocalDevice: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -76,8 +88,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.supportsAirPlay2 = supportsAirPlay2
         self.volume = volume.clampedToVolume
         self.isMuted = isMuted
-        self.isSoloed = isSoloed
         self.isSelected = isSelected
+        self.isLocalDevice = isLocalDevice
     }
 }
 

@@ -1,2 +1,15 @@
 .DS_Store
 *.swp
+
+# Assembled .app bundle from scripts/make-app.sh (build artifact).
+build/
+
+# OwnTone spike build (Phase 0 dev/test server) — durable local dev artifact,
+# not part of the shipped app; contains a large binary + install tree.
+dev/owntone/
+dev/owntone-src/
+
+# AirPlayEngine (Phase 2, T-PKG-1) SwiftPM build artifacts only — the
+# vendored + shimmed sources under AirPlayEngine/Sources/ are NOT ignored.
+AirPlayEngine/.build/
+AirPlayEngine/.swiftpm/

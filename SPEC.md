@@ -29,7 +29,7 @@ output. You want a single app that:
 | Form factor | **Menu bar + full window** | Quick menu-bar panel; richer window for groups/EQ. |
 | Remote control | **Mac only** (no phone app) | No companion app / network server needed. Simpler. |
 | Device types | **AirPlay only** | No Bluetooth/Sonos-native/wired in v1. (Sonos speakers are used *via their AirPlay 2 support*, not the Sonos API.) |
-| Distribution | **Direct download, personal use** | No App Store constraints; robustness bar is "works well for me", not "ship to strangers". |
+| Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | Alec may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
 | Extra controls | Per-device **mute/solo**, **master volume**, **EQ/balance** | Mixer-style UI. |
 | Power features | **Per-app routing**, **auto-reconnect** | Route Spotify→kitchen while Zoom stays local; re-activate groups when devices reappear. |
 
@@ -107,7 +107,12 @@ everything privileged is small enough to read line-by-line.**
    `pair_ap/`, `evrtsp/`), not a black-box server we shell out to.
 3. **OwnTone itself is spike scaffolding only.** It never ships. (Phase 0 also
    showed why: its root-drop leaves the saved-UID as root, so even "deprivileged"
-   it can't be signal-managed by the user — below our bar.)
+   it can't be signal-managed by the user — below our bar.) **Decided 2026-07-13:
+   the final product contains NO OwnTone references at all — naming included.**
+   The interim `OwnToneBackend` (dev-only, drives the local OwnTone server while
+   the native engine is built) and `dev/owntone/` are deleted when the native
+   sender lands; the shipped backend is named neutrally (e.g. `NativeBackend`),
+   and the `AIRPLAY_BACKEND=owntone` env value goes with it.
 4. **Signed + firewall-registered at install** so the Application Firewall
    allowlists the helper once, correctly (Phase 0 lost an hour to silent PTP
    drops from the firewall).
@@ -230,26 +235,89 @@ machine and your speakers. Each step is a throwaway command-line experiment.
      silence. Must allowlist the binary **and restart it** (the verdict sticks to
      already-bound sockets). The final app must be signed + firewall-registered
      at install.
-- [ ] **0d — Per-device volume.** Change one speaker's volume independently via
-  OwnTone's JSON API (`PUT /api/outputs/{id}` with `{"volume": N}`). *Confirms the
-  core control primitive.* (Near-certain to work — the API exposes per-output
-  volume directly and OwnTone already sent distinct volumes per device in logs.)
-- [ ] **0e — Capture system audio.** Prototype a Core Audio process tap (macOS
-  14.4+) *and/or* install BlackHole; verify we can grab all system output as PCM.
-  *Confirms the capture layer.*
-- [ ] **0f — End-to-end.** Wire capture → sender: play Spotify on the Mac, hear it
-  come out of all three speakers in sync. *This is the whole product in miniature.*
+- [x] **0d — Per-device volume.** ✅ **PASSED 2026-07-13** (fake-receiver form;
+  speakers no longer available — see §8.1). `PUT /api/outputs/{id}` with
+  `{"volume": 0-100}` → 204; wire-verified live `SET_PARAMETER` at the receiver
+  (linear 0–100 maps to −30…0 dB). Audible-on-Sonos form → deferred checkpoint.
+- [x] **0e — Capture system audio.** ✅ **PASSED 2026-07-13.** Swift CLI at
+  `dev/audiocap/` using Core Audio process taps (no virtual driver, no BlackHole):
+  - **Global tap** (all system audio): non-silent capture verified (peak 0.36).
+    Tap ASBD on this machine: 44.1 kHz Float32 LE interleaved stereo — **rate
+    tracks the default output device; always read the real ASBD.**
+  - **Per-app tap** (`--pid`/`--bundle`) and **process exclusion** (`--exclude`)
+    verified by Goertzel tone tests — the foundations of §9 per-app routing and
+    the "This Mac (don't stream)" bypass. **Exclusion resolves lazily:** a pid is
+    only excludable after it opens an audio stream.
+  - **TCC UX:** capture permission prompts on first run ("record this computer's
+    audio"; System Settings → Privacy & Security → Screen & System Audio
+    Recording). The grant attaches to the CLI's parent app and **resets on every
+    rebuild** of an ad-hoc-signed binary. No public preflight API exists — the
+    app must prompt-on-first-capture and handle denial gracefully.
+- [x] **0f — End-to-end.** ✅ **PASSED 2026-07-13** (fake-receiver form). Chain:
+  system audio → global tap → Float32→S16LE → named FIFO → OwnTone pipe input →
+  AirPlay → shairport receiver. 30 s check plus a **10-minute soak: stable,
+  no underruns, output stayed selected** (`dev/verify-0f3-soak.sh`). Pipe
+  latency ≈ 0.12 s; audible end-to-end is dominated by the ~2 s AirPlay sync
+  buffer (fine for audio-only scope). Key pipe facts (dev/notes/0f-pipe-brief.md):
+  `pipe_sample_rate` is a GLOBAL OwnTone config with **no autodetection** (wrong
+  rate = silent pitch shift) — **config-follows-tap** is an app invariant;
+  autostart silently no-ops when the pipe is already the current item (always
+  drive playback explicitly); after long stalls OwnTone can deselect an output
+  while still reporting "play" (watch `outputs[].selected`).
 
-If 0a–0f all pass, we know the product is buildable and move to Phase 1 (the real
-app + UI). If 0e or 0f fights us, we reassess the capture approach before investing
-in UI.
+### 8.1 Phase 0 close-out (2026-07-13)
 
-**Open decision for Phase 0:** do we build the sender *on top of* OwnTone (faster,
-but a heavier dependency to embed later) or extract just its AirPlay 2 sender code
-into a Swift-friendly library (more work, cleaner final app)? We can defer this —
-the spike can use OwnTone as-is to validate, then decide.
+**Phase 0 is COMPLETE. The product is buildable — proceed to Phase 1.**
+Execution details and per-task reports: `PLAN-0e-0f.md`; research briefs in
+`dev/notes/`; spike tooling in `dev/` (audiocap CLI, OwnTone at `dev/owntone/`,
+verify scripts, fake receiver).
 
----
+**Sender decision (was an open question): extract, don't embed.** OwnTone
+validated the protocol but never ships (§4) — Phase 2 extracts `airplay.c` +
+`libairptp` + `pair_ap` + `evrtsp` into our own engine; no OwnTone references
+in the final product, naming included.
+
+**Changed circumstances:** Alec lost access to the test speakers mid-spike
+(2026-07-13) — 0d/0f passed in fake-receiver form; 0b/0c had already passed on
+real Sonos + AirPort Express. **Deferred real-hardware checkpoints** (run when
+speakers return, before calling v1 done): audible per-device volume; multi-room
+sync walk test; 48 kHz-pipeline-on-Sonos check; real end-to-end latency +
+stability.
+
+**FULL end-to-end un-defer (2026-07-13):** on a live network with real AirPlay 2
+devices (Sonos Port "Pool", Yamaha RX-A4A "Cinema"), the COMPLETE Phase 1 path
+ran on real hardware, **user-confirmed audible on Cinema**: Mac system audio →
+audiocap Core-Audio tap → S16LE FIFO → OwnTone → **AirPlay 2 + PTP → Cinema**
+(`dev/verify-realpath-cinema.sh`). Both the capture half and the AirPlay-2-send
+half, together, on a genuine receiver. ⇒ every core technical bet is now proven
+on real gear.
+- **Config finding (shipped-app requirement):** OwnTone's `pipe_autostart`
+  defaults ON and RACES the explicit clear→add→play sequence when the FIFO
+  starts filling (DB-lock + failed start → silent speaker). MUST be OFF; drive
+  playback explicitly (T-C2 already does). Set in `dev/owntone/etc/owntone.conf`.
+- **Local-output behavior (DECIDED 2026-07-13 — a toggle, and sync is required):**
+  two modes: (1) **Mute the Mac** — local goes silent, audio only on the AirPlay
+  speakers (tap `muteBehavior = .mutedWhenTapped`); (2) **Play everywhere** — Mac
+  speakers AND AirPlay speakers together. Default = mute; a UI switch enables
+  "also play here."
+  - **HARD REQUIREMENT: in "play everywhere" mode the Mac's local output MUST be
+    synced with the AirPlay receivers.** Observed 2026-07-13: raw local output
+    plays ~2s AHEAD of AirPlay (AirPlay 2's ~2s sync buffer vs real-time local).
+  - **Implementation:** the Mac's own speakers become another *synchronized
+    endpoint* — mute the live OS output and render a DELAYED local copy scheduled
+    on the same PTP presentation clock as the remote receivers (delay local by the
+    AirPlay latency so all endpoints align).
+  - **This is a NATIVE-ENGINE (Phase 2) capability** — the engine owns the PTP
+    timeline, so it can schedule a local Core Audio sink at the remote presentation
+    timestamp. OwnTone can't do synced local output on macOS (no working local
+    backend), which is why the current prototype's local sound is unsynced OS
+    leakage. ⇒ add "synced local Core Audio endpoint" to the AirPlayEngine API
+    (it's a first-class output alongside the AirPlay outputs, on the shared clock).
+- STILL deferred: multi-room SYNC (needs 2+ real receivers together) and our own
+  extracted engine (Phase 2, not yet runnable). Devices are on a transient/shared
+  network — opportunistic only. The mock rig is primary in the meantime: `MockBackend`
+(control/state), `dev/fake-speakers.sh` + verify scripts (audio path),
+`AIRPLAY_BACKEND=mock|owntone` env toggle (default mock).
 
 ---
 
@@ -261,64 +329,133 @@ https://developer.apple.com/documentation/AppKit and used/styled exactly as its
 documentation and the macOS HIG specify.** Doc URLs below are
 `developer.apple.com/documentation/appkit/<class>`.
 
-Decisions: **pure AppKit** (no SwiftUI) · menu-bar extra opens a **true NSMenu**
-(HIG: "Display a menu — not a popover — when people click your menu bar extra")
-· full window is **sidebar + mixer** · volume is **horizontal rows** (the
-system Sound-menu pattern).
+Decisions: **pure AppKit** (no SwiftUI) · **dropdown is a Control-Center-style
+NSPopover** (REVISED 2026-07-13 — see below) · full window is **sidebar + mixer**
+· volume is **horizontal rows**.
+
+> **DROPDOWN REVISED 2026-07-13 — NSMenu → NSPopover.** The first build used a
+> true NSMenu (HIG's default for menu-bar extras). Hands-on use exposed hard
+> NSMenu limits: **no animated inline expand/collapse** (menus can't animate
+> row insertion — that smooth expansion is a Control-Center behavior, and
+> Control Center is a popover, not a menu), awkward click targets (only the
+> chevron toggled, not the row), and inconsistent custom-view layout. The HIG
+> sanctions a popover when a menu-bar extra is "too complex for a menu" —
+> grouped speakers with sliders, per-row controls, and animated expansion
+> qualifies. So the dropdown becomes an **`NSStatusItem` button → `NSPopover`**
+> hosting a custom view hierarchy (Control-Center style). This unlocks:
+> animations, click-anywhere-on-row to toggle, keyboard/text (so even in-panel
+> group naming is now possible), and consistent layout. Row/group views
+> (`DeviceRowView`, `GroupRowView`) and all group/volume logic carry over
+> unchanged; only the container swaps NSMenu → NSPopover. Quick-create is no
+> longer forced by the no-keyboard-in-menu limit, but manual creation stays the
+> primary path per the group-setup section.
 
 ### Menu bar extra
 | Element | AppKit API | Documented usage we follow |
 |---|---|---|
-| Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Never init `NSStatusItem` directly; customize only via its `button` property (`view`/`title`/`image` on the item are deprecated). Provide a user setting to hide it (HIG). |
-| Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume, so the waves fill with level. Template rendering → correct in dark/light menu bar. |
-| Dropdown | `NSMenu` + `NSMenuItem.view` | The system Sound-menu pattern: each row is a custom `NSView` assigned to `NSMenuItem.view` (docs: the view then owns all drawing; key equivalents still work). Action items are plain `NSMenuItem`s below a separator. |
+| Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action toggles the popover. Provide a user setting to hide it (HIG). |
+| Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume. Template rendering → correct in dark/light menu bar. |
+| Dropdown | **`NSPopover`** (`.transient`/`.semitransient` behavior) anchored to the status button, hosting a scrollable custom-view panel | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
 
 ### Groups in the menu (decided 2026-07-09)
 
 Groups are first-class in the dropdown — the menu is usable without ever opening
 the mixer window. Menu structure, top to bottom:
 
-1. **Groups section.** One row per saved group: chevron (`NSButton`, SF Symbol
-   `chevron.right`/`chevron.down`), group name, numeric readout, and a
-   **group master slider**. The *active* group shows its slider; inactive groups
-   collapse to a single line.
-2. **Expansion.** Clicking the chevron expands the group in place, inserting one
-   indented device row (`NSMenuItem` + custom view) per member — icon, name,
-   individual slider, mute button. Collapse removes them. (Menu items are
-   inserted/removed live; verify NSMenu tolerates mutation while open during
-   Phase 1 — fallback is `menuNeedsUpdate`.)
+1. **Groups section.** One row per saved group: disclosure chevron, group name,
+   numeric readout, and a **group master slider**. **REVISED 2026-07-13: EVERY
+   group row shows its master slider consistently** (not just the active one —
+   the active-only rule was confusing in practice). A non-active group's master
+   sets its members' preset levels; activating it applies them.
+2. **Expansion.** **Clicking anywhere on the group header row** (not just the
+   chevron) toggles expansion, which **animates** open/closed (popover custom
+   views — the reason for the NSMenu→NSPopover switch), revealing one indented
+   device row per member (icon, name, slider, mute). Chevron state always
+   reflects actual expansion.
 3. **Devices section.** Ungrouped speakers each get their own row below the
-   groups — everything on the network is reachable from the menu.
+   groups — everything on the network is reachable from the panel.
 4. **Actions.** Separator, then plain items: "Save current setup as group…",
    "Open mixer…".
 
-**Interaction model:**
-- **One active group at a time.** Activating a group switches the output set to
-  exactly its members (groups behave like output presets — matches the single
-  stream → one target-set pipeline). With v2 per-app routing, "active group"
-  remains the destination for *default* (unrouted) system audio.
-- **Master is proportional.** Dragging the group master scales members while
-  preserving their relative balance (ratios snapshotted at drag start; clamped
-  at 100).
-- **Master echoes.** Adjusting an individual member updates the group master to
-  the members' average, so the master is always an honest readout.
+**Interaction / routing model (REVISED 2026-07-14 — SoundSource-inspired; this is
+the CORE model, superseding the 07-13 free-on/off version):**
 
-### Group setup in the menu (decided 2026-07-09)
+Design cues from Rogue Amoeba's SoundSource (Alec's reference, screenshots
+2026-07-14): sectioned card layout, rows of icon · name · volume slider+% ·
+trailing control, a device-selector dropdown as THE routing control.
 
-Creating and editing groups must be possible entirely from the menu bar extra —
-the mixer window is never required. Doc-grounded: `NSMenuItem.view` hosts any
-view (Apple's own Help menu embeds a live search field the same way).
+**Popover structure (SIMPLIFIED 2026-07-14b — two-section selector):**
+1. **System section — a single "Main Out" row** (name · volume · device
+   selector). The device selector is THE routing decision. Its dropdown has
+   **TWO** option sections:
+   - **§1 "Selected Devices"** — the set composed by the toggles below. The
+     Mac's own speakers are NOT a special selector entry — the current device is
+     just one more device in the set. Passthrough is DERIVED: when the selected
+     set is exactly {current device}, the app captures/streams nothing.
+   - **§2 Output Groups** — the saved groups.
+   The Main Out **volume = proportional master of the current target**.
+2. **"Selected Devices" section** (below System): every discovered device, split
+   into two subsections: **Current Device** (the Mac, by its real name) and
+   **AirPlay Devices**. Row: name · volume · **toggle switch** (Alec explicitly
+   prefers toggles, not checkmarks) = membership in the Selected Devices set.
+   Toggles compose the set; routing is applied when Main Out targets Selected
+   Devices (the default).
+   - **Default state: Current Device toggled ON**, Main Out = Selected Devices ⇒
+     out-of-the-box the app is passthrough (normal local playback).
+   - **Auto-swap rule:** toggling an AirPlay device ON while the current device
+     is the ONLY selected device auto-untoggles the current device (switching to
+     AirPlay implies moving the audio there). The user may manually re-toggle
+     the current device afterwards to have both (Phase 1: that re-add hits the
+     local-sync block below; the gesture exists, the engine unlocks it).
+3. Groups keep expansion (animated) + per-group master; group editing stays in
+   the mixer window; "Save current setup as group" quick-create remains (now =
+   "save Selected Speakers as a group").
+4. Future (v2): an **Applications section** slots naturally under System — the
+   SoundSource per-app "Redirect Audio To" pattern maps 1:1 onto our per-app
+   routing (§ routing view).
 
-- **Entry points:** a "New group…" item in the actions section; a pencil
-  `NSButton` revealed on hover of each group row for editing it.
-- **Editor mode:** the menu content swaps in place to an editor: back arrow +
-  title row, group-name `NSTextField` (placeholder is an example name, HIG),
-  a "Speakers" section listing every discovered device with a **checkbox**
-  (`NSButton(checkboxWithTitle:)` — HIG toggles: checkboxes for multi-select
-  lists, not switches), then Cancel / Save buttons. Editing an existing group
-  adds "Delete group…".
-- Saving from the current state ("Save current setup as group…") captures the
-  live device set + volumes as a new group.
+**Rules:**
+- **Mute stays secondary** on device rows (session-preserving quick silence).
+  Solo remains removed.
+- **Master math unchanged:** proportional, ratios snapshotted at drag start,
+  clamped at 100; masters echo member averages; every group row shows its master.
+- **Phase 1 local-speaker rule:** the Mac's own speakers are selectable ALONE
+  (= passthrough) but are BLOCKED from joining a mixed Selected Speakers set,
+  with a short note ("synced everywhere-audio arrives with the new engine") —
+  because pre-engine, local can't sync with AirPlay (~2s buffer; §8.1). The
+  native engine's synced localOutput lifts this.
+- Selecting a group/Selection in Main Out maps to OwnTone's output "selected"
+  set (Phase 1) / the native engine's active output list (Phase 2).
+
+### Group setup (REVISED 2026-07-13 — quick-create in menu, edit in window)
+
+The original in-menu editor (menu swaps to a form with a name `NSTextField`) is
+**not buildable**: Apple's docs state menu item views "receive all mouse
+events … but keyboard events are not supported" — no typing during menu
+tracking (see dev/notes/p1-menu-brief.md). Alec chose **quick-create**, REFINED 2026-07-13 after using the app (two gaps
+found: no manual creation, and duplicate groups):
+
+- **Manual creation is the PRIMARY path, in the window.** A "New Group"
+  affordance (a "+" at the bottom of the sidebar source list, standard macOS
+  pattern) opens the editor on an EMPTY group: name `NSTextField` + a checklist
+  of ALL discovered devices to pick members + Save/Cancel. This is how you
+  define "Downstairs = these two speakers" directly. Renaming, membership
+  checkboxes, reorder, and "Delete group…" edit existing groups the same way.
+- **Menu quick-create is a SHORTCUT only:** "Save current setup as group"
+  captures the currently selected devices + volumes, auto-named. Secondary
+  convenience, not the only path.
+- **DEDUP / group identity (required):** a group is identified by its member
+  SET (order-independent). The app must NOT create a duplicate group whose
+  members equal an existing group's. Consequences:
+  - When the current active output set exactly matches a saved group's members,
+    the app recognizes THAT group as active (`activeGroupID` derived from the
+    selection) — it does not treat it as a nameless ad-hoc selection.
+  - The menu's "Save current setup as group" is HIDDEN/DISABLED when the current
+    selection already equals a saved group (it's already that group); if it
+    matches partially/differently it stays available.
+  - `GroupController` gains member-set matching (find group by member set) and
+    saveCurrentSetup dedups: identical set → resolve to the existing group
+    (activate it), never a second copy.
 
 ### Applications routing view — main window, v2 (decided 2026-07-09)
 

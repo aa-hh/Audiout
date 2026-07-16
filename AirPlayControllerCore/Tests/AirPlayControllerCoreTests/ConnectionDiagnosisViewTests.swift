@@ -103,6 +103,31 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         XCTAssertTrue(fired)
     }
 
+    // MARK: Appearance adaptivity — the tint is a static CGColor on the layer
+
+    func testBackgroundTintReResolvesOnAppearanceChange() {
+        let view = ConnectionDiagnosisView(
+            failure: ConnectionFailure(cause: .notResponding), deviceName: "Hall")
+
+        view.appearance = NSAppearance(named: .aqua)
+        let light = view.test_backgroundTint
+        view.appearance = NSAppearance(named: .darkAqua)
+        let dark = view.test_backgroundTint
+
+        // systemOrange resolves to different concrete values per appearance; a
+        // tint captured once at build time would be identical across the switch.
+        XCTAssertNotEqual(light?.components, dark?.components,
+                          "the warning tint must re-resolve on a live light/dark switch")
+
+        // And the re-resolved color is exactly systemOrange(0.12) under the
+        // NEW appearance, not some third value.
+        var expected: CGColor?
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            expected = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+        }
+        XCTAssertEqual(dark?.components, expected?.components)
+    }
+
     // MARK: Sizing sanity at popover width
 
     func testSelfSizesToNonZeroHeightAtPopoverWidth() {

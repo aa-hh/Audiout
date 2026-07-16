@@ -321,20 +321,8 @@ public struct NetworkConnectionDiagnostics: ConnectionDiagnosing {
                 await withCheckedContinuation { (continuation: CheckedContinuation<TCPProbeResult, Never>) in
                     let box = ProbeContinuationBox(continuation)
                     connection.stateUpdateHandler = { state in
-                        switch state {
-                        case .ready:
-                            box.resume(with: .ready)
-                        case let .waiting(error), let .failed(error):
-                            // POSIX ECONNREFUSED is how an actively-refused port
-                            // surfaces; any other hard failure is treated as a
-                            // timeout-equivalent (never reached ready in the bound).
-                            if case let .posix(code) = error, code == .ECONNREFUSED {
-                                box.resume(with: .refused)
-                            } else {
-                                box.resume(with: .timedOut)
-                            }
-                        default:
-                            break
+                        if let verdict = probeVerdict(for: state) {
+                            box.resume(with: verdict)
                         }
                     }
                     connection.start(queue: .global())
@@ -348,6 +336,34 @@ public struct NetworkConnectionDiagnostics: ConnectionDiagnosing {
             group.cancelAll()
             connection.cancel()
             return result
+        }
+    }
+
+    /// Classify one `NWConnection` state transition into a probe verdict, or
+    /// `nil` to keep waiting for the next transition (the 3 s task-group bound
+    /// is the backstop). Per Apple's `NWConnection` documentation `.waiting` is
+    /// *transient* — the connection can still reach `.ready` when a viable path
+    /// comes up — so only an active refusal is a verdict there; a hard `.failed`
+    /// is terminal. POSIX `ECONNREFUSED` is how an actively-refused port
+    /// surfaces (usually via `.waiting`, since the connection keeps retrying).
+    /// Internal (not `private`) so tests can drive this matrix directly — the
+    /// real handler lives behind the `tcpProbe` seam and never runs in unit
+    /// tests.
+    static func probeVerdict(for state: NWConnection.State) -> TCPProbeResult? {
+        switch state {
+        case .ready:
+            return .ready
+        case let .waiting(error):
+            if case let .posix(code) = error, code == .ECONNREFUSED { return .refused }
+            // Any other waiting error (e.g. EHOSTUNREACH/ENETDOWN during a
+            // path change) is recoverable — let the bound decide.
+            return nil
+        case let .failed(error):
+            if case let .posix(code) = error, code == .ECONNREFUSED { return .refused }
+            // A hard failure that never reached ready within the bound.
+            return .timedOut
+        default:
+            return nil
         }
     }
 }

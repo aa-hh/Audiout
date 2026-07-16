@@ -97,7 +97,7 @@ public final class ConnectionDiagnosisView: NSView {
         background.wantsLayer = true
         background.layer?.cornerRadius = Self.backgroundCornerRadius
         background.layer?.cornerCurve = .continuous
-        background.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+        applyBackgroundTint()
         addSubview(background)
 
         headlineLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -159,6 +159,25 @@ public final class ConnectionDiagnosisView: NSView {
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
+    /// Resolve the warning tint (brief §7.1) against the *current* effective
+    /// appearance and stamp it onto the layer. `CALayer.backgroundColor` is a
+    /// static `CGColor` — `NSColor.systemOrange` resolves to different concrete
+    /// values in light vs dark — so this must re-run on every appearance change,
+    /// not just at build time.
+    private func applyBackgroundTint() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            background.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+        }
+    }
+
+    /// Re-resolve the appearance-dependent chrome on a live light/dark switch —
+    /// the same pattern as `CardView`'s shadow/rim (the rest of this view is
+    /// semantic `NSColor`s on views, which AppKit re-resolves itself).
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBackgroundTint()
+    }
+
     // MARK: Layout — keep the wrapping label's pinned width equal to the
     // background's available content width so Auto Layout can compute the
     // wrapped height (a wrapping `NSTextField` needs a fixed width to report an
@@ -202,6 +221,8 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_suggestionText: String { suggestionLabel.stringValue }
     /// Whether "Copy details" is currently enabled (`failure.detail != nil`).
     public var test_copyDetailsEnabled: Bool { copyDetailsButton.isEnabled }
+    /// The tinted background's current layer color (appearance-adaptivity asserts).
+    public var test_backgroundTint: CGColor? { background.layer?.backgroundColor }
 
     /// Simulate a "Try again" click.
     public func test_tapRetry() { retryClicked(retryButton) }

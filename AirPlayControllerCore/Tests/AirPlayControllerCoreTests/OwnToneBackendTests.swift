@@ -572,6 +572,60 @@ final class OwnToneBackendTests: XCTestCase {
                      "stop() must cancel pending timeouts — no .failed after teardown")
     }
 
+    /// `stop()` during an in-flight confirm re-GET: the resumed confirm's
+    /// `applyPoll` must not resurrect devices — re-populating `known`/`order`
+    /// and emitting `deviceAdded`/`deviceUpdated` AFTER the teardown's
+    /// `deviceRemoved` sweep — and a restart must begin from empty state.
+    /// (stop() owns and cancels the select/confirm/recovery tasks; the
+    /// `started` guard in `applyPoll` closes the remaining race.)
+    func testStopDuringInFlightConfirmDoesNotResurrectDevices() async {
+        let discoveryDone = Locked(false)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"):
+                if discoveryDone.get() {
+                    // Hold the confirm re-GET long enough for stop() to land
+                    // mid-flight (pollInterval 60 → no other GET arrives).
+                    Thread.sleep(forTimeInterval: 0.3)
+                } else {
+                    discoveryDone.set(true)   // the discovery poll answers instantly
+                }
+                return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", true, 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON(state: "play"))
+            default:                      return .status(204)
+            }
+        }
+        let backend = makeBackend(pollInterval: 60)
+        backend.start()
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        // Watch the stream across the stop so a post-teardown resurrection
+        // (any add/update after the deviceRemoved sweep) would be caught.
+        let box = EventCollector()
+        let watcher = Task {
+            for await event in backend.makeEventStream() {
+                if case .level = event { continue }
+                _ = await box.append(event)
+            }
+        }
+        backend.setOutputSet(["s1"])
+        try? await Task.sleep(nanoseconds: 100_000_000)   // PUT lands; the confirm re-GET is held
+        backend.stop()
+
+        // Outlive the held re-GET: the resumed confirm must find a dead backend.
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        let events = await box.all
+        watcher.cancel()
+        XCTAssertTrue(backend.devices.isEmpty,
+                      "an in-flight confirm must not re-populate devices after stop()")
+        guard let removal = events.lastIndex(where: { if case .deviceRemoved = $0 { return true } else { return false } }) else {
+            return XCTFail("stop() must emit deviceRemoved for the known device")
+        }
+        XCTAssertTrue(events[(removal + 1)...].isEmpty,
+                      "no deviceAdded/deviceUpdated may follow the stop() teardown sweep, got \(events[(removal + 1)...])")
+    }
+
     /// The fire-and-forget diagnosis flow (brief §3): the immediate best-guess
     /// failure is emitted first, then replaced by the diagnosed one while the
     /// device is still `.failed`. The `DiagnosisContext` must carry the

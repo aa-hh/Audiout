@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import AirPlayControllerCore
 
@@ -225,6 +226,48 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         let diag = diagnostics(bonjour: { _ in BonjourPresence(isPresent: true, endpoint: nil) })
         let result = await diag.diagnose(context(priorCause: .unknown))
         XCTAssertEqual(result.cause, .unknown)
+    }
+
+    // MARK: Default TCP probe — NWConnection state classification
+    //
+    // The real probe closure never runs in these tests (it's behind the
+    // `tcpProbe` seam), so its state→verdict matrix is pinned directly via
+    // `probeVerdict(for:)`. Per Apple's `NWConnection` docs `.waiting` is
+    // transient — only an active refusal may decide there; everything else
+    // must leave the 3 s bound in charge.
+
+    func testProbeVerdictReadyIsReady() {
+        XCTAssertEqual(NetworkConnectionDiagnostics.probeVerdict(for: .ready), .ready)
+    }
+
+    func testProbeVerdictWaitingRefusedIsRefused() {
+        XCTAssertEqual(
+            NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ECONNREFUSED))),
+            .refused)
+    }
+
+    func testProbeVerdictTransientWaitingIsNotTerminal() {
+        // A momentarily-unrouted host (path change) can still reach .ready
+        // within the bound — the first .waiting must NOT resolve the probe.
+        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.EHOSTUNREACH))))
+        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ENETDOWN))))
+    }
+
+    func testProbeVerdictFailedRefusedIsRefused() {
+        XCTAssertEqual(
+            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ECONNREFUSED))),
+            .refused)
+    }
+
+    func testProbeVerdictOtherHardFailureIsTimedOut() {
+        XCTAssertEqual(
+            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ETIMEDOUT))),
+            .timedOut)
+    }
+
+    func testProbeVerdictNonTerminalStatesKeepWaiting() {
+        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .setup))
+        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .preparing))
     }
 
     // MARK: Never-throws / robustness

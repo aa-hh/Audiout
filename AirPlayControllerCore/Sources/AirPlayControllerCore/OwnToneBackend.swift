@@ -96,6 +96,13 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// back. Prevents the infinite-retry loop the brief warns against (§4 step 4).
     private var recovering: Set<String> = []
 
+    /// Select/confirm/recovery jobs currently in flight, owned so `stop()` can
+    /// cancel them — an un-owned task resuming after teardown could otherwise
+    /// re-populate `known`/`order` (via its `applyPoll`) and emit
+    /// `deviceAdded`/`deviceUpdated` AFTER the `deviceRemoved` sweep. See
+    /// ``runOwned(_:)``.
+    private var inFlightTasks: [UUID: Task<Void, Never>] = [:]
+
     /// Per-device connection lifecycle (connection-status brief §1/§3). `.off`
     /// is represented by absence. Folded into every snapshot by `mapOutput`, so
     /// transitions reach the UI as ordinary `deviceUpdated` diffs.
@@ -221,6 +228,12 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         pollTask = nil
         stateQueue.async {
             self.started = false
+            // Cancel the in-flight select/confirm/recovery jobs: nothing owned
+            // by a dead lifecycle may mutate or emit after teardown. (Their
+            // `applyPoll`/state mutations are also `started`-guarded, closing
+            // the race where a job already passed its cancellation points.)
+            for task in self.inFlightTasks.values { task.cancel() }
+            self.inFlightTasks.removeAll()
             let ids = self.order
             self.known.removeAll()
             self.order.removeAll()
@@ -299,7 +312,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
                 }
             }
         }
-        Task { [weak self] in
+        runOwned { [weak self] in
             guard let self else { return }
             do {
                 try await self.client.setOutputSet(Array(ids))
@@ -311,6 +324,26 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             // brief §1/§4 don't-assume #2: a 204 does not prove selection stuck.
             // Re-GET and confirm; a mismatch is a silent select failure.
             await self.confirmSelectionOrRecover(expected: ids)
+        }
+    }
+
+    /// Launch an async select/confirm/recovery job the backend *owns*: `stop()`
+    /// cancels every registered job, so an in-flight confirm or zombie recovery
+    /// can't resurrect devices (or emit) after teardown. Registration and
+    /// removal ride `stateQueue`, same as all other mutable state; a job whose
+    /// registration lands after `stop()` is cancelled instead of kept.
+    private func runOwned(_ operation: @escaping @Sendable () async -> Void) {
+        let key = UUID()
+        let task = Task { [weak self] in
+            await operation()
+            self?.stateQueue.async { self?.inFlightTasks[key] = nil }
+        }
+        stateQueue.async {
+            if self.started {
+                self.inFlightTasks[key] = task
+            } else {
+                task.cancel()
+            }
         }
     }
 
@@ -341,6 +374,12 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// Also drives zombie detection (expected-selected vs polled-selected).
     private func applyPoll(outputs: [OwnToneOutput], player: OwnToneClient.PlayerState) {
         stateQueue.sync {
+            // Lifecycle guard: a confirm/recovery re-GET that was in flight
+            // when `stop()` tore everything down must not re-populate
+            // `known`/`order` — or emit — after the `deviceRemoved` sweep
+            // (stop() also cancels the owned jobs; this closes the race where
+            // one already passed its cancellation points).
+            guard self.started else { return }
             if !self.reachable {
                 self.reachable = true
                 // Coming back from unreachable: everything re-appears available;
@@ -414,14 +453,17 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
                     self.setConnectionState(.reconnecting, for: id)
                     self.startConnectionTimeout(id)
                 }
-                Task { [weak self] in await self?.recoverZombies(drops, expected: expected) }
+                self.runOwned { [weak self] in await self?.recoverZombies(drops, expected: expected) }
             }
         }
     }
 
     private func markUnreachable() {
         stateQueue.sync {
-            guard self.reachable else { return }
+            // `started` guard: an owned job cancelled by `stop()` surfaces the
+            // cancellation as a thrown client error — that must not poison the
+            // next lifecycle's reachability (or emit) after teardown.
+            guard self.started, self.reachable else { return }
             self.reachable = false
             // Engine-unreachable leaves connection states as-is (connection-
             // status brief §1: the greyed whole-list treatment communicates
@@ -459,6 +501,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         // `.connected` (connection-status brief §1 stability window — a failed
         // activation can revert `selected` a moment after this confirm).
         stateQueue.sync {
+            guard self.started else { return }   // stopped mid-confirm — leave the corpse alone
             for id in expected.intersection(actuallySelected)
             where self.connectionState(of: id) == .connecting {
                 self.pendingStable.insert(id)
@@ -468,7 +511,10 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         guard !missing.isEmpty else { return }
         // Silent select failure — recover exactly the missing ids (their state
         // stays `.connecting` for the whole attempt, brief §3).
-        stateQueue.sync { for id in missing { self.recovering.insert(id) } }
+        stateQueue.sync {
+            guard self.started else { return }
+            for id in missing { self.recovering.insert(id) }
+        }
         await recoverZombies(Array(missing), expected: expected)
     }
 
@@ -500,6 +546,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         let stillMissing = Set(ids).subtracting(stillSelected)
 
         stateQueue.sync {
+            guard self.started else { return }   // stopped mid-recovery — no post-teardown transitions
             for id in ids {
                 if stillMissing.contains(id) {
                     // Recovery failed after one retry → resting `.failed`.

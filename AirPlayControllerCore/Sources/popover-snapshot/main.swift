@@ -120,9 +120,14 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
 
 /// A small fleet with one row per `ConnectionState` case, for the
 /// `connection-states` snapshot mode. Each device's name says what it's
-/// demoing so the PNG is self-explanatory without cross-referencing code.
+/// demoing so the PNG is self-explanatory without cross-referencing code. This
+/// now exercises the on-icon corner dot (2026-07-17): `.off` hides it,
+/// `.connecting`/`.reconnecting` breathe a neutral dot, `.connected` a green
+/// dot, `.failed` an amber dot with the "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [
+        Device(id: "cs-off", name: "Idle Speaker", kind: .generic,
+               volume: 40, connectionState: .off),
         Device(id: "cs-connecting", name: "Connecting Speaker", kind: .sonos,
                volume: 45, connectionState: .connecting),
         Device(id: "cs-connected", name: "Connected Speaker", kind: .homePod,

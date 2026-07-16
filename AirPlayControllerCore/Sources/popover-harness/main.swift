@@ -272,8 +272,8 @@ func runConnectionStatusChecks(_ checks: Checks) {
                   "failure bounced the toggle (membership removed)")
     checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == false,
                   "row switch rests OFF after the bounce")
-    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .warning,
-                  "status slot shows the warning triangle")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .failed,
+                  "on-icon status dot shows the failed (amber) state")
     let panel = popover.test_diagnosisPanel(for: "office")
     checks.expect(panel != nil, "diagnosis panel auto-expanded on failure")
     checks.expectEqual(panel?.test_headlineText ?? "", "Didn't respond",
@@ -287,8 +287,8 @@ func runConnectionStatusChecks(_ checks: Checks) {
     popover.update(devices: backend.devices)
     checks.expect(officeIsFailed(backend.devices.first { $0.id == "office" }?.connectionState ?? .off),
                   "backend kept .failed sticky through the cleanup setOutputSet")
-    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .warning,
-                  "warning survived the cleanup setOutputSet")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .failed,
+                  "failed dot survived the cleanup setOutputSet")
     checks.expect(popover.test_diagnosisPanel(for: "office") != nil,
                   "panel survived the cleanup setOutputSet")
 
@@ -298,7 +298,7 @@ func runConnectionStatusChecks(_ checks: Checks) {
     guard waitForOffice(".connected", { $0 == .connected }) else { return }
     popover.update(devices: backend.devices)
 
-    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connectedDot,
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connected,
                   "retry succeeded: green connected dot")
     checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == true,
                   "the honest toggle now rests ON")

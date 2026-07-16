@@ -46,8 +46,11 @@ public enum PopoverColumnGrid {
 
     // MARK: Fixed column widths
 
-    /// The device/Main-Out icon column.
-    public static let iconWidth: CGFloat = 22
+    /// The device/Main-Out icon column. Bumped 22→26 (2026-07-17) when the
+    /// connection-status indicator moved OFF a right-side slot and ONTO the icon
+    /// as a corner badge (``StatusDotView``) — a slightly larger glyph gives the
+    /// badge somewhere to sit without crowding the symbol.
+    public static let iconWidth: CGFloat = 26
     /// The volume/master slider column — one fixed width shared by every row so
     /// the slider column is identical in all three sections.
     public static let sliderWidth: CGFloat = 150
@@ -56,12 +59,6 @@ public enum PopoverColumnGrid {
     /// The speaker/mute glyph column, sitting **left of the slider** in every row
     /// (per-device mute on device rows, master mute on Main Out and group rows).
     public static let muteWidth: CGFloat = 24
-    /// The connection-status slot column (brief §6): spinner / green dot /
-    /// warning triangle, sitting between the `%` readout and the trailing
-    /// (ENABLED switch) control. Only `DeviceRowView` fills it today, but it's a
-    /// column in the shared grid like every other slot so a future row type can
-    /// adopt it without re-deriving the trailing anchors.
-    public static let statusWidth: CGFloat = 18
     /// The trailing control column, sized to the **widest** trailing control so
     /// the slider column clears it in every row: the Main Out row's named
     /// destination dropdown (task B). The device row's small mute button and the
@@ -69,6 +66,29 @@ public enum PopoverColumnGrid {
     /// slider's trailing edge lands at the same x in all three sections. Kept as
     /// tight as a named dropdown allows so the flexible name column keeps room.
     public static let trailingControlWidth: CGFloat = 116
+
+    // MARK: On-icon status badge (2026-07-17)
+    //
+    // The connection-status indicator is a small corner dot overlapping the
+    // device icon's bottom-right (a notification-badge position), replacing the
+    // retired right-side status slot. These are grouped as NAMED CONSTANTS on
+    // purpose: a future settings menu will offer compact/normal/large row
+    // densities, so the icon + badge sizing must be swappable HERE, in one
+    // place, not scattered as magic numbers across `DeviceRowView`/``StatusDotView``.
+
+    /// Diameter of the on-icon status badge (the connection-state dot).
+    public static let statusDotDiameter: CGFloat = 10
+    /// Width of the punch-out border ringing the badge, drawn in the card/window
+    /// background colour so the dot reads as a separate badge over the icon. A
+    /// best-effort separator — tuned live later.
+    public static let statusDotBorderWidth: CGFloat = 1.5
+    /// Duration of one half-cycle of the connecting/reconnecting "breathing"
+    /// pulse (opacity + scale), auto-reversed and repeated forever.
+    public static let statusDotBreathDuration: CFTimeInterval = 1.6
+    /// The breathing pulse's minimum opacity (rises to 1.0).
+    public static let statusDotBreathMinOpacity: Float = 0.3
+    /// The breathing pulse's minimum scale (grows to 1.0).
+    public static let statusDotBreathMinScale: CGFloat = 0.82
 
     // MARK: Inter-column gaps
 
@@ -83,15 +103,11 @@ public enum PopoverColumnGrid {
     /// that still trailing-anchor the readout (`GroupRowView`), and is defined so
     /// the two placements coincide.
     public static let sliderToReadout: CGFloat = 6
-    /// Gap between the `%` readout's trailing edge and the status slot's leading
-    /// edge (brief §6) — kept small so the indicator reads as part of the same
-    /// row cluster as the readout, not floated toward the switch. This is the
-    /// flex-adjacent gap that used to sit directly between the readout and the
-    /// trailing control before the status slot was inserted.
-    public static let readoutToStatus: CGFloat = 6
-    /// Gap between the status slot's trailing edge and the trailing control
-    /// (ENABLED switch) it sits left of.
-    public static let statusToTrailingControl: CGFloat = 6
+    /// Gap between the `%` readout's trailing edge and the trailing control
+    /// (ENABLED switch) it sits left of — the flexible slack column. The
+    /// right-side status slot was retired 2026-07-17 (status moved onto the
+    /// icon), so the readout now sits directly before the trailing control again.
+    public static let readoutToTrailingControl: CGFloat = 6
     /// Gap between the mute glyph and the slider it sits left of.
     public static let muteToSlider: CGFloat = 6
 
@@ -105,18 +121,13 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **trailing control's trailing
     /// edge** (i.e. the trailing control's own trailing inset).
     public static var trailingControlTrailing: CGFloat { trailingInset }
-    /// Distance from the row trailing edge to the **status slot's trailing
-    /// edge** (brief §6) — the slot sits immediately left of the trailing
-    /// control, at a fixed distance from the row edge like every other column.
-    public static var statusTrailing: CGFloat {
-        trailingControlTrailing + trailingControlWidth + statusToTrailingControl
-    }
     /// Distance from the row trailing edge to the **slider's trailing edge** — the
     /// slider column is fixed-width and fixed here, so it lines up across every
-    /// row type. Sized to clear the readout that hangs off it, the status slot,
-    /// the min flex slack, and the trailing control.
+    /// row type. Sized to clear the readout that hangs off it, the min flex
+    /// slack, and the trailing control. (The right-side status slot that once sat
+    /// between the readout and the trailing control was retired 2026-07-17.)
     public static var sliderTrailing: CGFloat {
-        statusTrailing + statusWidth + readoutToStatus
+        trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
             + readoutWidth + sliderToReadout
     }
     /// Distance from the row trailing edge to the **readout's trailing edge**.
@@ -135,8 +146,6 @@ public enum PopoverColumnGrid {
 
     /// Distance from the row trailing edge to the **slider column's center**.
     public static var sliderCenterFromTrailing: CGFloat { sliderTrailing + sliderWidth / 2 }
-    /// Distance from the row trailing edge to the **status slot's center** (brief §6).
-    public static var statusCenterFromTrailing: CGFloat { statusTrailing + statusWidth / 2 }
     /// Distance from the row trailing edge to the **trailing-control column's center**.
     public static var trailingControlCenterFromTrailing: CGFloat { trailingControlTrailing + trailingControlWidth / 2 }
 

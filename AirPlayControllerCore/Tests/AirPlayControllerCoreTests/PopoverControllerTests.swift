@@ -197,7 +197,9 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertFalse(row.test_isShowingSelectedBackground,
                        "popover row paints no selected-background pill, even when selected")
         XCTAssertTrue(row.test_isEnabledOn, "switch is ON")
-        XCTAssertEqual(row.test_iconTint, .controlAccentColor, "selected row is accent-tinted")
+        // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
+        // only, no accent-when-selected fill. Selection reads from the switch.
+        XCTAssertEqual(row.test_iconTint, .secondaryLabelColor, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
@@ -207,7 +209,7 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertFalse(row.test_isHovered, "no stale hover wash after deselect")
         XCTAssertFalse(row.test_isEnabledOn, "switch returned to OFF")
         XCTAssertEqual(row.test_iconTint, .secondaryLabelColor,
-                       "icon tint reverted to secondary (unselected)")
+                       "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -338,7 +340,7 @@ final class PopoverControllerTests: XCTestCase {
                        "honest toggle: failure removed Selected-Devices membership")
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
         XCTAssertFalse(row.test_isEnabledOn, "the switch bounced back OFF")
-        XCTAssertEqual(row.test_statusKind, .warning, "status slot shows the warning triangle")
+        XCTAssertEqual(row.test_statusKind, .failed, "on-icon dot shows the failed (amber) state")
         let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"),
                                   "the diagnosis panel auto-expanded")
         XCTAssertEqual(panel.test_headlineText, failure.headline)
@@ -365,14 +367,16 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertTrue(isFailed(device.connectionState),
                       "backend kept .failed sticky through the cleanup setOutputSet")
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        XCTAssertEqual(row.test_statusKind, .warning, "warning survived the cleanup")
+        XCTAssertEqual(row.test_statusKind, .failed, "failed dot survived the cleanup")
         XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"), "panel survived too")
     }
 
-    /// The warning button toggles the panel, and a closed panel STAYS closed on
-    /// an in-episode update (the diagnosis replacing the backend's first guess
-    /// must not force it back open — auto-expand is once per failure episode).
-    func testWarningTogglesPanelAndClosedPanelStaysClosedInEpisode() async throws {
+    /// The panel auto-expands once on `.failed`, and an in-episode update (the
+    /// diagnosis replacing the backend's first guess) refreshes the still-open
+    /// panel's copy rather than tearing it down. The manual warning-button toggle
+    /// was retired 2026-07-17 (status moved onto the icon) — the panel is now
+    /// purely auto-driven off the connection-state transitions.
+    func testPanelAutoExpandsAndRefreshesCopyInEpisode() async throws {
         let (popover, _, backend) = try await makeScriptedPopover(scripts: [
             "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .unknown))]),
         ])
@@ -380,26 +384,21 @@ final class PopoverControllerTests: XCTestCase {
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         try await waitForConnectionState(backend, id: "office", isFailed)
         popover.update(devices: backend.devices)
-        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"), "auto-expanded once")
-
-        // Close it via the warning button.
-        try XCTUnwrap(popover.test_deviceRow(for: "office")).test_tapWarning()
-        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "warning button closed the panel")
+        let firstPanel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"),
+                                       "auto-expanded once")
+        XCTAssertEqual(firstPanel.test_headlineText, ConnectionFailure(cause: .unknown).headline)
 
         // In-episode update: the diagnosis replaced the guess (still .failed,
-        // different cause). The closed panel must not reopen.
+        // different cause). The open panel refreshes its copy in place.
         var replaced = backend.devices
         for i in replaced.indices where replaced[i].id == "office" {
             replaced[i].connectionState = .failed(ConnectionFailure(cause: .vanished))
         }
         popover.update(devices: replaced)
-        XCTAssertNil(popover.test_diagnosisPanel(for: "office"),
-                     "diagnosis replacement didn't force the closed panel open")
-
-        // The warning button reopens it, rendering the REPLACED failure.
-        try XCTUnwrap(popover.test_deviceRow(for: "office")).test_tapWarning()
-        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"))
-        XCTAssertEqual(panel.test_headlineText, ConnectionFailure(cause: .vanished).headline)
+        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"),
+                                  "panel stays open through the diagnosis replacement")
+        XCTAssertEqual(panel.test_headlineText, ConnectionFailure(cause: .vanished).headline,
+                       "the panel re-rendered the replaced failure's copy")
     }
 
     /// "Try again" re-adds membership (the toggle-on path IS the retry path):
@@ -425,8 +424,8 @@ final class PopoverControllerTests: XCTestCase {
 
         XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "connected cleared the panel")
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        XCTAssertEqual(row.test_statusKind, .connectedDot)
-        XCTAssertEqual(row.test_statusText, "Connected")
+        XCTAssertEqual(row.test_statusKind, .connected)
+        XCTAssertNil(row.test_statusText, "connected is single-line (no sublabel)")
         XCTAssertTrue(row.test_isEnabledOn, "the honest toggle now rests ON")
     }
 
@@ -466,7 +465,7 @@ final class PopoverControllerTests: XCTestCase {
 
         // office failed while homepod-bed is still connecting.
         let homepodRow = try XCTUnwrap(popover.test_deviceRow(for: "homepod-bed"))
-        XCTAssertEqual(homepodRow.test_statusKind, .spinner, "second device still connecting")
+        XCTAssertEqual(homepodRow.test_statusKind, .connecting, "second device still connecting")
         XCTAssertTrue(controller.isSpeakerSelected("homepod-bed"),
                       "the failure cleanup only removed the FAILED device's membership")
 
@@ -481,8 +480,8 @@ final class PopoverControllerTests: XCTestCase {
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }
         try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connectedDot)
-        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connectedDot)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connected)
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connected)
         XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
     }
 

@@ -60,9 +60,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Ids whose diagnosis panel should currently be OPEN. This is the
     /// persistent intent — it survives `rebuild()` (which recreates the panel
-    /// views) and is what the warning button toggles. Seeded automatically on a
-    /// `→ .failed` transition (auto-expand ONCE per failure episode; a closed
-    /// panel stays closed until the warning button or a NEW failure reopens it).
+    /// views). Seeded automatically on a `→ .failed` transition (auto-expand ONCE
+    /// per failure episode) and cleared when the device leaves `.failed`
+    /// (`→ .connected` / `→ .off`). The manual warning-button toggle was retired
+    /// with the right-side status slot (2026-07-17); the panel is now purely
+    /// auto-driven off the connection-state transitions.
     private var openDiagnosisIDs: Set<String> = []
 
     /// The mounted `ConnectionDiagnosisView` per device id — the view-layer
@@ -252,9 +254,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // repaint, and the backend keeps `.failed` sticky through the resulting
     // cleanup `setOutputSet` (§1) so the warning survives — and (b) auto-expands
     // the diagnosis panel ONCE for that failure episode. On `→ .connected` /
-    // `→ .off` any panel for the id is torn down. In between, the warning
-    // button toggles the panel and "Try again" re-adds membership (the
-    // toggle-on path IS the retry path).
+    // `→ .off` any panel for the id is torn down. "Try again" re-adds membership
+    // (the toggle-on path IS the retry path). The panel is purely auto-driven off
+    // these transitions — the manual warning-button toggle was retired 2026-07-17.
 
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
@@ -502,18 +504,6 @@ extension PopoverController: DeviceRowView.Delegate {
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         handleSelection(result, deviceID: id)
-    }
-
-    public func deviceRow(_ row: DeviceRowView, didRequestDiagnosisFor id: String) {
-        // The warning triangle toggles the diagnosis panel (brief §7.3 — the
-        // auto-expand happens once per failure episode; from then on this is
-        // the only thing that opens/closes it).
-        if openDiagnosisIDs.contains(id) {
-            openDiagnosisIDs.remove(id)
-        } else {
-            openDiagnosisIDs.insert(id)
-        }
-        reconcileDiagnosisPanels(animated: popover.isShown)
     }
 }
 

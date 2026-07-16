@@ -2,6 +2,15 @@
 
 **IMPLEMENTED 2026-07-16, see SPEC §9.**
 
+**REVISED 2026-07-17 (row UI):** the right-side status slot + the `ArcSpinnerView`
+arc spinner were retired. Connection status now renders as a small on-icon corner
+dot (`StatusDotView`, breathing neutral = connecting/reconnecting, green =
+connected, amber = failed; hidden for off). The name is single-line except
+`.failed` (its "Couldn't connect" sublabel); clicking the name toggles ENABLED;
+the diagnosis panel is purely auto-driven (no manual warning-button toggle). §6's
+status-slot/sublabel/spinner details below are superseded by SPEC §9's device-row
+table for the new model.
+
 *2026-07-16. Approved by Alec. This is the single source of truth for the
 connection-status build. Implementation agents: read this whole file, plus the
 repo AGENTS.md and `AirPlayControllerCore/AGENTS.md`, before touching code.*

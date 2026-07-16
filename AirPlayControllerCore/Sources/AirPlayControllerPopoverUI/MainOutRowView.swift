@@ -158,7 +158,10 @@ public final class MainOutRowView: NSView {
                 break
             }
         }
-        iconView.contentTintColor = .controlAccentColor
+        // Match device row icon styling (2026-07-17): neutral gray, not accent.
+        // Consistency across System and Devices sections — all icons are identity
+        // only, connection status lives on the icon as a corner badge.
+        iconView.contentTintColor = .secondaryLabelColor
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false

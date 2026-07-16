@@ -18,9 +18,10 @@ import AppKit
 /// effect when the deployment floor reaches macOS 15.
 ///
 /// Built from documented Core Animation API — a `CAShapeLayer` stroking a
-/// partial circle (`strokeEnd = 0.75`, round caps, matching the approved
-/// mockup glyph) driven by an infinitely repeating `CABasicAnimation` on
-/// `transform.rotation.z`. Works on every supported macOS, so it replaces both
+/// 270° arc (round caps, gap centered at 12 o'clock — see `layout()` for why
+/// the gap position matters, matching the approved mockup glyph) driven by an
+/// infinitely repeating `CABasicAnimation` on `transform.rotation.z`. Works on
+/// every supported macOS, so it replaces both
 /// the prior macOS-14 rays symbol-effect view AND the pre-14
 /// `NSProgressIndicator` fallback — no availability split.
 final class ArcSpinnerView: NSView {
@@ -40,8 +41,6 @@ final class ArcSpinnerView: NSView {
         arcLayer.fillColor = nil
         arcLayer.lineWidth = 1.5          // matches the mockup's stroke weight at slot size
         arcLayer.lineCap = .round
-        arcLayer.strokeStart = 0
-        arcLayer.strokeEnd = 0.75         // 270° arc — the mockup's open ring
         layer?.addSublayer(arcLayer)
     }
 
@@ -71,12 +70,19 @@ final class ArcSpinnerView: NSView {
         // `frame` is undefined while a transform (our rotation) is applied.
         arcLayer.bounds = bounds
         arcLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-        let inset = arcLayer.lineWidth / 2
-        let arcRect = NSRect(x: bounds.midX - arcDiameter / 2,
-                             y: bounds.midY - arcDiameter / 2,
-                             width: arcDiameter, height: arcDiameter)
-            .insetBy(dx: inset, dy: inset)
-        arcLayer.path = CGPath(ellipseIn: arcRect, transform: nil)
+        // 270° arc with the gap centered at 12 o'clock (spanning 45°–135°; CG
+        // angles run counterclockwise from +x in the layer's y-up space). The
+        // gap MUST be vertically centered, not a corner (Alec, 2026-07-17): a
+        // corner gap shifts the arc's visual mass off the slot's center line,
+        // reading as misaligned against the solid dot/triangle in the column —
+        // even though the bounding circles align. Centering the gap keeps the
+        // resting frame (what snapshots and the pre-spin instant show)
+        // left/right symmetric; once rotating, orientation is moot.
+        let radius = (arcDiameter - arcLayer.lineWidth) / 2
+        let path = CGMutablePath()
+        path.addArc(center: CGPoint(x: bounds.midX, y: bounds.midY), radius: radius,
+                    startAngle: 3 * .pi / 4, endAngle: .pi / 4, clockwise: false)
+        arcLayer.path = path
     }
 
     func startSpinning() {

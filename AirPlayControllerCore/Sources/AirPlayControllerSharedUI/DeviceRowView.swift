@@ -119,13 +119,26 @@ public final class DeviceRowView: NSView {
     private let readoutLabel = NSTextField(labelWithString: "")
 
     /// Connection-status slot (brief §6), between the `%` readout and the
-    /// ENABLED switch. Three mutually-exclusive views share the same slot rect;
-    /// `apply` shows exactly one (or none, for `.off`) per `Device.connectionState`.
+    /// ENABLED switch. The mutually-exclusive slot views share the same slot
+    /// rect; `apply` shows exactly one (or none, for `.off`) per
+    /// `Device.connectionState`.
     ///
-    /// `NSProgressIndicator` — Apple docs: `.style = .spinning` is "an
-    /// indeterminate, circular" indicator "used to show that an activity is
-    /// ongoing" with no defined duration, exactly the connecting/reconnecting
-    /// case; `isDisplayedWhenStopped = false` keeps it invisible (not just
+    /// The connecting/reconnecting spinner (Alec, 2026-07-17: wants the lighter
+    /// look from the approved mockup, not the stock gear) is an `NSImageView`
+    /// showing SF Symbol `rays` animated via the documented symbol-effects API —
+    /// Apple docs: `addSymbolEffect(_:)` "adds an indefinite symbol effect to
+    /// the image view" (macOS 14+), and
+    /// `.variableColor.iterative.hideInactiveLayers.nonReversing` cycles the
+    /// symbol's variable-color layers one at a time, the system treatment for
+    /// ongoing-activity glyphs. `rays` was verified to carry variable-color
+    /// layers on macOS 14.4; `circle.dotted` does not, and the true ring
+    /// spinner symbol (`progress.indicator.spinner`) is macOS 15+ — revisit
+    /// when the deployment floor rises.
+    private let statusRaysView = NSImageView()
+    /// Pre-macOS-14 fallback spinner (no symbol-effects API there) — Apple
+    /// docs: `.style = .spinning` is "an indeterminate, circular" indicator
+    /// "used to show that an activity is ongoing" with no defined duration;
+    /// `isDisplayedWhenStopped = false` keeps it invisible (not just
     /// stopped-looking) whenever this row isn't animating it.
     private let statusSpinner: NSProgressIndicator = {
         let spinner = NSProgressIndicator()
@@ -150,8 +163,10 @@ public final class DeviceRowView: NSView {
         button.isBordered = false
         button.imagePosition = .imageOnly
         button.contentTintColor = .systemOrange
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-        button.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+        // Outlined variant (Alec, 2026-07-17: matches the approved mockup's
+        // outlined error state); `.medium` keeps the thin strokes legible at 12pt.
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        button.image = NSImage(systemSymbolName: "exclamationmark.triangle",
                                accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         return button
@@ -281,6 +296,7 @@ public final class DeviceRowView: NSView {
     private func applyConnectionStatus(_ state: ConnectionState) {
         statusSpinner.stopAnimation(nil)
         statusSpinner.isHidden = true
+        statusRaysView.isHidden = true
         statusDotView.isHidden = true
         statusWarningButton.isHidden = true
 
@@ -290,8 +306,14 @@ public final class DeviceRowView: NSView {
             statusLabel.stringValue = ""
 
         case .connecting, .reconnecting:
-            statusSpinner.isHidden = false
-            statusSpinner.startAnimation(nil)
+            // Symbol-effect rays spinner where available (macOS 14+); the
+            // stock circular NSProgressIndicator otherwise.
+            if #available(macOS 14.0, *) {
+                statusRaysView.isHidden = false
+            } else {
+                statusSpinner.isHidden = false
+                statusSpinner.startAnimation(nil)
+            }
             statusLabel.isHidden = false
             statusLabel.stringValue = state == .connecting ? "Connecting…" : "Reconnecting…"
             statusLabel.textColor = .secondaryLabelColor
@@ -378,8 +400,21 @@ public final class DeviceRowView: NSView {
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
                                   action: #selector(muteToggled(_:)))
 
-        // Status slot (brief §6): all three views share the same slot rect
+        // Status slot (brief §6): the slot views share the same slot rect
         // below; only one is un-hidden at a time (`applyConnectionStatus`).
+        statusRaysView.translatesAutoresizingMaskIntoConstraints = false
+        statusRaysView.imageScaling = .scaleProportionallyDown
+        statusRaysView.contentTintColor = .secondaryLabelColor
+        let raysConfig = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        statusRaysView.image = NSImage(systemSymbolName: "rays", accessibilityDescription: nil)?
+            .withSymbolConfiguration(raysConfig)
+        statusRaysView.setContentHuggingPriority(.required, for: .horizontal)
+        if #available(macOS 14.0, *) {
+            // The variable-color effect is indefinite and a hidden view doesn't
+            // draw, so install it once here instead of toggling per state change.
+            statusRaysView.addSymbolEffect(.variableColor.iterative.hideInactiveLayers.nonReversing)
+        }
+
         statusSpinner.translatesAutoresizingMaskIntoConstraints = false
         statusSpinner.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -402,6 +437,7 @@ public final class DeviceRowView: NSView {
         addSubview(statusLabel)
         addSubview(slider)
         addSubview(readoutLabel)
+        addSubview(statusRaysView)
         addSubview(statusSpinner)
         addSubview(statusDotView)
         addSubview(statusWarningButton)
@@ -419,8 +455,11 @@ public final class DeviceRowView: NSView {
         // `centerYAnchor` so the PAIR is vertically centered in the row exactly
         // like every other control — `.off` (sublabel hidden) still reads with
         // the name on the row's optical center, matching every other row type.
-        let nameBaselineOffset: CGFloat = -6
-        let statusBaselineOffset: CGFloat = 6
+        // Widened from ±6 (Alec, 2026-07-17: the sublabel sat too tight under
+        // the name) — ±7.5 gives the pair ~3pt of visual air while both lines
+        // stay comfortably inside the 42pt row.
+        let nameBaselineOffset: CGFloat = -7.5
+        let statusBaselineOffset: CGFloat = 7.5
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
@@ -465,6 +504,11 @@ public final class DeviceRowView: NSView {
             // Connection-status slot (brief §6): fixed-width column between the
             // `%` readout and the trailing ENABLED switch. All three candidate
             // views share this one rect; `apply` shows exactly one.
+            statusRaysView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            statusRaysView.centerXAnchor.constraint(
+                equalTo: trailingAnchor, constant: -PopoverColumnGrid.statusCenterFromTrailing),
+            statusRaysView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.statusWidth),
+            statusRaysView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.statusWidth),
             statusSpinner.centerYAnchor.constraint(equalTo: centerYAnchor),
             statusSpinner.centerXAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.statusCenterFromTrailing),
@@ -577,7 +621,9 @@ public final class DeviceRowView: NSView {
     public var test_statusKind: StatusKind {
         if !statusWarningButton.isHidden { return .warning }
         if !statusDotView.isHidden { return .connectedDot }
-        if !statusSpinner.isHidden { return .spinner }
+        // Either spinner implementation (rays symbol-effect on macOS 14+, the
+        // NSProgressIndicator fallback below it) counts as "the spinner".
+        if !statusRaysView.isHidden || !statusSpinner.isHidden { return .spinner }
         return .none
     }
 

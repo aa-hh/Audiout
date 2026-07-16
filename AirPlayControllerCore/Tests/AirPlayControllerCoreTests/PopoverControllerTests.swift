@@ -278,6 +278,214 @@ final class PopoverControllerTests: XCTestCase {
                        "selecting a group updates the named dropdown")
     }
 
+    // MARK: Connection status + diagnosis panel (brief §7.3)
+
+    /// Build a popover on a MockBackend with per-device `ConnectScript`s, so the
+    /// connection state machine actually runs (fail/retry/drop choreography).
+    private func makeScriptedPopover(
+        scripts: [String: ConnectScript]
+    ) async throws -> (PopoverController, GroupController, MockBackend) {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false,
+                                  connectScripts: scripts)
+        try await waitForFleet(backend, count: 7)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        controller.ensureDefaultSelection()
+        popover.update(devices: backend.devices)
+        return (popover, controller, backend)
+    }
+
+    /// Poll the backend until `id`'s connection state satisfies `predicate`
+    /// (the scripted choreography runs on the mock's own queue).
+    private func waitForConnectionState(
+        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
+        _ predicate: (ConnectionState) -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let device = backend.devices.first(where: { $0.id == id }),
+               predicate(device.connectionState) { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for \(id)'s connection state")
+    }
+
+    private func isFailed(_ state: ConnectionState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    /// → `.failed` (with the popover closed — the rebuild path): the honest
+    /// toggle bounces OFF (membership removed), the row shows the warning, and
+    /// the diagnosis panel auto-expands with the failure's copy.
+    func testFailedTransitionBouncesToggleAndShowsPanel() async throws {
+        let failure = ConnectionFailure(cause: .notResponding, detail: "raw engine log line")
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, failure)]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "membership composed on toggle")
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+
+        XCTAssertFalse(controller.isSpeakerSelected("office"),
+                       "honest toggle: failure removed Selected-Devices membership")
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
+        XCTAssertFalse(row.test_isEnabledOn, "the switch bounced back OFF")
+        XCTAssertEqual(row.test_statusKind, .warning, "status slot shows the warning triangle")
+        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"),
+                                  "the diagnosis panel auto-expanded")
+        XCTAssertEqual(panel.test_headlineText, failure.headline)
+        XCTAssertEqual(panel.test_suggestionText, failure.suggestion)
+        XCTAssertTrue(panel.test_copyDetailsEnabled, "detail present ⇒ Copy details enabled")
+    }
+
+    /// Sticky-failed (§1): the honest-toggle cleanup triggers a `setOutputSet`
+    /// without the failed id, and the warning must survive that cleanup.
+    func testStickyWarningSurvivesCleanupSetOutputSet() async throws {
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .timedOut))]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)   // runs the membership cleanup
+        XCTAssertFalse(controller.isSpeakerSelected("office"))
+
+        // Let the cleanup `setOutputSet` land in the backend, then re-render.
+        await drain()
+        popover.update(devices: backend.devices)
+        let device = try XCTUnwrap(backend.devices.first { $0.id == "office" })
+        XCTAssertTrue(isFailed(device.connectionState),
+                      "backend kept .failed sticky through the cleanup setOutputSet")
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
+        XCTAssertEqual(row.test_statusKind, .warning, "warning survived the cleanup")
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"), "panel survived too")
+    }
+
+    /// The warning button toggles the panel, and a closed panel STAYS closed on
+    /// an in-episode update (the diagnosis replacing the backend's first guess
+    /// must not force it back open — auto-expand is once per failure episode).
+    func testWarningTogglesPanelAndClosedPanelStaysClosedInEpisode() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .unknown))]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"), "auto-expanded once")
+
+        // Close it via the warning button.
+        try XCTUnwrap(popover.test_deviceRow(for: "office")).test_tapWarning()
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "warning button closed the panel")
+
+        // In-episode update: the diagnosis replaced the guess (still .failed,
+        // different cause). The closed panel must not reopen.
+        var replaced = backend.devices
+        for i in replaced.indices where replaced[i].id == "office" {
+            replaced[i].connectionState = .failed(ConnectionFailure(cause: .vanished))
+        }
+        popover.update(devices: replaced)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"),
+                     "diagnosis replacement didn't force the closed panel open")
+
+        // The warning button reopens it, rendering the REPLACED failure.
+        try XCTUnwrap(popover.test_deviceRow(for: "office")).test_tapWarning()
+        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"))
+        XCTAssertEqual(panel.test_headlineText, ConnectionFailure(cause: .vanished).headline)
+    }
+
+    /// "Try again" re-adds membership (the toggle-on path IS the retry path):
+    /// the id re-enters `setOutputSet` → `.connecting`, and on `.connected` the
+    /// panel clears and the row rests ON with the green dot.
+    func testRetryReconnectsClearsPanelAndRestoresMembership() async throws {
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+                .connect(after: 0.05),
+            ]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"))
+
+        popover.test_tapRetry(for: "office")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "retry re-added membership")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        popover.update(devices: backend.devices)
+
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "connected cleared the panel")
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
+        XCTAssertEqual(row.test_statusKind, .connectedDot)
+        XCTAssertEqual(row.test_statusText, "Connected")
+        XCTAssertTrue(row.test_isEnabledOn, "the honest toggle now rests ON")
+    }
+
+    /// A device that disappears entirely while `.failed` (`deviceRemoved`, §1
+    /// `.failed → .off`) takes its panel and tracking down with it.
+    func testDeviceRemovedWhileFailedTearsDownPanel() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .vanished))]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"))
+
+        // The app layer prunes a removed device from the snapshot it pushes.
+        popover.update(devices: backend.devices.filter { $0.id != "office" })
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "panel torn down on removal")
+        XCTAssertNil(popover.test_deviceRow(for: "office"), "row gone with the device")
+    }
+
+    /// A retry while a SECOND device is still connecting: the retry must not
+    /// disturb the in-flight device, and both resolve independently.
+    func testRetryWhileSecondDeviceConnecting() async throws {
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, ConnectionFailure(cause: .refusedOrBusy)),
+                .connect(after: 0.05),
+            ]),
+            "homepod-bed": ConnectScript(attempts: [.connect(after: 1.0)]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+
+        // office failed while homepod-bed is still connecting.
+        let homepodRow = try XCTUnwrap(popover.test_deviceRow(for: "homepod-bed"))
+        XCTAssertEqual(homepodRow.test_statusKind, .spinner, "second device still connecting")
+        XCTAssertTrue(controller.isSpeakerSelected("homepod-bed"),
+                      "the failure cleanup only removed the FAILED device's membership")
+
+        popover.test_tapRetry(for: "office")
+        popover.update(devices: backend.devices)
+        let officeDevice = try XCTUnwrap(backend.devices.first { $0.id == "office" })
+        XCTAssertEqual(officeDevice.connectionState, .connecting, "retry restarted office")
+        let homepodDevice = try XCTUnwrap(backend.devices.first { $0.id == "homepod-bed" })
+        XCTAssertEqual(homepodDevice.connectionState, .connecting,
+                       "the in-flight device was not disturbed by the retry's setOutputSet")
+
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connectedDot)
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connectedDot)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
+    }
+
     func testMuteDrivesVolumeToZeroAndRestores() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)

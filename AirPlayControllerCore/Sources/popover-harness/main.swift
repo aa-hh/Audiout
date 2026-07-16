@@ -200,6 +200,12 @@ func run() -> Int32 {
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown to the group name")
 
+    // --- 14. Connection-status flow (brief §7.3), on a scripted MockBackend:
+    // fail → toggle bounced + warning + auto-expanded panel; sticky warning
+    // survives the cleanup setOutputSet; "Try again" → connected + panel gone.
+    print("\n[14] Connection-status flow (scripted MockBackend)")
+    runConnectionStatusChecks(checks)
+
     print("\n----------------------------------------")
     if checks.failures == 0 {
         print("PASS: all \(checks.total) popover-structure checks passed")
@@ -208,6 +214,96 @@ func run() -> Int32 {
         print("FAIL: \(checks.failures)/\(checks.total) popover-structure checks failed")
         return 1
     }
+}
+
+/// Drive the full §7.3 failure → retry flow against a fresh popover whose
+/// MockBackend scripts `office` to fail once (not responding, with a raw
+/// detail line) and connect on the second attempt. The harness stands in for
+/// AppDelegate's event loop by pushing `backend.devices` snapshots into
+/// `popover.update` after each choreography step.
+@MainActor
+func runConnectionStatusChecks(_ checks: Checks) {
+    let backend = MockBackend(
+        fleet: .demoFleet, staggerDiscovery: false,
+        emitsLevels: false, simulatesDropouts: false,
+        connectScripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.2, ConnectionFailure(cause: .notResponding, detail: "raw engine log line")),
+                .connect(after: 0.2),
+            ]),
+        ])
+    let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let popover = PopoverController()
+
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        checks.expect(false, "scripted fleet discovered"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+    popover.update(devices: backend.devices)
+
+    /// Poll `office`'s connection state until `predicate` holds (bounded).
+    func waitForOffice(_ what: String, timeout: TimeInterval = 3,
+                       _ predicate: (ConnectionState) -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let device = backend.devices.first(where: { $0.id == "office" }),
+               predicate(device.connectionState) { return true }
+            drain(0.02)
+        }
+        checks.expect(false, "office reached \(what) in time")
+        return false
+    }
+    func officeIsFailed(_ state: ConnectionState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    // Enable → scripted first attempt fails.
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+    checks.expect(controller.isSpeakerSelected("office"), "toggle composed membership")
+    guard waitForOffice(".failed", officeIsFailed) else { return }
+    popover.update(devices: backend.devices)
+
+    checks.expect(!controller.isSpeakerSelected("office"),
+                  "failure bounced the toggle (membership removed)")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == false,
+                  "row switch rests OFF after the bounce")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .warning,
+                  "status slot shows the warning triangle")
+    let panel = popover.test_diagnosisPanel(for: "office")
+    checks.expect(panel != nil, "diagnosis panel auto-expanded on failure")
+    checks.expectEqual(panel?.test_headlineText ?? "", "Didn't respond",
+                       "panel renders the failure headline")
+    checks.expect(panel?.test_copyDetailsEnabled == true,
+                  "Copy details enabled (detail present)")
+
+    // Sticky warning: the bounce triggered a cleanup setOutputSet without the
+    // id; the backend keeps .failed and the popover keeps the warning + panel.
+    drain(0.3)
+    popover.update(devices: backend.devices)
+    checks.expect(officeIsFailed(backend.devices.first { $0.id == "office" }?.connectionState ?? .off),
+                  "backend kept .failed sticky through the cleanup setOutputSet")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .warning,
+                  "warning survived the cleanup setOutputSet")
+    checks.expect(popover.test_diagnosisPanel(for: "office") != nil,
+                  "panel survived the cleanup setOutputSet")
+
+    // "Try again" → second scripted attempt connects.
+    popover.test_tapRetry(for: "office")
+    checks.expect(controller.isSpeakerSelected("office"), "retry re-added membership")
+    guard waitForOffice(".connected", { $0 == .connected }) else { return }
+    popover.update(devices: backend.devices)
+
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connectedDot,
+                  "retry succeeded: green connected dot")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == true,
+                  "the honest toggle now rests ON")
+    checks.expect(popover.test_diagnosisPanel(for: "office") == nil,
+                  "connected cleared the diagnosis panel")
 }
 
 func tempDir() -> URL {

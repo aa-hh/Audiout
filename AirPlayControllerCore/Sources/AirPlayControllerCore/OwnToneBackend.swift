@@ -734,7 +734,13 @@ public enum BackendKind {
 /// `AIRPLAY_BACKEND` env var → `.mock`.
 public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
     switch BackendKind.resolved(explicit: kind) {
-    case .mock:    return MockBackend()
+    case .mock:
+        // Scenario scripts (connection-status brief §5): with
+        // `AIRPLAY_MOCK_SCENARIO=connection-demo` the mock choreographs
+        // failures/retries/mid-stream drops so every ConnectionState is
+        // demoable offline; any other/missing value resolves to no scripts
+        // (exact pre-existing behaviour).
+        return MockBackend(connectScripts: MockBackend.resolveScenarioScripts())
     case .ownTone:
         let backend = OwnToneBackend()
         // Attach the capture pipeline (T-C2). The coordinator spawns the audiocap
@@ -743,6 +749,10 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         // wires `replayHook` in `start()`. Binary/library paths are the dev
         // defaults; a shipped `.app` would pass the embedded binary's path.
         backend.captureCoordinator = CaptureCoordinator()
+        // Real failure diagnosis (connection-status brief §4): engine-log scan +
+        // Bonjour presence + TCP probe, replacing the backend's first-guess
+        // ConnectionFailure once evidence is in. Tests inject fakes instead.
+        backend.diagnostics = NetworkConnectionDiagnostics()
         return backend
     }
 }

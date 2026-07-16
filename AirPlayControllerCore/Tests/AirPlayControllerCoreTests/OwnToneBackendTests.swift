@@ -19,13 +19,15 @@ final class OwnToneBackendTests: XCTestCase {
     // MARK: Helpers
 
     /// A backend wired to the stubbed transport, no real websocket, fast polls.
-    private func makeBackend(pollInterval: TimeInterval = 0.05) -> OwnToneBackend {
+    private func makeBackend(pollInterval: TimeInterval = 0.05,
+                             connectingTimeout: TimeInterval = 10) -> OwnToneBackend {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]
         let session = URLSession(configuration: config)
         let client = OwnToneClient(session: session, timeout: 2)
         return OwnToneBackend(client: client, webSocket: nil,
-                              pollInterval: pollInterval, unreachablePollInterval: 0.05)
+                              pollInterval: pollInterval, unreachablePollInterval: 0.05,
+                              connectingTimeout: connectingTimeout)
     }
 
     /// Collect non-level events until `predicate` is satisfied or timeout.
@@ -49,13 +51,34 @@ final class OwnToneBackendTests: XCTestCase {
         return await box.all
     }
 
-    private func outputsJSON(_ outputs: [(id: String, name: String, type: String, selected: Bool, volume: Int)]) -> Data {
+    private func outputsJSON(_ outputs: [(id: String, name: String, type: String, selected: Bool, volume: Int)],
+                             requiresAuth: Bool = false) -> Data {
         let objs = outputs.map { o in
             """
-            {"id":"\(o.id)","name":"\(o.name)","type":"\(o.type)","selected":\(o.selected),"volume":\(o.volume),"has_password":false,"requires_auth":false,"needs_auth_key":false,"offset_ms":0,"format":"alac","supported_formats":["alac"]}
+            {"id":"\(o.id)","name":"\(o.name)","type":"\(o.type)","selected":\(o.selected),"volume":\(o.volume),"has_password":false,"requires_auth":\(requiresAuth),"needs_auth_key":false,"offset_ms":0,"format":"alac","supported_formats":["alac"]}
             """
         }.joined(separator: ",")
         return Data("{\"outputs\":[\(objs)]}".utf8)
+    }
+
+    /// Extract the connection states (for one device id) from an event list,
+    /// in emission order — the backbone of the state-machine ordering asserts.
+    private func states(of id: String, in events: [BackendEvent]) -> [ConnectionState] {
+        events.compactMap {
+            switch $0 {
+            case .deviceAdded(let d) where d.id == id:   return d.connectionState
+            case .deviceUpdated(let d) where d.id == id: return d.connectionState
+            default:                                     return nil
+            }
+        }
+    }
+
+    /// The `.failed` payload of the LAST failed update for `id`, if any.
+    private func lastFailure(of id: String, in events: [BackendEvent]) -> ConnectionFailure? {
+        for state in states(of: id, in: events).reversed() {
+            if case .failed(let f) = state { return f }
+        }
+        return nil
     }
 
     private func playerJSON(state: String = "stop", volume: Int = 50) -> Data {
@@ -148,8 +171,10 @@ final class OwnToneBackendTests: XCTestCase {
     /// Silent-select-failure: `outputs/set` 204s but the re-GET shows the target
     /// still `selected:false`. The backend must detect it (brief don't-assume #2)
     /// and run recovery (re-issue outputs/set). Here recovery keeps failing, so
-    /// the device ends up surfaced as unavailable (device-level error state).
-    func testSilentSelectFailureDetectedAndSurfacedAsError() async {
+    /// the device ends `.failed` — but stays *available*: it answered the poll,
+    /// so it's on the network; the *session* failed (connection-status brief §1,
+    /// which deliberately replaced the old mark-unavailable behaviour).
+    func testSilentSelectFailureDetectedAndSurfacedAsFailed() async {
         let setCalls = Locked(0)
         StubURLProtocol.handler = { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
@@ -170,12 +195,18 @@ final class OwnToneBackendTests: XCTestCase {
         backend.setOutputSet(["dead"])
 
         // The confirm-re-GET sees selected:false → recovery re-issues set once →
-        // still false → device surfaced unavailable, and it stops retrying.
-        let events = await collect(from: backend, timeout: 4) { events in
-            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "dead" && !d.isAvailable } else { return false } }
+        // still false → `.failed`, and it stops retrying.
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            lastFailure(of: "dead", in: events) != nil
         }
-        XCTAssertTrue(events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "dead" && !d.isAvailable } else { return false } },
-                      "a persistently-failing selection should surface the device as unavailable")
+        XCTAssertEqual(lastFailure(of: "dead", in: events)?.cause, .unknown,
+                       "a select-revert with no better evidence should fail as .unknown")
+        let failedDevice = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, case .failed = d.connectionState { return d }
+            return nil
+        }.last
+        XCTAssertEqual(failedDevice?.isAvailable, true,
+                       "recovery failure must keep the device available — the session failed, not the network")
         // outputs/set was called at least twice: the initial set + the recovery re-select.
         XCTAssertGreaterThanOrEqual(setCalls.get(), 2, "recovery must re-issue outputs/set")
     }
@@ -299,6 +330,291 @@ final class OwnToneBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(sentVolume.get(), 100, "the backend must clamp to 100 before PUT — OwnTone 400s on out-of-range")
     }
+
+    // MARK: Connection state machine (dev/notes/p1-connection-status-brief.md §3)
+
+    /// Enabling a device emits `.connecting` immediately (before the
+    /// PUT/confirm round-trip resolves), then `.connected` once the confirm
+    /// re-GET AND the next poll tick agree it's selected. Once connected, the
+    /// timeout must be disarmed — a short `connectingTimeout` here would fail
+    /// the device if any stale timer survived.
+    func testEnableEmitsConnectingThenConnectedAndCancelsTimeout() async {
+        let selected = Locked(false)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON(state: "play"))
+            case ("PUT", "/api/outputs/set"):
+                selected.set(true)                        // the selection sticks
+                return .status(204)
+            default:                      return .status(204)
+            }
+        }
+        let backend = makeBackend(connectingTimeout: 0.5)
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["s1"])
+
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            states(of: "s1", in: events).contains(.connected)
+        }
+        let observed = states(of: "s1", in: events)
+        guard let connecting = observed.firstIndex(of: .connecting),
+              let connected = observed.firstIndex(of: .connected) else {
+            return XCTFail("expected both .connecting and .connected, got \(observed)")
+        }
+        XCTAssertLessThan(connecting, connected, ".connecting must be emitted before .connected")
+        let connectedDevice = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, d.connectionState == .connected { return d }
+            return nil
+        }.first
+        XCTAssertEqual(connectedDevice?.isSelected, true, "a .connected device must also be selected")
+
+        // Outlive the 0.5 s timeout: it must have been cancelled on connect.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(backend.devices.first?.connectionState, .connected,
+                       "the connecting timeout must not fire after a successful connect")
+    }
+
+    /// Sticky-failed (brief §1): the popover removes a failed id from the
+    /// output set as *cleanup*, and that must not erase the warning. Re-adding
+    /// the id afterwards is the retry path and goes back to `.connecting`.
+    func testFailedIsStickyAcrossCleanupAndRetriesAsConnecting() async {
+        StubURLProtocol.handler = { [self] request in
+            switch request.url!.path {
+            case "/api/config":  return .ok(configJSON)
+            // The selection never sticks — every enable attempt fails.
+            case "/api/outputs": return .ok(outputsJSON([("dead", "Stubborn", "AirPlay 2", false, 40)]))
+            case "/api/player":  return .ok(playerJSON())
+            default:             return .status(204)
+            }
+        }
+        let backend = makeBackend()
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["dead"])
+        _ = await collect(from: backend, timeout: 4) { [self] events in
+            lastFailure(of: "dead", in: events) != nil
+        }
+
+        // Cleanup: drop the id from the set (what the popover does on failure).
+        backend.setOutputSet([])
+        // Let the set call land and a few polls tick — the state must survive.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        guard case .failed = backend.devices.first?.connectionState else {
+            return XCTFail("removing a failed id from the set must keep it .failed (sticky), got \(String(describing: backend.devices.first?.connectionState))")
+        }
+
+        // Retry: re-adding the failed id goes back to .connecting.
+        backend.setOutputSet(["dead"])
+        let retry = await collect(from: backend, timeout: 4) { [self] events in
+            states(of: "dead", in: events).contains(.connecting)
+        }
+        XCTAssertTrue(states(of: "dead", in: retry).contains(.connecting),
+                      "re-adding a failed id is the retry path → .connecting")
+    }
+
+    /// Zombie drop with successful recovery: `.connected → .reconnecting →
+    /// .connected`, in that order.
+    func testZombieDropEmitsReconnectingThenRecoversToConnected() async {
+        let selected = Locked(false)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON(state: "play"))
+            case ("PUT", "/api/outputs/set"):
+                selected.set(true)                        // every (re-)select sticks
+                return .status(204)
+            default:                      return .status(204)
+            }
+        }
+        let backend = makeBackend()
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["s1"])
+        _ = await collect(from: backend, timeout: 4) { [self] events in
+            states(of: "s1", in: events).contains(.connected)
+        }
+
+        // Silent drop: OwnTone deselects without the app having asked.
+        selected.set(false)
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            let observed = states(of: "s1", in: events)
+            guard let r = observed.firstIndex(of: .reconnecting) else { return false }
+            return observed[r...].contains(.connected)
+        }
+        let observed = states(of: "s1", in: events)
+        guard let reconnecting = observed.firstIndex(of: .reconnecting) else {
+            return XCTFail("expected .reconnecting after a zombie drop, got \(observed)")
+        }
+        XCTAssertTrue(observed[reconnecting...].contains(.connected),
+                      "successful recovery must return to .connected")
+    }
+
+    /// Zombie drop where recovery fails: `.reconnecting →
+    /// .failed(.droppedMidStream)` — and the device stays available (§1
+    /// changed behaviour: the session failed, not the network).
+    func testZombieRecoveryFailureEndsFailedDroppedMidStreamAndAvailable() async {
+        let selected = Locked(false)
+        let allowSelect = Locked(true)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON(state: "play"))
+            case ("PUT", "/api/outputs/set"):
+                if allowSelect.get() { selected.set(true) }
+                return .status(204)
+            default:                      return .status(204)
+            }
+        }
+        let backend = makeBackend()
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["s1"])
+        _ = await collect(from: backend, timeout: 4) { [self] events in
+            states(of: "s1", in: events).contains(.connected)
+        }
+
+        // Silent drop, and this time the recovery re-select won't stick.
+        allowSelect.set(false)
+        selected.set(false)
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            lastFailure(of: "s1", in: events) != nil
+        }
+        XCTAssertEqual(lastFailure(of: "s1", in: events)?.cause, .droppedMidStream,
+                       "a failed reconnect must report .droppedMidStream")
+        XCTAssertTrue(states(of: "s1", in: events).contains(.reconnecting),
+                      ".reconnecting must be emitted before the failure")
+        let failedDevice = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, case .failed = d.connectionState { return d }
+            return nil
+        }.last
+        XCTAssertEqual(failedDevice?.isAvailable, true,
+                       "a mid-stream drop must keep the device available")
+    }
+
+    /// Timeout path: the confirm re-GET says selected, but no poll tick ever
+    /// re-confirms it (a huge poll interval stands in for OwnTone's optimistic
+    /// selected-then-revert window), so `.connecting` never resolves and the
+    /// generation-token timeout fails it with `.timedOut`.
+    func testConnectingTimeoutFailsWithTimedOut() async {
+        let selected = Locked(false)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON())
+            case ("PUT", "/api/outputs/set"):
+                selected.set(true)                        // confirm will see it…
+                return .status(204)
+            default:                      return .status(204)
+            }
+        }
+        // pollInterval 60 → only the initial discovery poll + the confirm
+        // re-GET run; the stability tick never comes.
+        let backend = makeBackend(pollInterval: 60, connectingTimeout: 0.3)
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["s1"])
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            lastFailure(of: "s1", in: events) != nil
+        }
+        XCTAssertEqual(lastFailure(of: "s1", in: events)?.cause, .timedOut,
+                       "an unresolved .connecting must fail as .timedOut when the timeout fires")
+        XCTAssertFalse(states(of: "s1", in: events).contains(.connected),
+                       "the device never stabilized, so .connected must never be emitted")
+    }
+
+    /// `stop()` clears the connection lifecycle: a pending connecting timeout
+    /// must never fire after the backend is stopped.
+    func testStopCancelsPendingConnectingTimeout() async {
+        let selected = Locked(false)
+        StubURLProtocol.handler = { [self] request in
+            switch (request.httpMethod ?? "", request.url!.path) {
+            case ("GET", "/api/config"):  return .ok(configJSON)
+            case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
+            case ("GET", "/api/player"):  return .ok(playerJSON())
+            case ("PUT", "/api/outputs/set"):
+                selected.set(true)
+                return .status(204)
+            default:                      return .status(204)
+            }
+        }
+        let backend = makeBackend(pollInterval: 60, connectingTimeout: 0.2)
+        backend.start()
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        // Watch the stream across the stop so a late .failed would be caught.
+        let box = EventCollector()
+        let watcher = Task {
+            for await event in backend.makeEventStream() {
+                if case .level = event { continue }
+                _ = await box.append(event)
+            }
+        }
+        backend.setOutputSet(["s1"])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        backend.stop()
+
+        // Outlive the 0.2 s timeout — nothing may fail after stop.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let events = await box.all
+        watcher.cancel()
+        XCTAssertNil(lastFailure(of: "s1", in: events),
+                     "stop() must cancel pending timeouts — no .failed after teardown")
+    }
+
+    /// The fire-and-forget diagnosis flow (brief §3): the immediate best-guess
+    /// failure is emitted first, then replaced by the diagnosed one while the
+    /// device is still `.failed`. The `DiagnosisContext` must carry the
+    /// captured auth flag and the prior cause.
+    func testDiagnosisReplacesInitialFailureAndGetsAuthFlags() async {
+        StubURLProtocol.handler = { [self] request in
+            switch request.url!.path {
+            case "/api/config":  return .ok(configJSON)
+            // Never selects (enable always fails) + requires_auth:true so the
+            // backend's per-id auth capture has something to pick up.
+            case "/api/outputs": return .ok(outputsJSON([("dead", "Locked Speaker", "AirPlay 2", false, 40)],
+                                                        requiresAuth: true))
+            case "/api/player":  return .ok(playerJSON())
+            default:             return .status(204)
+            }
+        }
+        let diagnosed = ConnectionFailure(cause: .notResponding, detail: "probe: TCP ready, RTSP silent")
+        let diagnostics = RecordingDiagnostics(result: diagnosed)
+        let backend = makeBackend()
+        backend.diagnostics = diagnostics
+        backend.start(); defer { backend.stop() }
+        _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
+
+        backend.setOutputSet(["dead"])
+
+        let events = await collect(from: backend, timeout: 4) { [self] events in
+            lastFailure(of: "dead", in: events) == diagnosed
+        }
+        // The best guess lands first, the diagnosis replaces it.
+        let failures = states(of: "dead", in: events).compactMap { state -> ConnectionFailure? in
+            if case .failed(let f) = state { return f }
+            return nil
+        }
+        XCTAssertEqual(failures.first?.cause, .unknown,
+                       "the immediate best-guess failure must be emitted before diagnosis returns")
+        XCTAssertEqual(failures.last, diagnosed,
+                       "the diagnosed failure must replace the best guess")
+        let context = diagnostics.recorded.get()
+        XCTAssertEqual(context?.deviceID, "dead")
+        XCTAssertEqual(context?.deviceName, "Locked Speaker")
+        XCTAssertEqual(context?.requiresAuth, true, "the polled requires_auth flag must reach the diagnoser")
+        XCTAssertEqual(context?.priorCause, .unknown)
+    }
 }
 
 // MARK: - Test support
@@ -315,6 +631,19 @@ final class Locked<Value>: @unchecked Sendable {
 private actor EventCollector {
     private(set) var all: [BackendEvent] = []
     func append(_ event: BackendEvent) -> [BackendEvent] { all.append(event); return all }
+}
+
+/// A `ConnectionDiagnosing` fake: records the context it was handed and
+/// returns a canned failure, so the backend's fire-and-forget replacement flow
+/// is testable without any real probes.
+private struct RecordingDiagnostics: ConnectionDiagnosing {
+    let recorded = Locked<DiagnosisContext?>(nil)
+    let result: ConnectionFailure
+
+    func diagnose(_ context: DiagnosisContext) async -> ConnectionFailure {
+        recorded.set(context)
+        return result
+    }
 }
 
 extension URLRequest {

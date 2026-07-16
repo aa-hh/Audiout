@@ -20,8 +20,16 @@ import Foundation
 /// - **Zombie de-selection** (brief §4): a previously-selected output flipping
 ///   to `selected:false` on a poll — without the app having asked — is a silent
 ///   drop. Recovery = re-select once (+ the coordinator's clear→add→play, wired
-///   via ``replayHook``); if it still fails, surface the device as unavailable
-///   (a device-level error state) and stop retrying.
+///   via ``replayHook``); if it still fails, the device enters the resting
+///   `.failed` connection state and recovery stops. It stays *available* — it
+///   answered the poll, so it's on the network; the *session* failed
+///   (`dev/notes/p1-connection-status-brief.md` §1).
+/// - **Connection lifecycle** (connection-status brief §1/§3): every routed
+///   device walks `.off → .connecting → .connected` (confirm re-GET + one
+///   stable poll tick), `.reconnecting` on a zombie drop, and a sticky
+///   `.failed` once the single recovery attempt or the connecting timeout is
+///   exhausted. All transitions live in `connectionStates` on `stateQueue`
+///   and reach the UI as ordinary `deviceUpdated` diffs.
 /// - **Connect-only** (Q7, brief §5): connection-refused → mark everything
 ///   unavailable, keep polling at a backed-off interval, NEVER start/supervise
 ///   the server.
@@ -39,6 +47,9 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// The backed-off poll interval used while the engine is unreachable (Q7):
     /// keep polling so recovery is automatic, but don't thrash.
     private let unreachablePollInterval: TimeInterval
+    /// How long `.connecting`/`.reconnecting` may sit unresolved before the
+    /// failure flow runs with `.timedOut` (connection-status brief §3 — 10 s).
+    private let connectingTimeout: TimeInterval
 
     private let client: OwnToneClient
     private let webSocket: OwnToneWebSocketMonitor?
@@ -57,6 +68,16 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// drives device state, there's just no audio pipeline behind it.
     public var captureCoordinator: CaptureCoordinator?
 
+    /// Investigates *why* an enable failed (connection-status brief §4/§5). On
+    /// entering `.failed` the backend reports its immediate best-guess
+    /// `ConnectionFailure`, then fires this off in the background; if the
+    /// device is still `.failed` when it returns, the diagnosed failure
+    /// replaces the guess (and emits again). `nil` (the default) skips
+    /// diagnosis — the guess stands. The concrete implementation is wired by
+    /// ``makeBackend(_:)``; tests inject fakes. Set before `start()` (same
+    /// discipline as ``replayHook``).
+    public var diagnostics: ConnectionDiagnosing?
+
     // All mutable state is confined to `stateQueue`. `@unchecked Sendable` is
     // honest because of that discipline (same pattern as MockBackend).
     private let stateQueue = DispatchQueue(label: "OwnToneBackend.state")
@@ -74,6 +95,23 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// Ids we've already tried to recover once this drop; cleared when they come
     /// back. Prevents the infinite-retry loop the brief warns against (§4 step 4).
     private var recovering: Set<String> = []
+
+    /// Per-device connection lifecycle (connection-status brief §1/§3). `.off`
+    /// is represented by absence. Folded into every snapshot by `mapOutput`, so
+    /// transitions reach the UI as ordinary `deviceUpdated` diffs.
+    private var connectionStates: [String: ConnectionState] = [:]
+    /// Ids whose selection the confirm re-GET verified, awaiting one more
+    /// stable poll tick before `.connecting → .connected` (§1 — a failed
+    /// activation can still revert `selected` a moment after the confirm).
+    private var pendingStable: Set<String> = []
+    /// Live connecting/reconnecting timeouts by id, with a generation token so
+    /// a stale timeout (superseded by a newer transition) can never fire even
+    /// if `cancel()` loses the race with the sleep ending.
+    private var timeoutTasks: [String: Task<Void, Never>] = [:]
+    private var timeoutTokens: [String: UUID] = [:]
+    /// Latest raw auth flags per id (OwnTone `has_password || requires_auth ||
+    /// needs_auth_key`), captured on every poll for `DiagnosisContext`.
+    private var authFlags: [String: Bool] = [:]
 
     /// App-side mute (Q4): OwnTone has no mute field, so mute is realized as
     /// volume 0 with the prior value stashed. Kept here so the `Device` snapshots
@@ -98,16 +136,21 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     ///     want a real socket).
     ///   - pollInterval / unreachablePollInterval: overridable so tests run the
     ///     poll loop fast.
+    ///   - connectingTimeout: how long `.connecting`/`.reconnecting` may sit
+    ///     unresolved before failing with `.timedOut` (brief §3 — 10 s;
+    ///     tests shrink it).
     init(
         client: OwnToneClient,
         webSocket: OwnToneWebSocketMonitor?,
         pollInterval: TimeInterval = 1.0,
-        unreachablePollInterval: TimeInterval = 3.0
+        unreachablePollInterval: TimeInterval = 3.0,
+        connectingTimeout: TimeInterval = 10.0
     ) {
         self.client = client
         self.webSocket = webSocket
         self.pollInterval = pollInterval
         self.unreachablePollInterval = unreachablePollInterval
+        self.connectingTimeout = connectingTimeout
     }
 
     // MARK: OutputBackend
@@ -183,6 +226,12 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             self.order.removeAll()
             self.expectedSelected.removeAll()
             self.recovering.removeAll()
+            // The connection lifecycle dies with the backend: no timeout may
+            // fire after stop, and a restart begins from `.off`.
+            for id in Array(self.timeoutTasks.keys) { self.cancelConnectionTimeout(id) }
+            self.connectionStates.removeAll()
+            self.pendingStable.removeAll()
+            self.authFlags.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -221,8 +270,34 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
 
     public func setOutputSet(_ ids: Set<String>) {
         stateQueue.async {
+            let previous = self.expectedSelected
             self.expectedSelected = ids
             self.recovering.removeAll()
+
+            // Ids leaving the set → `.off` — unless `.failed`, which is
+            // sticky: the popover drops membership as failure *cleanup*
+            // (connection-status brief §7.3), and that cleanup must not erase
+            // the warning (§1).
+            for id in previous.subtracting(ids) {
+                self.pendingStable.remove(id)
+                self.cancelConnectionTimeout(id)
+                if case .failed = self.connectionState(of: id) { continue }
+                self.setConnectionState(.off, for: id)
+            }
+
+            // Ids newly enabled — including a `.failed` id re-added, which is
+            // the retry path (§1) — go `.connecting` NOW, before the
+            // PUT/confirm round-trip below resolves, so the UI spinner is
+            // immediate (§3).
+            for id in ids {
+                switch self.connectionState(of: id) {
+                case .off, .failed:
+                    self.setConnectionState(.connecting, for: id)
+                    self.startConnectionTimeout(id)
+                default:
+                    break   // already connecting/connected/reconnecting — leave it
+                }
+            }
         }
         Task { [weak self] in
             guard let self else { return }
@@ -274,9 +349,16 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
 
             let polledIDs = Set(outputs.map(\.id))
 
-            // Removals: known ids absent from this poll.
+            // Removals: known ids absent from this poll. Departure clears every
+            // per-id trace — `.failed → .off` happens only here (connection-
+            // status brief §1: a failed device keeps its warning until it
+            // disappears entirely).
             for id in self.order where !polledIDs.contains(id) {
                 self.known[id] = nil
+                self.connectionStates[id] = nil
+                self.pendingStable.remove(id)
+                self.authFlags[id] = nil
+                self.cancelConnectionTimeout(id)
                 self.emit(.deviceRemoved(id: id))
             }
             self.order.removeAll { !polledIDs.contains($0) }
@@ -284,13 +366,30 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             // Additions + updates.
             var zombieDrops: [String] = []
             for output in outputs {
+                // Capture the raw auth flags for `DiagnosisContext` (brief §3).
+                self.authFlags[output.id] = output.requiresAnyAuth
+                // Stability window (§1): the confirm re-GET said selected, and
+                // this poll tick agreeing is what promotes `.connecting →
+                // .connected` — set it before `mapOutput` so the promotion
+                // rides the same `deviceUpdated` diff.
+                if output.selected,
+                   self.pendingStable.contains(output.id),
+                   self.connectionState(of: output.id) == .connecting {
+                    self.pendingStable.remove(output.id)
+                    self.cancelConnectionTimeout(output.id)
+                    self.connectionStates[output.id] = .connected
+                }
                 let mapped = self.mapOutput(output)
                 if let existing = self.known[output.id] {
-                    // Detect a silent zombie drop: we expected this selected, the
-                    // app didn't deselect it, yet the poll shows it unselected.
+                    // Detect a silent zombie drop: this device was verified
+                    // connected, the app didn't deselect it, yet the poll shows
+                    // it unselected. (The `.connected` gate keeps an id that is
+                    // still mid-confirm — `.connecting` — out of here; that
+                    // path belongs to `confirmSelectionOrRecover`.)
                     if self.expectedSelected.contains(output.id),
                        !output.selected,
-                       !self.recovering.contains(output.id) {
+                       !self.recovering.contains(output.id),
+                       self.connectionState(of: output.id) == .connected {
                         zombieDrops.append(output.id)
                     }
                     let merged = self.merge(existing: existing, polled: mapped)
@@ -308,7 +407,13 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             if !zombieDrops.isEmpty {
                 let expected = self.expectedSelected
                 let drops = zombieDrops
-                for id in drops { self.recovering.insert(id) }
+                for id in drops {
+                    self.recovering.insert(id)
+                    // Emit `.reconnecting` BEFORE recovery runs so the UI shows
+                    // the spinner for the whole attempt (brief §3).
+                    self.setConnectionState(.reconnecting, for: id)
+                    self.startConnectionTimeout(id)
+                }
                 Task { [weak self] in await self?.recoverZombies(drops, expected: expected) }
             }
         }
@@ -318,6 +423,10 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         stateQueue.sync {
             guard self.reachable else { return }
             self.reachable = false
+            // Engine-unreachable leaves connection states as-is (connection-
+            // status brief §1: the greyed whole-list treatment communicates
+            // it), but no timeout may fire while the engine is down.
+            for id in Array(self.timeoutTasks.keys) { self.cancelConnectionTimeout(id) }
             // Q7: surface an unavailable state for every known device and keep
             // polling (the loop will back off). Never touch the server process.
             for id in self.order {
@@ -345,17 +454,31 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         applyPoll(outputs: outputs, player: (try? await client.player()) ?? .init(state: "stop", volume: 0))
 
         let actuallySelected = Set(outputs.filter(\.selected).map(\.id))
+        // Confirmed ids stay `.connecting` but are marked pending-stable: the
+        // NEXT poll tick still showing them selected is what makes them
+        // `.connected` (connection-status brief §1 stability window — a failed
+        // activation can revert `selected` a moment after this confirm).
+        stateQueue.sync {
+            for id in expected.intersection(actuallySelected)
+            where self.connectionState(of: id) == .connecting {
+                self.pendingStable.insert(id)
+            }
+        }
         let missing = expected.subtracting(actuallySelected)
         guard !missing.isEmpty else { return }
-        // Silent select failure — recover exactly the missing ids.
+        // Silent select failure — recover exactly the missing ids (their state
+        // stays `.connecting` for the whole attempt, brief §3).
         stateQueue.sync { for id in missing { self.recovering.insert(id) } }
         await recoverZombies(Array(missing), expected: expected)
     }
 
     /// Recovery sequence (brief §4 step 4): re-select the full intended set,
     /// invoke the coordinator's replay (clear→add→play) if wired, then re-GET
-    /// once. If the ids still aren't selected, surface a device-level error
-    /// (mark unavailable) and STOP — do not loop (brief §4 step 4).
+    /// once. Success → `.connected`. If the ids still aren't selected, enter
+    /// the resting `.failed` state and STOP — do not loop (brief §4 step 4).
+    /// The device stays *available*: it answered the poll, so it's on the
+    /// network — the *session* failed (connection-status brief §1; this
+    /// deliberately replaced the old mark-unavailable behaviour).
     private func recoverZombies(_ ids: [String], expected: Set<String>) async {
         do {
             try await client.setOutputSet(Array(expected))
@@ -379,19 +502,107 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         stateQueue.sync {
             for id in ids {
                 if stillMissing.contains(id) {
-                    // Recovery failed after one retry → device-level error state.
-                    // The only channel we have to the UI is `Device`: mark it
-                    // unavailable so it greys out. Stays in `recovering` so we
-                    // don't hammer it every poll.
-                    if var device = self.known[id], device.isAvailable {
-                        device.isAvailable = false
-                        self.known[id] = device
-                        self.emit(.deviceUpdated(device))
+                    // Recovery failed after one retry → resting `.failed`.
+                    // Only fail an unresolved connect/reconnect: the timeout
+                    // may have failed it already, or the user may have
+                    // disabled the device mid-recovery (`.off`) — both must
+                    // stand. Stays in `recovering` so we don't hammer it
+                    // every poll.
+                    switch self.connectionState(of: id) {
+                    case .connecting:
+                        self.enterFailure(id, cause: .unknown)
+                    case .reconnecting:
+                        self.enterFailure(id, cause: .droppedMidStream)
+                    default:
+                        break
                     }
                 } else {
                     // Recovered — clear the guard so a future drop retries.
                     self.recovering.remove(id)
+                    switch self.connectionState(of: id) {
+                    case .connecting, .reconnecting:
+                        self.pendingStable.remove(id)
+                        self.cancelConnectionTimeout(id)
+                        self.setConnectionState(.connected, for: id)
+                    default:
+                        break
+                    }
                 }
+            }
+        }
+    }
+
+    // MARK: Connection state machine (dev/notes/p1-connection-status-brief.md §1/§3)
+
+    /// Current lifecycle state for an id; absence means `.off`.
+    private func connectionState(of id: String) -> ConnectionState {   // on stateQueue
+        connectionStates[id] ?? .off
+    }
+
+    /// Record a transition and echo it through the normal update machinery.
+    /// (`applyLocal` no-ops for ids not yet discovered; `mapOutput` folds the
+    /// dict in when they are.)
+    private func setConnectionState(_ state: ConnectionState, for id: String) {   // on stateQueue
+        guard connectionState(of: id) != state else { return }
+        connectionStates[id] = (state == .off) ? nil : state
+        applyLocal(id) { $0.connectionState = state }
+    }
+
+    /// Arm the connecting/reconnecting timeout (brief §3): if the id is still
+    /// unresolved when it fires, the failure flow runs with `.timedOut`. The
+    /// generation token makes a superseded timeout inert even if `cancel()`
+    /// loses the race with the sleep ending.
+    private func startConnectionTimeout(_ id: String) {   // on stateQueue
+        timeoutTasks[id]?.cancel()
+        let token = UUID()
+        timeoutTokens[id] = token
+        let timeout = connectingTimeout
+        timeoutTasks[id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.stateQueue.async {
+                guard self.timeoutTokens[id] == token else { return }
+                switch self.connectionState(of: id) {
+                case .connecting, .reconnecting:
+                    self.enterFailure(id, cause: .timedOut)
+                default:
+                    // Resolved without cancelling (shouldn't happen — every
+                    // exit cancels) — just clean up the bookkeeping.
+                    self.cancelConnectionTimeout(id)
+                }
+            }
+        }
+    }
+
+    /// Disarm the timeout for an id. Every state exit does this (brief §3).
+    private func cancelConnectionTimeout(_ id: String) {   // on stateQueue
+        timeoutTasks[id]?.cancel()
+        timeoutTasks[id] = nil
+        timeoutTokens[id] = nil
+    }
+
+    /// The failure flow (brief §3): enter the resting `.failed` with the
+    /// backend's immediate best guess, emit, then fire-and-forget diagnosis.
+    /// When it returns, the diagnosed failure replaces the guess only if the
+    /// device is STILL `.failed` — a retry or removal in the meantime wins.
+    private func enterFailure(_ id: String, cause: ConnectionFailure.Cause) {   // on stateQueue
+        cancelConnectionTimeout(id)
+        pendingStable.remove(id)
+        setConnectionState(.failed(ConnectionFailure(cause: cause)), for: id)
+
+        guard let diagnostics else { return }
+        let context = DiagnosisContext(
+            deviceID: id,
+            deviceName: known[id]?.name ?? id,
+            requiresAuth: authFlags[id] ?? false,
+            priorCause: cause
+        )
+        Task { [weak self] in
+            let diagnosed = await diagnostics.diagnose(context)
+            guard let self else { return }
+            self.stateQueue.async {
+                guard case .failed = self.connectionState(of: id) else { return }
+                self.setConnectionState(.failed(diagnosed), for: id)
             }
         }
     }
@@ -416,7 +627,10 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             // (intended) level so the slider doesn't jump to 0 under the user.
             volume: isMuted ? (stashedVolume[output.id] ?? output.volume) : output.volume,
             isMuted: isMuted,
-            isSelected: output.selected
+            isSelected: output.selected,
+            // The lifecycle dict is the truth (connection-status brief §3);
+            // folding it in here is what makes transitions ride the poll diff.
+            connectionState: connectionStates[output.id] ?? .off
         )
     }
 

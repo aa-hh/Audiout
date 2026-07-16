@@ -128,11 +128,11 @@ public final class DeviceRowView: NSView {
     /// documented-controls rule (2026-07-17; see ArcSpinnerView.swift for the
     /// full rationale and the native candidates that were evaluated first).
     private let statusArcSpinner = ArcSpinnerView()
-    /// `NSImageView` showing SF Symbol `circle.fill` — Apple docs: `NSImageView`
-    /// is the documented way to display a static template image;
-    /// `contentTintColor` is the supported way to recolor a template/SF Symbol
-    /// image without a custom `NSImage` per color.
-    private let statusDotView = NSImageView()
+    /// The "connected" green dot — a custom ``StatusDotView`` (filled circle
+    /// drawn at exact view center) rather than an SF-Symbol `circle.fill`, whose
+    /// glyph sat ~0.5pt right of the arc/triangle in the column (see
+    /// StatusDotView.swift; Alec, 2026-07-17).
+    private let statusDotView = StatusDotView()
     /// Borderless, image-only `NSButton` — Apple docs: `bezelStyle` is ignored
     /// when `isBordered = false`, the documented pattern for an icon-only
     /// tappable control that shouldn't look like a button (same recipe already
@@ -380,11 +380,6 @@ public final class DeviceRowView: NSView {
         statusArcSpinner.setContentHuggingPriority(.required, for: .horizontal)
 
         statusDotView.translatesAutoresizingMaskIntoConstraints = false
-        statusDotView.imageScaling = .scaleProportionallyDown
-        statusDotView.contentTintColor = .systemGreen
-        let dotConfig = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
-        statusDotView.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(dotConfig)
         statusDotView.setContentHuggingPriority(.required, for: .horizontal)
 
         statusWarningButton.translatesAutoresizingMaskIntoConstraints = false

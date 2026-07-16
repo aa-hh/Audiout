@@ -92,6 +92,228 @@ final class MockBackendTests: XCTestCase {
         let sawUpdate = await box.value
         XCTAssertFalse(sawUpdate, "a no-op change should not emit deviceUpdated")
     }
+
+    func testUnscriptedEnableAndDisableAreStillSingleSynchronousEvents() async throws {
+        // Backward-compat requirement (brief §5): a device with no script
+        // keeps the exact current one-event-per-toggle behaviour, just now
+        // also carrying `.connected`/`.off` in that same event.
+        let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
+        _ = try await collect(1, from: backend)   // initial deviceAdded
+
+        let stream = backend.makeEventStream()
+        let box = DeviceBox()
+        let done = expectation(description: "enabled")
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == "a" {
+                    await box.set(d); done.fulfill(); break
+                }
+            }
+        }
+        backend.setOutputSet(["a"])
+        await fulfillment(of: [done], timeout: 2)
+        task.cancel()
+        let enabled = await box.value
+        XCTAssertEqual(enabled?.isSelected, true)
+        XCTAssertEqual(enabled?.connectionState, .connected)
+
+        let stream2 = backend.makeEventStream()
+        let box2 = DeviceBox()
+        let done2 = expectation(description: "disabled")
+        let task2 = Task {
+            for await event in stream2 {
+                if case .deviceUpdated(let d) = event, d.id == "a" {
+                    await box2.set(d); done2.fulfill(); break
+                }
+            }
+        }
+        backend.setOutputSet([])
+        await fulfillment(of: [done2], timeout: 2)
+        task2.cancel()
+        let disabled = await box2.value
+        XCTAssertEqual(disabled?.isSelected, false)
+        XCTAssertEqual(disabled?.connectionState, .off)
+    }
+
+    func testScriptedConnectGoesConnectingThenConnected() async throws {
+        let script = ConnectScript(attempts: [.connect(after: 0.1)])
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": script]
+        )
+        _ = try await collectFleetDiscovery(backend)
+
+        let updates = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])
+        }
+        XCTAssertEqual(updates.map(\.connectionState), [.connecting, .connected])
+        XCTAssertEqual(updates.last?.isSelected, true)
+    }
+
+    func testScriptedFailGoesConnectingThenFailedWithIsSelectedFalse() async throws {
+        let failure = ConnectionFailure(cause: .notResponding)
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+
+        let updates = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])
+        }
+        XCTAssertEqual(updates.map(\.connectionState), [.connecting, .failed(failure)])
+        XCTAssertEqual(updates.last?.isSelected, false)
+    }
+
+    func testFailedStateIsStickyAcrossDeselect() async throws {
+        // §1: dropping a failed device from the expected set (the popover's
+        // honest-toggle cleanup) must not erase the warning.
+        let failure = ConnectionFailure(cause: .vanished)
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])
+        }
+
+        let cleanup = try await collectUpdates(for: "a", count: 1, from: backend) {
+            backend.setOutputSet([])   // remove from expected set without retrying
+        }
+        XCTAssertEqual(cleanup.last?.connectionState, .failed(failure), "sticky-failed must survive deselect")
+        XCTAssertEqual(cleanup.last?.isSelected, false)
+    }
+
+    func testRetryAfterFailureUsesTheSecondScriptedAttempt() async throws {
+        let failure = ConnectionFailure(cause: .notResponding)
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [
+                .fail(after: 0.1, failure),
+                .connect(after: 0.1),
+            ])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])       // attempt 1: fails
+        }
+        _ = try await collectUpdates(for: "a", count: 1, from: backend) {
+            backend.setOutputSet([])          // cleanup (sticky-failed)
+        }
+        let retry = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])       // attempt 2: connects
+        }
+        XCTAssertEqual(retry.map(\.connectionState), [.connecting, .connected])
+        XCTAssertEqual(retry.last?.isSelected, true)
+    }
+
+    func testConnectThenDropRecovers() async throws {
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [
+                .connectThenDrop(connectAfter: 0.1, dropAfter: 0.1, recovers: true),
+            ])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+
+        // connecting -> connected -> reconnecting -> connected
+        let updates = try await collectUpdates(for: "a", count: 4, from: backend, timeout: 5) {
+            backend.setOutputSet(["a"])
+        }
+        XCTAssertEqual(updates.map(\.connectionState), [.connecting, .connected, .reconnecting, .connected])
+        XCTAssertEqual(updates.last?.isSelected, true)
+    }
+
+    func testConnectThenDropFails() async throws {
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [
+                .connectThenDrop(connectAfter: 0.1, dropAfter: 0.1, recovers: false),
+            ])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+
+        let updates = try await collectUpdates(for: "a", count: 4, from: backend, timeout: 5) {
+            backend.setOutputSet(["a"])
+        }
+        XCTAssertEqual(
+            updates.map(\.connectionState),
+            [.connecting, .connected, .reconnecting, .failed(ConnectionFailure(cause: .droppedMidStream))]
+        )
+        XCTAssertEqual(updates.last?.isSelected, false)
+    }
+
+    func testScenarioFactoryMapsEnvironmentToConnectionDemoScripts() {
+        let none = MockBackend.resolveScenarioScripts(environment: [:])
+        XCTAssertTrue(none.isEmpty, "no AIRPLAY_MOCK_SCENARIO → no scripting")
+
+        let other = MockBackend.resolveScenarioScripts(environment: ["AIRPLAY_MOCK_SCENARIO": "something-else"])
+        XCTAssertTrue(other.isEmpty)
+
+        let scripts = MockBackend.resolveScenarioScripts(environment: ["AIRPLAY_MOCK_SCENARIO": "connection-demo"])
+        guard case .fail(let after, let failure) = scripts["airport-mixer"]?.attempts.first else {
+            return XCTFail("airport-mixer should start with a .fail attempt")
+        }
+        XCTAssertEqual(after, 1.5)
+        XCTAssertEqual(failure.cause, .notResponding)
+        guard case .connect = scripts["airport-mixer"]?.attempts.dropFirst().first else {
+            return XCTFail("airport-mixer's retry attempt should be .connect")
+        }
+
+        guard case .connect(let sonosAfter) = scripts["sonos-move-2"]?.attempts.first else {
+            return XCTFail("sonos-move-2 should be a plain slow .connect")
+        }
+        XCTAssertEqual(sonosAfter, 4.0)
+
+        guard case .connectThenDrop(_, _, let recovers) = scripts["office"]?.attempts.first else {
+            return XCTFail("office should be .connectThenDrop")
+        }
+        XCTAssertFalse(recovers)
+
+        // Every other fleet device gets the plain quick-connect fallback.
+        guard case .connect(let fallbackAfter) = scripts["homepod-bed"]?.attempts.first else {
+            return XCTFail("unlisted devices should fall back to a plain .connect")
+        }
+        XCTAssertEqual(fallbackAfter, 0.8)
+    }
+}
+
+private extension MockBackendTests {
+    /// Discover the (single-device) fleet used by the scripted-choreography
+    /// tests below, starting the backend.
+    func collectFleetDiscovery(_ backend: MockBackend, timeout: TimeInterval = 2) async throws -> [BackendEvent] {
+        try await collect(1, from: backend, timeout: timeout)
+    }
+
+    /// Run `action`, then collect the next `count` `deviceUpdated` events for
+    /// `id` that follow it.
+    func collectUpdates(
+        for id: String, count: Int, from backend: MockBackend, timeout: TimeInterval = 4,
+        after action: () -> Void
+    ) async throws -> [Device] {
+        let stream = backend.makeEventStream()
+        let expectation = expectation(description: "\(count) updates for \(id)")
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == id {
+                    if await box.append(event) >= count { expectation.fulfill(); break }
+                }
+            }
+        }
+        action()
+        await fulfillment(of: [expectation], timeout: timeout)
+        task.cancel()
+        let events = await box.events
+        return events.compactMap { if case .deviceUpdated(let d) = $0 { return d } else { return nil } }
+    }
 }
 
 // Small actors to carry mutable state across the async boundary without races.

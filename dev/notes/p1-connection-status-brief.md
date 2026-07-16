@@ -1,5 +1,7 @@
 # P1 — Per-speaker connection status + failure diagnostics (design brief)
 
+**IMPLEMENTED 2026-07-16, see SPEC §9.**
+
 *2026-07-16. Approved by Alec. This is the single source of truth for the
 connection-status build. Implementation agents: read this whole file, plus the
 repo AGENTS.md and `AirPlayControllerCore/AGENTS.md`, before touching code.*

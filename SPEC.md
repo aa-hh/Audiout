@@ -483,6 +483,9 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 | Volume | `NSSlider(value:minValue:maxValue:target:action:)`, horizontal | `isContinuous = true` for live drag feedback (HIG sliders: live feedback required). Min at leading edge, speaker icons at ends per HIG. (HIG's "don't use a slider for volume" is iOS-only — macOS's own Sound menu is a slider.) |
 | Mute / Solo | `NSButton`, `bezelStyle = .accessoryBar`, `setButtonType(.pushOnPushOff)` | `.accessoryBar` is documented for on/off-style buttons; NOT `NSSwitch` (HIG: switches only for emphasized settings, don't replace checkbox-like toggles). SF Symbols `speaker.slash.fill` / `headphones`. |
 | Level meter | `NSLevelIndicator`, `.discreteCapacity` | Docs describe this style as "similar to audio level indicators in audio playback applications" — with `warningValue`/`criticalValue` for free green/yellow/red. Display-only. |
+| Status slot (2026-07-16) | `NSProgressIndicator` (`.spinning`, `.small`) / `NSImageView` (SF Symbol `circle.fill`) / borderless imageOnly `NSButton` (SF Symbol `exclamationmark.triangle.fill`) | Fixed-width column between the `%` readout and the ENABLED switch. Spinner while connecting/reconnecting; persistent green dot once connected; orange warning triangle (a real button, not just an image) on failure — tapping it toggles the inline diagnosis panel. Empty while `.off`. |
+| Status sublabel (2026-07-16) | Second `NSTextField` under the device name, `systemFont(ofSize: 10)` | Two-line name/status stack in the unchanged row height. "Connecting…"/"Reconnecting…" in `.secondaryLabelColor`, "Connected" in `.systemGreen`, "Couldn't connect" in `.systemOrange`; hidden for `.off`. |
+| Diagnosis panel (2026-07-16) | Custom `NSView` (`ConnectionDiagnosisView`) inserted as its own stack-view row directly under the failed device's row, `NSColor.systemOrange.withAlphaComponent(0.12)` rounded background | Headline + wrapping suggestion body + "Try again"/"Copy details" (`NSButton`, `bezelStyle = .rounded`, `.small`). Inserted/removed with the same animated approach as group expansion. Auto-expands once per failure episode; the warning button toggles it afterwards. |
 
 ### Full window (Mixer)
 | Element | AppKit API | Documented usage we follow |
@@ -505,6 +508,32 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
   materials only, and `NSMenu`/sidebar supply their own automatically.
 - Switches for mute/solo, switches in toolbars (HIG toggles).
 - Cell-based `NSTableView` (view-based only).
+
+### Connection status & diagnostics (2026-07-16)
+
+Enabling a speaker can silently fail after OwnTone's API already returned
+success, and a connected speaker can silently drop mid-stream (the "zombie"
+case) — see `dev/notes/p1-connection-status-brief.md` for the full design.
+Summary of what shipped:
+
+- **State machine** on `Device.connectionState`: `off → connecting →
+  connected`, `connecting → failed`, `connected → reconnecting →
+  connected|failed`. The backend (`MockBackend` and `OwnToneBackend`) is the
+  only writer; the UI is a pure renderer, same as every other `Device` field.
+- **Honest toggle:** the row's switch only rests ON once the connection is
+  confirmed stable, not just requested. On failure it animates back OFF via
+  ordinary Selected-Devices membership removal.
+- **Sticky-failed:** a `.failed` device keeps showing its warning even after
+  that membership-removal cleanup drops its id from the backend's expected-
+  selected set; it only clears on retry (`.failed → .connecting`) or the
+  device disappearing entirely (`.failed → .off`).
+- **Retry policy:** the backend's one automatic recovery attempt is covered by
+  the connecting/reconnecting phase; after that, `.failed` is a resting state
+  — retry is manual ("Try again" or toggling back on). No background retry
+  loops.
+- **Diagnosis:** engine-log tail + Bonjour presence + a bounded TCP probe +
+  auth flags map to one plain-English cause + suggested action, shown in the
+  inline panel with a "Copy details" action for the raw evidence.
 
 ---
 

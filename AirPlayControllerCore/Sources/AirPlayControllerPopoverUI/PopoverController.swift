@@ -164,7 +164,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             // Combined header row (change 1): "Selected Devices" title on the
             // left, "VOLUME" over the slider and "ENABLED" over the membership
             // toggle on the right.
-            panel.beginCard(header: "Selected Devices", volumeTitle: "Volume", trailingTitle: "Enabled")
+            panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Enabled")
             if !locals.isEmpty {
                 panel.addSubsectionHeader("Current Device")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
@@ -198,7 +198,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else { return }
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Enabled Devices", target: .selectedDevices),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))

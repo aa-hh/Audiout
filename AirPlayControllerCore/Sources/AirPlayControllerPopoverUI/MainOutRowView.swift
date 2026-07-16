@@ -144,8 +144,16 @@ public final class MainOutRowView: NSView {
         // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
         // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
         // visible fallback (Alec's choice).
+        // Match the device rows' glyph sizing (2026-07-17): size the symbol to
+        // fill the shared 26pt icon box so the Main Out icon reads at the same
+        // scale as the device icons below it (without a config it renders at the
+        // small default size and floats in a big box).
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                                     weight: .regular)
+        iconView.imageScaling = .scaleProportionallyDown
         for name in ["hifispeaker.arrow.forward.fill", "hifispeaker.fill"] {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out") {
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out")?
+                .withSymbolConfiguration(iconConfig) {
                 iconView.image = image
                 break
             }

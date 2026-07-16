@@ -216,6 +216,9 @@ public final class DeviceRowView: NSView {
         iconView.image = NSImage(
             systemSymbolName: device.kind.symbolName,
             accessibilityDescription: device.name
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                        weight: .regular)
         )
         // The icon is ALWAYS neutral now (2026-07-17): identity only, no
         // accent-when-selected fill. Selection reads from the switch state; the
@@ -391,13 +394,16 @@ public final class DeviceRowView: NSView {
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
             // On-icon status badge: sized to the badge diameter, its center
-            // overlapping the icon's bottom-right corner (notification-badge
-            // position). Sits on the corner so ~half the badge extends past the
-            // icon edge, reading as a distinct badge with its punch-out ring.
+            // pulled IN from the icon's bottom-right corner by `statusDotInset`
+            // so it rides the (now box-filling) glyph's corner with a slight
+            // overhang, reading as a distinct badge over the symbol rather than
+            // floating in the box padding below it.
             statusDotView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
             statusDotView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
-            statusDotView.centerXAnchor.constraint(equalTo: iconView.trailingAnchor),
-            statusDotView.centerYAnchor.constraint(equalTo: iconView.bottomAnchor),
+            statusDotView.centerXAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
+            statusDotView.centerYAnchor.constraint(equalTo: iconView.bottomAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
 
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                constant: PopoverColumnGrid.iconToName),

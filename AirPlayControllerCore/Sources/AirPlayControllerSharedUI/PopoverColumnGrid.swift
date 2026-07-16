@@ -90,6 +90,17 @@ public enum PopoverColumnGrid {
     /// The breathing pulse's minimum scale (grows to 1.0).
     public static let statusDotBreathMinScale: CGFloat = 0.82
 
+    /// SF-Symbol point size for the device icon glyph. Without this the symbol
+    /// renders at its small default size and floats in the middle of the 26pt
+    /// box (leaving the corner badge stranded in empty padding); sizing it here
+    /// fills the box so the glyph's corner ≈ the box corner and the badge sits
+    /// ON the symbol (2026-07-17, matching the approved mockup).
+    public static let iconGlyphPointSize: CGFloat = 18
+    /// How far the badge's center is pulled IN from the icon box's bottom-right
+    /// corner so it rides the glyph's corner (a slight overhang) rather than
+    /// sitting off in the box padding. Tuned live.
+    public static let statusDotInset: CGFloat = 3
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

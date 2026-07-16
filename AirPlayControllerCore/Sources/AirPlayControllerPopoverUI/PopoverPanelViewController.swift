@@ -15,9 +15,16 @@ import AirPlayControllerSharedUI
 ///
 /// It is a dumb container: `PopoverController` composes the sections and hands in
 /// the rows; this controller lays them out and sizes the popover. The outer
-/// vertical `stackView` holds the cards. The `NSScrollView` is retained (harmless)
-/// but the scroll area is pinned to its content height (2026-07-16) — the popover
-/// always grows to fit the full content, so it never actually scrolls.
+/// vertical `stackView` holds the cards.
+///
+/// **Exact-fit sizing (T-3, PLAN-POPOVER-ROUTING.md §A/§E risk 1, 2026-07-16):**
+/// there is **no `NSScrollView`** — the stack is pinned directly inside the
+/// container (header bottom → container bottom), so no scroller chrome can ever
+/// appear. The popover is exactly the height of its visible content and
+/// grows/shrinks as sections expand or collapse. The size flows out through
+/// `preferredContentSize` (the DOCUMENTED `NSPopover` channel — it tracks
+/// `contentViewController.preferredContentSize` and animates on its own when
+/// `popover.animates` is true; see `panelContentDidChangeHeight`).
 @MainActor
 final class PopoverPanelViewController: NSViewController {
 
@@ -38,10 +45,24 @@ final class PopoverPanelViewController: NSViewController {
     /// the module so the controller can animate `layoutSubtreeIfNeeded()` on it
     /// during a group's expand/collapse.
     let stackView = NSStackView()
-    private let scrollView = NSScrollView()
 
     /// The card currently being filled by `addRow` / `addSubsectionHeader`.
     private var currentCard: CardView?
+
+    // MARK: Collapsible-card bookkeeping (T-4)
+
+    /// Cards keyed by their section title, so the controller (and tests) can
+    /// toggle/inspect a card by title without holding a view reference.
+    private var cardsByHeader: [String: CardView] = [:]
+    /// Chevron buttons keyed by section title (for symbol flips + assertions).
+    private var chevronsByHeader: [String: NSButton] = [:]
+    /// The SF Symbol name currently assigned to each chevron (there's no public
+    /// getter for an `NSImage`'s symbol name pre-macOS-14, so we track it for the
+    /// chevron-flip test hook — set wherever the chevron image is assigned).
+    private var chevronSymbolByHeader: [String: String] = [:]
+    /// Initial collapse states recorded in `beginCard`, applied on the first body
+    /// row (a header-only card has nothing to collapse until it has a body).
+    private var pendingCollapsed: [String: Bool] = [:]
 
     /// The header bar pinned above the scroll area (task A). Now also hosts the
     /// **Quit** button (the footer was removed 2026-07-14).
@@ -57,6 +78,10 @@ final class PopoverPanelViewController: NSViewController {
     private let panelWidth: CGFloat = 623
     /// Side inset of a card from the popover edge (Control Center–style).
     static let cardMargin: CGFloat = 12
+
+    /// Associated-object key that keeps a chevron/title `ClosureActionTarget` alive
+    /// for the lifetime of its button (target/action holds `target` weakly).
+    private static var actionTargetKey: UInt8 = 0
 
     /// The popover's own BACKGROUND — distinct from the card tiles floating on
     /// top of it. `NSPopover` gives a vibrant frame "for free" only around
@@ -87,19 +112,22 @@ final class PopoverPanelViewController: NSViewController {
         stackView.spacing = 12
         stackView.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
 
-        let documentView = NSView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        documentView.addSubview(stackView)
-
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = documentView
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.automaticallyAdjustsContentInsets = false
-
         container.addSubview(header)
-        container.addSubview(scrollView)
+        container.addSubview(stackView)
 
+        // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
+        // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
+        // popover is exactly its content height and never scrolls). Pinning all four
+        // edges (header bottom → container bottom) makes the container's height a
+        // pure function of the stack's fitting height.
+        //
+        // EMPTY-POPOVER AUTO-LAYOUT TRAP (preserved from the pre-scroll design,
+        // T-U8: MUST NOT regress): the stack MUST be pinned top AND bottom so its
+        // intrinsic content height drives the container. Historically the scroll
+        // area was under-constrained and Auto Layout collapsed it to ~0, hiding
+        // every card. Here the same guarantee comes from the bottom pin below —
+        // without `stackView.bottomAnchor == container.bottomAnchor` the stack
+        // would be free to collapse to zero height and silently hide all cards.
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: panelWidth),
 
@@ -114,44 +142,65 @@ final class PopoverPanelViewController: NSViewController {
             header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-
-            // Footer removed 2026-07-14 → the scroll area runs to the bottom.
-            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-
-            stackView.topAnchor.constraint(equalTo: documentView.topAnchor),
-            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
-            stackView.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
-            documentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+            // Stack pinned header-bottom → container-bottom, full width. The bottom
+            // pin is the anti-collapse guarantee (see the note above).
+            stackView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stackView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
         ])
-
-        // Pin the scroll view to its content height (2026-07-16 — the scroll-height
-        // cap was removed). REQUIRED so the scroll area always equals its content:
-        // the popover then grows to fit the full content and never scrolls. Without
-        // this the scroll view is under-constrained and Auto Layout collapses it to
-        // ~0, hiding every card (the empty-popover bug). (T-U8: MUST NOT regress.)
-        let fitContent = scrollView.heightAnchor.constraint(equalTo: documentView.heightAnchor)
-        fitContent.isActive = true
-        scrollView.setContentHuggingPriority(.defaultHigh, for: .vertical)
 
         view = container
     }
 
-    /// Scroll the document view to the top so the System card is flush with the
-    /// top edge. With the fit-height constraint there's no scroll range, but this
-    /// is a belt-and-suspenders reset called right after the popover shows.
-    func scrollToTop() {
+    // MARK: Exact-fit sizing (T-3)
+
+    /// The single source of truth for the popover's target size: settle Auto Layout
+    /// synchronously (`layoutSubtreeIfNeeded`), then read the container's
+    /// `fittingSize`. Callers push this into `preferredContentSize` so the popover
+    /// resizes to exactly the visible content (PLAN-POPOVER-ROUTING.md §E risk 1 —
+    /// "layout settled synchronously before animating").
+    func fittingSizeSettled() -> NSSize {
         _ = view   // ensure `loadView` ran
-        guard let documentView = scrollView.documentView else { return }
-        // In a flipped document (default), the top is y == 0; in an unflipped one
-        // it's the max-y edge. Scroll to whichever represents the top so the first
-        // card ends up visible.
-        let topY = documentView.isFlipped ? 0 : max(0, documentView.bounds.height - scrollView.contentView.bounds.height)
-        scrollView.contentView.scroll(to: NSPoint(x: 0, y: topY))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        view.layoutSubtreeIfNeeded()
+        return view.fittingSize
+    }
+
+    /// The single resize primitive (T-3 → consumed by the collapsible-sections task
+    /// T-4). Settle layout, then publish the new size through the popover's
+    /// DOCUMENTED size channel: `contentViewController.preferredContentSize`.
+    /// `NSPopover` observes this property and, when `popover.animates` is true,
+    /// animates the frame change ON ITS OWN — so we do NOT set `popover.contentSize`
+    /// directly, and we do NOT wrap the assignment in an `NSAnimationContext`
+    /// (there is no `animator()` proxy on `NSViewController`; the popover, not us,
+    /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
+    /// "prefer the preferredContentSize channel".
+    ///
+    /// `animated` selects the animation via `PopoverController.setPopoverAnimates`
+    /// (the controller owns the `NSPopover`): it toggles `popover.animates` around
+    /// the `preferredContentSize` assignment. The non-animated path is used for the
+    /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
+    /// is true (the jank escape hatch); it applies the size with `animates` forced
+    /// off so no frame animation runs. Because `NSPopover` retargets a
+    /// `preferredContentSize` change mid-flight against its own running animation,
+    /// rapid expand/collapse toggles glide rather than fight (PLAN §E risk 1
+    /// "retargetable rapid toggles"). T-4 animates a card's clip-height constraint
+    /// alongside this so the panel and popover agree.
+    func panelContentDidChangeHeight(animated: Bool) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let wantsAnimation = animated && !reduceMotion
+        let target = fittingSizeSettled()
+        // Assigning `preferredContentSize` is the sole size channel; NSPopover
+        // animates iff `popover.animates` is true when the assignment happens.
+        if let controller {
+            controller.setPopoverAnimates(wantsAnimation) { [weak self] in
+                self?.preferredContentSize = target
+            }
+        } else {
+            // No controller (offscreen harness/snapshot): still publish the size so
+            // `fittingSize`/`preferredContentSize` are exact for the render.
+            preferredContentSize = target
+        }
     }
 
     // MARK: Rows API (called by PopoverController)
@@ -163,6 +212,10 @@ final class PopoverPanelViewController: NSViewController {
             v.removeFromSuperview()
         }
         currentCard = nil
+        cardsByHeader.removeAll()
+        chevronsByHeader.removeAll()
+        chevronSymbolByHeader.removeAll()
+        pendingCollapsed.removeAll()
     }
 
     /// Start a new section **card** whose FIRST element is a single combined
@@ -185,12 +238,29 @@ final class PopoverPanelViewController: NSViewController {
     /// `trailingAccessory` optionally mounts a borderless icon button on the RIGHT
     /// of the module header (task D — the Groups section's "+" / New group). The
     /// button's `accessibilityLabel`/`toolTip` are set from `accessory.label`.
+    ///
+    /// **Collapsible cards (T-4, PLAN-POPOVER-ROUTING.md decision 5 + §E risk 1).**
+    /// When `collapsible` is true the header row gains a leading disclosure chevron
+    /// (`chevron.down` expanded / `chevron.right` collapsed, per `GroupRowView`'s
+    /// precedent) placed LEFT of the section title, and BOTH the chevron and the
+    /// title label become click targets that call `onToggle` (the rest of the
+    /// header — column headers, accessory — stays inert). `collapsed` is the
+    /// INITIAL state: the card body is laid out collapsed (height 0, hidden) with
+    /// no animation. The parameters default so existing (non-collapsible) call
+    /// sites compile and behave exactly as before. The host owns the collapse
+    /// POLICY (recomputing `collapsed` per open, flipping it in `onToggle` +
+    /// re-driving `test_toggleCard`/`setCardCollapsed`); this method only builds
+    /// the affordance.
     func beginCard(header: String,
                    volumeTitle: String? = nil,
                    trailingTitle: String? = nil,
-                   trailingAccessory accessory: HeaderAccessory? = nil) {
+                   trailingAccessory accessory: HeaderAccessory? = nil,
+                   collapsible: Bool = false,
+                   collapsed: Bool = false,
+                   onToggle: (() -> Void)? = nil) {
         let card = CardView()
         card.translatesAutoresizingMaskIntoConstraints = false
+        cardsByHeader[header] = card
 
         // The combined header row is the FIRST element inside the tile: section
         // title on the left, column headers centered over their columns on the
@@ -202,11 +272,51 @@ final class PopoverPanelViewController: NSViewController {
         let headerWrap = NSView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
-        headerWrap.addSubview(label)
+
+        // Leading disclosure chevron (decision 5). Placed LEFT of the title; the
+        // title's leading anchor shifts to sit after it. Follows GroupRowView's
+        // symbol convention (chevron.down expanded / chevron.right collapsed).
+        var titleLeadingAnchor = headerWrap.leadingAnchor
+        var titleLeadingConstant = PopoverColumnGrid.leadingInset
+        if collapsible {
+            let chevron = NSButton()
+            chevron.translatesAutoresizingMaskIntoConstraints = false
+            chevron.bezelStyle = .accessoryBar
+            chevron.isBordered = false
+            chevron.imagePosition = .imageOnly
+            chevron.setContentHuggingPriority(.required, for: .horizontal)
+            chevron.contentTintColor = .secondaryLabelColor
+            chevron.setAccessibilityLabel(collapsed ? "Expand \(header)" : "Collapse \(header)")
+            let toggle = onToggle
+            let onChevron = ClosureActionTarget { toggle?() }
+            chevron.target = onChevron
+            chevron.action = #selector(ClosureActionTarget.fire)
+            objc_setAssociatedObject(chevron, &Self.actionTargetKey, onChevron, .OBJC_ASSOCIATION_RETAIN)
+            headerWrap.addSubview(chevron)
+            headerWrap.addSubview(label)
+            NSLayoutConstraint.activate([
+                chevron.leadingAnchor.constraint(equalTo: headerWrap.leadingAnchor,
+                                                 constant: PopoverColumnGrid.leadingInset),
+                chevron.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
+                chevron.widthAnchor.constraint(equalToConstant: 16),
+            ])
+            titleLeadingAnchor = chevron.trailingAnchor
+            titleLeadingConstant = 4
+
+            // The title label is ALSO a click target (decision 5). A label isn't a
+            // control, so a click-recognizer forwards its click to the same toggle.
+            let click = NSClickGestureRecognizer(target: onChevron,
+                                                 action: #selector(ClosureActionTarget.fire))
+            label.addGestureRecognizer(click)
+            chevronsByHeader[header] = chevron
+            assignChevron(chevron, collapsed: collapsed, for: header)
+        } else {
+            headerWrap.addSubview(label)
+        }
         NSLayoutConstraint.activate([
             headerWrap.heightAnchor.constraint(equalToConstant: 28),
-            label.leadingAnchor.constraint(equalTo: headerWrap.leadingAnchor,
-                                            constant: PopoverColumnGrid.leadingInset),
+            label.leadingAnchor.constraint(equalTo: titleLeadingAnchor,
+                                            constant: titleLeadingConstant),
             label.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
         ])
 
@@ -275,13 +385,89 @@ final class PopoverPanelViewController: NSViewController {
         ])
 
         currentCard = card
+        // Remember the initial collapse state so the FIRST body row can apply it
+        // synchronously (non-animated) once the body exists — the header alone has
+        // nothing to collapse yet.
+        if collapsible { pendingCollapsed[header] = collapsed }
     }
 
     /// Add a content row (Main Out row, group header, device row) into the
-    /// current card, full card width.
+    /// current card's COLLAPSIBLE body, full card width. On the first body row of
+    /// a card that opened collapsed, apply the initial collapsed end state (no
+    /// animation).
     func addRow(_ view: NSView) {
         guard let card = currentCard else { return }
-        card.addRow(view)
+        card.addBodyRow(view)
+        applyPendingCollapseIfNeeded(card)
+    }
+
+    /// Apply a card's deferred initial collapse (recorded in `beginCard`) once its
+    /// body exists. Synchronous end state, no animation (PLAN §E risk 1 — initial
+    /// show uses the non-animated path).
+    private func applyPendingCollapseIfNeeded(_ card: CardView) {
+        guard let header = cardsByHeader.first(where: { $0.value === card })?.key,
+              let collapsed = pendingCollapsed[header] else { return }
+        pendingCollapsed[header] = nil
+        card.setBodyCollapsed(collapsed, animated: false)
+    }
+
+    // MARK: Collapse / expand (T-4, PLAN decision 5 + §E risk 1)
+
+    /// Set a card's collapsed state by section title and follow it with the
+    /// popover resize. Drives the card's clip-height animation and the popover's
+    /// `preferredContentSize` change in lockstep at the same 0.2s pace so the panel
+    /// and popover track (PLAN §E risk 1). `animated == false` (Reduce Motion or
+    /// programmatic) applies both end states synchronously. Flips the chevron
+    /// symbol to match. No-op if `title` isn't a collapsible card.
+    ///
+    /// The popover resize runs via `panelContentDidChangeHeight(animated:)`, which
+    /// already gates itself on `accessibilityDisplayShouldReduceMotion`; the card
+    /// animation is gated the same way here so both honor Reduce Motion together.
+    @discardableResult
+    func setCardCollapsed(title: String, collapsed: Bool, animated: Bool) -> Bool {
+        guard let card = cardsByHeader[title] else { return false }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let wantsAnimation = animated && !reduceMotion
+
+        if let chevron = chevronsByHeader[title] {
+            assignChevron(chevron, collapsed: collapsed, for: title)
+            chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
+        }
+
+        card.setBodyCollapsed(collapsed, animated: wantsAnimation) { [weak self] in
+            // Republish the exact-fit size once the card settles (non-animated tail
+            // for the completion; the in-flight popover resize below already tracked
+            // the animation).
+            if !wantsAnimation { self?.panelContentDidChangeHeight(animated: false) }
+        }
+        // Kick the popover resize in the SAME turn as the card animation so both
+        // run together (NSPopover animates its `preferredContentSize` change at its
+        // own pace; matching 0.2s keeps them in step — PLAN §E risk 1).
+        if wantsAnimation { panelContentDidChangeHeight(animated: true) }
+        return true
+    }
+
+    /// Toggle a card's collapse state (used by the chevron/title click + tests).
+    /// Returns the NEW collapsed state, or `nil` if `title` isn't a collapsible
+    /// card.
+    @discardableResult
+    func toggleCard(title: String, animated: Bool = true) -> Bool? {
+        guard let card = cardsByHeader[title] else { return nil }
+        let next = !card.isBodyCollapsed
+        setCardCollapsed(title: title, collapsed: next, animated: animated)
+        return next
+    }
+
+    /// Assign the disclosure chevron image for a collapse state (GroupRowView
+    /// precedent: `chevron.down` expanded / `chevron.right` collapsed),
+    /// template-tinted, and record the symbol name for the flip test hook.
+    private func assignChevron(_ chevron: NSButton, collapsed: Bool, for header: String) {
+        let name = collapsed ? "chevron.right" : "chevron.down"
+        let image = NSImage(systemSymbolName: name,
+                            accessibilityDescription: collapsed ? "Expand" : "Collapse")
+        image?.isTemplate = true
+        chevron.image = image
+        chevronSymbolByHeader[header] = name
     }
 
     /// A small uppercase secondary column-header label (VOLUME / DEVICE / ENABLED),
@@ -332,4 +518,45 @@ final class PopoverPanelViewController: NSViewController {
     var test_cardCount: Int {
         stackView.arrangedSubviews.compactMap { $0 as? CardView }.count
     }
+
+    // MARK: Collapsible-card test hooks (T-4)
+
+    /// Whether the card with `title` is currently collapsed (body pinned to 0 /
+    /// hidden). `nil` if there's no such card.
+    func test_isCardCollapsed(title: String) -> Bool? {
+        cardsByHeader[title]?.isBodyCollapsed
+    }
+    /// Toggle the card with `title` (drives the chevron/title click path). Returns
+    /// the new collapsed state, or `nil` if `title` isn't a card.
+    @discardableResult
+    func test_toggleCard(title: String, animated: Bool = false) -> Bool? {
+        toggleCard(title: title, animated: animated)
+    }
+    /// The card's laid-out body-clip height (0 when collapsed, else the body's
+    /// fitting height). `nil` if there's no such card.
+    func test_cardBodyClipHeight(title: String) -> CGFloat? {
+        guard let card = cardsByHeader[title] else { return nil }
+        view.layoutSubtreeIfNeeded()
+        return card.bodyClipHeight
+    }
+    /// The card's expanded body height (its content's fitting height, independent
+    /// of the current collapse state). `nil` if there's no such card.
+    func test_cardBodyFittingHeight(title: String) -> CGFloat? {
+        cardsByHeader[title]?.bodyFittingHeight
+    }
+    /// The chevron's current SF Symbol name for `title` (`chevron.down` expanded /
+    /// `chevron.right` collapsed), for the flip assertion. `nil` if not collapsible.
+    func test_cardChevronSymbolName(title: String) -> String? {
+        chevronSymbolByHeader[title]
+    }
+}
+
+/// A tiny reference target that forwards a target/action click (a chevron button
+/// tap or a title-label click gesture) to a stored closure — the disclosure
+/// toggle. Retained via an associated object on its owning control so it lives as
+/// long as the control (T-4; the closure captures the controller's `onToggle`).
+private final class ClosureActionTarget: NSObject {
+    private let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    @objc func fire() { action() }
 }

@@ -77,13 +77,17 @@ flowchart LR
 | `MockBackend` | Fully-working offline backend: fabricates a fleet, staggers discovery, emits level samples, can simulate dropout/reconnect. |
 | `OwnToneBackend` | Stub for the real backend (OwnTone JSON API + AirPlay-2 sender). Every method is `unimplemented()`/asserts — not yet wired up. |
 | `makeBackend(_:)` | The one factory function that knows about concrete backend types; everything else depends on `OutputBackend`. |
+| `AppRoutingController` | Owns per-app routing state (sibling of `GroupController`, not folded into it): `appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`, `routedAppCount`, `handleDeviceUnavailable(id:)` (silent fallback to Current device when a route's target disappears). Persists every mutation via `AppRouteStore`. See [AppRoutingController.swift](Sources/AirPlayControllerCore/AppRoutingController.swift). |
+| `AppRouteStore` | Versioned-JSON persistence for per-app routes, mirroring `RoutingStore`: writes `app-routes.json` in the same `Application Support/AirPlay Controller/` directory, schemaVersion-gated (newer schema on disk → treated as missing). See [AppRouteStore.swift](Sources/AirPlayControllerCore/AppRouteStore.swift). |
+| `AppRowView` / `AddApplicationRowView` | Popover row views for the Applications card (`AirPlayControllerSharedUI` target, not this library's own sources): icon/name/volume/destination-popup row, and the full-width "+ Add application…" row that doubles as the card's empty state. Both defined in [AppRowView.swift](Sources/AirPlayControllerSharedUI/AppRowView.swift). |
 
 ## In-Progress Work
 
 | Area | Status |
 |---|---|
 | `OwnToneBackend` | Stub only — `start()`/`setVolume`/`setMuted`/`setSoloed`/`setOutputSet` all call `unimplemented()` (assertion failure). Real implementation is Phase 0d/0f → Phase 1 work per SPEC.md §5, blocked on physical speaker access (see project memory: speakers currently unavailable, mock rig is primary dev target). OwnTone pipe-input rate/autostart findings are captured in `dev/notes/0f-pipe-brief.md` at the repo root, not in this package. |
-| AppKit app target | Not yet created — this package is pure logic today; nothing in the repo links against it as a UI. |
+| Per-app routing (`AppRoutingController`/`AppRouteStore`) | UI + model + persistence COMPLETE (SPEC.md §9, PLAN-POPOVER-ROUTING.md T-1..T-8/T-11, all landed, 148 tests green). Routes persist and render but move no audio yet — wired against `MockBackend` only; blocked on the native engine gaining per-app capture streams (`CaptureCoordinator` is still a single global tap today). |
+| AppKit app target | Not yet created — this package is pure logic today; nothing in the repo links against it as a UI. Popover UI (`PopoverController`, `AppRowView`, etc.) lives in the separate `AirPlayControllerPopoverUI`/`AirPlayControllerSharedUI` targets in this same package, not yet a shipping app. |
 
 ## Tests
 

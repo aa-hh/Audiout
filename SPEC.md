@@ -333,6 +333,14 @@ Decisions: **pure AppKit** (no SwiftUI) · **dropdown is a Control-Center-style
 NSPopover** (REVISED 2026-07-13 — see below) · full window is **sidebar + mixer**
 · volume is **horizontal rows**.
 
+> **REVISED 2026-07-16 — Applications card + collapsible sections + exact-fit
+> popover SHIPPED.** Per-app routing (previously a "Future (v2)" note below)
+> is now a third popover card with full UI, model, and persistence; sections
+> are individually collapsible with per-open-recomputed defaults; the popover
+> dropped its `NSScrollView` in favor of exact content-fit sizing with no
+> scrollbar. Full authoritative decision record: PLAN-POPOVER-ROUTING.md §B.
+> Details inline below.
+
 > **DROPDOWN REVISED 2026-07-13 — NSMenu → NSPopover.** The first build used a
 > true NSMenu (HIG's default for menu-bar extras). Hands-on use exposed hard
 > NSMenu limits: **no animated inline expand/collapse** (menus can't animate
@@ -355,7 +363,7 @@ NSPopover** (REVISED 2026-07-13 — see below) · full window is **sidebar + mix
 |---|---|---|
 | Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action toggles the popover. Provide a user setting to hide it (HIG). |
 | Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume. Template rendering → correct in dark/light menu bar. |
-| Dropdown | **`NSPopover`** (`.transient`/`.semitransient` behavior) anchored to the status button, hosting a scrollable custom-view panel | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
+| Dropdown | **`NSPopover`** (`.transient`/`.semitransient` behavior) anchored to the status button, hosting an exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below) | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
 
 ### Groups in the menu (decided 2026-07-09)
 
@@ -410,9 +418,61 @@ trailing control, a device-selector dropdown as THE routing control.
 3. Groups keep expansion (animated) + per-group master; group editing stays in
    the mixer window; "Save current setup as group" quick-create remains (now =
    "save Selected Speakers as a group").
-4. Future (v2): an **Applications section** slots naturally under System — the
-   SoundSource per-app "Redirect Audio To" pattern maps 1:1 onto our per-app
-   routing (§ routing view).
+4. **Applications card — SHIPPED 2026-07-16** (see PLAN-POPOVER-ROUTING.md §B
+   for the full resolved-decisions record; this supersedes the prior "Future
+   (v2)" note). The popover now has a third card, **rendered last**, below
+   Selected Devices: one row per user-routed app — app icon · name ·
+   **always-visible** volume slider (`ControlCenterSlider`, dimmed/disabled
+   while the destination is "Current device," matching `DeviceRowView`
+   dimming) · a "redirect audio to…" `NSPopUpButton` with **exactly two
+   sections, Current Device and AirPlay Devices** (no Groups — Main Out's
+   Output Groups entries are unaffected). A hover-revealed **✕** removes the
+   route (`HoverActionButton` idiom, same discipline as other rows). A
+   full-width **"+ Add application…"** row sits at the card's bottom; it is
+   also the card's empty state, and opens a running-app picker sourced from
+   `NSWorkspace.shared.runningApplications` (`.regular` apps only). Picking an
+   app creates a route with destination **Current device** (§ "Current device
+   == no redirect" below).
+   - **"Current device" is not a distinct state — it IS "no redirect."** The
+     app just plays locally; there is no separate no-redirect flag to track.
+   - **Lost-device fallback is silent.** If a route's target device
+     disappears from the network, the route resets to Current device
+     (persisted immediately) — no greyed-out placeholder, no error UI.
+   - **Scope honesty: this is UI + model + persistence only.** Routes are
+     wired against `MockBackend` today; no `OutputBackend` changes shipped
+     with this work. Redirects persist and render correctly, but **move no
+     audio** until the native AirPlay engine (Phase 2) supports per-app
+     capture streams — per-process Core Audio taps are already proven
+     (`dev/audiocap`, §8.1 0e), but `CaptureCoordinator` today is a single
+     global tap. Treat every redirect as "recorded intent," not "live
+     routing," until the engine lands.
+
+   **Collapsible sections (shipped alongside the Applications card).** Every
+   card — System, Selected Devices, Applications — gets a leading chevron
+   (`chevron.down`/`chevron.right`) next to its title; clicking **either the
+   chevron or the title** (decision 5, PLAN §B) toggles that card's body
+   collapsed/expanded with an animated resize (rest of the header is inert).
+   Collapse **defaults are recomputed every time the popover opens** — System
+   and Selected Devices start expanded; Applications starts expanded **iff**
+   at least one app currently has a non-"Current device" redirect
+   (`routedAppCount > 0`), collapsed otherwise. Manual toggles during a
+   popover session are transient UI state only — they are never persisted and
+   are discarded the next time the popover opens.
+
+   **Exact-fit, no-scrollbar popover.** The popover's `NSScrollView` was
+   removed: the popover is always sized to exactly its content's fitting
+   size — it grows and shrinks as cards collapse/expand, and **never shows a
+   scrollbar**, matching the Control-Center reference (§9 intro). Resizing is
+   driven through the documented `preferredContentSize` tracking channel (with
+   an explicit `contentSize` fallback) and animated in a single
+   `NSAnimationContext` group alongside each card's collapse animation, with a
+   non-animated path for initial show and for Reduce Motion.
+
+   Owning types: `AppRoutingController` (model/persistence logic, sibling of
+   `GroupController`) and `AppRouteStore` (versioned-JSON persistence,
+   `app-routes.json`) — see `AirPlayControllerCore/AGENTS.md` Key Types.
+   `AppRowView` / `AddApplicationRowView` (`AirPlayControllerSharedUI`) render
+   the rows; `PopoverController` wires the card and the running-app picker.
 
 **Rules:**
 - **Mute stays secondary** on device rows (session-preserving quick silence).

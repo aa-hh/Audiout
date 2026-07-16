@@ -70,9 +70,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         groupController = GroupController(backend: backend)
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
-        // Groups "+" (task D) → open the mixer window's new-group draft (the same
-        // manual-creation flow the window's own "+" runs).
-        popoverController.onNewGroup = { [weak self] in self?.openMixerNewGroup() }
 
         // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
         // burst the backend emits as it enumerates what's already there.
@@ -80,46 +77,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backend.start()
 
         log("AirPlay Controller launched (backend: \(type(of: backend)))")
-
-        // DEV self-capture hook (2026-07-14): agent shells have no Screen
-        // Recording TCC and cannot screenshot the live popover from outside, so
-        // when AIRPLAY_DEBUG_POPOVER_PNG=<path> is set, open the popover exactly
-        // as a status-item click would, render its live window to that PNG (an
-        // app may render its OWN views without any capture permission), and
-        // quit. Guarded by the env var — completely inert in normal launches.
-        if let capturePath = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_POPOVER_PNG"] {
-            debugCapturePopover(to: capturePath)
-        }
-    }
-
-    /// Dev-only (see the launch hook above): wait for the mock fleet to
-    /// discover, toggle the popover open off the real status button, give it a
-    /// beat to animate + lay out, then `cacheDisplay` the popover window's root
-    /// frame view (chrome included) to a PNG and terminate.
-    @MainActor
-    private func debugCapturePopover(to path: String) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [self] in
-            guard let button = statusItemController.button else {
-                log("DEBUG capture: status button missing"); NSApp.terminate(nil); return
-            }
-            popoverController.toggle(relativeTo: button)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
-                guard let contentView = popoverController.popover.contentViewController?.view,
-                      let window = contentView.window,
-                      let root = window.contentView?.superview ?? window.contentView else {
-                    log("DEBUG capture: popover window missing"); NSApp.terminate(nil); return
-                }
-                root.layoutSubtreeIfNeeded()
-                if let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
-                    root.cacheDisplay(in: root.bounds, to: rep)
-                    if let data = rep.representation(using: .png, properties: [:]) {
-                        try? data.write(to: URL(fileURLWithPath: path))
-                        log("DEBUG capture: wrote \(path)")
-                    }
-                }
-                NSApp.terminate(nil)
-            }
-        }
     }
 
     /// "Open Mixer…" target — open/focus the full mixer window (SPEC §9, T-U4).
@@ -138,22 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.update(devices: Array(devicesByID.values))
         controller.showWindow()
         log("Open Mixer… (window shown)")
-    }
-
-    /// Groups "+" target (task D) — open/focus the mixer and immediately begin a
-    /// new-group draft, reusing the window's manual-creation flow.
-    @MainActor
-    private func openMixerNewGroup() {
-        let controller: MixerWindowController
-        if let existing = mixerWindowController {
-            controller = existing
-        } else {
-            controller = MixerWindowController(groupController: groupController)
-            mixerWindowController = controller
-        }
-        controller.update(devices: Array(devicesByID.values))
-        controller.beginNewGroup()
-        log("New group… (mixer draft shown)")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

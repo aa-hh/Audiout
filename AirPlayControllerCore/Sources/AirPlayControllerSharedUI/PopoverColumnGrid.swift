@@ -11,19 +11,25 @@ import AppKit
 ///
 /// The trick that makes columns line up despite different *leading* controls
 /// (a mini switch on device rows, an activate+chevron pair on group rows, a lone
-/// icon on the Main Out row) is to anchor the right-hand columns — slider, %
-/// readout, trailing control — to fixed distances from the row's **trailing**
-/// edge, not the leading edge. So no matter what leads a row, the slider's
-/// trailing edge, the readout, and the trailing control all sit at the same x in
-/// every row. The name label is the single flexible column that absorbs the
-/// slack and truncates with a tail ellipsis.
+/// icon on the Main Out row) is to anchor the fixed right-hand columns — slider
+/// and trailing control — to fixed distances from the row's **trailing** edge,
+/// not the leading edge. So no matter what leads a row, the slider's trailing
+/// edge and the trailing control sit at the same x in every row. The name label
+/// is the flexible column that absorbs the slack and truncates with a tail
+/// ellipsis.
 ///
 /// Columns, leading → trailing:
 /// ```
-/// │ [leading zone] [icon] [name  …  ] [ slider ] [ %% ] [ ctl ] │
+/// │ [leading zone] [icon] [name  …  ] [ slider ][ %% ] ···flex··· [ ctl ] │
 /// ```
-/// A row that lacks a given column simply leaves the slot empty but keeps the
-/// same right-hand anchors, so alignment holds.
+/// The `%` readout is NOT trailing-anchored — it hangs immediately off the
+/// **slider's** trailing edge (`sliderToReadout` gap), so the number always
+/// reads tight against its slider on every slider row (Main Out + device rows),
+/// not floated over near the trailing control. The flexible slack now lives
+/// BETWEEN the readout and the trailing control instead of in the name column
+/// alone; the slider column itself stays a fixed width and a fixed distance from
+/// the trailing edge, so everything still lines up across row types. A row that
+/// lacks a given column leaves the slot empty but keeps the same anchors.
 public enum PopoverColumnGrid {
 
     // MARK: Leading edges
@@ -62,9 +68,16 @@ public enum PopoverColumnGrid {
     public static let iconToName: CGFloat = 9
     /// Gap between the name and the slider column.
     public static let nameToSlider: CGFloat = 12
-    /// Gap between the slider and the `%` readout.
-    public static let sliderToReadout: CGFloat = 8
-    /// Gap between the `%` readout and the trailing control.
+    /// Gap between the slider's trailing edge and the `%` readout's leading edge
+    /// — kept small so the number reads tight against the slider on every slider
+    /// row (change 4). Slider rows anchor the readout off `slider.trailingAnchor`
+    /// with this constant; the derived `readoutTrailing` below is only for rows
+    /// that still trailing-anchor the readout (`GroupRowView`), and is defined so
+    /// the two placements coincide.
+    public static let sliderToReadout: CGFloat = 6
+    /// Minimum flex slack between the `%` readout and the trailing control (the
+    /// readout no longer butts up against the trailing control — the slack floats
+    /// here now, not in the name column).
     public static let readoutToTrailing: CGFloat = 8
     /// Gap between the mute glyph and the slider it sits left of.
     public static let muteToSlider: CGFloat = 6
@@ -79,16 +92,24 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **trailing control's trailing
     /// edge** (i.e. the trailing control's own trailing inset).
     public static var trailingControlTrailing: CGFloat { trailingInset }
-    /// Distance from the row trailing edge to the **readout's trailing edge**.
-    public static var readoutTrailing: CGFloat {
-        trailingInset + trailingControlWidth + readoutToTrailing
-    }
-    /// Distance from the row trailing edge to the **slider's trailing edge**.
+    /// Distance from the row trailing edge to the **slider's trailing edge** — the
+    /// slider column is fixed-width and fixed here, so it lines up across every
+    /// row type. Sized to clear the readout that hangs off it, the min flex slack,
+    /// and the trailing control.
     public static var sliderTrailing: CGFloat {
-        readoutTrailing + readoutWidth + sliderToReadout
+        trailingControlTrailing + trailingControlWidth + readoutToTrailing
+            + readoutWidth + sliderToReadout
+    }
+    /// Distance from the row trailing edge to the **readout's trailing edge**.
+    /// Only used by rows that still trailing-anchor the readout (`GroupRowView`);
+    /// slider rows instead anchor it off `slider.trailingAnchor + sliderToReadout`.
+    /// Defined as exactly that same x so both placements coincide and the readout
+    /// column stays aligned across row types.
+    public static var readoutTrailing: CGFloat {
+        sliderTrailing - readoutWidth - sliderToReadout
     }
 
-    // MARK: Column-center helpers (for ColumnHeaderRow)
+    // MARK: Column-center helpers (for the combined section/column header row)
     //
     // Distances (positive, measured inward from the row trailing edge) to the
     // horizontal *center* of a column, so a header label can be centered over it.
@@ -97,4 +118,12 @@ public enum PopoverColumnGrid {
     public static var sliderCenterFromTrailing: CGFloat { sliderTrailing + sliderWidth / 2 }
     /// Distance from the row trailing edge to the **trailing-control column's center**.
     public static var trailingControlCenterFromTrailing: CGFloat { trailingControlTrailing + trailingControlWidth / 2 }
+
+    // Optical vertical centering is NOT done here per-element (that needed a
+    // fragile magic number for every control type and mismatched the trailing
+    // controls). Instead every element keeps plain `centerYAnchor`, and the ONE
+    // element that drew off the shared optical line — the custom slider, which
+    // draws at exact geometric center while text/symbols/native controls sit
+    // ~1.75pt above — is corrected once inside `ControlCenterSlider` via its
+    // `opticalRise`. See that type (Alec 2026-07-16).
 }

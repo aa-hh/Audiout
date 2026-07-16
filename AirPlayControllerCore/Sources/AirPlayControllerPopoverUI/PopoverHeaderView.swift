@@ -10,8 +10,9 @@ import AppKit
 /// Layout, left → right:
 /// - a **centered title** ("AudioControl", medium ~14pt, label color); and
 /// - two right-aligned, borderless, image-only icon buttons:
-///   1. **Open Groups editor** — a system SF Symbol (`rectangle.3.group`,
-///      template-rendered, verified non-nil at runtime with graceful fallbacks).
+///   1. **Open Groups editor** — a system SF Symbol
+///      (`hifispeaker.and.homepod.mini.badge.plus.fill`, template-rendered,
+///      verified non-nil at runtime with graceful fallbacks).
 ///      Opens the mixer window (where group membership editing lives) via the
 ///      host's existing open-mixer path.
 ///   2. **Settings** — SF Symbol `gearshape`. No action yet (a stub with an
@@ -63,12 +64,13 @@ final class PopoverHeaderView: NSView {
 
         configureIconButton(groupsButton,
                             symbol: Self.groupsSymbolName,
-                            fallbacks: ["hifispeaker.2.fill", "square.grid.2x2"],
+                            fallbacks: ["hifispeaker.and.homepod.fill",
+                                       "rectangle.3.group", "hifispeaker.2.fill"],
                             accessibilityLabel: "Open Groups editor",
                             action: #selector(groupsTapped))
         configureIconButton(settingsButton,
-                            symbol: "gearshape",
-                            fallbacks: ["gear"],
+                            symbol: "gearshape.fill",
+                            fallbacks: ["gearshape", "gear"],
                             accessibilityLabel: "Settings",
                             action: #selector(settingsTapped))
         configureIconButton(quitButton,
@@ -107,13 +109,15 @@ final class PopoverHeaderView: NSView {
         ])
     }
 
-    /// The chosen SF Symbol for "audio group" (task A). `rectangle.3.group` best
-    /// depicts a *group of framed items* — the clearest "audio groups editor"
-    /// metaphor of the candidates on macOS 14 (`hifispeaker.2.fill` reads as one
-    /// device; `square.stack.3d.up.fill` as generic layers;
-    /// `homepod.and.hifispeaker.fill` doesn't resolve on macOS 14). Verified
-    /// non-nil at runtime in `configureIconButton`, with graceful fallbacks.
-    static let groupsSymbolName = "rectangle.3.group"
+    /// The chosen SF Symbol for "audio group" (task A). `hifispeaker.and.homepod.mini.badge.plus.fill`
+    /// depicts multiple speaker devices with an "add" badge — the clearest
+    /// "audio groups editor" metaphor of the candidates, but it's macOS-15+
+    /// only (resolves nil on this machine's macOS 14). Below macOS 15, Alec's
+    /// choice is `hifispeaker.and.homepod.fill` (available back to macOS 14 —
+    /// verified on this machine); `rectangle.3.group` then `hifispeaker.2.fill`
+    /// remain as further fallbacks, verified non-nil at runtime in
+    /// `configureIconButton`, so the button is never blank.
+    static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
 
     /// A borderless, image-only SF-Symbol button (task A — subtle hover via
     /// `HoverActionButton`). The symbol is **template-rendered** (system vector,

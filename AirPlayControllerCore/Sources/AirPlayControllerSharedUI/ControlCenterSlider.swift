@@ -48,6 +48,15 @@ final class ControlCenterSliderCell: NSSliderCell {
 
     private let trackHeight: CGFloat = 8
     private let knobDiameter: CGFloat = 18
+    /// The track + knob draw at the view's exact geometric center, but every OTHER
+    /// row element — text labels, SF-Symbol icons, the NSSwitch, the NSPopUpButton
+    /// — renders its content on AppKit's natural content line, which sits ~1.75pt
+    /// ABOVE geometric center. Raising the drawn track+knob by that amount lets the
+    /// slider share the row's single optical centerline, so alignment is fixed once
+    /// HERE (scalable to any future row) instead of nudging every other element
+    /// (Alec 2026-07-16). Applied to both `barRect` and `knobRect` so hit-testing
+    /// tracks the drawn knob.
+    private let opticalRise: CGFloat = 1.75
 
     // MARK: Geometry
 
@@ -56,7 +65,7 @@ final class ControlCenterSliderCell: NSSliderCell {
         // radius so the knob stays fully inside the control at both ends.
         let bounds = controlView?.bounds ?? .zero
         let inset = knobDiameter / 2
-        let y = bounds.midY - trackHeight / 2
+        let y = bounds.midY - opticalRise - trackHeight / 2
         return NSRect(x: bounds.minX + inset,
                       y: y,
                       width: max(0, bounds.width - knobDiameter),
@@ -70,7 +79,7 @@ final class ControlCenterSliderCell: NSSliderCell {
         let cx = bar.minX + travel * CGFloat(frac)
         let bounds = controlView?.bounds ?? .zero
         return NSRect(x: cx - knobDiameter / 2,
-                      y: bounds.midY - knobDiameter / 2,
+                      y: bounds.midY - opticalRise - knobDiameter / 2,
                       width: knobDiameter,
                       height: knobDiameter)
     }

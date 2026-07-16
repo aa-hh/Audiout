@@ -71,7 +71,7 @@ func run() -> Int32 {
     checks.expectEqual(popover.test_deviceSectionRowCount, 7, "all 7 devices get a row")
     checks.expect(controller.isSpeakerSelected("local-mac"), "default: current device selected")
     checks.expect(controller.isPassthrough, "default state is passthrough (set == {local})")
-    checks.expectEqual(popover.test_groupRowCount, 0, "no groups yet")
+    checks.expectEqual(controller.groups.count, 0, "no groups yet")
 
     // --- 2. Main Out selector: two sections (Selected Devices + groups after save).
     print("\n[2] Main Out selector sections")
@@ -157,14 +157,8 @@ func run() -> Int32 {
                       "dragging Main Out master scaled a member up")
     }
 
-    // --- 10. Group master still shows on EVERY group row.
-    print("\n[10] Group row still shows its master")
-    if let row = popover.test_groupRow(for: group.id) {
-        checks.expect(row.test_masterSliderVisible, "the group's master slider is visible")
-    } else { checks.expect(false, "group row exists") }
-
-    // --- 11. Mute (secondary) drives volume to 0 and restores.
-    print("\n[11] Mute (secondary)")
+    // --- 10. Mute (secondary) drives volume to 0 and restores.
+    print("\n[10] Mute (secondary)")
     let target = group.memberIDs.first { id in
         backend.devices.first { $0.id == id }?.isLocalDevice == false
     } ?? group.memberIDs[0]
@@ -176,17 +170,8 @@ func run() -> Int32 {
         checks.expectEqual(backend.devices.first { $0.id == target }?.volume, volBefore, "unmute restores")
     }
 
-    // --- 12. Expansion still animates member rows in/out.
-    print("\n[12] Group expansion animates")
-    checks.expectEqual(popover.test_visibleMemberRowCount(groupID: group.id), 0, "collapsed initially")
-    popover.test_toggleExpansion(groupID: group.id)
-    checks.expect(popover.test_lastAnimatedExpansion, "the animated path ran")
-    drain(0.4)
-    checks.expectEqual(popover.test_visibleMemberRowCount(groupID: group.id), group.memberIDs.count,
-                       "expanding revealed the member rows")
-
-    // --- 13. Header bar (task A): title + two system-symbol icon buttons.
-    print("\n[13] Header bar")
+    // --- 11. Header bar (task A): title + two system-symbol icon buttons.
+    print("\n[11] Header bar")
     checks.expectEqual(popover.test_headerTitle, "AudioControl", "header title is AudioControl")
     checks.expect(popover.test_headerGroupsButtonHasImage,
                   "Open-Groups-editor button resolved a system SF Symbol")
@@ -197,37 +182,17 @@ func run() -> Int32 {
     popover.test_tapHeaderGroupsEditor()
     checks.expect(openedMixer, "header Groups-editor button opens the mixer path")
 
-    // --- 14. Group members hide the on/off toggle (task C).
-    print("\n[14] Group members hide the toggle")
-    // Every group-member row hides its toggle (distinct from the Selected-Devices
-    // row for the same device, which keeps it).
-    var allMembersHideToggle = true
-    var sawMemberRow = false
-    for mid in group.memberIDs {
-        if let row = popover.test_memberRow(groupID: group.id, deviceID: mid) {
-            sawMemberRow = true
-            if row.test_showsToggle { allMembersHideToggle = false }
-        }
-    }
-    checks.expect(sawMemberRow, "found the group-member rows")
-    checks.expect(allMembersHideToggle, "every expanded group-member row hides its on/off toggle")
-    // And a Selected-Devices row (a device that is NOT a group member) still
-    // SHOWS its toggle. "airport-mixer" is discovered but never grouped here.
+    // --- 12. A Selected-Devices row shows its on/off toggle. "airport-mixer" is
+    // discovered but never grouped here.
+    print("\n[12] Selected-Devices row shows its toggle")
     if let selRow = popover.test_deviceRow(for: "airport-mixer") {
-        checks.expect(selRow.test_showsToggle, "a Selected-Devices row still shows its toggle")
+        checks.expect(selRow.test_showsToggle, "a Selected-Devices row shows its toggle")
     } else {
         checks.expect(false, "the Selected-Devices row for airport-mixer exists")
     }
 
-    // --- 15. Groups "+" (task D) triggers the new-group flow.
-    print("\n[15] Groups '+' new-group")
-    var newGroupTriggered = false
-    popover.onNewGroup = { newGroupTriggered = true }
-    popover.test_tapNewGroup()
-    checks.expect(newGroupTriggered, "the Groups '+' invoked the new-group callback")
-
-    // --- 16. Main Out named dropdown reflects the current target's title (task B).
-    print("\n[16] Main Out named dropdown")
+    // --- 13. Main Out named dropdown reflects the current target's title (task B).
+    print("\n[13] Main Out named dropdown")
     popover.test_selectMainOut(.selectedDevices); drain()
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
                        "the Main Out dropdown shows the current target's name")

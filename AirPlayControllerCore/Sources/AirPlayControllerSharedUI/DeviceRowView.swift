@@ -92,6 +92,10 @@ public final class DeviceRowView: NSView {
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let slider = ControlCenterSlider()
+    /// Small right-aligned `%` readout sitting immediately right of the slider
+    /// (change 4 — a device row now shows its volume number too, tight against
+    /// the slider like the Main Out row, on the same shared column).
+    private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
 
     /// App-local mouse-moved monitor that guarantees hover clears even when the
@@ -117,16 +121,26 @@ public final class DeviceRowView: NSView {
     /// toggle).
     private let showsToggle: Bool
 
+    /// Whether the row paints the accent-wash pill behind a row that's IN the
+    /// Selected Devices set. The popover (2026-07-14 — Alec: no longer needed,
+    /// the row's accent icon tint + switch state already say "on") passes
+    /// `false`; the mixer window keeps it (its rows have no card background to
+    /// separate them, so the wash still carries useful row-to-row separation).
+    /// Defaults to `true` so existing callers (the mixer window) are unchanged.
+    private let paintsSelectionBackground: Bool
+
     /// True when this row is drawn in the menu (paint the menu highlight);
     /// false in the mixer window (no `enclosingMenuItem` — let standard control
     /// appearance show). Computed live from `enclosingMenuItem` so the same
     /// instance is correct wherever it's parented.
     private var isInMenu: Bool { enclosingMenuItem != nil }
 
-    public init(device: Device, indented: Bool = false, showsToggle: Bool = true) {
+    public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
+               paintsSelectionBackground: Bool = true) {
         self.device = device
         self.indented = indented
         self.showsToggle = showsToggle
+        self.paintsSelectionBackground = paintsSelectionBackground
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
         // Fill the host's width, keep a fixed height (brief §2).
         autoresizingMask = [.width]
@@ -180,9 +194,11 @@ public final class DeviceRowView: NSView {
         nameLabel.textColor = rowTextColor
 
         // Don't fight a live drag: only push the model value into the slider
-        // when the user isn't dragging it.
+        // when the user isn't dragging it. (The readout is kept live during a
+        // drag by the slider action; on a model refresh it shows the model value.)
         if !isDraggingSlider {
             slider.integerValue = device.volume
+            readoutLabel.stringValue = "\(device.volume)%"
         }
         // The volume slider + mute are usable whenever the device is a selected,
         // available member (its level composes the Main Out master).
@@ -239,21 +255,30 @@ public final class DeviceRowView: NSView {
         slider.target = self
         slider.action = #selector(volumeChanged(_:))
 
+        // `%` readout, right-aligned, small secondary — hangs off the slider's
+        // trailing edge (change 4) so the number reads tight against the slider.
+        readoutLabel.translatesAutoresizingMaskIntoConstraints = false
+        readoutLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        readoutLabel.textColor = .secondaryLabelColor
+        readoutLabel.alignment = .right
+        readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
+
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
-                                  alternate: "speaker.slash.fill",
                                   action: #selector(muteToggled(_:)))
 
         addSubview(enableSwitch)
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(slider)
+        addSubview(readoutLabel)
         addSubview(muteButton)
 
         // The icon now LEADS the row (task B grid): at `leading` for top-level
         // rows, `indentedLeadingInset` for members — the toggle no longer leads.
-        // Right-hand columns (mute glyph, slider, trailing "Enabled" control) are
-        // anchored off the TRAILING edge via the shared grid so they line up with
-        // every other row type.
+        // The mute glyph, slider and trailing "Enabled" control are anchored off
+        // the TRAILING edge via the shared grid so they line up with every other
+        // row type; the `%` readout hangs off the slider's trailing edge (change
+        // 4) so the number is tight to the slider on every slider row.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
@@ -282,25 +307,35 @@ public final class DeviceRowView: NSView {
             slider.trailingAnchor.constraint(equalTo: trailingAnchor,
                                              constant: -PopoverColumnGrid.sliderTrailing),
 
-            // Primary "Selected Devices" toggle now trails in the "Enabled" column.
-            enableSwitch.trailingAnchor.constraint(
-                equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
+            // `%` readout: tight to the right of the slider, fixed-width column.
+            readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
+            readoutLabel.leadingAnchor.constraint(
+                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+
+            // Primary "Selected Devices" toggle: centered UNDER its "ENABLED"
+            // header (change 3) — its centerX sits on the trailing-control column
+            // center, not the column's trailing edge.
+            enableSwitch.centerXAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
             enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     private func configureAccessoryButton(_ button: NSButton, symbol: String,
-                                          alternate: String, action: Selector) {
+                                          action: Selector) {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar        // SPEC §9 device-row mute
         button.setButtonType(.pushOnPushOff)
         button.isBordered = false
-        // Speaker glyph LEFT of the slider: default = "sound on", alternate (the
-        // `.on` state) = "muted". State is driven off `device.isMuted` in `apply`.
+        // Speaker glyph LEFT of the slider: `pushOnPushOff` still toggles the
+        // mute STATE (and fires the delegate) on tap, but the glyph itself stays
+        // fixed on `symbol` in both states — no alternate/slash image (Alec wants
+        // the icon to never change on toggle). Mute state is reflected only via
+        // `button.state` and the accessibility label update in `apply`.
         let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
-        button.alternateImage = NSImage(systemSymbolName: alternate, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.imagePosition = .imageOnly
         button.contentTintColor = .secondaryLabelColor
@@ -316,6 +351,9 @@ public final class DeviceRowView: NSView {
         isDraggingSlider = true
         let event = NSApp.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
+        // Keep the `%` readout live through the drag (change 4 — mirrors
+        // MainOutRowView), since `apply` won't push the model value mid-drag.
+        readoutLabel.stringValue = "\(sender.integerValue)%"
         delegate?.deviceRow(self, didSetVolume: sender.integerValue, for: device.id)
     }
 
@@ -461,7 +499,7 @@ public final class DeviceRowView: NSView {
             // deselected row returns to a fully clean background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: 5, dy: 2)
             let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
-            if isSelectedInSet {
+            if isSelectedInSet && paintsSelectionBackground {
                 NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
                 path.fill()
             } else if isHovered {
@@ -475,8 +513,11 @@ public final class DeviceRowView: NSView {
 
     /// Whether the row is currently painting its selected-row background. A
     /// deselected row MUST report `false` — the visual property that encodes the
-    /// highlight, asserted by the T-U8 deselect-reset test.
-    public var test_isShowingSelectedBackground: Bool { !isInMenu && isSelectedInSet }
+    /// highlight, asserted by the T-U8 deselect-reset test. Always `false` when
+    /// `paintsSelectionBackground` is off (the popover, 2026-07-14).
+    public var test_isShowingSelectedBackground: Bool {
+        !isInMenu && isSelectedInSet && paintsSelectionBackground
+    }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 

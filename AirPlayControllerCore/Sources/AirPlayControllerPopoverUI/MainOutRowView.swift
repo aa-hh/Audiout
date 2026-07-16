@@ -139,8 +139,17 @@ public final class MainOutRowView: NSView {
         wantsLayer = true
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                 accessibilityDescription: "Main Out")
+        // Alec's requested icon `hifispeaker.arrow.forward.fill` was introduced in
+        // macOS 15 (Sequoia); it returns nil on our macOS 13 target and on macOS 14,
+        // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
+        // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
+        // visible fallback (Alec's choice).
+        for name in ["hifispeaker.arrow.forward.fill", "hifispeaker.fill"] {
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out") {
+                iconView.image = image
+                break
+            }
+        }
         iconView.contentTintColor = .controlAccentColor
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -152,8 +161,10 @@ public final class MainOutRowView: NSView {
         slider.action = #selector(masterChanged(_:))
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
-        // `DeviceRowView`'s per-device mute): `pushOnPushOff`, image-only,
-        // `speaker.wave.2.fill` → `.on`/alternate `speaker.slash.fill` when muted.
+        // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
+        // still toggles and the delegate still fires, but the glyph itself stays
+        // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
+        // — Alec wants the icon to never change on toggle).
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
@@ -161,9 +172,6 @@ public final class MainOutRowView: NSView {
         let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
                                    accessibilityDescription: "Mute Main Out")?
-            .withSymbolConfiguration(muteConfig)
-        muteButton.alternateImage = NSImage(systemSymbolName: "speaker.slash.fill",
-                                            accessibilityDescription: "Unmute Main Out")?
             .withSymbolConfiguration(muteConfig)
         muteButton.contentTintColor = .secondaryLabelColor
         muteButton.target = self
@@ -240,10 +248,13 @@ public final class MainOutRowView: NSView {
             slider.trailingAnchor.constraint(equalTo: trailingAnchor,
                                              constant: -PopoverColumnGrid.sliderTrailing),
 
+            // `%` readout: tight to the right of the slider (change 4), not
+            // trailing-anchored — so the number reads against its slider and the
+            // flex slack sits between it and the trailing dropdown.
             readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
-            readoutLabel.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                                   constant: -PopoverColumnGrid.readoutTrailing),
+            readoutLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor,
+                                                  constant: PopoverColumnGrid.sliderToReadout),
 
             destinationPopUp.centerYAnchor.constraint(equalTo: centerYAnchor),
             destinationPopUp.widthAnchor.constraint(

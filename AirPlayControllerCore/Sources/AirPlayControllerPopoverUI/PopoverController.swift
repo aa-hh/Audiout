@@ -19,10 +19,11 @@ import AirPlayControllerSharedUI
 ///    toggle COMPOSES the set; it routes only when Main Out targets Selected
 ///    Devices (the default). The current-device toggle enforces the Phase-1
 ///    local-mix block (disabled + tooltip) and the AirPlay auto-swap rule.
-/// 3. **Groups section** — one `GroupRowView` header per saved group (animated
-///    expansion, per-group master). Activating a group here sets Main Out to that
-///    group.
-/// 4. **Actions footer** — "Save Selected Devices as group", "Open Mixer…", "Quit".
+///
+/// The popover no longer renders a Groups SECTION (2026-07-16). Group ROUTING
+/// stays — the Main Out selector still offers each saved group as a destination
+/// (`refreshMainOutRow`), and the header's Groups-editor button still opens the
+/// mixer window where group membership is edited.
 ///
 /// All group/master/mute/selection arithmetic goes through the injected
 /// `GroupController` (UI-agnostic, unit-tested in core). `@MainActor`.
@@ -39,12 +40,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// otherwise wants the mixer window shown.
     public var onOpenMixer: (() -> Void)?
 
-    /// Called when the user taps the Groups section header's "+" button (task D).
-    /// The app opens the mixer window's new-group draft (matching how the window's
-    /// own "+" works). Falls back to `onOpenMixer` if unset so the "+" always at
-    /// least surfaces the editor.
-    public var onNewGroup: (() -> Void)?
-
     /// Called when the user taps the header's Settings button (task A). Stubbed —
     /// no settings surface exists yet (`// TODO: settings`).
     public var onOpenSettings: (() -> Void)?
@@ -54,12 +49,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The single System-section Main Out row.
     private let mainOutRow = MainOutRowView()
 
-    private var expandedGroupIDs: Set<String> = []
-    private var memberRowsByGroup: [String: [DeviceRowView]] = [:]
     private var deviceRowsByID: [String: DeviceRowView] = [:]
-    private var groupRowsByID: [String: GroupRowView] = [:]
-
-    private(set) public var test_lastAnimatedExpansion = false
 
     /// The most recent local-mix refusal reason surfaced to the user (so the app
     /// / tests can assert the block was presented). Cleared on the next
@@ -97,7 +87,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         groupController?.syncActiveGroupToSelection()
         if popover.isShown {
             refreshDeviceRows()
-            refreshGroupRows()
             refreshMainOutRow()
         } else {
             rebuild()
@@ -120,6 +109,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             rebuild()
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            // With fit-height there's no scroll range, but reset to the top so the
+            // System card is flush with the top edge (belt-and-suspenders — the old
+            // scroll cap could otherwise leave the panel opening mid-scroll).
+            panel.scrollToTop()
         }
     }
 
@@ -127,16 +120,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     public func rebuild() {
         deviceRowsByID.removeAll()
-        groupRowsByID.removeAll()
-        memberRowsByGroup.removeAll()
         panel.clearRows()
 
-        let groups = groupController?.groups ?? []
         let allDevices = orderedDevices()
 
-        // 1. System card — the single Main Out row.
-        panel.beginCard(header: "System")
-        panel.addColumnHeader(volumeTitle: "Volume", enabledTitle: nil)
+        // 1. System card — the single Main Out row. Combined header row (change
+        // 1): "System" title on the left, "VOLUME" over the slider and "DEVICE"
+        // over the destination dropdown on the right (change 2).
+        panel.beginCard(header: "System", volumeTitle: "Volume", trailingTitle: "Device")
         panel.addRow(mainOutRow)
         refreshMainOutRow()
 
@@ -144,8 +135,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         if !locals.isEmpty || !airplay.isEmpty {
-            panel.beginCard(header: "Selected Devices")
-            panel.addColumnHeader(volumeTitle: "Volume", enabledTitle: "Enabled")
+            // Combined header row (change 1): "Selected Devices" title on the
+            // left, "VOLUME" over the slider and "ENABLED" over the membership
+            // toggle on the right.
+            panel.beginCard(header: "Selected Devices", volumeTitle: "Volume", trailingTitle: "Enabled")
             if !locals.isEmpty {
                 panel.addSubsectionHeader("Current Device")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
@@ -156,34 +149,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             }
         }
 
-        // 3. Groups card — with a trailing "+" accessory (task D) that opens the
-        // mixer window's new-group draft (matching the window's own "+").
-        if !groups.isEmpty {
-            let activeID = groupController?.activeGroupID
-            panel.beginCard(header: "Groups",
-                            trailingAccessory: .init(
-                                symbol: "plus",
-                                label: "New group",
-                                action: { [weak self] in self?.createNewGroup() }))
-            panel.addColumnHeader(volumeTitle: "Volume", enabledTitle: nil)
-            for group in groups {
-                let header = makeGroupHeader(group, isActive: group.id == activeID)
-                panel.addRow(header)
-                let expanded = expandedGroupIDs.contains(group.id)
-                var memberRows: [DeviceRowView] = []
-                for memberID in group.memberIDs {
-                    guard let device = devicesByID[memberID] else { continue }
-                    // Group members hide the on/off toggle (task C) — membership
-                    // in a group is fixed here; the toggle is only for the
-                    // Selected Devices section.
-                    let row = makeDeviceRow(device, indented: true, showsToggle: false)
-                    row.isHidden = !expanded
-                    panel.addRow(row)
-                    memberRows.append(row)
-                }
-                memberRowsByGroup[group.id] = memberRows
-            }
-        }
+        // Groups card removed (2026-07-16): the popover no longer renders a Groups
+        // SECTION. Group ROUTING lives in the Main Out selector (refreshMainOutRow)
+        // and membership editing lives in the mixer window (header Groups button).
 
         // Footer removed (2026-07-14): Open Mixer → header Groups button;
         // Save-as-group → Groups "+"; Quit → header Quit button.
@@ -213,22 +181,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                          isMuted: controller.isMainOutMuted)
     }
 
-    // MARK: Group + device rows
-
-    private func makeGroupHeader(_ group: Group, isActive: Bool) -> GroupRowView {
-        let master = (isActive ? groupController?.masterVolume : nil) ?? averageVolume(of: group)
-        let view = GroupRowView(group: group,
-                                isActive: isActive,
-                                isExpanded: expandedGroupIDs.contains(group.id),
-                                masterVolume: master,
-                                isMuted: groupController?.isGroupMuted(group.id) ?? false)
-        view.delegate = self
-        groupRowsByID[group.id] = view
-        return view
-    }
+    // MARK: Device rows
 
     private func makeDeviceRow(_ device: Device, indented: Bool, showsToggle: Bool = true) -> DeviceRowView {
-        let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle)
+        // No accent-wash pill in the popover (2026-07-14 — Alec: no longer
+        // needed to highlight multiple selected devices at once here; the
+        // card already separates rows, and the icon tint + switch state still
+        // say "on"). The mixer window keeps the wash (its default `true`).
+        let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
+                                 paintsSelectionBackground: false)
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -247,60 +208,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   blockReason: blocked ? GroupController.localMixRefusalReason : nil)
     }
 
-    private func averageVolume(of group: Group) -> Int {
-        let vols = group.memberIDs.compactMap { devicesByID[$0]?.volume }
-        guard !vols.isEmpty else { return 0 }
-        return Int((Double(vols.reduce(0, +)) / Double(vols.count)).rounded())
-    }
-
     private func refreshDeviceRows() {
         for (id, row) in deviceRowsByID {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
         }
-        for rows in memberRowsByGroup.values {
-            for row in rows {
-                guard let device = devicesByID[row.device.id] else { continue }
-                applySelectionState(to: row, device: device)
-            }
-        }
-    }
-
-    // MARK: Expansion (animated — the reason for NSMenu → NSPopover)
-
-    private func toggleExpansion(groupID: String) {
-        let willExpand = !expandedGroupIDs.contains(groupID)
-        if willExpand { expandedGroupIDs.insert(groupID) }
-        else { expandedGroupIDs.remove(groupID) }
-
-        let rows = memberRowsByGroup[groupID] ?? []
-        if let header = groupRowsByID[groupID] { refreshGroupRow(header) }
-
-        test_lastAnimatedExpansion = true
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.22
-            context.allowsImplicitAnimation = true
-            for row in rows { row.animator().isHidden = !willExpand }
-            self.panel.stackView.layoutSubtreeIfNeeded()
-        }, completionHandler: {
-            for row in rows { row.isHidden = !willExpand }
-        })
-    }
-
-    private func refreshGroupRows() {
-        for view in groupRowsByID.values { refreshGroupRow(view) }
-    }
-
-    private func refreshGroupRow(_ view: GroupRowView) {
-        let groupID = view.group.id
-        guard let group = groupController?.groups.first(where: { $0.id == groupID }) else { return }
-        let isActive = groupController?.activeGroupID == groupID
-        let master = (isActive ? groupController?.masterVolume : nil) ?? averageVolume(of: group)
-        view.apply(group: group,
-                   isActive: isActive,
-                   isExpanded: expandedGroupIDs.contains(groupID),
-                   masterVolume: master,
-                   isMuted: groupController?.isGroupMuted(groupID) ?? false)
     }
 
     // MARK: Actions
@@ -319,17 +231,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let name = "Group \(controller.groups.count + 1)"
         _ = try? controller.saveCurrentSetupAsGroup(name: name)
         rebuild()
-    }
-
-    /// The Groups header "+" (task D): open the mixer window's new-group draft —
-    /// the same manual-creation flow the window's own "+" runs (SPEC §9 "manual
-    /// creation is the PRIMARY path, in the window"). Group membership editing
-    /// lives in that window, so a popover "+" routes there rather than creating a
-    /// nameless group inline. Falls back to just opening the mixer if the app
-    /// hasn't wired a dedicated new-group callback.
-    private func createNewGroup() {
-        if let onNewGroup { onNewGroup() }
-        else { onOpenMixer?() }
     }
 
     // MARK: Local-mix block presentation
@@ -362,45 +263,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Test-support hooks
 
-    public func test_groupRow(for groupID: String) -> GroupRowView? { groupRowsByID[groupID] }
-
     public func test_deviceRow(for id: String) -> DeviceRowView? {
-        if let row = deviceRowsByID[id] { return row }
-        for rows in memberRowsByGroup.values {
-            if let row = rows.first(where: { $0.device.id == id }) { return row }
-        }
-        return nil
+        deviceRowsByID[id]
     }
 
-    public func test_memberRowCount(groupID: String) -> Int {
-        memberRowsByGroup[groupID]?.count ?? 0
-    }
-
-    /// The specific group-**member** row for `deviceID` under `groupID` (distinct
-    /// from the Selected-Devices row for the same device). Used to assert the
-    /// member row hides its toggle (task C).
-    public func test_memberRow(groupID: String, deviceID: String) -> DeviceRowView? {
-        memberRowsByGroup[groupID]?.first { $0.device.id == deviceID }
-    }
-
-    public func test_visibleMemberRowCount(groupID: String) -> Int {
-        guard expandedGroupIDs.contains(groupID) else { return 0 }
-        return memberRowsByGroup[groupID]?.count ?? 0
-    }
-
-    public func test_renderedVisibleMemberRowCount(groupID: String) -> Int {
-        (memberRowsByGroup[groupID] ?? []).filter { !$0.isHidden }.count
-    }
-
-    public var test_expandedGroupIDs: Set<String> { expandedGroupIDs }
-    /// Whether saving the current selection as a group is possible (the footer
-    /// "Save" button was removed; this now reflects the Groups "+" affordance's
-    /// underlying condition).
+    /// Whether saving the current selection as a group is possible (this backs the
+    /// Main Out selector's group-routing entries — a saved group becomes a
+    /// destination even though the popover no longer renders a Groups section).
     public var test_saveCurrentSetupEnabled: Bool { canSaveCurrentSetup }
     public var test_headerHasQuit: Bool { panel.test_headerHasQuit }
-    public var test_groupRowCount: Int { groupRowsByID.count }
 
-    // Header (task A) + Groups "+" (task D) test hooks.
+    // Header (task A) test hooks.
     public var test_headerTitle: String { panel.header.test_title }
     public var test_headerGroupsButtonHasImage: Bool { panel.header.test_groupsButtonHasImage }
     public var test_headerSettingsButtonHasImage: Bool { panel.header.test_settingsButtonHasImage }
@@ -408,10 +281,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public func test_tapHeaderGroupsEditor() { panel.header.test_tapGroupsEditor() }
     /// Simulate tapping the header's Settings button.
     public func test_tapHeaderSettings() { panel.header.test_tapSettings() }
-    /// Simulate tapping the Groups section header's "+" (task D).
-    public func test_tapNewGroup() { createNewGroup() }
 
-    /// Count of device rows in the Selected Devices section (not group members).
+    /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }
     /// The Main Out row (for selector / master assertions).
     public var test_mainOutRow: MainOutRowView { mainOutRow }
@@ -423,15 +294,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         v.layoutSubtreeIfNeeded()
         return v
     }
-
-    /// Lift the panel's scroll-height cap so an offscreen snapshot can render the
-    /// full unscrolled panel. Snapshot tooling only — no effect on the live popover.
-    public func test_liftScrollHeightCap() {
-        _ = panel.view   // ensure `loadView` ran so the cap constraint exists
-        panel.test_liftScrollHeightCap()
-    }
-
-    public func test_toggleExpansion(groupID: String) { toggleExpansion(groupID: groupID) }
 
     /// Select the Main Out destination directly (drives the routing).
     public func test_selectMainOut(_ target: MainOutTarget) {
@@ -482,17 +344,15 @@ extension PopoverController: DeviceRowView.Delegate {
 
     public func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {
         groupController?.setMemberVolume(volume, for: id)
-        refreshGroupRows()
         refreshMainOutRow()
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {
         groupController?.setMuted(muted, for: id)
-        // A per-device mute may flip a master (Main Out / group) to fully-muted or
-        // back, so refresh those glyphs live.
+        // A per-device mute may flip the Main Out master to fully-muted or back, so
+        // refresh those glyphs live.
         refreshDeviceRows()
         refreshMainOutRow()
-        refreshGroupRows()
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -501,44 +361,6 @@ extension PopoverController: DeviceRowView.Delegate {
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         handleSelection(result, deviceID: id)
-    }
-}
-
-// MARK: - GroupRowView.Delegate
-
-extension PopoverController: GroupRowView.Delegate {
-
-    func groupRowToggleExpansion(_ row: GroupRowView, groupID: String) {
-        toggleExpansion(groupID: groupID)
-    }
-
-    func groupRowActivate(_ row: GroupRowView, groupID: String) {
-        // Activating a group = pointing Main Out at it (SPEC §9b).
-        groupController?.setMainOut(.group(id: groupID))
-        rebuild()
-    }
-
-    func groupRowBeginMasterDrag(_ row: GroupRowView, groupID: String) {
-        if groupController?.activeGroupID != groupID {
-            groupController?.setMainOut(.group(id: groupID))
-        }
-        groupController?.beginMasterDrag()
-    }
-
-    func groupRow(_ row: GroupRowView, didSetMaster volume: Int, groupID: String) {
-        groupController?.setMasterVolume(volume)
-        refreshMainOutRow()
-    }
-
-    func groupRowEndMasterDrag(_ row: GroupRowView, groupID: String) {
-        groupController?.endMasterDrag()
-    }
-
-    func groupRow(_ row: GroupRowView, didSetMuted muted: Bool, groupID: String) {
-        groupController?.setGroupMuted(muted, groupID: groupID)
-        refreshGroupRows()
-        refreshMainOutRow()
-        refreshDeviceRows()
     }
 }
 
@@ -558,7 +380,6 @@ extension PopoverController: MainOutRowView.Delegate {
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
-        refreshGroupRows()
     }
 
     public func mainOutRowEndMasterDrag(_ row: MainOutRowView) {
@@ -569,6 +390,5 @@ extension PopoverController: MainOutRowView.Delegate {
         groupController?.setMainOutMuted(muted)
         refreshDeviceRows()
         refreshMainOutRow()
-        refreshGroupRows()
     }
 }

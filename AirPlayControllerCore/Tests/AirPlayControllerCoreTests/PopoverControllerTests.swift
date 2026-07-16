@@ -58,7 +58,7 @@ final class PopoverControllerTests: XCTestCase {
 
     func testBaselineHasDeviceRowsAndDefaultPassthrough() async throws {
         let (popover, controller, _) = try await makePopover()
-        XCTAssertEqual(popover.test_groupRowCount, 0)
+        XCTAssertEqual(controller.groups.count, 0)
         XCTAssertEqual(popover.test_deviceSectionRowCount, 7)
         XCTAssertTrue(controller.isSpeakerSelected("local-mac"), "current device selected by default")
         XCTAssertTrue(controller.isPassthrough, "default set == {local} ⇒ passthrough")
@@ -170,17 +170,6 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(backend.devices.first { $0.id == "homepod-bed" }?.volume, 40)
     }
 
-    func testSaveSelectedDevicesCreatesGroupWithVisibleMaster() async throws {
-        let (popover, controller, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // non-local set
-        popover.test_saveCurrentSetup(); await drain()
-        XCTAssertEqual(controller.groups.count, 1)
-        let group = controller.groups[0]
-        XCTAssertEqual(popover.test_groupRowCount, 1)
-        let row = try XCTUnwrap(popover.test_groupRow(for: group.id))
-        XCTAssertTrue(row.test_masterSliderVisible, "the group's master slider is visible")
-    }
-
     func testSaveActionDisabledWhenSetEqualsGroup() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -190,31 +179,13 @@ final class PopoverControllerTests: XCTestCase {
                        "disabled: the Selected Devices set already IS a saved group")
     }
 
-    func testExpansionAnimatesMemberRowsInAndOut() async throws {
-        let (popover, controller, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        popover.test_saveCurrentSetup(); await drain()
-        let group = controller.groups[0]
-
-        XCTAssertEqual(popover.test_memberRowCount(groupID: group.id), group.memberIDs.count)
-        XCTAssertEqual(popover.test_visibleMemberRowCount(groupID: group.id), 0)
-
-        popover.test_toggleExpansion(groupID: group.id)
-        XCTAssertTrue(popover.test_expandedGroupIDs.contains(group.id))
-        XCTAssertTrue(popover.test_lastAnimatedExpansion)
-        await drain()
-        XCTAssertEqual(popover.test_visibleMemberRowCount(groupID: group.id), group.memberIDs.count)
-
-        popover.test_toggleExpansion(groupID: group.id)
-        await drain()
-        XCTAssertEqual(popover.test_visibleMemberRowCount(groupID: group.id), 0)
-    }
-
     /// T-U8 Part 1 — a deselected device row returns to a fully unselected
     /// appearance (the stale-highlight bug). After toggling a device OFF the row's
     /// model membership AND every visual property that encodes "selected/highlight"
-    /// (icon accent tint, selected-background pill, transient hover) must reset.
+    /// (icon accent tint, transient hover) must reset. The popover row never
+    /// paints a selected-background pill at all (2026-07-14 — Alec: removed the
+    /// accent wash so multiple selected devices no longer highlight at once;
+    /// the mixer window still paints it, covered by its own tests).
     func testDeselectResetsRowHighlight() async throws {
         let (popover, _, _) = try await makePopover()
 
@@ -223,7 +194,8 @@ final class PopoverControllerTests: XCTestCase {
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
         XCTAssertTrue(row.isSelectedInSet, "selected after ON")
-        XCTAssertTrue(row.test_isShowingSelectedBackground, "selected row paints its pill")
+        XCTAssertFalse(row.test_isShowingSelectedBackground,
+                       "popover row paints no selected-background pill, even when selected")
         XCTAssertTrue(row.test_isEnabledOn, "switch is ON")
         XCTAssertEqual(row.test_iconTint, .controlAccentColor, "selected row is accent-tinted")
 
@@ -245,10 +217,9 @@ final class PopoverControllerTests: XCTestCase {
     /// area to trigger the exit. The fix reconciles hover against the real pointer
     /// position via an app-local mouse-moved monitor; here we drive that reconcile
     /// with the pointer reported OUTSIDE and assert the highlight clears. Written
-    /// against EVERY device row (and a group row) so it's general, not a last-row
-    /// special-case.
+    /// against EVERY device row so it's general, not a last-row special-case.
     func testHoverClearsWhenPointerLeavesWithoutExitEvent() async throws {
-        let (popover, controller, backend) = try await makePopover()
+        let (popover, _, backend) = try await makePopover()
 
         // Every device row: enter hover, then a pointer-leave reconcile with NO
         // `mouseExited:` must still clear the hover wash.
@@ -261,17 +232,6 @@ final class PopoverControllerTests: XCTestCase {
             XCTAssertFalse(row.test_isHovered,
                            "\(device.id): hover cleared on pointer-leave without an exit event")
         }
-
-        // Same guarantee for a group header row (the last row before the footer).
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
-        let group = controller.groups[0]
-        let groupRow = try XCTUnwrap(popover.test_groupRow(for: group.id))
-        groupRow.test_simulateMouseEntered()
-        XCTAssertTrue(groupRow.test_isHovered, "group row: hover set on enter")
-        groupRow.test_reconcileHover(pointerInside: false)
-        XCTAssertFalse(groupRow.test_isHovered,
-                       "group row: hover cleared on pointer-leave without an exit event")
     }
 
     // MARK: Layout overhaul (header / columns / member toggle / groups "+")
@@ -293,37 +253,12 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertTrue(openedMixer, "the header Groups-editor button opens the mixer path")
     }
 
-    /// Task C — an expanded group's member rows hide the on/off toggle, while the
-    /// Selected-Devices row for a non-member device keeps it.
-    func testGroupMemberRowsHideTheToggle() async throws {
-        let (popover, controller, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        popover.test_saveCurrentSetup(); await drain()
-        let group = controller.groups[0]
-
-        for mid in group.memberIDs {
-            let row = try XCTUnwrap(popover.test_memberRow(groupID: group.id, deviceID: mid))
-            XCTAssertFalse(row.test_showsToggle,
-                           "group member \(mid) hides its on/off toggle (task C)")
-        }
-        // A Selected-Devices row for a device that is NOT grouped keeps its toggle.
+    /// A Selected-Devices row for a device shows its on/off toggle.
+    func testSelectedDevicesRowShowsTheToggle() async throws {
+        let (popover, _, _) = try await makePopover()
         let ungrouped = try XCTUnwrap(popover.test_deviceRow(for: "airport-mixer"))
         XCTAssertTrue(ungrouped.test_showsToggle,
-                      "a Selected-Devices row still shows its toggle")
-    }
-
-    /// Task D — the Groups "+" invokes the new-group callback.
-    func testGroupsPlusTriggersNewGroup() async throws {
-        let (popover, controller, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
-        _ = controller
-
-        var triggered = false
-        popover.onNewGroup = { triggered = true }
-        popover.test_tapNewGroup()
-        XCTAssertTrue(triggered, "the Groups '+' invoked the new-group callback")
+                      "a Selected-Devices row shows its toggle")
     }
 
     /// Task B — the Main Out named dropdown shows the CURRENT target's title and

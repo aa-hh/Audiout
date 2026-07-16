@@ -75,24 +75,13 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     popover.configure(groupController: controller)
     controller.ensureDefaultSelection()
 
-    // Compose a couple of AirPlay devices into the Selected Devices set and save
-    // them as a group so the Groups section has real content.
+    // Compose a couple of AirPlay devices into the Selected Devices set (the
+    // popover no longer renders a Groups section, so we just populate the
+    // Selected Devices set for the snapshot).
     _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
     _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
     _ = popover.test_toggleDeviceEnabled(deviceID: "sonos-move", on: true)
-    popover.test_saveCurrentSetup()
     popover.update(devices: backend.devices)
-
-    // Expand the (one) group so its member rows show — the expanded-group case.
-    if let group = controller.groups.first {
-        popover.test_toggleExpansion(groupID: group.id)
-        drain(0.45)   // let the expand animation settle so members are visible
-    }
-    popover.update(devices: backend.devices)
-
-    // Lift the scroll cap so the FULL panel renders (all sections at once), not
-    // just the first ~460pt.
-    popover.test_liftScrollHeightCap()
 
     // Host the assembled panel in an offscreen window so the card materials /
     // vibrancy render, under the requested appearance.

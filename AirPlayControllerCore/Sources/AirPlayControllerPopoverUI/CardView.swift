@@ -19,7 +19,11 @@ import AppKit
 ///      from the system material (the "semantic-first" decision stands — no
 ///      hand-mixed tint that would freeze one OS version's look). Rows still
 ///      live inside it so they keep the vibrant blending context and clip to
-///      the rounded corners.
+///      the rounded corners. (2026-07-16 — Alec confirmed his earlier "flat"
+///      report was his own Reduce Transparency accessibility setting, not a
+///      bug; he wants MORE translucency on the popover's own BACKGROUND, not
+///      these foreground card tiles, so this stays `.withinWindow` — see
+///      `PopoverPanelViewController`'s `container` for that change instead.)
 ///   3. **`rim`** — a hit-test-transparent overlay stroking the raised-edge
 ///      lighting: a 1pt inner highlight, brightest along the top edge and
 ///      fading down (light-from-above rim light), plus a 0.5pt hairline at the

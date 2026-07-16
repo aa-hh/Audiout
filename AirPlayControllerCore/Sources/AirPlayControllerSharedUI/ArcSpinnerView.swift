@@ -58,14 +58,25 @@ final class ArcSpinnerView: NSView {
         arcLayer.strokeColor = NSColor.secondaryLabelColor.cgColor
     }
 
+    /// Outer diameter of the drawn arc. Deliberately smaller than the 18pt
+    /// status-slot rect so the spinner reads at the same optical weight as its
+    /// slot-mates — the 12pt warning triangle and 8pt connected dot (Alec,
+    /// 2026-07-17: the slot-filling arc was "too big compared to the rest of
+    /// the iconography").
+    private let arcDiameter: CGFloat = 12
+
     override func layout() {
         super.layout()
         // Size via bounds + position, NOT `frame` — Apple docs: a layer's
         // `frame` is undefined while a transform (our rotation) is applied.
         arcLayer.bounds = bounds
         arcLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-        let inset = arcLayer.lineWidth / 2 + 0.5
-        arcLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: inset, dy: inset), transform: nil)
+        let inset = arcLayer.lineWidth / 2
+        let arcRect = NSRect(x: bounds.midX - arcDiameter / 2,
+                             y: bounds.midY - arcDiameter / 2,
+                             width: arcDiameter, height: arcDiameter)
+            .insetBy(dx: inset, dy: inset)
+        arcLayer.path = CGPath(ellipseIn: arcRect, transform: nil)
     }
 
     func startSpinning() {

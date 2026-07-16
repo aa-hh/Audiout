@@ -165,20 +165,52 @@ func runLiveSession(_ args: ProbeArgs) async {
         let bytesPerFrame = 2 /*ch*/ * 2 /*S16*/
         let samplesPerChunk = 352
         let chunkBytes = samplesPerChunk * bytesPerFrame
+        let sampleRate = 44100.0
         print("[probe] streaming \(pcm.count) bytes of PCM in \(chunkBytes)-byte frames...")
 
+        // The pts MUST advance with the audio: airplay.c's timestamp_set()
+        // stores it as "the player clock ... normally now" and the periodic
+        // sync packets tell the receiver what rtptime should be audible at
+        // that instant. A frozen pts makes every re-sync claim an advancing
+        // position plays at a time receding into the past -> the receiver
+        // keeps the session but schedules nothing (gated first-light
+        // 2026-07-16: Sonos light green, never white, no audio). OwnTone's
+        // player passes a CALCULATED clock (samples/rate since start), which
+        // timestamp_set explicitly prefers over the actual clock — do the same.
+        var startTS = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &startTS)
+        let t0 = Double(startTS.tv_sec) + Double(startTS.tv_nsec) / 1e9
+
         var offset = 0
-        var pts = timespec()
-        clock_gettime(CLOCK_MONOTONIC, &pts)
+        var chunkIndex = 0
         while offset < pcm.count {
             let end = min(offset + chunkBytes, pcm.count)
+            let elapsed = Double(chunkIndex) * Double(samplesPerChunk) / sampleRate
+            let t = t0 + elapsed
+            let sec = Int(t)
+            let pts = timespec(tv_sec: sec, tv_nsec: Int((t - Double(sec)) * 1e9))
             engine.write(pcm: pcm.subdata(in: offset..<end), pts: pts)
             offset = end
-            // ~8ms per 352-sample frame at 44100 Hz.
-            try await Task.sleep(nanoseconds: 7_982_000)
+            chunkIndex += 1
+
+            // Absolute-deadline pacing against the same calculated timeline,
+            // so cumulative sleep jitter can't drift the cadence away from
+            // the pts we are claiming.
+            let target = t0 + Double(chunkIndex) * Double(samplesPerChunk) / sampleRate
+            var nowTS = timespec()
+            clock_gettime(CLOCK_MONOTONIC, &nowTS)
+            let now = Double(nowTS.tv_sec) + Double(nowTS.tv_nsec) / 1e9
+            if target > now {
+                try await Task.sleep(nanoseconds: UInt64((target - now) * 1e9))
+            }
         }
 
-        print("[probe] done streaming; stopping...")
+        // Let the receiver's ~2s buffer drain before tearing down, or the
+        // tail of the tone gets cut off with the session.
+        print("[probe] done streaming; letting the buffered tail play out (3s)...")
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+
+        print("[probe] stopping...")
         await engine.stop()
         print("[probe] stopped cleanly.")
     } catch {

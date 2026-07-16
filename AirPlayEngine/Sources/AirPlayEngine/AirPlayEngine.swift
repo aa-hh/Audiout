@@ -146,6 +146,13 @@ public actor AirPlayEngine {
 
         // Everything below touches the C cluster -> must run on the engine thread.
         let initResult: Int32 = await engineThread.run { [self] in
+            // 0. App-side crypto init (libgcrypt + libsodium). pair_ap only
+            //    CHECKS initialization (is_initialized, pair.c); without this
+            //    every pair_setup_new() fails — gated first-light 2026-07-16.
+            if engine_crypto_init() != 0 {
+                return -102 // crypto init failed
+            }
+
             // 1. Set evbase_player BEFORE airplay_init (seam-map §8).
             evbase_player = base
 
@@ -159,6 +166,17 @@ public actor AirPlayEngine {
             // 3. Apply config via conffile setters (strings NOT copied — retained
             //    on `self` for the engine lifetime).
             applyConfigOnEngineThread()
+
+            // 3b. Bind or attach the PTP daemon BEFORE airplay_init — the third
+            //     app-side duty inherited from OwnTone's main() (after gcrypt
+            //     init and libevent threading): ptpd_find_or_bind() is the ONLY
+            //     privileged step (binds UDP 319/320, needs root), while
+            //     airplay_init's ptpd_init() merely finds/starts an already-
+            //     bound daemon and otherwise logs "PTP daemon unavailable" and
+            //     falls back to NTP — which Sonos refuses (SPEC.md §8 0b).
+            //     Non-fatal by design, mirroring OwnTone: NTP-only receivers
+            //     still work unprivileged. Gated first-light 2026-07-16.
+            _ = ptpd_find_or_bind()
 
             // 4. Start the backend: output_airplay.init == airplay_init. This also
             //    calls mdns_browse -> our shim captures airplay_device_cb so
@@ -194,6 +212,9 @@ public actor AirPlayEngine {
             if let deinitFn = output_airplay.deinit {
                 deinitFn()
             }
+            // Symmetric with ptpd_find_or_bind() in start(). NULL-safe:
+            // airptp_end() guards a never-bound handle.
+            ptpd_deinit()
             completions.uninstall()
             outputs_dispatcher_deinit()
             evbase_player = nil
@@ -332,8 +353,9 @@ public actor AirPlayEngine {
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
         let clamped = max(0.0, min(1.0, volume))
-        // Set device->volume (0...max_volume) BEFORE the op, on the engine thread.
-        // The vendored airplay_set_volume_one reads it to build SET_PARAMETER.
+        // Set device->volume (a 0...100 PERCENT) BEFORE the op, on the engine
+        // thread. The vendored airplay_set_volume_one reads it to build
+        // SET_PARAMETER, and airplay_volume_from_pct() maps 0..100 -> -30..0 dB.
         // Kept out of the issue closure so it still runs in headless test mode
         // (where the issue closure is overridden).
         await applyVolumeOnDevice(id: id, normalized: clamped)
@@ -348,10 +370,19 @@ public actor AirPlayEngine {
 
     /// Set the C device's `volume` field from a normalized 0...1 value. Engine
     /// thread (or inline in headless mode).
+    ///
+    /// The vendored airplay.c volume model treats `device->volume` as a 0...100
+    /// PERCENT (see the "Volume in [0 - 100]" contract on airplay_set_volume_one
+    /// and airplay_volume_from_pct, which maps 0..100 -> -30..0 dB). Earlier this
+    /// scaled by `device->max_volume`, but `struct output_device.max_volume` is a
+    /// different quantity (a 0..11 ceiling) that this engine never initializes, so
+    /// it was always 0 — pinning every request to volume=0 => -30 dB (the quietest
+    /// non-muted level), which reads as "no/inaudible sound" on the receiver.
+    /// Map the normalized value straight onto the 0..100 percent the C layer wants.
     private func applyVolumeOnDevice(id: OutputID, normalized: Double) async {
         let apply: () -> Void = {
             guard let device = outputs_device_get(id.rawValue) else { return }
-            device.pointee.volume = Int32((Double(device.pointee.max_volume) * normalized).rounded())
+            device.pointee.volume = Int32((normalized * 100.0).rounded())
         }
         if issueOverride != nil { apply() } else { await engineThread.run(apply) }
     }

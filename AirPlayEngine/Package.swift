@@ -164,6 +164,13 @@ let package = Package(
                 // so pair_ap is built with CONFIG_GCRYPT (+ libsodium
                 // always), NOT CONFIG_OPENSSL. Avoids an openssl dep. ---
                 .define("CONFIG_GCRYPT"),
+                // libairptp per-packet tx/rx logging (log_sent/log_received are
+                // compiled-out no-ops without these). Enabled for the gated
+                // first-light bring-up (2026-07-16) to watch the PTP exchange;
+                // cheap (E_DBG level) and gated by AIRPLAYENGINE_LOG_LEVEL at
+                // runtime, so safe to leave on during bring-up.
+                .define("AIRPTP_LOG_SENT", to: "1"),
+                .define("AIRPTP_LOG_RECEIVED", to: "1"),
 
                 // --- Brew include paths for the deps the cluster needs
                 // (seam-map §7 + Appendix A): libevent, libsodium, libgcrypt
@@ -182,6 +189,12 @@ let package = Package(
                 // swresample when it implements the real ALAC encoder).
                 .unsafeFlags(brewLibFlags),
                 .linkedLibrary("event"),
+                // libevent's pthreads support lives in a separate library.
+                // evthread_use_pthreads() (EngineThread) needs it so that
+                // cross-thread event_base_once() wakes a kevent-blocked loop —
+                // without it the engine's first live start() deadlocked
+                // (gated first-light, 2026-07-16).
+                .linkedLibrary("event_pthreads"),
                 .linkedLibrary("sodium"),
                 .linkedLibrary("gcrypt"),
                 .linkedLibrary("gpg-error"),

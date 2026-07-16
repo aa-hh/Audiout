@@ -78,6 +78,51 @@ final class AirPlayEngineAPITests: XCTestCase {
         XCTAssertEqual(state, .streaming)
     }
 
+    // MARK: - addOutput: CONNECTED resolves the waiter (the REAL Sonos/AP2 path).
+    //
+    // REGRESSION (2026-07-16 first-light hang): against a real AirPlay 2 buffered
+    // receiver (Sonos Move), the FULL RTSP/PTP handshake succeeds and the vendored
+    // sender reports its single device_start completion as OUTPUT_STATE_CONNECTED
+    // (AIRPLAY_SEQ_START_PLAYBACK.on_success == session_connected, airplay.c:3620),
+    // NOT STREAMING. STREAMING is reached later inside airplay_write() with no
+    // further callback. This test fires exactly that observed callback and asserts
+    // addOutput RESOLVES (does not hang). Before the fix, OutputState.connected was
+    // classified non-terminal, so CompletionRegistry.deliver dropped this sole
+    // completion and the waiter hung forever.
+    func testAddOutputConnectedSucceeds() async throws {
+        let id = OutputID(rawValue: 0xA1C0)
+        makeRegistryDevice(id: id.rawValue)
+
+        let engine = AirPlayEngine()
+        await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+        await engine.registerKnownOutputForTest(id)
+
+        async let op: Void = engine.addOutput(id)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+        try await op // must NOT hang: CONNECTED is the terminal for AP2 device_start
+
+        let state = await engine.stateOf(id)
+        XCTAssertEqual(state, .connected)
+    }
+
+    // MARK: - Terminal-state classification: the exact set the vendored sender can
+    // report via a single callback_id-spending outputs_cb. Locks in the
+    // 2026-07-16 fix (CONNECTED terminal) and guards against a regression that
+    // would re-drop the AP2 device_start completion.
+    //
+    // STARTUP (INFO…RECORD progress) is the ONLY non-terminal — and in the
+    // vendored sender it is never even emitted for device_start (session_status is
+    // only called at sequence success/failure), so this guard is defensive.
+    func testOutputStateTerminalClassification() {
+        XCTAssertTrue(OutputState.connected.isTerminal,
+                      "CONNECTED is the AP2 device_start terminal (regression: 2026-07-16 hang)")
+        XCTAssertTrue(OutputState.streaming.isTerminal)
+        XCTAssertTrue(OutputState.stopped.isTerminal)
+        XCTAssertTrue(OutputState.failed.isTerminal)
+        XCTAssertTrue(OutputState.passwordRequired.isTerminal)
+        XCTAssertFalse(OutputState.startup.isTerminal, "STARTUP is intermediate progress")
+    }
+
     // MARK: - addOutput: FAILED terminal state throws sessionFailed.
 
     func testAddOutputFailedThrows() async throws {
@@ -123,14 +168,15 @@ final class AirPlayEngineAPITests: XCTestCase {
     func testSetVolumeDrivesDeviceAndCompletes() async throws {
         let id = OutputID(rawValue: 0xB1)
         makeRegistryDevice(id: id.rawValue)
-        // A realistic max_volume so the normalized value maps to a range.
-        outputs_device_get(id.rawValue)!.pointee.max_volume = 11
 
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode(issue: { device, _ in
-            // Emulate airplay_set_volume_one reading device->volume: assert it
-            // was set from the normalized 0.5 -> ~6 (of 11).
-            XCTAssertEqual(device.pointee.volume, 6)
+            // airplay.c's volume model treats device->volume as a 0...100 PERCENT
+            // (airplay_set_volume_one / airplay_volume_from_pct map 0..100 -> -30..0
+            // dB). The normalized 0.5 must therefore land on 50, NOT be scaled by the
+            // uninitialized `max_volume` field (which pinned every request to 0 => the
+            // -30 dB "inaudible" floor). See applyVolumeOnDevice.
+            XCTAssertEqual(device.pointee.volume, 50)
             return 1
         })
         await engine.registerKnownOutputForTest(id)
@@ -138,6 +184,40 @@ final class AirPlayEngineAPITests: XCTestCase {
         async let op: Void = engine.setVolume(id, 0.5)
         try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
         try await op
+    }
+
+    // MARK: - setVolume regression: normalized -> 0..100 percent, NOT scaled by
+    // the uninitialized `max_volume` field.
+    //
+    // First-light bug (2026-07-17): applyVolumeOnDevice computed
+    // `device->volume = max_volume * normalized`, but `struct output_device`'s
+    // `max_volume` is never initialized by this engine (calloc'd to 0) and is not
+    // the quantity airplay.c's AirPlay-2 volume path uses. That pinned EVERY
+    // setVolume to device->volume = 0 => airplay_volume_from_pct(0) = -30.0 dB,
+    // the quietest non-muted level — inaudible on a Sonos, "green never white".
+    // The C layer wants device->volume as a 0..100 PERCENT. This asserts the
+    // full-range mapping with a device left at the production default max_volume=0.
+    func testSetVolumeMapsToPercentIgnoringUninitializedMaxVolume() async throws {
+        let cases: [(Double, Int32)] = [(0.0, 0), (0.4, 40), (0.5, 50), (1.0, 100)]
+        for (normalized, expectedPct) in cases {
+            outputs_dispatcher_reset(); drainRegistry()
+            let id = OutputID(rawValue: 0xB5)
+            makeRegistryDevice(id: id.rawValue)
+            // Deliberately DO NOT set max_volume: it stays 0 as in production.
+            XCTAssertEqual(outputs_device_get(id.rawValue)!.pointee.max_volume, 0)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { device, _ in
+                XCTAssertEqual(device.pointee.volume, expectedPct,
+                               "normalized \(normalized) must map to \(expectedPct)% (device->volume is a 0..100 percent)")
+                return 1
+            })
+            await engine.registerKnownOutputForTest(id)
+
+            async let op: Void = engine.setVolume(id, normalized)
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+            try await op
+        }
     }
 
     // MARK: - removeOutput: awaits stop completion.

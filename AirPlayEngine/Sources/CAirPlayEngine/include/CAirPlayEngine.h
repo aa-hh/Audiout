@@ -24,6 +24,13 @@
 #ifndef CAIRPLAYENGINE_H
 #define CAIRPLAYENGINE_H
 
+/* libevent threading support — exposes evthread_use_pthreads() to Swift.
+ * EngineThread MUST enable this before creating its event_base so that
+ * cross-thread event_base_once() wakes a loop blocked in kevent(). Found the
+ * hard way at the gated first-light (2026-07-16): without it, enqueue() from
+ * the Swift side is silently deferred until the keep-alive timer fires. */
+#include <event2/thread.h>
+
 /* Shim surfaces (T-SHIM-1 implements the .c bodies) */
 #include "../shims/logger.h"
 #include "../shims/misc.h"

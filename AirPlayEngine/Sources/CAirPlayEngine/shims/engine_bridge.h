@@ -51,6 +51,17 @@ extern struct output_definition output_airplay;
  * airplay_init, then calls outputs_dispatcher_init() (seam-map §8, risk R-B). */
 extern struct event_base *evbase_player;
 
+/* One-time process-wide crypto initialization, called by the Swift wrapper
+ * BEFORE airplay_init. libgcrypt's documentation requires the APPLICATION
+ * (not a library) to run gcry_check_version() + GCRYCTL_INITIALIZATION_FINISHED;
+ * pair_ap only CHECKS this via is_initialized() (pair.c) and, when the app
+ * never did it, pair_setup_new() fails with the misleading "Out of memory for
+ * verification setup context" log. OwnTone's main() did this init; the engine
+ * must do its own. Found at the gated first-light (2026-07-16). Also runs
+ * sodium_init(). Idempotent. Returns 0 on success, -1 on failure. */
+int
+engine_crypto_init(void);
+
 /* True once airplay_init has run and mdns_browse captured the device callback.
  * Discovery feeds are dropped (return false) before this. */
 bool

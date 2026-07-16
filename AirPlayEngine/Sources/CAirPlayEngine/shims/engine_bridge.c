@@ -6,9 +6,30 @@
 #include "engine_bridge.h"
 #include "mdns.h"
 
+#include <gcrypt.h>
+#include <sodium.h>
+
 /* Defined in shims/mdns.c: the captured airplay_device_cb (set when
  * airplay_init calls mdns_browse). NULL until init has run. */
 extern mdns_browse_cb airplayengine_device_cb;
+
+int
+engine_crypto_init(void)
+{
+  // The app-side libgcrypt init pair_ap's is_initialized() checks for
+  // (engine_bridge.h has the full story). Mirrors OwnTone's main():
+  // version check (NULL = no minimum), no secure memory (we hold no
+  // long-lived secrets), then mark initialization finished.
+  if (!gcry_check_version(NULL))
+    return -1;
+  gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
+  gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+
+  if (sodium_init() == -1)
+    return -1;
+
+  return 0;
+}
 
 bool
 airplayengine_discovery_ready(void)

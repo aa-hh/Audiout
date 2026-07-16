@@ -112,7 +112,7 @@ public final class DeviceRowView: NSView {
     /// "Connected", "Couldn't connect" — hidden entirely for `.off` so a row
     /// that isn't being routed to reads exactly as it did before this feature.
     private let statusLabel = NSTextField(labelWithString: "")
-    private let slider = ControlCenterSlider()
+    private let slider = NSSlider()
     /// Small right-aligned `%` readout sitting immediately right of the slider
     /// (change 4 — a device row now shows its volume number too, tight against
     /// the slider like the Main Out row, on the same shared column).

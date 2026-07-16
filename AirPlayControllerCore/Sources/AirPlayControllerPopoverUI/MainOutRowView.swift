@@ -8,8 +8,8 @@ import AirPlayControllerSharedUI
 /// The single **"Main Out"** row in the popover's System card — styled after
 /// macOS Control Center's **Sound module** (SPEC §9, T-U9b). Laid out against the
 /// shared popover column grid (task B). Left to right: a leading speaker icon ·
-/// name-less flexible zone · a Control-Center pill `ControlCenterSlider` (the
-/// master volume) · a `%` readout · a **named destination dropdown**
+/// name-less flexible zone · a horizontal `NSSlider` (the master volume, stock
+/// macOS styling) · a `%` readout · a **named destination dropdown**
 /// (`NSPopUpButton`, `pullsDown = false`) as the trailing control.
 ///
 /// (T-U10 briefly moved the glyph into the slider's track to match a full-height
@@ -64,7 +64,7 @@ public final class MainOutRowView: NSView {
     /// "Output" row and filling the shared name column so it aligns with the
     /// device/group rows below.
     private let nameLabel = NSTextField(labelWithString: "Audio Out")
-    private let slider = ControlCenterSlider()
+    private let slider = NSSlider()
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()

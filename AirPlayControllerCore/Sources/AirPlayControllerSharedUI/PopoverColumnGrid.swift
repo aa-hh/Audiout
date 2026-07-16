@@ -140,11 +140,8 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **trailing-control column's center**.
     public static var trailingControlCenterFromTrailing: CGFloat { trailingControlTrailing + trailingControlWidth / 2 }
 
-    // Optical vertical centering is NOT done here per-element (that needed a
-    // fragile magic number for every control type and mismatched the trailing
-    // controls). Instead every element keeps plain `centerYAnchor`, and the ONE
-    // element that drew off the shared optical line — the custom slider, which
-    // draws at exact geometric center while text/symbols/native controls sit
-    // ~1.75pt above — is corrected once inside `ControlCenterSlider` via its
-    // `opticalRise`. See that type (Alec 2026-07-16).
+    // Every element keeps plain `centerYAnchor` — no per-element optical nudge.
+    // (The volume sliders are stock `NSSlider`s as of 2026-07-17; the earlier
+    // custom Control-Center slider carried a 1.75pt optical-rise tweak, removed
+    // with it when Alec reverted to default macOS slider styling.)
 }

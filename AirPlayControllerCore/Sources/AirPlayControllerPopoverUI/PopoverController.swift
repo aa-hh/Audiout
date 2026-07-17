@@ -32,8 +32,8 @@ public struct RunningAppInfo: Equatable {
 /// opens the existing running-app picker, "minus" removes the currently
 /// selected app row. Pure UI: both actions route back through `onAdd`/
 /// `onRemove` closures so `PopoverController` stays the only thing that talks
-/// to `AppRoutingController`. Replaces the retired `AddApplicationRowView`
-/// row as the card's sole add affordance.
+/// to `AppRoutingController`. Replaces the retired full-width "Add
+/// application…" row as the card's sole add affordance.
 private final class ApplicationsFooterView: NSView {
 
     private enum Segment: Int { case add = 0, remove = 1 }

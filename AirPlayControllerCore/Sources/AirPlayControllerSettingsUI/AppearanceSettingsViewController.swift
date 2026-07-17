@@ -14,9 +14,9 @@ import AirPlayControllerCore
 /// as placeholder (2026-07-17): a literal preview of the appearance is far more
 /// legible than an abstract icon.
 ///
-/// Custom-drawn (`ThemeTileButton`), the same idiom this codebase already uses
-/// for controls AppKit doesn't style natively (`RowHoverButton`,
-/// `ControlCenterSlider`).
+/// Custom-drawn (`ThemeTileButton`) — justified because AppKit ships no control
+/// that renders an appearance preview; this is the codebase's one custom-drawn
+/// button, everything else uses a stock bezel.
 ///
 /// The pane owns persistence (writes `AppSettings.theme`) but NOT the side
 /// effect: applying the override app-wide means touching `NSApp.appearance`,

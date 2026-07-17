@@ -48,6 +48,18 @@ selector or header actions change, or a `test_` hook's contract changes.
   trap note in `PopoverPanelViewController.loadView`).
 - **The host owns the pasteboard.** `ConnectionDiagnosisView` never touches
   `NSPasteboard`; "Copy details" fires `onCopyDetails`, and the controller writes.
+- **The Applications card ends in a ± footer, not a row.** `ApplicationsFooterView`
+  is an `NSSegmentedControl` (`.momentaryAccelerator`, plus/minus segments) that
+  replaced the retired full-width "+ Add application…" row. "+" opens the
+  running-app picker; "−" removes the selected app row and is disabled whenever
+  nothing is selected.
+- **App-row selection is host-owned and session-transient.** `PopoverController`
+  holds `selectedAppBundleID` (survives `rebuild()`, like `transientCollapsed`)
+  so `AppRowView.isSelected` can be re-pushed into every row after a rebuild.
+  It resets in `popoverDidClose` (never carries into the next open) and clears
+  on any mouse-down outside an `AppRowView`/`ApplicationsFooterView` via a local
+  `NSEvent` monitor installed in `popoverDidShow` — deselect discipline like
+  clicking away from a table row.
 
 ## Architecture
 
@@ -70,8 +82,9 @@ flowchart TD
 2. **Build cards** — `rebuild()` clears rows and builds three cards via
    `panel.beginCard`: **System** (the `MainOutRowView`), **Devices** (Current
    Device + AirPlay Devices sub-sections, each an Enabled toggle), **Applications**
-   (one `AppRowView` per route + an "+ Add application…" row). Open diagnosis
-   panels are re-mounted from `openDiagnosisIDs`.
+   (one `AppRowView` per route, each pushed `isSelected` from `selectedAppBundleID`,
+   + the `ApplicationsFooterView` ± footer). Open diagnosis panels are re-mounted
+   from `openDiagnosisIDs`.
 3. **Toggle a device** — the row's Enabled switch → `didToggleEnabled` →
    `groupController.setDeviceSelected` → `handleSelection` presents any refusal
    and repaints. This composes the Enabled set; it only routes when Main Out
@@ -95,9 +108,10 @@ flowchart TD
 | `CardView` | One rounded Control-Center-style module: header rows + a clipping collapsible body (`setBodyCollapsed`), drop shadow + raised-edge rim chrome. |
 | `MainOutRowView` | The System card's Main Out row: master slider + `%` + mute + the named destination dropdown ("Enabled Devices" / saved groups) — THE routing control. |
 | `ConnectionDiagnosisView` | Inline "Couldn't connect" panel under a failed device row: cause + suggestion + Try again / Copy details. Pure renderer of a `ConnectionFailure`. |
-| `PopoverHeaderView` | Top bar: centered title + Groups-editor / Settings / Quit icon buttons (callbacks only; Settings is a `// TODO` stub). Buttons are stock `NSButton`s with `bezelStyle = .smallSquare`. |
+| `PopoverHeaderView` | Top bar: centered title + Groups-editor / Settings / Quit icon buttons (callbacks only; Settings is a `// TODO` stub). Buttons are stock `NSButton`s with `bezelStyle = .smallSquare` — image-only SF Symbols, no custom hover fill. |
 | `GroupRowView` | A saved group's master row (activate + chevron + name + master slider). Built for the mixer window's group section — the popover no longer renders a Groups section, so it is unused by `PopoverController` here. |
-| `RunningAppInfo` | Plain-value snapshot of a running app for the "+ Add application…" picker (icon-independent `Equatable`). |
+| `ApplicationsFooterView` | The Applications card's ± footer: an `NSSegmentedControl` (`.momentaryAccelerator`, plus/minus segments). "+" opens the running-app picker via `onAdd`; "−" fires `onRemove` for the selected app row and is disabled with no selection. Replaced the retired "+ Add application…" row. |
+| `RunningAppInfo` | Plain-value snapshot of a running app for the "+" segment's running-app picker (icon-independent `Equatable`). |
 
 ## Tests
 

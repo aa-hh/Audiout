@@ -470,6 +470,54 @@ final class PopoverPanelViewController: NSViewController {
         chevronSymbolByHeader[header] = name
     }
 
+    /// Insert `view` as a row directly UNDER `sibling` (a row already mounted in
+    /// one of the cards) — the inline diagnosis panel expanding under a failed
+    /// device row (connection-status brief §7.2). `animated` reuses the
+    /// group-expansion animation approach (the popover's original NSMenu →
+    /// NSPopover motivation): animate the row's `isHidden` inside an
+    /// `NSAnimationContext` group with implicit animation on, laying out the
+    /// stack so siblings slide apart, then pin the final state in the completion
+    /// handler. No-op if `sibling` isn't currently mounted in a card.
+    func insertRow(_ view: NSView, after sibling: NSView, animated: Bool) {
+        guard let card = stackView.arrangedSubviews.compactMap({ $0 as? CardView })
+                .first(where: { $0.contentStack.arrangedSubviews.contains(sibling) }),
+              let index = card.contentStack.arrangedSubviews.firstIndex(of: sibling)
+        else { return }
+        card.insertRow(view, at: index + 1)
+        guard animated else { return }
+        view.isHidden = true
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.allowsImplicitAnimation = true
+            view.animator().isHidden = false
+            self.stackView.layoutSubtreeIfNeeded()
+        }, completionHandler: {
+            view.isHidden = false
+        })
+    }
+
+    /// Remove a row previously mounted with `insertRow(_:after:animated:)` (or
+    /// `addRow`). Animated removal collapses the row first (same animation group
+    /// as the insert), then detaches it in the completion handler; un-animated
+    /// removal detaches immediately.
+    func removeRow(_ view: NSView, animated: Bool) {
+        guard let stack = view.superview as? NSStackView else {
+            view.removeFromSuperview()
+            return
+        }
+        let detach = {
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        guard animated else { detach(); return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.allowsImplicitAnimation = true
+            view.animator().isHidden = true
+            self.stackView.layoutSubtreeIfNeeded()
+        }, completionHandler: detach)
+    }
+
     /// A small uppercase secondary column-header label (VOLUME / DEVICE / ENABLED),
     /// centered over its column in the combined header row built by `beginCard`.
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {

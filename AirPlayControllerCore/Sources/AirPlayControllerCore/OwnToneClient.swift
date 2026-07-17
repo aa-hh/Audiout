@@ -220,6 +220,27 @@ struct OwnToneOutput: Decodable, Equatable {
     let type: String
     let selected: Bool
     let volume: Int
+
+    /// Raw auth flags. Optional so an OwnTone version that omits any of them
+    /// still decodes; the backend only consumes the OR of all three (below)
+    /// for `DiagnosisContext.requiresAuth`
+    /// (`dev/notes/p1-connection-status-brief.md` §3).
+    let hasPassword: Bool?
+    let requiresAuth: Bool?
+    let needsAuthKey: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, type, selected, volume
+        case hasPassword = "has_password"
+        case requiresAuth = "requires_auth"
+        case needsAuthKey = "needs_auth_key"
+    }
+
+    /// `has_password || requires_auth || needs_auth_key` — "this speaker wants
+    /// credentials/pairing we don't support" for diagnosis purposes.
+    var requiresAnyAuth: Bool {
+        (hasPassword ?? false) || (requiresAuth ?? false) || (needsAuthKey ?? false)
+    }
 }
 
 private struct OutputsEnvelope: Decodable {

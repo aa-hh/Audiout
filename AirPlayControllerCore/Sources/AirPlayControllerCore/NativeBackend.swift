@@ -305,6 +305,18 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
 
                 let previous = self.desiredOn[id]
                 self.desiredOn[id] = wantOn
+                // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
+                // `setOutputSet`): a device newly desired ON goes `.connecting`
+                // immediately, before the engine op resolves, so the UI spinner is
+                // immediate. This also clears a sticky `.failed` on retry (the
+                // `failedGate` clear above is the routing-side twin of this). A
+                // device newly desired OFF drops any in-flight/failed indication
+                // back to `.off` right away — NativeBackend has no "sticky failed
+                // survives deselect" behavior (its park is cleared on toggle
+                // unconditionally, above), so the connection dot follows suit.
+                if previous != wantOn {
+                    self.setConnectionState(wantOn ? .connecting : .off, for: id)
+                }
                 // Kick only if the desired changed AND no loop is already running for
                 // this id (a running loop re-reads `desiredOn` when its op settles).
                 if previous != wantOn, !self.converging.contains(id) {
@@ -396,6 +408,10 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                         guard !self.failedGate.contains(id) else { return }
                         self.added.insert(id)
                         self.applyLocal(id) { $0.isSelected = true; $0.isAvailable = true }
+                        // Engine confirmed the add — connecting → connected. (An
+                        // interim out-of-band `.failed` already returned above and
+                        // left connectionState `.failed` via `applyEngineState`.)
+                        self.setConnectionState(.connected, for: id)
                     }
                 } catch {
                     // D4: no rollback of anything else. Mark THIS device
@@ -406,6 +422,7 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                         self.added.remove(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+                        self.enterFailure(id)
                     }
                     return
                 }
@@ -415,11 +432,20 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                     stateQueue.sync {
                         self.added.remove(id)
                         self.applyLocal(id) { $0.isSelected = false }
+                        // Confirmed torn down — off is a no-op if `setOutputSet`
+                        // already set it eagerly, but covers the case where an
+                        // interim event (e.g. a park) had moved it to `.failed`
+                        // while this removal was in flight.
+                        self.setConnectionState(.off, for: id)
                     }
                 } catch {
                     // Removal failed — best-effort: surface unavailable but do NOT
                     // park (a stuck-on session should still be retryable). Drop it
                     // from `added` so the loop can re-issue the stop on the next pass.
+                    // Connection state is left alone here (mirrors OwnTone's
+                    // `markUnreachable`, which doesn't touch connectionStates on a
+                    // non-terminal issue) — the device is still desired off, so the
+                    // dot should already read `.off` from `setOutputSet`'s eager set.
                     stateQueue.sync {
                         self.added.remove(id)
                         self.markUnavailable(id)
@@ -619,6 +645,10 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         var changed = false
         if device.isAvailable { device.isAvailable = false; changed = true }
         if device.isSelected { device.isSelected = false; changed = true }
+        // Brief §1: a sticky `.failed` clears to `.off` only when the device
+        // disappears entirely — this is that site (mirrors OwnToneBackend's
+        // `.failed → .off` on the poll's removal branch).
+        if device.connectionState != .off { device.connectionState = .off; changed = true }
         if changed {
             known[id] = device
             emit(.deviceUpdated(device))
@@ -683,6 +713,7 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                 }
                 device.isAvailable = true
                 device.isSelected = true
+                device.connectionState = .connected
                 self.added.insert(id)
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
@@ -696,10 +727,22 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                 device.isAvailable = false
                 device.isSelected = false
                 self.added.remove(id)
-                if self.desiredOn[id] == true { self.failedGate.insert(id) }
+                if self.desiredOn[id] == true {
+                    self.failedGate.insert(id)
+                    device.connectionState = .failed(ConnectionFailure(cause: .unknown))
+                }
             case .stopped:
                 device.isSelected = false
                 self.added.remove(id)
+                // A stopped session for a device the user hasn't re-desired-off is
+                // NOT a failure — it's a clean stop. Only clear a `.connecting` /
+                // `.connected` / `.reconnecting` dot to `.off`; leave a sticky
+                // `.failed` alone (mirrors the brief's sticky-failed rule — a
+                // resting failure isn't overwritten by a plain stop) and leave `.off`
+                // alone (no-op).
+                if case .failed = device.connectionState {} else {
+                    device.connectionState = .off
+                }
             case .startup:
                 return nil // non-terminal progress; nothing to render yet
             }
@@ -753,6 +796,12 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         } else {
             result.isAvailable = false
             result.isSelected = false
+            // AP1-only devices are never routed (D6) and must never show a
+            // connecting/failed dot. An AP2→AP1 downgrade tears down any live
+            // engine session (`teardownEngineOutput`) before this merge runs, so
+            // force the dot back to `.off` here too — it's the permanent state
+            // for a device that can no longer be added.
+            result.connectionState = .off
         }
         return result
     }
@@ -809,6 +858,37 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         stateQueue.async {
             for id in self.order { self.markUnavailable(id) }
         }
+    }
+
+    // MARK: Connection state (dev/notes/p1-connection-status-brief.md §1)
+    //
+    // Mirrors OwnToneBackend's `connectionState(of:)`/`setConnectionState(_:for:)`
+    // semantics, not its mechanism: there is no poll loop or confirm re-GET here —
+    // the engine's completions and state-stream transitions ARE ground truth, so
+    // `.connecting → .connected`/`.failed` rides the SAME hooks that already drive
+    // `isSelected`/`isAvailable` (converge success/failure, `applyEngineState`,
+    // discovery loss) rather than a separate poll-derived stability window. AP1-only
+    // devices are never routed (`setOutputSet` skips them entirely, D6) so they never
+    // reach these helpers and stay `.off` for their whole lifetime.
+
+    /// Current lifecycle state for an id; absence means `.off`.
+    private func connectionState(of id: String) -> ConnectionState {   // on stateQueue
+        known[id]?.connectionState ?? .off
+    }
+
+    /// Record a transition and echo it through the normal update machinery.
+    /// `applyLocal` no-ops (and this is a no-op) for ids not yet discovered.
+    private func setConnectionState(_ state: ConnectionState, for id: String) {   // on stateQueue
+        guard connectionState(of: id) != state else { return }
+        applyLocal(id) { $0.connectionState = state }
+    }
+
+    /// Enter the resting `.failed` state (converge add-throw or an out-of-band
+    /// `.failed`/`.passwordRequired` from the engine's state stream). NativeBackend
+    /// has no diagnostics seam (T3 is OwnTone-only per the brief; the engine's
+    /// completion IS the evidence) — always `.unknown`.
+    private func enterFailure(_ id: String) {   // on stateQueue
+        setConnectionState(.failed(ConnectionFailure(cause: .unknown)), for: id)
     }
 
     /// Recompute the effective (wire) volume after an unmute: push the stashed

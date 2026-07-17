@@ -717,6 +717,163 @@ final class NativeBackendTests: XCTestCase {
                        "a failed session must not be shown selected")
     }
 
+    // MARK: connectionState wiring (mirrors OwnToneBackend's T2 state machine semantics)
+
+    /// add → connecting → connected: `setOutputSet` flips the id ON, which must go
+    /// `.connecting` immediately (before the engine op resolves), then `.connected`
+    /// once `addOutput` succeeds and the post-success write lands.
+    func testConnectionStateAddGoesConnectingThenConnected() async {
+        let (backend, engine, discovery) = makeBackend()
+        engine.opDelayNanos = 30_000_000 // slow enough to observe the connecting frame
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:30", name: "State Machine")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.connectionState, .off)
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connecting }
+                else { return false }
+            }
+        } after: { backend.setOutputSet([device.id]) }
+        XCTAssertTrue(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connecting }
+            else { return false }
+        }, "a newly-desired-on device must go .connecting immediately, before the op resolves")
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let final = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(final?.connectionState, .connected, "a successful addOutput must land .connected")
+        XCTAssertEqual(final?.isSelected, true)
+    }
+
+    /// NACK → failed: an `addOutput` throw (engine NACK) must land `.failed`, not
+    /// just `isAvailable = false` — the status dot must light up amber.
+    func testConnectionStateAddFailureGoesFailed() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:31", name: "NACKer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            let d = backend.devices.first { $0.id == device.id }
+            if case .failed = d?.connectionState { return true }
+            return false
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        guard case .failed(let failure) = d?.connectionState else {
+            XCTFail("expected .failed after a NACKed addOutput, got \(String(describing: d?.connectionState))")
+            return
+        }
+        XCTAssertEqual(failure.cause, .unknown, "NativeBackend has no diagnostics seam — always .unknown")
+        XCTAssertEqual(d?.isAvailable, false)
+        XCTAssertEqual(d?.isSelected, false)
+    }
+
+    /// Recovery clears to connecting/connected: after a NACK parks the device
+    /// `.failed`, a discovery re-resolution clears the park (root cause 4) and a
+    /// user re-toggle retries — the connection dot must follow through
+    /// `.failed → .connecting → .connected`, not stay stuck amber.
+    func testConnectionStateRecoveryClearsFailedThenReconnects() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:32", name: "Recoverer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+
+        // The receiver settles; discovery re-resolves it. This clears the park but
+        // is not itself a retry, so the dot should NOT jump to .connecting on its
+        // own here — it stays .failed (sticky) until the user re-toggles.
+        engine.addFailures = []
+        discovery.fire(.updated(device))
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+
+        // User re-toggle: the dot must move .failed → .connecting → .connected.
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected, "a retry after recovery must reach .connected")
+        XCTAssertEqual(d?.isSelected, true)
+    }
+
+    /// toggle-off → off: deselecting a connected device must clear the dot back to
+    /// `.off` (NativeBackend has no sticky-failed-survives-deselect behavior — its
+    /// failure park is unconditionally cleared on any toggle, so the connection dot
+    /// mirrors that and does not stay amber after the user turns the device off).
+    func testConnectionStateToggleOffGoesOff() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "Toggle Off")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        backend.setOutputSet([])
+        // The dot goes .off eagerly (synchronously, ahead of the removeOutput op
+        // resolving) — wait for isSelected to catch up too so the assertion below
+        // isn't racing the in-flight removal.
+        await pollUntil(timeout: 5) {
+            let d = backend.devices.first { $0.id == device.id }
+            return d?.connectionState == .off && d?.isSelected == false
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .off)
+        XCTAssertEqual(d?.isSelected, false)
+    }
+
+    /// AP1-only devices are never routed (D6: never fed to the engine, never
+    /// addOutput-ed even if included in `setOutputSet`) and must stay `.off`
+    /// permanently — no connecting/failed dot for a device that can't be enabled.
+    func testConnectionStateAP1StaysOffPermanently() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap1 = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
+        } after: { discovery.fire(.appeared(ap1)) }
+        XCTAssertEqual(backend.devices.first { $0.id == ap1.id }?.connectionState, .off)
+
+        // Attempting to select it must not move the dot — it's never addOutput-ed.
+        backend.setOutputSet([ap1.id])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let d = backend.devices.first { $0.id == ap1.id }
+        XCTAssertEqual(d?.connectionState, .off, "an AP1-only device must never show connecting/failed")
+        XCTAssertTrue(engine.addedIDs.isEmpty)
+    }
+
     // MARK: Helpers
 
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {

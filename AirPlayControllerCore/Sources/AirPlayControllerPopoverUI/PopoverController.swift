@@ -337,10 +337,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let airplay = allDevices.filter { !$0.isLocalDevice }
         if !locals.isEmpty || !airplay.isEmpty {
             // Combined header row (change 1): "Devices" title on the left,
-            // "VOLUME" over the slider and "ENABLED" over the membership toggle
-            // on the right. Collapsible (main merge) — the collapse key must equal
-            // the display header, since cards are looked up by header title.
-            panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Enabled",
+            // "VOLUME" over the slider and "Selected" over the membership
+            // checkbox on the right. Collapsible (main merge) — the collapse key
+            // must equal the display header, since cards are looked up by header
+            // title.
+            panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Selected",
                             collapsible: true,
                             collapsed: collapsedState(for: "Devices", default: false),
                             onToggle: { [weak self] in self?.toggleCard("Devices") })
@@ -463,16 +464,29 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         return view
     }
 
+    /// Whether an app route currently redirects to this device — the canonical
+    /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
+    private func isRedirectTarget(_ id: String) -> Bool {
+        !appRouting.routedAppNames(for: id).isEmpty
+    }
+
     /// Push the current membership + local-block state into a device row.
     private func applySelectionState(to row: DeviceRowView, device: Device) {
-        guard let controller = groupController else { row.apply(device, selected: false); return }
+        guard let controller = groupController else {
+            // No controller ⇒ nothing routable ⇒ not controllable.
+            row.apply(device, selected: false, controllable: false,
+                      routedAppNames: appRouting.routedAppNames(for: device.id))
+            return
+        }
         let selected = controller.isSpeakerSelected(device.id)
         // Block only the local device when it can't currently be turned ON.
         let blocked = device.isLocalDevice && !selected && !controller.canSelectLocalSpeaker(device.id)
         row.apply(device,
                   selected: selected,
+                  controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
                   blocked: blocked,
-                  blockReason: blocked ? GroupController.localMixRefusalReason : nil)
+                  blockReason: blocked ? GroupController.localMixRefusalReason : nil,
+                  routedAppNames: appRouting.routedAppNames(for: device.id))
     }
 
     private func refreshDeviceRows() {

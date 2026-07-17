@@ -26,7 +26,7 @@ to / removed from `Package.swift`.
 ## Notable Patterns
 
 - **`Device` is a value type; the backend is the only writer.** The UI never mutates
-  a `Device` directly — it calls a backend method (`setVolume`, `setMuted`, `setSoloed`,
+  a `Device` directly — it calls a backend method (`setVolume`, `setMuted`,
   `setOutputSet`) and reacts to the echoed `deviceUpdated` event. This is what keeps
   `MockBackend` and the real backend behaviorally identical from the UI's point of view.
   See [Device.swift](Sources/AirPlayControllerCore/Device.swift).
@@ -48,7 +48,7 @@ to / removed from `Package.swift`.
   [OwnToneBackend.swift](Sources/AirPlayControllerCore/OwnToneBackend.swift) is the one
   place that knows about concrete backend types. New callers take an `OutputBackend`.
 - **Capture is gated on intent, in the backend — never the UI.** `NativeBackend` runs
-  its Core Audio process tap only while at least one real AP2 output is selected
+  its Core Audio process tap only while at least one real AP2 output is in the set
   (`reconcileCaptureGate()`, keyed on `expectedSelected` — the ids `setOutputSet` was
   last called with — deliberately not on availability, and deliberately not on
   `GroupController.isPassthrough`). The tap is `.mutedWhenTapped`: getting this wrong
@@ -57,6 +57,18 @@ to / removed from `Package.swift`.
   already excludes the local device from the output set it hands the backend, so
   passthrough reaches the gate as an empty set on its own; the two independently agree
   without either one depending on the other.
+  - **Know exactly what `expectedSelected` contains: it is Selected Devices ∪ app-route
+    redirect targets**, not the Selected set alone (`GroupController.applyRouting()` /
+    `activateGroup()` union in `redirectOutputIDs()`). So **the gate opens — and the
+    Mac goes silent — when an app is redirected even with NO device manually selected**,
+    and because the tap is a single global mixdown, the WHOLE system mix streams to that
+    device, not just the redirected app's audio. That is the known "per-app routing needs
+    per-app capture streams" limitation (see In-Progress Work), **not a regression**: before
+    the gate existed the tap ran unconditionally and muted the Mac always. Do NOT try to
+    fix it by narrowing the gate — a redirect genuinely needs a session open, so the gate
+    is right; the missing piece is per-app capture. Expect this to surprise you when
+    reading `isPassthrough`, which still reports `true` in that state (it answers "is the
+    SELECTED set just the Mac?", which stays correct).
 - Device/backend/UI behavior is spec'd in [SPEC.md](../SPEC.md), particularly §8 (Phase 0
   feasibility findings) and §9 (UI design — device row, groups, per-app routing). Comments
   cite specific subsections; the connection-status design is `dev/notes/p1-connection-status-brief.md`.
@@ -120,13 +132,13 @@ evidence, so a native `.failed` device's cause is always `.unknown`.
 
 | Type | Role |
 |---|---|
-| `Device` | Value-type snapshot of one AirPlay output (identity, kind, volume, mute/solo/selected, `connectionState`). **Trap: `isSelected` means "in the backend's current output set" (streaming now) — it is NOT membership in the UI's Selected Devices set.** Row/menu toggle state must come from `GroupController.isSpeakerSelected(_:)`, not `device.isSelected`; both `PopoverController` and `MixerViewController` compute it explicitly and pass it as the `selected` argument to `DeviceRowView.apply(_:selected:blocked:blockReason:)`. |
+| `Device` | Value-type snapshot of one AirPlay output (identity, kind, volume, mute/selected, `connectionState`). **Trap: `isSelected` means "in the backend's current output set" (streaming now) — it is NOT membership in the UI's Selected Devices set** (which lives in `GroupController.selectedDeviceIDs`). Row/menu toggle state must come from `GroupController.isSpeakerSelected(_:)`, not `device.isSelected`; both `PopoverController` and `MixerViewController` compute it explicitly and pass it as the `selected` argument to `DeviceRowView.apply(_:selected:controllable:blocked:blockReason:routedAppNames:)`. The gap is now WIDER than the name suggests: the output set is Selected ∪ redirect targets, so a redirect-only device reports `isSelected == true` while being in nobody's Selected Devices set. |
 | `Device.Kind` | Receiver category — drives SF Symbol and AirPlay-1-vs-2 assumptions. |
 | `ConnectionState` / `ConnectionFailure` | Live per-device connection lifecycle (`off`/`connecting`/`connected`/`reconnecting`/`failed`) + the plain-English cause behind a failure. Backend-owned, UI-rendered. See [ConnectionState.swift](Sources/AirPlayControllerCore/ConnectionState.swift). |
 | `ConnectionDiagnosing` / `NetworkConnectionDiagnostics` | Protocol seam + real "why didn't it connect" — engine-log tail, Bonjour presence, TCP probe, auth flags, in that decision order. `OwnToneBackend`-only; `NativeBackend` has no diagnostics seam. See [ConnectionDiagnostics.swift](Sources/AirPlayControllerCore/ConnectionDiagnostics.swift). |
-| `GroupController` | The routing brain: owns the persistent "Enabled Devices" set + Main Out target + saved output groups; composes the set, resolves Main Out, saves/activates/dedups groups. |
-| `AppRoutingController` | Per-app routing state (sibling of `GroupController`): `appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`, `handleDeviceUnavailable(id:)` silent fallback. Persists via `AppRouteStore`. |
-| `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence (`app-routes.json` / routing / `groups.json`) in `Application Support/AirPlay Controller/`, schemaVersion-gated. |
+| `GroupController` | The routing brain: owns the persistent "Selected Devices" set (`selectedDeviceIDs` — the SPEC §9 rename; "Enabled Devices" survives only as the Main Out dropdown's user-facing title, `PopoverController`) + Main Out target + saved output groups; composes the set, resolves Main Out, saves/activates/dedups groups. **Redirect-connect (main, 432aa7d):** the backend output set is **Selected AirPlay devices ∪ app-route redirect targets** — composed at every `setOutputSet` call site via the injected `appRouteTargets` closure / `redirectOutputIDs()` helper, so an AirPlay session opens the moment an app is redirected. `mainOutMemberIDs` and the Main Out master deliberately EXCLUDE redirect targets (Q5 — a redirect must not move the system master). `groupMatchingCurrentSelection` is keyed off `mainOutMemberIDs` — the membership the Main Out target names (`selectedDeviceIDs` when targeting Selected Devices, the group's own members when targeting a group) — NOT the live output set (`Device.isSelected`), so a redirect-connected device can't pollute group matching (Q3). `reapplyRouting()` re-runs the union — call it after app routes change so the affected device connects or drops to `.off`. **Launch default (Alec, 2026-07-17): the live routing set is NOT auto-resumed.** The init deliberately never reads `selectedDeviceIDs`/`mainOut` back from `routingStore` (write-only at launch); `ensureDefaultSelection()` seeds `{local}` = passthrough every launch, so a previously-selected AirPlay device never auto-streams on open. Saved GROUPS still persist and stay re-applyable — `loadPersisted` gates those, and must never again gate a routing resume. |
+| `AppRoutingController` | Per-app routing state (sibling of `GroupController`): `appRoutes`, `addRoute(bundleID:displayName:)`/`setDestination(_:for:)`/`setVolume(_:for:)`/`removeRoute(bundleID:)`, `handleDeviceUnavailable(id:)` silent fallback. `routedAppNames(for:)` returns the app display names whose route destination is a given device, excluding `.currentDevice` routes, in stable route order — both UI hosts call it to populate the `DeviceRowView` routing sublabel AND to decide whether a device is a redirect target (grounding the row's `controllable` param). `AppDelegate` wires it into `GroupController.appRouteTargets` (assigned after construction — the var is publicly assignable precisely to break that init-order cycle). Persists via `AppRouteStore`. |
+| `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence (`app-routes.json` / routing / `groups.json`) in `Application Support/AirPlay Controller/`, schemaVersion-gated. `RoutingStore` is WRITE-ONLY at launch by design — see the `GroupController` launch-default note above. |
 | `BackendEvent` | The single push channel backend→UI: device added/removed/updated, or a level sample. |
 | `OutputBackend` | The seam between app and audio routing — implemented by `MockBackend`, `OwnToneBackend`, and `NativeBackend`. |
 | `MockBackend` | Fully-working offline backend: fabricates a fleet, staggers discovery, emits levels, simulates dropout/reconnect, and runs scripted connect/fail/drop choreography (`ConnectScript`). |
@@ -143,7 +155,8 @@ evidence, so a native `.failed` device's cause is always `.unknown`.
 |---|---|
 | `OwnToneBackend` | Fully implemented (not a stub) — HTTP polling, zombie recovery, real connection-state + diagnostics wiring. Superseded by `NativeBackend` as the shipping path once Phase 2/2b built the in-process engine instead of continuing against an external OwnTone server; not being carried further. Historical pipe-input findings: `dev/notes/0f-pipe-brief.md`. |
 | `NativeBackend` | The shipping backend (`AIRPLAY_BACKEND=native`). AP1-only receivers are discovered/shown but not driven (raop sender deferred, D6). One gated live-verification session with real hardware remains before it's production-ready (root AGENTS.md; `dev/notes/p2b-nativebackend-runbook.md`). |
-| Per-app routing (`AppRoutingController`/`AppRouteStore`) | UI + model + persistence COMPLETE (SPEC.md §9, PLAN-POPOVER-ROUTING.md T-1..T-8/T-11). Routes persist and render but move no audio yet: `NativeCaptureCoordinator`'s tap is a whole-system stereo mixdown (`CATapDescription(stereoGlobalTapButExcludeProcesses: [])`) — per-app streams are, per its own doc comment, "a later concern." |
+| Per-app routing (`AppRoutingController`/`AppRouteStore`) | Model + persistence + UI COMPLETE (SPEC.md §9, PLAN-POPOVER-ROUTING.md T-1..T-8/T-11), and a redirect now **connects** its target device (`GroupController.appRouteTargets` ∪ into the output set). But it still does **not move that app's audio in isolation**: `NativeCaptureCoordinator`'s tap is a whole-system stereo mixdown (`CATapDescription(stereoGlobalTapButExcludeProcesses: [])`) — per-app streams are, per its own doc comment, "a later concern." **Consequence (see the capture-gate pattern above): redirecting ONE app streams the WHOLE system mix to that device and mutes the Mac.** Known limitation, not a regression — don't "fix" it in the gate; it needs per-app capture streams. |
+| Routing sublabel / device row | COMPLETE in both hosts. `PopoverController` + `MixerViewController` pass `routedAppNames` (from `AppRoutingController.routedAppNames(for:)`) and `controllable` (`selected ‖ isRedirectTarget`) into `DeviceRowView.apply(...)`; `MixerViewController`/`MixerWindowController` gained an `AppRoutingController` param (defaulted to a non-persisting instance so existing call sites/tests still compile). The row renders ONE sublabel by precedence: failed → unavailable → routing line ("System · <apps>") → none. |
 | Per-device connection status | COMPLETE against the mock; also real under `native` — `off`/`connecting`/`connected`/`failed` all driven from `setOutputSet`'s eager set plus `engine.makeStateStream()` transitions (no `.reconnecting`: a failed native session is parked, not retried). `NativeBackend` has no diagnostics seam, so a `.failed` cause is always `.unknown`; full `ConnectionDiagnosing` only runs under `OwnToneBackend`. |
 | `AirPlayControllerApp` | A real menu-bar (`NSStatusItem`, `LSUIElement`) executable target — built into "AirPlay Controller.app" by `scripts/make-app.sh` (ad-hoc signed), runnable offline via `AIRPLAY_BACKEND=mock AIRPLAY_MOCK_SCENARIO=connection-demo`. NOT yet distributed/notarized. Moves real audio today via `AIRPLAY_BACKEND=native` — must run as the built `.app` (not bare `swift run`) to keep the TCC grant for the capture tap across rebuilds. |
 
@@ -164,12 +177,12 @@ checks; run them alongside `swift test`.
 | `OwnToneBackendTests` | Connection-state transitions, diagnostics dispatch, post-stop resurrection guard. |
 | `NativeBackendTests` | Hermetic native-backend behavior via a spy `EngineControlling` + injected `DiscoverySource`: discovery→`deviceAdded`, AP1 surfaced-never-added, out-of-band engine state→`deviceUpdated`, converge/coalescing, the mute shim, the capture gate, and local-device volume/mute via a fake `SystemVolumeControlling`. |
 | `ConnectionStateTests` / `ConnectionDiagnosticsTests` | Failure copy/equality; `NetworkConnectionDiagnostics` decision order. |
-| `GroupControllerTests` | Enabled-set composition, Main Out routing, group save/activate/dedup, persistence. |
-| `AppRoutingControllerTests` / `AppRouteStoreTests` | Per-app route model + silent fallback; JSON persistence round-trip + schema gating. |
+| `GroupControllerTests` | Selected-set composition, Main Out routing, group save/activate/dedup, persistence. Also the redirect union (Selected ∪ `appRouteTargets`, `reapplyRouting()` connect/drop, master + group-identity exclusion) and `testGroupsPersistButRoutingResetsToLocalOnLaunch` — the guard on the launch default: **groups persist, the live AirPlay routing set does not auto-resume.** |
+| `AppRoutingControllerTests` / `AppRouteStoreTests` | Per-app route model + silent fallback + `routedAppNames(for:)` ordering/filtering; JSON persistence round-trip + schema gating. |
 | `AppSettingsTests` / `ExcludedAppsTests` | `AppSettings` (theme/density/start-buffer) and the excluded-apps list: defaults, round-trip, forward-compat fallback on an unrecognized stored value. |
 | `PopoverControllerTests` | Popover build, collapsible cards, Applications card, connection-status flow + diagnosis panels. |
 | `PopoverExcludedAppsTests` | An excluded app is dropped from the popover's "+ Add application…" picker and its route row is skipped on rebuild. |
-| `DeviceRowConnectionStateTests` / `DeviceRowUnsupportedTests` / `ConnectionDiagnosisViewTests` / `AppRowViewTests` | Row status badge per state; AP1-only dimming/disabled row + "coming soon" click explanation; failure-panel copy/actions; app-row config. |
+| `DeviceRowConnectionStateTests` / `DeviceRowUnsupportedTests` / `ConnectionDiagnosisViewTests` / `AppRowViewTests` | Row status badge per state + the sublabel precedence ladder (failed → unavailable → routing line) and `controllable` slider/mute enabling; AP1-only dimming/disabled row + "coming soon" click explanation; failure-panel copy/actions; app-row config. |
 | `MixerWindowControllerTests` | Full mixer-window wiring (shared row reuse). |
 | `SettingsWindowControllerTests` / `AudioSettingsLatencyTests` | Settings window structure via `test_` hooks (General/Appearance/Audio panes fit on one screen); the Advanced audio-buffer control specifically (numeric options, apply round-trip, CTA arming, env-override disabled state). |
 | `CaptureCoordinatorTests` / `BackendKindResolutionTests` | OwnTone-path capture-tap coordination; `makeBackend` kind resolution (mock/owntone/native) + the native start-buffer env-override/settings resolution. |

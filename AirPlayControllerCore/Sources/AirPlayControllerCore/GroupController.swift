@@ -52,6 +52,15 @@ public final class GroupController {
 
     private var memberState: [String: MemberState] = [:]
 
+    /// App-route redirect targets that must ALSO be connected (an AirPlay session
+    /// opens the moment an app is redirected, before per-app capture exists). These
+    /// device ids are UNIONed into the backend output set at every applyRouting()
+    /// call site, but are deliberately kept OUT of selectedDeviceIDs and
+    /// mainOutMemberIDs (Q5: a redirect must not move the system master). Injected
+    /// as a closure so GroupController does not depend on AppRoutingController.
+    /// Defaults to {} so tests and legacy callers are unaffected.
+    public var appRouteTargets: () -> Set<String> = { [] }
+
     // MARK: Main Out / Selected Devices (SPEC.md §9 2026-07-14b — SoundSource model)
     //
     // Per-device toggles no longer route audio. They compose a PERSISTENT ad-hoc
@@ -81,12 +90,20 @@ public final class GroupController {
     ///   - store: persistence for saved groups. Defaults to the on-disk store
     ///     at ``GroupStore/defaultDirectory``; tests inject one pointed at a
     ///     temp directory.
-    ///   - loadPersisted: load `store`'s saved groups immediately. Tests that
-    ///     don't care about persistence can skip the disk hit.
+    ///   - loadPersisted: load `store`'s saved GROUPS immediately. Tests that
+    ///     don't care about persistence can skip the disk hit. Scoped to groups
+    ///     ONLY — it deliberately does not resume the live Selected-Devices
+    ///     routing set (see the decision note in the body).
+    ///   - routingStore: persistence for the live routing set. WRITE-ONLY at
+    ///     launch by design — `persistRouting()` saves to it, nothing reads it
+    ///     back (same decision note).
+    ///   - appRouteTargets: injected redirect targets to union into the backend
+    ///     output set; see ``appRouteTargets``.
     public init(backend: OutputBackend,
                 store: GroupStore = GroupStore(),
                 routingStore: RoutingStore = RoutingStore(),
-                loadPersisted: Bool = true) {
+                loadPersisted: Bool = true,
+                appRouteTargets: @escaping () -> Set<String> = { [] }) {
         self.backend = backend
         self.store = store
         self.routingStore = routingStore
@@ -103,7 +120,16 @@ public final class GroupController {
         // `routingStore` is retained so ongoing changes are still SAVED (via
         // `persistRouting()`), which keeps the field live and lets a future
         // "resume last routing" option read it back without a signature change.
+        //
+        // MERGE NOTE (2026-07-17, phase2b ← main): main branched before this
+        // decision and its side of this hunk restored routing here via
+        // `routingStore.load()` under `loadPersisted`. That restore is
+        // deliberately NOT carried forward. `loadPersisted` still gates SAVED
+        // GROUPS (`store.load()` above) — it is a live knob, not vestigial — but
+        // it must never again gate a routing resume. Do not "restore" the read
+        // below; it is absent on purpose.
         _ = routingStore
+        self.appRouteTargets = appRouteTargets
     }
 
     /// True once the out-of-the-box default has been established, so
@@ -267,6 +293,16 @@ public final class GroupController {
     /// `isPassthrough` directly — an unconsulted version of exactly that assumption
     /// is what let a passthrough session mute the Mac in the first place (the tap
     /// ran unconditionally; nothing here ever stopped it).
+    ///
+    /// MERGE NOTE (2026-07-17, phase2b ← main): the "passthrough ⇒ empty output
+    /// set" agreement above holds only for the SELECTED set. `applyRouting()` now
+    /// also unions `redirectOutputIDs()`, so with an app redirected to an AirPlay
+    /// device the backend receives a NON-empty set — the capture gate opens and the
+    /// tap (a single global `.mutedWhenTapped`) silences the whole Mac — while this
+    /// property still reports `true`. That is the known "per-app routing needs
+    /// per-app capture streams" limitation, NOT a bug in either side: this property
+    /// answers "is the SELECTED set just the Mac?", which stays correct. It is one
+    /// more reason nothing in the audio path may key off `isPassthrough`.
     public var isPassthrough: Bool {
         guard mainOut == .selectedDevices, let local = localDeviceID else { return false }
         return selectedDeviceIDs == [local]
@@ -290,13 +326,30 @@ public final class GroupController {
         case .selectedDevices:
             activeGroupID = nil
             // Only real (AirPlay) outputs go to the backend; the local device is
-            // the Mac's own output, represented by an EMPTY output set.
+            // the Mac's own output, represented by an EMPTY output set. Redirect
+            // targets (app routes) are UNIONed in so an AirPlay session opens the
+            // moment an app is redirected (Q1) — kept out of selectedDeviceIDs.
             let outputs = selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
-            backend.setOutputSet(outputs)
+            backend.setOutputSet(outputs.union(redirectOutputIDs()))
         case .group(let id):
             activateGroup(id: id)
         }
     }
+
+    /// The redirect-target output ids to union into the backend set: the injected
+    /// app-route targets, filtered to devices that exist and are NOT the local Mac
+    /// (defensive — .device(id:) is non-local by construction, but a target may be
+    /// unknown/stale). Never touches selectedDeviceIDs or mainOutMemberIDs.
+    private func redirectOutputIDs() -> Set<String> {
+        appRouteTargets().filter { device($0)?.isLocalDevice == false }
+    }
+
+    /// Re-run routing against the CURRENT Main Out target + Selected set + the
+    /// injected app-route targets. Call after app routes change (redirect set /
+    /// changed / removed) so the redirect-target union is recomputed and the
+    /// affected device connects or leaves the output set (→ .off). Cheap; the
+    /// backend no-ops when the set is unchanged.
+    public func reapplyRouting() { applyRouting() }
 
     // MARK: Group identity — member-set matching (SPEC.md §9 "DEDUP / group identity")
     //
@@ -317,13 +370,17 @@ public final class GroupController {
         return groups.first { Set($0.memberIDs) == memberSet }
     }
 
-    /// The saved group whose members equal the current output set (the devices
-    /// the backend reports as `isSelected`), or nil for an ad-hoc selection that
-    /// matches no group. This is the derived notion behind
-    /// ``syncActiveGroupToSelection()``.
+    /// The saved group whose members equal the current Main Out target's
+    /// membership, or nil for an ad-hoc selection that matches no group. This is
+    /// the derived notion behind ``syncActiveGroupToSelection()``.
     public var groupMatchingCurrentSelection: Group? {
-        let selected = Set(backend.devices.filter(\.isSelected).map(\.id))
-        return group(matchingMemberSet: selected)
+        // Keyed off the MEMBERSHIP the Main Out target names (`mainOutMemberIDs`
+        // — selectedDeviceIDs when targeting Selected Devices, the group's own
+        // members when targeting a group), NOT the live output set
+        // (`Device.isSelected`): redirect targets now enter the output set, so
+        // matching on it would spuriously pollute group identity (Q3).
+        // `mainOutMemberIDs` is exactly the redirect-free membership set.
+        return group(matchingMemberSet: mainOutMemberIDs)
     }
 
     /// Reconcile ``activeGroupID`` with the live output set: if the current
@@ -440,7 +497,10 @@ public final class GroupController {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
         memberState.removeAll()
-        backend.setOutputSet(Set(group.memberIDs))
+        // Union redirect targets so an app-redirect session isn't dropped when
+        // Main Out points at a group (Q1). Redirect ids stay out of the group's
+        // membership + the Main Out master set (Q5).
+        backend.setOutputSet(Set(group.memberIDs).union(redirectOutputIDs()))
         for memberID in group.memberIDs {
             if let volume = group.memberVolumes[memberID] {
                 backend.setVolume(volume, for: memberID)

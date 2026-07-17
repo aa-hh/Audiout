@@ -100,6 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Construct the production AppRoutingController explicitly (T-11), using
         // the default store directory so app routes persist to Application Support.
         appRouting = AppRoutingController(store: AppRouteStore())
+        // Redirect targets feed GroupController's connect union (an AirPlay session
+        // opens the moment an app is redirected). Union of every app route's
+        // .device(id:) target — non-local by construction. Assigned AFTER appRouting
+        // exists (groupController was built at :98, before appRouting) — the var is
+        // publicly assignable precisely to avoid this init-order cycle.
+        groupController.appRouteTargets = { [weak appRouting] in
+            guard let appRouting else { return [] }
+            return Set(appRouting.appRoutes.compactMap { route in
+                if case .device(let id) = route.destination { return id }
+                return nil
+            })
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
@@ -131,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = mixerWindowController {
             controller = existing
         } else {
-            controller = MixerWindowController(groupController: groupController)
+            controller = MixerWindowController(groupController: groupController, appRouting: appRouting)
             mixerWindowController = controller
         }
         controller.update(devices: Array(devicesByID.values))

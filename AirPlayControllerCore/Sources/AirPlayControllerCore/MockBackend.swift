@@ -214,4 +214,18 @@ public extension Array where Element == Device {
             Device(id: "office",       name: "Office",        kind: .generic,        volume: 50),
         ]
     }
+
+    /// `demoFleet` PLUS one extra, explicitly-named AP1-only fixture
+    /// (T-UI-AP1-1, PLAN-PHASE-2B D6): discovered but `NativeBackend` never
+    /// `addOutput`s it — the popover renders it dimmed/disabled with a
+    /// "coming soon" explanation on click. A SEPARATE array (not appended to
+    /// `demoFleet` itself) so the many existing hardcoded `count == 7`
+    /// assertions elsewhere stay untouched; tests that want the AP1-only row
+    /// opt in with this fleet instead.
+    static var demoFleetWithAP1Only: [Device] {
+        demoFleet + [
+            Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,
+                   supportsAirPlay2: false, volume: 20),
+        ]
+    }
 }

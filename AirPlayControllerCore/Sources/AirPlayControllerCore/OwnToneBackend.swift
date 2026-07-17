@@ -1,4 +1,5 @@
 import Foundation
+import AirPlayEngine
 
 /// The real ``OutputBackend``: drives OwnTone's JSON API (`:3689`) for the
 /// outputs list / selection / volume, and mirrors OwnTone's state into the UI
@@ -481,6 +482,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
 public enum BackendKind {
     case mock
     case ownTone
+    case native
 
     /// The env var that selects a backend when no explicit argument is given.
     /// Maps onto a future hidden Developer setting in the app (SPEC.md §4 seam).
@@ -503,6 +505,7 @@ public enum BackendKind {
         switch raw.lowercased() {
         case "mock":    return .mock
         case "owntone": return .ownTone
+        case "native":  return .native
         default:
             FileHandle.standardError.write(
                 Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — falling back to mock\n".utf8)
@@ -530,5 +533,14 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         // defaults; a shipped `.app` would pass the embedded binary's path.
         backend.captureCoordinator = CaptureCoordinator()
         return backend
+    case .native:
+        // In-process AirPlayEngine + app-owned discovery/capture. See
+        // NativeBackend.swift / NativeCaptureCoordinator.swift (T-NB-BACKEND-1,
+        // T-NB-CAPTURE-1) for the engine-driven equivalent of the OwnTone path
+        // above.
+        let engine = AirPlayEngine()
+        let nativeBackend = NativeBackend(engine: engine)
+        nativeBackend.captureCoordinator = NativeCaptureCoordinator(engine: engine)
+        return nativeBackend
     }
 }

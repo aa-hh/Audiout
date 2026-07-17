@@ -29,4 +29,14 @@ final class BackendKindResolutionTests: XCTestCase {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "sonos"])
         XCTAssertEqual(resolved, .mock, "an unrecognized value should fall back to mock, not crash")
     }
+
+    func testEnvVarSelectsNative() {
+        let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "native"])
+        XCTAssertEqual(resolved, .native)
+    }
+
+    func testEnvVarForNativeIsCaseInsensitive() {
+        let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "Native"])
+        XCTAssertEqual(resolved, .native)
+    }
 }

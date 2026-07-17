@@ -41,6 +41,9 @@ import AirPlayEngine
 /// coordinator set one) for the play half.
 public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
 
+    /// Sentinel ID for the synthetic local-Mac device (matches MockBackend).
+    private static let localMacID = "local-mac"
+
     /// The steady-state poll interval (brief §3 recommends 1 s: fast enough to
     /// catch zombie drops within a UI-imperceptible window, cheap against a
     /// local server).
@@ -54,6 +57,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
 
     private let client: OwnToneClient
     private let webSocket: OwnToneWebSocketMonitor?
+    private let outputObserver: DefaultOutputObserver?
 
     /// The coordinator (T-C2) sets this to supply the play half of zombie
     /// recovery (clear→add→play). `OwnToneBackend` owns re-*select*; the
@@ -131,8 +135,8 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// with the best-effort `:3688` websocket accelerant and 1 s polling.
     /// (`OwnToneClient` / `OwnToneWebSocketMonitor` are internal by design —
     /// T-C4 keeps the OwnTone name off any public symbol.)
-    public convenience init() {
-        self.init(client: OwnToneClient(), webSocket: OwnToneWebSocketMonitor())
+    public convenience init(outputObserver: DefaultOutputObserver? = nil) {
+        self.init(client: OwnToneClient(), webSocket: OwnToneWebSocketMonitor(), outputObserver: outputObserver)
     }
 
     /// Injectable designated initializer (internal — tests pass a client backed
@@ -150,12 +154,14 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     init(
         client: OwnToneClient,
         webSocket: OwnToneWebSocketMonitor?,
+        outputObserver: DefaultOutputObserver? = nil,
         pollInterval: TimeInterval = 1.0,
         unreachablePollInterval: TimeInterval = 3.0,
         connectingTimeout: TimeInterval = 10.0
     ) {
         self.client = client
         self.webSocket = webSocket
+        self.outputObserver = outputObserver
         self.pollInterval = pollInterval
         self.unreachablePollInterval = unreachablePollInterval
         self.connectingTimeout = connectingTimeout
@@ -189,6 +195,35 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         stateQueue.async {
             guard !self.started else { return }
             self.started = true
+
+            // Inject the synthetic local-Mac device if the observer is present.
+            if let observer = self.outputObserver {
+                observer.onChange = { [weak self] newName in
+                    guard let self else { return }
+                    self.stateQueue.async {
+                        let id = OwnToneBackend.localMacID
+                        guard var device = self.known[id] else { return }
+                        device.name = newName
+                        self.known[id] = device
+                        self.emit(.deviceUpdated(device))
+                    }
+                }
+                observer.start()
+                let device = Device(
+                    id: OwnToneBackend.localMacID,
+                    name: observer.currentDeviceName,
+                    kind: .localMac,
+                    isAvailable: true,
+                    supportsAirPlay2: false,
+                    volume: 100,
+                    isMuted: false,
+                    isSelected: false,
+                    isLocalDevice: true
+                )
+                self.known[OwnToneBackend.localMacID] = device
+                self.order.insert(OwnToneBackend.localMacID, at: 0)
+                self.emit(.deviceAdded(device))
+            }
         }
         // Wire + start the capture pipeline (real path only). The coordinator's
         // `replayPlayback` is the play half of zombie recovery; `recoverZombies`
@@ -223,6 +258,8 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
         // Tear down the capture pipeline first (SIGINT the child + player/stop)
         // so no paused pipe session lingers (0f-pipe-brief.md:19-20).
         captureCoordinator?.stop()
+        outputObserver?.onChange = nil
+        outputObserver?.stop()
         webSocket?.onNotification = nil
         webSocket?.stop()
         pollTask?.cancel()
@@ -392,8 +429,10 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
             // Removals: known ids absent from this poll. Departure clears every
             // per-id trace — `.failed → .off` happens only here (connection-
             // status brief §1: a failed device keeps its warning until it
-            // disappears entirely).
-            for id in self.order where !polledIDs.contains(id) {
+            // disappears entirely). The synthetic local-Mac device is skipped:
+            // it is not in OwnTone's output list by design, so every poll would
+            // otherwise "remove" it.
+            for id in self.order where !polledIDs.contains(id) && id != OwnToneBackend.localMacID {
                 self.known[id] = nil
                 self.connectionStates[id] = nil
                 self.pendingStable.remove(id)
@@ -401,7 +440,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
                 self.cancelConnectionTimeout(id)
                 self.emit(.deviceRemoved(id: id))
             }
-            self.order.removeAll { !polledIDs.contains($0) }
+            self.order.removeAll { !polledIDs.contains($0) && $0 != OwnToneBackend.localMacID }
 
             // Additions + updates.
             var zombieDrops: [String] = []
@@ -789,10 +828,12 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         // `AIRPLAY_MOCK_SCENARIO=connection-demo` the mock choreographs
         // failures/retries/mid-stream drops so every ConnectionState is
         // demoable offline; any other/missing value resolves to no scripts
-        // (exact pre-existing behaviour).
-        return MockBackend(connectScripts: MockBackend.resolveScenarioScripts())
+        // (exact pre-existing behaviour). The observer gives the mock's local
+        // row the real default-output name instead of a hardcoded one.
+        return MockBackend(connectScripts: MockBackend.resolveScenarioScripts(),
+                           outputObserver: DefaultOutputObserver())
     case .ownTone:
-        let backend = OwnToneBackend()
+        let backend = OwnToneBackend(outputObserver: DefaultOutputObserver())
         // Attach the capture pipeline (T-C2). The coordinator spawns the audiocap
         // subprocess, creates the FIFO in OwnTone's library dir, reconciles the
         // rate, and drives explicit playback. The backend starts/stops it and

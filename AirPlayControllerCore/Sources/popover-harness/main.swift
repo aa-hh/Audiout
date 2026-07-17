@@ -130,8 +130,8 @@ func run() -> Int32 {
     print("\n[2] Main Out selector sections")
     checks.expect(popover.test_mainOutRow.test_selectableTargets.contains(.selectedDevices),
                   "selector offers Selected Devices")
-    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Enabled Devices"),
-                  "selector has an Enabled Devices entry")
+    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Selected Devices"),
+                  "selector has a Selected Devices entry")
 
     // --- 3. Auto-swap: toggling an AirPlay device ON while local is sole member drops local.
     print("\n[3] Auto-swap (AirPlay ON while current device is sole member)")
@@ -247,7 +247,7 @@ func run() -> Int32 {
     // --- 13. Main Out named dropdown reflects the current target's title (task B).
     print("\n[13] Main Out named dropdown")
     popover.test_selectMainOut(.selectedDevices); drain()
-    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Enabled Devices",
+    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
                        "the Main Out dropdown shows the current target's name")
     popover.test_selectMainOut(.group(id: group.id)); drain()
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
@@ -302,12 +302,10 @@ func run() -> Int32 {
         checks.expect(false, "the seeded app row's destination menu exists")
     }
 
-    // --- 18. Add row present last; picking an app via the picker hook adds a row.
-    print("\n[18] Add-application row is last; picker hook adds a row")
-    let cardsAfterSeed = topLevelCards(panelView: popover.test_panelView)
-    checks.expect(allLabelStrings(under: cardsAfterSeed[cardsAfterSeed.count - 1])
-                    .contains(where: { $0.contains("Add application") }),
-                  "the Applications card body ends with the Add-application row")
+    // --- 18. ± footer present; picking an app via the picker hook adds a row.
+    print("\n[18] Applications ± footer present; picker hook adds a row")
+    checks.expect(!popover.test_applicationsFooterRemoveEnabled,
+                  "the − segment starts disabled with nothing selected")
     let safariBundleID = "com.apple.Safari"
     let runningApps = [RunningAppInfo(bundleID: safariBundleID, displayName: "Safari", icon: nil)]
     let pickerPopover = PopoverController(appRouting: appRouting, runningAppsProvider: { runningApps })
@@ -318,22 +316,37 @@ func run() -> Int32 {
     checks.expect(pickerPopover.test_appRow(for: safariBundleID) != nil,
                   "the picked app's row is mounted under its bundle id")
 
-    // --- 19. Removing a route resets the card.
-    print("\n[19] Removing a route resets the card")
+    // --- 19. Selecting a row enables the − segment; the ± footer's "−" removes
+    // the selected app and advances selection to the neighbor.
+    print("\n[19] Row selection + ± footer remove")
+    checks.expectEqual(pickerPopover.test_selectedAppBundleID, nil, "nothing selected initially")
+    pickerPopover.test_selectAppRow(bundleID: musicBundleID)
+    checks.expectEqual(pickerPopover.test_selectedAppBundleID, musicBundleID,
+                       "selecting a row records it as the host's selection")
+    checks.expect(pickerPopover.test_applicationsFooterRemoveEnabled,
+                  "the − segment is enabled once a row is selected")
+    pickerPopover.test_tapApplicationsFooterRemove()
+    checks.expectEqual(pickerPopover.test_appRowCount, 1, "the − segment removed the selected app")
+    checks.expect(pickerPopover.test_appRow(for: musicBundleID) == nil, "Music's row is gone")
+    checks.expectEqual(pickerPopover.test_selectedAppBundleID, safariBundleID,
+                       "selection advanced to the remaining neighbor")
+
+    // --- 20. Removing a route (via a row's own remove path) resets the card.
+    print("\n[20] Removing a route resets the card")
     if let safariRow = pickerPopover.test_appRow(for: safariBundleID) {
         safariRow.test_remove()
     }
-    checks.expectEqual(pickerPopover.test_appRowCount, 1, "removing Safari leaves just Music")
+    checks.expectEqual(pickerPopover.test_appRowCount, 0, "removing Safari leaves the card empty")
     appRouting.removeRoute(bundleID: musicBundleID)
     popover.test_simulateOpen()
     checks.expectEqual(popover.test_appRowCount, 0, "removing the last route empties the card")
     checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
                        "the card collapses again once no app is redirected")
 
-    // --- 20. Connection-status flow (brief §7.3), on a scripted MockBackend:
+    // --- 21. Connection-status flow (brief §7.3), on a scripted MockBackend:
     // fail → toggle bounced + warning + auto-expanded panel; sticky warning
     // survives the cleanup setOutputSet; "Try again" → connected + panel gone.
-    print("\n[20] Connection-status flow (scripted MockBackend)")
+    print("\n[21] Connection-status flow (scripted MockBackend)")
     runConnectionStatusChecks(checks)
 
     print("\n----------------------------------------")

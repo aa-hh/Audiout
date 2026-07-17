@@ -8,7 +8,10 @@ import AppKit
 /// always-visible `NSSlider` (dimmed while the app plays on the
 /// current device, decision 3) · `%` readout · a trailing "redirect audio to…"
 /// `NSPopUpButton` sectioned **Current Device** / **AirPlay Devices** (decision
-/// 4 — no Groups section) · a hover-revealed remove (✕) affordance.
+/// 4 — no Groups section). Removal is no longer a per-row hover affordance —
+/// it's the Applications card's ± footer segmented control, a "Remove from
+/// list" context-menu item, and Delete/Backspace on the selected row, all
+/// routed through `Delegate.appRow(_:didRemoveFor:)`.
 ///
 /// Laid out on the shared ``PopoverColumnGrid`` exactly like `DeviceRowView`,
 /// so its slider/trailing-control columns line up with every other row type
@@ -30,8 +33,18 @@ public final class AppRowView: NSView {
         /// `destinationID` is one of the ids passed in ``Configuration/destinations``
         /// (the local "Current Device" entry or an AirPlay device id).
         func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String)
-        /// The user clicked the hover-revealed ✕ to remove this app row entirely.
+        /// The user removed this app row entirely, via the ± footer's "−"
+        /// segment, the row's "Remove from list" context-menu item, or
+        /// Delete/Backspace on the selected row — all three paths funnel
+        /// through this single call.
         func appRow(_ row: AppRowView, didRemoveFor appID: String)
+        /// The user clicked the row body (icon/name/dead-zone — NOT the slider or
+        /// destination popup) or right-clicked it, requesting this row become the
+        /// list's single selection. The HOST owns "which bundleID is selected" —
+        /// this view only reports intent and renders whatever `test_setSelected`/
+        /// the next `apply` tells it. The host re-pushes selection into every row
+        /// recreated by a `PopoverController.rebuild()`.
+        func appRow(_ row: AppRowView, didRequestSelect appID: String)
     }
 
     /// One entry in the destination popup (either the local "Current Device"
@@ -71,8 +84,7 @@ public final class AppRowView: NSView {
         }
     }
 
-    /// Same comfortable Control-Center row density as `DeviceRowView`, plus the
-    /// row must also seat the hover-revealed remove button.
+    /// Same comfortable Control-Center row density as `DeviceRowView`.
     public static let rowHeight: CGFloat = 38
 
     public weak var delegate: Delegate?
@@ -88,20 +100,27 @@ public final class AppRowView: NSView {
     private let slider = NSSlider()
     private let readoutLabel = NSTextField(labelWithString: "")
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    /// Hover-revealed remove affordance (HoverActionButton idiom — a borderless
-    /// button that paints its own subtle hover highlight, since `HoverActionButton`
-    /// itself lives in the popover UI target and isn't visible from here).
-    private let removeButton = RowHoverButton()
 
     private var isDraggingSlider = false
-    /// Transient pointer-hover state, reconciled exactly like `DeviceRowView`'s
-    /// sticky-hover fix (PLAN risk 2): cleared on every model refresh and on
-    /// re-parenting, backed by an app-local mouse-moved monitor so a hover can
-    /// never "stick" after the pointer leaves without a matching `mouseExited`.
-    private var isHovered: Bool = false {
-        didSet { if isHovered != oldValue { removeButton.isHidden = !isHovered; setNeedsDisplay(bounds) } }
+
+    /// Single-selection render state (T1 seam). The HOST owns which bundleID is
+    /// selected across the whole Applications list — this view only renders
+    /// whatever it's told via `apply`'s isSelected flag or `test_setSelected`,
+    /// and reports a *request* to select via `Delegate.appRow(_:didRequestSelect:)`
+    /// when its body is clicked. Like hover, it is cleared on every `apply` call
+    /// site that doesn't explicitly re-assert it (see `apply(_:isSelected:)`).
+    private var isSelected: Bool = false {
+        didSet { if isSelected != oldValue { setNeedsDisplay(bounds) } }
     }
-    private var mouseMovedMonitor: Any?
+
+    /// Transient hover render state, kept SEPARATE from selection so the two
+    /// draw in different colours (neutral hover vs accent selection). Reconciled
+    /// against the true pointer position (sticky-hover discipline) and cleared
+    /// on every `apply` and re-parenting.
+    private var isHovered: Bool = false {
+        didSet { if isHovered != oldValue { setNeedsDisplay(bounds) } }
+    }
+    private var hoverMoveMonitor: Any?
 
     public init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
@@ -120,8 +139,11 @@ public final class AppRowView: NSView {
         self.destinations = configuration.destinations
         self.isLocal = configuration.destinations.first { $0.id == configuration.selectedDestinationID }?.isLocal
             ?? true
-        // A model refresh clears any transient hover, matching `DeviceRowView`'s
-        // T-U8 fix (PLAN risk 2) — hover is transient, never model-driven.
+        // `apply(_:)` (no selection param) is the "clear like hover used to be"
+        // where the caller doesn't care about selection. `PopoverController`
+        // (T3) re-asserts selection across a `rebuild()` by calling
+        // `apply(_:isSelected:)` or `test_setSelected` right after `apply`.
+        self.isSelected = false
         self.isHovered = false
 
         iconView.image = configuration.icon
@@ -141,7 +163,32 @@ public final class AppRowView: NSView {
         setNeedsDisplay(bounds)
     }
 
+    /// Same as `apply(_:)`, but atomically re-asserts selection afterward —
+    /// the host's seam for surviving `PopoverController.rebuild()` (which
+    /// recreates every row) without a visible deselect/reselect flicker. The
+    /// HOST is the source of truth for "which bundleID is selected"; pass the
+    /// result of comparing `configuration.appID` against its stored
+    /// `selectedAppBundleID`.
+    public func apply(_ configuration: Configuration, isSelected: Bool) {
+        apply(configuration)
+        self.isSelected = isSelected
+    }
+
     private func rebuildDestinationMenu(selecting selectedID: String) {
+        let (menu, currentItem) = buildDestinationMenu(
+            selecting: selectedID, action: #selector(destinationChanged(_:)))
+        destinationPopUp.menu = menu
+        if let currentItem { destinationPopUp.select(currentItem) }
+    }
+
+    /// Shared builder behind both the trailing destination popup and the
+    /// context menu's "Route to" submenu (T5) — same two sections (LOCKED
+    /// DECISION 4 — no Groups), same entries, same checkmark, just a
+    /// caller-supplied action selector so each host can route the pick back
+    /// through `destinationChanged(_:)`.
+    private func buildDestinationMenu(
+        selecting selectedID: String, action: Selector
+    ) -> (menu: NSMenu, currentItem: NSMenuItem?) {
         let menu = NSMenu()
         var currentItem: NSMenuItem?
 
@@ -166,7 +213,7 @@ public final class AppRowView: NSView {
         if !localEntries.isEmpty {
             addHeader("Current Device")
             for entry in localEntries {
-                let item = menuItem(for: entry, isCurrent: entry.id == selectedID)
+                let item = menuItem(for: entry, isCurrent: entry.id == selectedID, action: action)
                 menu.addItem(item)
                 if entry.id == selectedID { currentItem = item }
             }
@@ -174,18 +221,17 @@ public final class AppRowView: NSView {
         if !deviceEntries.isEmpty {
             addHeader("AirPlay Devices")
             for entry in deviceEntries {
-                let item = menuItem(for: entry, isCurrent: entry.id == selectedID)
+                let item = menuItem(for: entry, isCurrent: entry.id == selectedID, action: action)
                 menu.addItem(item)
                 if entry.id == selectedID { currentItem = item }
             }
         }
 
-        destinationPopUp.menu = menu
-        if let currentItem { destinationPopUp.select(currentItem) }
+        return (menu, currentItem)
     }
 
-    private func menuItem(for entry: Destination, isCurrent: Bool) -> NSMenuItem {
-        let item = NSMenuItem(title: entry.title, action: #selector(destinationChanged(_:)), keyEquivalent: "")
+    private func menuItem(for entry: Destination, isCurrent: Bool, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: entry.title, action: action, keyEquivalent: "")
         item.target = self
         item.state = isCurrent ? .on : .off
         item.representedObject = entry.id
@@ -233,31 +279,18 @@ public final class AppRowView: NSView {
         destinationPopUp.setContentHuggingPriority(.required, for: .horizontal)
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        removeButton.translatesAutoresizingMaskIntoConstraints = false
-        removeButton.isBordered = false
-        removeButton.setButtonType(.momentaryChange)
-        removeButton.imagePosition = .imageOnly
-        let removeConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-        removeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove")?
-            .withSymbolConfiguration(removeConfig)
-        removeButton.contentTintColor = .secondaryLabelColor
-        removeButton.target = self
-        removeButton.action = #selector(removeTapped(_:))
-        removeButton.isHidden = true
-
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(destinationPopUp)
-        addSubview(removeButton)
 
         // Laid out against the shared `PopoverColumnGrid` exactly like
         // `DeviceRowView`: icon leads, slider/`%`/trailing popup are anchored off
-        // the row's TRAILING edge so they line up with every other row type. The
-        // remove ✕ sits in the row's leading margin dead-zone (over the icon,
-        // hover-revealed) so it needs no extra reserved column — WIDTH CHECK
-        // (PLAN risk 3) below confirms the name column survives at 623pt.
+        // the row's TRAILING edge so they line up with every other row type.
+        // Removal is no longer a floating row control — it's the ± footer
+        // segmented control, the row's context menu, and Delete/Backspace, all
+        // routed through the same `didRemoveFor(appID:)` delegate call.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
@@ -289,15 +322,37 @@ public final class AppRowView: NSView {
                 equalToConstant: PopoverColumnGrid.trailingControlWidth),
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-
-            // The ✕ floats over the icon's leading margin (hidden until hover), so
-            // it costs no reserved column and doesn't compete with the name for
-            // width — the tight budget the width check below is about.
-            removeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            removeButton.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
-            removeButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
-            removeButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
         ])
+    }
+
+    // MARK: Drawing
+
+    public override func draw(_ dirtyRect: NSRect) {
+        // Row highlight. Selection and hover use DIFFERENT colours so they read
+        // distinctly: selection is a translucent ACCENT wash; hover is a
+        // NEUTRAL grey wash (shown only when NOT selected). Neither uses the
+        // full emphasized `selectedContentBackgroundColor`, which would obscure
+        // the row's slider / readout / destination popup.
+        let highlight: NSColor?
+        if isSelected {
+            highlight = NSColor.controlAccentColor.withAlphaComponent(0.18)
+        } else if isHovered {
+            highlight = NSColor.unemphasizedSelectedContentBackgroundColor
+        } else {
+            highlight = nil
+        }
+        if let highlight {
+            let rect = bounds.insetBy(
+                dx: PopoverColumnGrid.selectionHighlightInsetX,
+                dy: PopoverColumnGrid.selectionHighlightInsetY)
+            let path = NSBezierPath(
+                roundedRect: rect,
+                xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
+            highlight.setFill()
+            path.fill()
+        }
+        super.draw(dirtyRect)
     }
 
     // MARK: Actions
@@ -315,63 +370,168 @@ public final class AppRowView: NSView {
         delegate?.appRow(self, didSelectDestination: id, for: appID)
     }
 
-    @objc private func removeTapped(_ sender: NSButton) {
+    // MARK: Context menu (T5)
+    //
+    // Right-clicking a row both selects it (via `rightMouseDown`'s existing
+    // `requestSelectIfInDeadZone` call, above) AND — regardless of dead-zone,
+    // since AppKit calls `menu(for:)` for a right-click landing anywhere in
+    // the view that doesn't have its own context menu (the slider/popup do,
+    // so this never overrides theirs) — presents this menu: a "Route to"
+    // submenu mirroring the trailing destination popup, a separator, then
+    // "Remove from list" LAST, styled destructive.
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        buildContextMenu()
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+
+        let routeToItem = NSMenuItem(title: "Route to", action: nil, keyEquivalent: "")
+        let (routeToMenu, _) = buildDestinationMenu(
+            selecting: currentSelectedDestinationID(), action: #selector(destinationChanged(_:)))
+        routeToItem.submenu = routeToMenu
+        menu.addItem(routeToItem)
+
+        menu.addItem(.separator())
+
+        let removeItem = NSMenuItem(
+            title: "", action: #selector(removeFromListMenuItemSelected(_:)), keyEquivalent: "")
+        removeItem.target = self
+        removeItem.attributedTitle = NSAttributedString(
+            string: "Remove from list",
+            attributes: [.foregroundColor: NSColor.systemRed])
+        menu.addItem(removeItem)
+
+        return menu
+    }
+
+    private func currentSelectedDestinationID() -> String {
+        destinationPopUp.selectedItem?.representedObject as? String ?? destinations.first?.id ?? ""
+    }
+
+    @objc private func removeFromListMenuItemSelected(_ sender: NSMenuItem) {
         delegate?.appRow(self, didRemoveFor: appID)
     }
 
-    // MARK: Hover discipline (mirrors DeviceRowView's sticky-hover fix, PLAN risk 2)
+    // MARK: Selection (T1 seam)
+    //
+    // `mouseDown`/`rightMouseDown` on the ROW ITSELF only fire when AppKit's hit
+    // test doesn't route the click to a more specific subview first — the slider
+    // and destination popup are opaque `NSControl`s that consume their own
+    // mouseDown, so a click landing on either NEVER reaches here. Only the
+    // icon/name/dead-zone area (backed by a plain `NSImageView`/label-style
+    // `NSTextField`, neither of which intercepts mouse events) and the row's
+    // background fall through to these overrides. The hover-revealed remove
+    // button is the one exception living in that dead zone; it's excluded
+    // explicitly below so a click on it removes rather than also selecting.
+
+    public override var acceptsFirstResponder: Bool { true }
+
+    public override func becomeFirstResponder() -> Bool {
+        true
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        requestSelectIfInDeadZone(with: event)
+        // Still let NSView's default handling run (e.g. so this becomes first
+        // responder via the normal click-to-focus path where applicable).
+        super.mouseDown(with: event)
+    }
+
+    public override func rightMouseDown(with event: NSEvent) {
+        requestSelectIfInDeadZone(with: event)
+        super.rightMouseDown(with: event)
+    }
+
+    // MARK: Hover tracking (neutral hover wash, distinct from selection)
 
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
+        for area in trackingAreas { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self
-        ))
+            owner: self))
     }
 
     public override func mouseEntered(with event: NSEvent) { isHovered = true }
     public override func mouseExited(with event: NSEvent) { isHovered = false }
 
-    private func pointerIsInside() -> Bool {
-        guard let window = window else { return false }
-        let windowPoint = window.mouseLocationOutsideOfEventStream
-        let local = convert(windowPoint, from: nil)
-        return bounds.contains(local)
-    }
-
-    /// Belt-and-suspenders against a sticky hover, exactly like `DeviceRowView`:
-    /// re-parenting (a popover rebuild) clears any transient hover, and an
-    /// app-local mouse-moved monitor reconciles hover against the true pointer
-    /// position so leaving the row into an untracked dead zone still clears it.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor); hoverMoveMonitor = nil }
         isHovered = false
-        if window != nil {
-            installMouseMovedMonitor()
-        } else {
-            removeMouseMovedMonitor()
-        }
-    }
-
-    private func installMouseMovedMonitor() {
-        guard mouseMovedMonitor == nil else { return }
-        mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            guard let self else { return event }
-            self.isHovered = self.pointerIsInside()
+        guard window != nil else { return }
+        // Sticky-hover fix (shared row idiom): a bottom-most row can miss
+        // `mouseExited` when the pointer leaves into an untracked dead-zone
+        // below the card, so reconcile against the true pointer position.
+        hoverMoveMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            guard let self, let window = self.window else { return event }
+            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            self.isHovered = self.bounds.contains(point)
             return event
         }
     }
 
-    private func removeMouseMovedMonitor() {
-        if let monitor = mouseMovedMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseMovedMonitor = nil
-        }
+    deinit {
+        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor) }
     }
 
-    deinit { removeMouseMovedMonitor() }
+    /// Test hooks for the hover wash.
+    public func test_setHovered(_ hovered: Bool) { isHovered = hovered }
+    public var test_isHovered: Bool { isHovered }
+
+    // MARK: Keyboard removal (T6)
+    //
+    // Delete is a responder-chain accelerator only (house convention — the
+    // visible "−" footer segment is the required main-interface affordance).
+    // AppKit routes both Delete (forward-delete, keyCode 117) and Backspace
+    // (keyCode 51) to the standard `deleteBackward:`/`deleteForward:` action
+    // methods on the first responder BEFORE `keyDown` would see them as raw
+    // key events on most systems, so both are implemented as those action
+    // overrides rather than parsed out of `keyDown` by keyCode. This view is
+    // only ever the first responder while it renders `isSelected` (selection
+    // and first-responder status are pushed/pulled together everywhere above),
+    // so no separate "is anything selected" guard is needed — no selection
+    // means this view was never made first responder, so neither override
+    // fires from a real key press.
+
+    public override func deleteForward(_ sender: Any?) {
+        delegate?.appRow(self, didRemoveFor: appID)
+    }
+
+    public override func deleteBackward(_ sender: Any?) {
+        delegate?.appRow(self, didRemoveFor: appID)
+    }
+
+    private func requestSelectIfInDeadZone(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        // Belt-and-suspenders alongside AppKit's own hit-testing (which, in a
+        // live window, already routes a slider/popup click to that subview's
+        // own `mouseDown` and never calls this override at all): explicitly
+        // re-check the same dead-zone `NSView.hitTest` effectively enforces,
+        // so this stays correct even when driven directly (as the `test_*`
+        // hooks below do, offscreen, with no real window to hit-test through).
+        guard isInSelectableDeadZone(local) else { return }
+        window?.makeFirstResponder(self)
+        delegate?.appRow(self, didRequestSelect: appID)
+    }
+
+    /// Whether `point` (in the row's own coordinate space) is outside the
+    /// slider/destination-popup frames — i.e. the icon/name/background dead
+    /// zone a body click must land in to select the row. In a live window
+    /// AppKit's own hit-testing already routes a click on either of those
+    /// subviews to the subview itself, so this override never even runs;
+    /// this check is the belt-and-suspenders that keeps the same guarantee
+    /// true when this method is invoked directly (as the
+    /// `test_simulateBodyClick`/`test_simulateSliderClick` hooks do, with no
+    /// real window to hit-test through).
+    private func isInSelectableDeadZone(_ point: NSPoint) -> Bool {
+        if slider.frame.contains(point) { return false }
+        if destinationPopUp.frame.contains(point) { return false }
+        return bounds.contains(point)
+    }
 
     // MARK: Accessibility
 
@@ -382,7 +542,6 @@ public final class AppRowView: NSView {
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(nameLabel.stringValue) volume")
         destinationPopUp.setAccessibilityLabel("\(nameLabel.stringValue) destination")
-        removeButton.setAccessibilityLabel("Remove \(nameLabel.stringValue)")
     }
 
     // MARK: Test-support hooks
@@ -401,7 +560,9 @@ public final class AppRowView: NSView {
         delegate?.appRow(self, didSelectDestination: destinationID, for: appID)
     }
 
-    /// Simulate the user clicking the hover-revealed remove (✕) affordance.
+    /// Simulate removal being triggered for this row (± footer "−" segment,
+    /// context-menu "Remove from list", or Delete/Backspace) — all three real
+    /// paths funnel through this same delegate call.
     public func test_remove() {
         delegate?.appRow(self, didRemoveFor: appID)
     }
@@ -418,123 +579,104 @@ public final class AppRowView: NSView {
     public var test_selectedDestinationID: String? {
         destinationPopUp.selectedItem?.representedObject as? String
     }
-    /// Whether the hover-revealed remove affordance is currently shown.
-    public var test_isRemoveButtonVisible: Bool { !removeButton.isHidden }
+    // MARK: Test-support hooks — context menu (T5)
 
-    /// Simulate the pointer entering this row (as a real `mouseEntered:` would).
-    public func test_simulateMouseEntered() { isHovered = true }
-    /// Simulate a pointer-move reconcile where the pointer is no longer inside
-    /// the row, without AppKit ever delivering `mouseExited:` (the last-row
-    /// dead-zone case `DeviceRowView` guards against).
-    public func test_reconcileHover(pointerInside: Bool) { isHovered = pointerInside }
+    /// Build the same context menu a right-click produces: "Route to"
+    /// submenu (mirroring the trailing destination popup), a separator, then
+    /// "Remove from list" last. Exposed so tests can assert item order/count
+    /// and that the remove item's action fires `didRemoveFor` without
+    /// needing to synthesize a real right-click.
+    public func test_contextMenu() -> NSMenu {
+        buildContextMenu()
+    }
+
+    /// Simulate choosing "Remove from list" from the context menu built by
+    /// `test_contextMenu()` — invokes the menu item's real action, same path
+    /// a live click on it takes.
+    public func test_selectRemoveFromListMenuItem() {
+        guard let removeItem = test_contextMenu().items.last else { return }
+        _ = removeItem.target?.perform(removeItem.action, with: removeItem)
+    }
+
+    // MARK: Test-support hooks — selection (T1 seam)
+
+    /// Directly set the render-only selection state, bypassing the delegate —
+    /// mirrors how the HOST re-pushes `selectedAppBundleID` into a recreated
+    /// row after `PopoverController.rebuild()`. Does NOT notify the delegate
+    /// (setting selection is the host telling the view, not the view asking).
+    public func test_setSelected(_ selected: Bool) { isSelected = selected }
+    /// Whether the row is currently rendering the selected-row highlight.
+    public var test_isSelected: Bool { isSelected }
+
+    /// Simulate a real click landing on the row's BODY (icon/name/dead-zone,
+    /// deliberately away from the slider and destination popup columns).
+    /// Constructs a genuine `NSEvent` and calls the real `mouseDown(with:)`
+    /// override — exercising the exact path a real click takes (not a direct
+    /// delegate call) — so it also proves first-responder promotion. Point
+    /// defaults into the icon/name area, away from every control's frame.
+    public func test_simulateBodyClick(at point: NSPoint? = nil) {
+        layoutSubtreeIfNeeded()
+        let target = point ?? NSPoint(x: PopoverColumnGrid.leadingInset + 4, y: AppRowView.rowHeight / 2)
+        mouseDown(with: mouseEvent(at: target))
+    }
+
+    /// Simulate a real click landing on the volume slider's frame — same
+    /// `mouseDown(with:)` entry point as `test_simulateBodyClick`, but at a
+    /// point inside `slider.frame`. In a live window a click there is
+    /// intercepted by the `NSSlider` subview and never reaches this view's
+    /// override at all; this hook proves the same on the row's own override
+    /// as a belt-and-suspenders structural check — see
+    /// `test_pointIsInSelectableDeadZone` for the point-in-dead-zone rule the
+    /// real subview hit-testing enforces.
+    public func test_simulateSliderClick() {
+        layoutSubtreeIfNeeded()
+        mouseDown(with: mouseEvent(at: NSPoint(x: slider.frame.midX, y: slider.frame.midY)))
+    }
+
+    /// Whether `point` (in the row's own coordinate space) falls inside a
+    /// region that would trigger `didRequestSelect` on a real click — i.e.
+    /// outside the slider and destination popup frames, and outside the
+    /// remove button when it's visible. Test-hook wrapper around the real
+    /// production check `mouseDown`/`rightMouseDown` use (`isInSelectableDeadZone`).
+    public func test_pointIsInSelectableDeadZone(_ point: NSPoint) -> Bool {
+        layoutSubtreeIfNeeded()
+        return isInSelectableDeadZone(point)
+    }
+
+    /// Simulate pressing Delete (forward-delete, keyCode 117) on this row via
+    /// the real key path: dispatches a synthetic `keyDown` through
+    /// `doCommand(by:)`, the same `NSStandardKeyBindingResponding` dispatch
+    /// AppKit's own key-binding manager uses to turn a physical Delete key
+    /// press into the `deleteForward:` action call — not a direct call to
+    /// `deleteForward(_:)` or the delegate. (`interpretKeyEvents` resolves to
+    /// this same call in a live window; it's skipped here because it needs a
+    /// loaded system key-binding table that isn't guaranteed available
+    /// offscreen/headless.)
+    public func test_pressDelete() {
+        doCommand(by: #selector(NSResponder.deleteForward(_:)))
+    }
+
+    /// Simulate pressing Backspace (keyCode 51) on this row via the real key
+    /// path — see `test_pressDelete`'s doc for why `doCommand(by:)` is used.
+    public func test_pressBackspace() {
+        doCommand(by: #selector(NSResponder.deleteBackward(_:)))
+    }
+
+    /// A synthetic left-mouse-down `NSEvent` at `point` in this view's own
+    /// coordinate space. Works without a live window — `locationInWindow` is
+    /// only ever consumed by this view via `convert(_:from:)`, which degrades
+    /// gracefully to identity conversion when `window` is `nil`.
+    private func mouseEvent(at point: NSPoint) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: point,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1)!
+    }
 }
 
-/// Minimal borderless hover-highlight button used by ``AppRowView``'s remove
-/// affordance. `HoverActionButton` (the popover UI's footer-action button)
-/// lives in `AirPlayControllerPopoverUI` and isn't visible from
-/// `AirPlayControllerSharedUI`, so this is the same hover-reconcile idiom
-/// (mouse-moved monitor, not just enter/exit) scoped to this target.
-final class RowHoverButton: NSButton {
-    private var isHovered = false {
-        didSet { if isHovered != oldValue { needsDisplay = true } }
-    }
-    private var moveMonitor: Any?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let m = moveMonitor { NSEvent.removeMonitor(m); moveMonitor = nil }
-        isHovered = false
-        guard window != nil else { return }
-        moveMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            guard let self, let window = self.window else { return event }
-            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            self.isHovered = self.bounds.contains(point)
-            return event
-        }
-    }
-
-    deinit { if let m = moveMonitor { NSEvent.removeMonitor(m) } }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if isHovered && isEnabled {
-            let rect = bounds.insetBy(dx: 2, dy: 2)
-            let path = NSBezierPath(ovalIn: rect)
-            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
-            path.fill()
-        }
-        super.draw(dirtyRect)
-    }
-}
-
-// MARK: - AddApplicationRowView
-
-/// A full-width borderless "+ Add application…" row (PLAN decision 6): sits at
-/// the bottom of the Applications card body and doubles as the empty state.
-/// Hover-highlights per the `HoverActionButton` idiom. Pure UI — the host wires
-/// ``onAdd`` to open the running-app picker (T-7, built elsewhere).
-public final class AddApplicationRowView: NSView {
-
-    /// Same row height as `AppRowView` so it reads as one more row in the card.
-    public static let rowHeight: CGFloat = 30
-
-    /// Called when the user clicks the row.
-    public var onAdd: (() -> Void)?
-
-    private let button = RowHoverButton()
-
-    public init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
-        autoresizingMask = [.width]
-        translatesAutoresizingMaskIntoConstraints = true
-        buildSubviews()
-    }
-
-    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    private func buildSubviews() {
-        wantsLayer = true
-
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.setButtonType(.momentaryChange)
-        button.alignment = .left
-        button.font = .menuFont(ofSize: 0)
-        button.contentTintColor = .secondaryLabelColor
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-        button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
-        button.imagePosition = .imageLeading
-        button.title = "Add application…"
-        button.target = self
-        button.action = #selector(tapped(_:))
-        button.setAccessibilityLabel("Add application")
-
-        addSubview(button)
-
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: Self.rowHeight),
-            button.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                            constant: PopoverColumnGrid.leadingInset),
-            button.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.trailingInset),
-            button.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @objc private func tapped(_ sender: NSButton) { onAdd?() }
-
-    /// Simulate the user clicking the row.
-    public func test_tap() { onAdd?() }
-}

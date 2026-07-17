@@ -27,6 +27,82 @@ public struct RunningAppInfo: Equatable {
     }
 }
 
+/// The Applications card's **± footer** (T3, LOCKED DECISION): a single
+/// `NSSegmentedControl` (`.momentaryAccelerator`) with two segments — "plus"
+/// opens the existing running-app picker, "minus" removes the currently
+/// selected app row. Pure UI: both actions route back through `onAdd`/
+/// `onRemove` closures so `PopoverController` stays the only thing that talks
+/// to `AppRoutingController`. Replaces the retired full-width "Add
+/// application…" row as the card's sole add affordance.
+private final class ApplicationsFooterView: NSView {
+
+    private enum Segment: Int { case add = 0, remove = 1 }
+
+    var onAdd: (() -> Void)?
+    var onRemove: (() -> Void)?
+
+    private let segmented = NSSegmentedControl()
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 320,
+                                 height: PopoverColumnGrid.applicationsFooterRowHeight))
+        autoresizingMask = [.width]
+        translatesAutoresizingMaskIntoConstraints = true
+        buildSubviews()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func buildSubviews() {
+        segmented.translatesAutoresizingMaskIntoConstraints = false
+        segmented.segmentStyle = .texturedRounded
+        segmented.trackingMode = .momentaryAccelerator
+        segmented.segmentCount = 2
+        let addSymbol = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add application")
+        let removeSymbol = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove application")
+        segmented.setImage(addSymbol, forSegment: Segment.add.rawValue)
+        segmented.setImage(removeSymbol, forSegment: Segment.remove.rawValue)
+        segmented.setWidth(PopoverColumnGrid.applicationsFooterControlWidth / 2, forSegment: Segment.add.rawValue)
+        segmented.setWidth(PopoverColumnGrid.applicationsFooterControlWidth / 2, forSegment: Segment.remove.rawValue)
+        segmented.target = self
+        segmented.action = #selector(segmentTapped(_:))
+        segmented.setAccessibilityLabel("Add or remove application")
+
+        addSubview(segmented)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterRowHeight),
+            segmented.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                               constant: PopoverColumnGrid.leadingInset),
+            segmented.centerYAnchor.constraint(equalTo: centerYAnchor),
+            segmented.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterControlWidth),
+            segmented.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterControlHeight),
+        ])
+    }
+
+    /// Whether the "−" segment is enabled — false when nothing is selected
+    /// (LOCKED DECISION: disabled with no selection).
+    var isRemoveEnabled: Bool {
+        get { segmented.isEnabled(forSegment: Segment.remove.rawValue) }
+        set { segmented.setEnabled(newValue, forSegment: Segment.remove.rawValue) }
+    }
+
+    @objc private func segmentTapped(_ sender: NSSegmentedControl) {
+        switch Segment(rawValue: sender.selectedSegment) {
+        case .add: onAdd?()
+        case .remove: onRemove?()
+        case nil: break
+        }
+    }
+
+    // MARK: Test-support hooks
+
+    /// Simulate tapping the "+" segment.
+    func test_tapAdd() { onAdd?() }
+    /// Simulate tapping the "−" segment.
+    func test_tapRemove() { onRemove?() }
+}
+
 /// Builds and owns the status-item **`NSPopover`** dropdown (SPEC §9 revised —
 /// NSMenu → NSPopover; SoundSource-inspired Main Out model, 2026-07-14b).
 ///
@@ -146,6 +222,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// PLAN §C). Lets `test_` hooks look a row up by bundle id.
     private var appRowsByBundleID: [String: AppRowView] = [:]
 
+    /// The Applications card's single selection (T1/T3 seam): the bundle id of
+    /// the currently selected app row, or `nil` when nothing is selected. This
+    /// is the HOST's source of truth — `AppRowView` only renders whatever
+    /// `isSelected` it's pushed. Survives `rebuild()` (which recreates every
+    /// row) exactly like `transientCollapsed`: it is NEVER cleared by a
+    /// rebuild, only by an explicit selection change or the selected app being
+    /// removed. Cleared when the selected app no longer has a route (removed
+    /// via any of the three remove paths, or dropped for some other reason).
+    private var selectedAppBundleID: String?
+
+    /// Active only while the popover is open: a local mouse-down monitor that
+    /// clears `selectedAppBundleID` when the user clicks outside any app row or
+    /// the ± footer (deselect-on-outside-click). Installed in `popoverDidShow`,
+    /// removed in `popoverDidClose`.
+    private var deselectClickMonitor: Any?
+
+    /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
+    /// the retired "+ Add application…" row as the card's add affordance).
+    private let applicationsFooter = ApplicationsFooterView()
+
     /// The previous device snapshot's ids-that-were-valid-AirPlay-targets, so
     /// `update(devices:)` can detect a routed device disappearing or going
     /// unavailable and drive `appRouting.handleDeviceUnavailable(id:)` (PLAN
@@ -198,6 +294,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
             onOpenSettings: { [weak self] in self?.onOpenSettings?() },
             onQuit: { NSApp.terminate(nil) })
+        applicationsFooter.onAdd = { [weak self] in
+            guard let self else { return }
+            self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
+        }
+        applicationsFooter.onRemove = { [weak self] in self?.removeSelectedApp() }
         rebuild()
     }
 
@@ -362,15 +463,25 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
 
         // 3. Applications card — rendered LAST (below Selected Devices), one
-        // `AppRowView` per routed app in stable `appRoutes` order, then the
-        // "+ Add application…" row (PLAN decision 6 — it doubles as the empty
-        // state, so the card is always present even with no routes).
+        // `AppRowView` per routed app in stable `appRoutes` order, then the ±
+        // footer (T3, LOCKED DECISION — replaces the old "+ Add application…"
+        // row; the card is always present even with no routes since the
+        // footer's "+" segment is always available).
         //
         // Collapsible (T-4/T-5): collapse DEFAULT is "expanded iff ≥1 app is
         // redirected" (`applicationsDefaultExpanded`), recomputed on every OPEN
         // and preserved across mid-open rebuilds by `collapsedState(for:default:)`
         // — same machinery as the other two cards. `collapsed:` is the negation of
         // the expanded default.
+        //
+        // Selection (T1/T3 seam): a stale `selectedAppBundleID` (its route was
+        // removed by some other path, e.g. the device-drop fallback) is pruned
+        // BEFORE building rows, so no row is ever pushed a selection that no
+        // longer exists and the "−" segment correctly disables.
+        if let selected = selectedAppBundleID,
+           !appRouting.appRoutes.contains(where: { $0.bundleID == selected }) {
+            selectedAppBundleID = nil
+        }
         let title = Self.applicationsCardTitle
         panel.beginCard(header: title, volumeTitle: "Volume", trailingTitle: "Redirect",
                         collapsible: true,
@@ -379,7 +490,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         for route in appRouting.appRoutes where !isAppExcluded(route.bundleID) {
             panel.addRow(makeAppRow(route, devices: allDevices))
         }
-        panel.addRow(makeAddApplicationRow())
+        applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
+        panel.addRow(applicationsFooter)
 
         // Groups card removed (2026-07-16): the popover no longer renders a Groups
         // SECTION. Group ROUTING lives in the Main Out selector (refreshMainOutRow)
@@ -441,7 +553,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else { return }
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Enabled Devices", target: .selectedDevices),
+            .init(title: "Selected Devices", target: .selectedDevices),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))
@@ -603,6 +715,43 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         pasteboard.setString(text, forType: .string)
     }
 
+    // MARK: Applications card ± footer (T3, LOCKED DECISION)
+
+    /// The footer's "−" segment: remove the currently selected app (no-op if
+    /// nothing is selected — the segment is disabled in that state, but this
+    /// guard keeps `test_tapRemove` safe to call unconditionally too).
+    private func removeSelectedApp() {
+        guard let bundleID = selectedAppBundleID else { return }
+        removeApp(bundleID: bundleID)
+    }
+
+    /// Remove `bundleID`'s route via the SAME path all three removal
+    /// affordances funnel through (± footer "−", context-menu "Remove from
+    /// list", Delete/Backspace — `AppRowView.Delegate.appRow(_:didRemoveFor:)`
+    /// calls this too). If the removed app was selected, selection advances to
+    /// its neighbor in `appRoutes` order (LOCKED DECISION) — preferring the
+    /// row that slides into the removed row's old position (the next route),
+    /// falling back to the previous one, and clearing selection entirely when
+    /// the list becomes empty.
+    private func removeApp(bundleID: String) {
+        if selectedAppBundleID == bundleID {
+            selectedAppBundleID = neighborBundleID(of: bundleID)
+        }
+        appRouting.removeRoute(bundleID: bundleID)
+        rebuild()
+    }
+
+    /// The bundle id that should become selected after `bundleID` is removed:
+    /// the route immediately after it in `appRoutes` order, else the one
+    /// immediately before, else `nil` (the list is now empty).
+    private func neighborBundleID(of bundleID: String) -> String? {
+        let routes = appRouting.appRoutes
+        guard let index = routes.firstIndex(where: { $0.bundleID == bundleID }) else { return nil }
+        if index + 1 < routes.count { return routes[index + 1].bundleID }
+        if index - 1 >= 0 { return routes[index - 1].bundleID }
+        return nil
+    }
+
     // MARK: Applications card rows (T-8, PLAN §C decisions 3/4/6/8)
 
     /// Build one `AppRowView` for `route` against the discovered device `devices`.
@@ -620,20 +769,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             icon: appIcon(for: route.bundleID),
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
-            destinations: appDestinations(devices: devices)))
+            destinations: appDestinations(devices: devices)),
+                  isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
-        return row
-    }
-
-    /// The "+ Add application…" row (PLAN decision 6). Wires its tap to the same
-    /// running-app picker the header would (`presentAddApplicationPicker`), anchored
-    /// to the row itself.
-    private func makeAddApplicationRow() -> AddApplicationRowView {
-        let row = AddApplicationRowView()
-        row.onAdd = { [weak self, weak row] in
-            guard let self, let row else { return }
-            self.presentAddApplicationPicker(relativeTo: row)
-        }
         return row
     }
 
@@ -896,7 +1034,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Applications card test hooks (T-8)
 
     /// Number of `AppRowView`s currently mounted in the Applications card (one per
-    /// routed app; excludes the "+ Add application…" row).
+    /// routed app; excludes the ± footer row).
     public var test_appRowCount: Int { appRowsByBundleID.count }
 
     /// The `AppRowView` for `bundleID`, or `nil` if that app isn't routed / the
@@ -925,6 +1063,39 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public func test_appRowSliderDimmed(for bundleID: String) -> Bool? {
         appRowsByBundleID[bundleID]?.test_isSliderDimmed
     }
+
+    // MARK: Applications card ± footer test hooks (T3)
+
+    /// The Applications card's current single selection, or `nil` (the HOST's
+    /// source of truth — survives `rebuild()`).
+    public var test_selectedAppBundleID: String? { selectedAppBundleID }
+
+    /// Whether `bundleID`'s row currently renders the selected-row highlight.
+    /// `nil` if no such row.
+    public func test_appRowIsSelected(for bundleID: String) -> Bool? {
+        appRowsByBundleID[bundleID]?.test_isSelected
+    }
+
+    /// Whether the footer's "−" segment is currently enabled (LOCKED DECISION —
+    /// disabled iff nothing is selected).
+    public var test_applicationsFooterRemoveEnabled: Bool { applicationsFooter.isRemoveEnabled }
+
+    /// Simulate the row's body being clicked, requesting selection — drives
+    /// the same `AppRowView.Delegate.appRow(_:didRequestSelect:)` path a real
+    /// click takes. No-op if `bundleID` has no row.
+    public func test_selectAppRow(bundleID: String) {
+        guard let row = appRowsByBundleID[bundleID] else { return }
+        appRow(row, didRequestSelect: bundleID)
+    }
+
+    /// Simulate tapping the footer's "+" segment — opens the same running-app
+    /// picker the header would.
+    public func test_tapApplicationsFooterAdd() { applicationsFooter.test_tapAdd() }
+
+    /// Simulate tapping the footer's "−" segment — removes the selected app
+    /// (no-op if nothing is selected, matching the real disabled-segment
+    /// behavior).
+    public func test_tapApplicationsFooterRemove() { applicationsFooter.test_tapRemove() }
 
     /// Whether saving the current selection as a group is possible (this backs the
     /// Main Out selector's group-routing entries — a saved group becomes a
@@ -1143,7 +1314,88 @@ extension PopoverController: AppRowView.Delegate {
     }
 
     public func appRow(_ row: AppRowView, didRemoveFor appID: String) {
-        appRouting.removeRoute(bundleID: appID)
+        removeApp(bundleID: appID)
+    }
+
+    /// T1/T3 selection seam: the row's body (or a right-click) was clicked,
+    /// requesting single-selection. The HOST owns `selectedAppBundleID` — set
+    /// it and rebuild so `isSelected` is re-pushed into every row (including
+    /// the newly-deselected previous selection) and the footer's "−" segment
+    /// enables.
+    public func appRow(_ row: AppRowView, didRequestSelect appID: String) {
+        guard selectedAppBundleID != appID else { return }
+        selectedAppBundleID = appID
+        rebuild()
+    }
+
+    // MARK: - App-row selection lifecycle (deselect discipline)
+    //
+    // App-row selection is TRANSIENT to a single open session and exists only
+    // to target the ± footer's "−" (and Delete/Backspace). Two rules keep it
+    // from feeling like a permanent, un-clearable state:
+    //   1. It resets when the popover closes, so a fresh open never shows a
+    //      selection carried over from a previous session.
+    //   2. A mouse-down anywhere OUTSIDE an `AppRowView` or the ± footer clears
+    //      it — empty space, a device row, the header, etc. all deselect, like
+    //      clicking away from a table row.
+
+    public func popoverDidShow(_ notification: Notification) {
+        installDeselectMonitor()
+    }
+
+    public func popoverDidClose(_ notification: Notification) {
+        removeDeselectMonitor()
+        selectedAppBundleID = nil
+    }
+
+    private func installDeselectMonitor() {
+        removeDeselectMonitor()
+        deselectClickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            self?.deselectIfClickOutsideSelectedRow(event)
+            return event
+        }
+    }
+
+    private func removeDeselectMonitor() {
+        if let monitor = deselectClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            deselectClickMonitor = nil
+        }
+    }
+
+    /// Clears the app-row selection when `event` is a click that is neither on
+    /// an `AppRowView` (which selects it) nor on the ± footer (whose "−"/"+"
+    /// must see the selection intact). The rebuild is deferred to the next
+    /// runloop tick so the click still reaches its target view first — a
+    /// synchronous rebuild here would destroy the very view being clicked.
+    private func deselectIfClickOutsideSelectedRow(_ event: NSEvent) {
+        guard selectedAppBundleID != nil,
+              let window = popover.contentViewController?.view.window,
+              event.window === window else { return }
+        let hit = window.contentView?.hitTest(event.locationInWindow)
+        if let hit,
+           enclosingView(of: hit, ofType: AppRowView.self) != nil
+               || enclosingView(of: hit, ofType: ApplicationsFooterView.self) != nil {
+            return
+        }
+        selectedAppBundleID = nil
+        DispatchQueue.main.async { [weak self] in self?.rebuild() }
+    }
+
+    private func enclosingView<T: NSView>(of view: NSView, ofType type: T.Type) -> T? {
+        var current: NSView? = view
+        while let node = current {
+            if let match = node as? T { return match }
+            current = node.superview
+        }
+        return nil
+    }
+
+    /// Test hook: clear the app-row selection as an outside click would.
+    public func test_deselectApp() {
+        selectedAppBundleID = nil
         rebuild()
     }
 }

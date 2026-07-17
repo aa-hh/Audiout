@@ -101,6 +101,34 @@ public enum PopoverColumnGrid {
     /// sitting off in the box padding. Tuned live.
     public static let statusDotInset: CGFloat = 3
 
+    // MARK: Single-selection highlight (AppRowView, 2026-07-17)
+    //
+    // The Applications card's single-selection model (± footer controls,
+    // context-menu remove, Delete/Backspace) needs a selected-row highlight
+    // distinct from `DeviceRowView`'s membership/hover pill. Named here per
+    // house rule (no magic numbers) even though today only `AppRowView` draws it.
+
+    /// Horizontal/vertical inset of the selection-highlight rounded rect from
+    /// the row's bounds — matches `DeviceRowView`'s hover/selection pill inset.
+    public static let selectionHighlightInsetX: CGFloat = 5
+    public static let selectionHighlightInsetY: CGFloat = 2
+    /// Corner radius of the selection-highlight rounded rect.
+    public static let selectionHighlightCornerRadius: CGFloat = 7
+
+    // MARK: Applications card ± footer (T3, 2026-07-17)
+    //
+    // The Applications card footer row hosting the add/remove
+    // `NSSegmentedControl` (LOCKED DECISION: replaces the old "+ Add
+    // application…" row). Named here per house rule even though only
+    // `PopoverController`'s footer row view uses them.
+
+    /// Height of the footer row containing the ± segmented control.
+    public static let applicationsFooterRowHeight: CGFloat = 28
+    /// Width of the ± segmented control (two equal segments).
+    public static let applicationsFooterControlWidth: CGFloat = 50
+    /// Height of the ± segmented control.
+    public static let applicationsFooterControlHeight: CGFloat = 20
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

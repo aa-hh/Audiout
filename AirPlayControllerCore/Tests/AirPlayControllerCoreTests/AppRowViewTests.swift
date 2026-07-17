@@ -16,6 +16,8 @@ final class AppRowViewTests: XCTestCase {
         var lastVolume: (appID: String, volume: Int)?
         var lastDestination: (appID: String, destinationID: String)?
         var removedAppID: String?
+        var selectRequestedAppID: String?
+        var selectRequestCount = 0
 
         func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
             lastVolume = (appID, volume)
@@ -25,6 +27,10 @@ final class AppRowViewTests: XCTestCase {
         }
         func appRow(_ row: AppRowView, didRemoveFor appID: String) {
             removedAppID = appID
+        }
+        func appRow(_ row: AppRowView, didRequestSelect appID: String) {
+            selectRequestedAppID = appID
+            selectRequestCount += 1
         }
     }
 
@@ -127,42 +133,98 @@ final class AppRowViewTests: XCTestCase {
         XCTAssertEqual(redirectedRow.test_volume, 42)
     }
 
-    // MARK: Hover / remove affordance discipline (mirrors DeviceRowView, PLAN risk 2)
+    // MARK: Selection (T1 seam)
 
-    func testRemoveButtonHiddenUntilHover() {
-        let (row, _) = makeRow()
-        XCTAssertFalse(row.test_isRemoveButtonVisible)
-        row.test_simulateMouseEntered()
-        XCTAssertTrue(row.test_isRemoveButtonVisible)
+    func testSetSelectedTogglesRenderStateWithoutNotifyingDelegate() {
+        let (row, delegate) = makeRow()
+        XCTAssertFalse(row.test_isSelected)
+        row.test_setSelected(true)
+        XCTAssertTrue(row.test_isSelected)
+        XCTAssertNil(delegate.selectRequestedAppID,
+                     "test_setSelected is the HOST pushing state in — it must not report a select request")
+        row.test_setSelected(false)
+        XCTAssertFalse(row.test_isSelected)
     }
 
-    func testHoverReconcilesWhenPointerLeavesWithoutExitEvent() {
+    func testApplyClearsSelectionLikeHover() {
         let (row, _) = makeRow()
-        row.test_simulateMouseEntered()
-        XCTAssertTrue(row.test_isRemoveButtonVisible)
-        // The dead-zone case: no `mouseExited:` delivered, only a reconcile.
-        row.test_reconcileHover(pointerInside: false)
-        XCTAssertFalse(row.test_isRemoveButtonVisible)
-    }
-
-    func testApplyClearsStaleHover() {
-        let (row, _) = makeRow()
-        row.test_simulateMouseEntered()
-        XCTAssertTrue(row.test_isRemoveButtonVisible)
+        row.test_setSelected(true)
+        XCTAssertTrue(row.test_isSelected)
         row.apply(AppRowView.Configuration(
             appID: "com.example.app", name: "Example App", icon: nil, volume: 50,
             selectedDestinationID: "local", destinations: makeDestinations()
         ))
-        XCTAssertFalse(row.test_isRemoveButtonVisible, "a model refresh must clear a transient hover (T-U8 fix)")
+        XCTAssertFalse(row.test_isSelected, "a bare apply(_:) must clear selection, matching hover's T-U8 discipline")
     }
 
-    // MARK: AddApplicationRowView
-
-    func testAddApplicationRowFiresCallback() {
-        let row = AddApplicationRowView()
-        var fired = false
-        row.onAdd = { fired = true }
-        row.test_tap()
-        XCTAssertTrue(fired)
+    func testApplyWithIsSelectedReassertsSelectionAtomically() {
+        let (row, _) = makeRow()
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 50,
+            selectedDestinationID: "local", destinations: makeDestinations()
+        ), isSelected: true)
+        XCTAssertTrue(row.test_isSelected, "apply(_:isSelected:) is the host's rebuild()-survival seam")
     }
+
+    func testBodyClickFiresDidRequestSelectAndBecomesFirstResponder() {
+        let (row, delegate) = makeRow()
+        row.test_simulateBodyClick()
+        XCTAssertEqual(delegate.selectRequestedAppID, "com.example.app")
+        XCTAssertEqual(delegate.selectRequestCount, 1)
+    }
+
+    func testBodyClickDeadZoneExcludesSliderAndDestinationPopup() {
+        let (row, _) = makeRow()
+        // The slider and destination popup are trailing-anchored per
+        // `PopoverColumnGrid`, both comfortably right of the icon/name area a
+        // real body click lands in. Assert the icon/name point IS selectable
+        // and the trailing-anchored slider/popup column IS NOT — the same
+        // distinction real subview hit-testing enforces (a real click on
+        // either control is consumed by the control and never reaches this
+        // view's `mouseDown` override at all).
+        let bodyPoint = NSPoint(x: PopoverColumnGrid.leadingInset + 4, y: AppRowView.rowHeight / 2)
+        XCTAssertTrue(row.test_pointIsInSelectableDeadZone(bodyPoint),
+                     "the icon/name area must be in the select dead-zone")
+        let sliderColumnPoint = NSPoint(x: row.bounds.width - PopoverColumnGrid.sliderTrailing - 10,
+                                        y: AppRowView.rowHeight / 2)
+        XCTAssertFalse(row.test_pointIsInSelectableDeadZone(sliderColumnPoint),
+                       "a click inside the slider's own column must not be in the select dead-zone")
+    }
+
+    func testSliderClickDoesNotFireDidRequestSelect() {
+        let (row, delegate) = makeRow()
+        row.test_simulateSliderClick()
+        XCTAssertNil(delegate.selectRequestedAppID,
+                     "a click routed to the slider's own frame must never request row selection")
+    }
+
+    func testRemoveButtonClickDoesNotAlsoRequestSelect() {
+        let (row, delegate) = makeRow()
+        row.test_remove()
+        XCTAssertEqual(delegate.removedAppID, "com.example.app")
+        XCTAssertNil(delegate.selectRequestedAppID,
+                     "the remove path must not also request selection")
+    }
+
+    func testAcceptsFirstResponder() {
+        let (row, _) = makeRow()
+        XCTAssertTrue(row.acceptsFirstResponder)
+    }
+
+    // MARK: Keyboard removal (T6) — Delete/Backspace on the selected row
+
+    func testPressDeleteFiresDidRemoveForViaRealKeyPath() {
+        let (row, delegate) = makeRow()
+        row.test_pressDelete()
+        XCTAssertEqual(delegate.removedAppID, "com.example.app",
+                       "Delete (forward-delete, keyCode 117) must fire didRemoveFor via the real key path")
+    }
+
+    func testPressBackspaceFiresDidRemoveForViaRealKeyPath() {
+        let (row, delegate) = makeRow()
+        row.test_pressBackspace()
+        XCTAssertEqual(delegate.removedAppID, "com.example.app",
+                       "Backspace (keyCode 51) must fire didRemoveFor via the real key path")
+    }
+
 }

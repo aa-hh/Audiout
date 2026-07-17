@@ -238,6 +238,11 @@ final class GroupControllerTests: XCTestCase {
         let (controller, _) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Downstairs",
                                        memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        // groupMatchingCurrentSelection is keyed off selectedDeviceIDs (Q3 — not
+        // the live output set, which redirect targets can pollute), so Selected
+        // Devices must mirror the group's membership for the sync to resolve it.
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("sonos-move", true)
 
         // Main Out at the group → active; syncActiveGroupToSelection keeps it.
         controller.setMainOut(.group(id: "g1"))

@@ -291,7 +291,7 @@ final class PopoverControllerTests: XCTestCase {
         let group = controller.groups[0]
 
         popover.test_selectMainOut(.selectedDevices); await drain()
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Enabled Devices",
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
                        "the named dropdown shows the current target")
         popover.test_selectMainOut(.group(id: group.id)); await drain()
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
@@ -926,6 +926,155 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(popover.test_appRowCount, 0, "the card repainted to the empty state")
         XCTAssertNil(popover.test_appRow(for: "com.example.music"),
                      "the removed app's row is gone")
+    }
+
+    // MARK: T3 — ± footer + single selection (LOCKED DECISION)
+
+    /// The "−" segment starts disabled when nothing is selected.
+    func testApplicationsFooterRemoveDisabledWithNoSelection() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        XCTAssertNil(popover.test_selectedAppBundleID, "nothing selected on a fresh build")
+        XCTAssertFalse(popover.test_applicationsFooterRemoveEnabled,
+                       "the − segment is disabled with no selection")
+    }
+
+    /// Selecting a row (the T1 `didRequestSelect` path) sets the host's
+    /// selection, renders the row's highlight, and enables the − segment.
+    func testSelectingRowEnablesFooterRemove() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        popover.test_selectAppRow(bundleID: "com.example.music")
+
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music")
+        XCTAssertEqual(popover.test_appRowIsSelected(for: "com.example.music"), true,
+                       "the selected row renders the highlight")
+        XCTAssertTrue(popover.test_applicationsFooterRemoveEnabled,
+                      "the − segment enables once something is selected")
+    }
+
+    /// Selection survives `rebuild()` (a device update, volume change, etc. all
+    /// recreate every row) — the host re-pushes `isSelected` into the
+    /// recreated row rather than losing it.
+    func testSelectionSurvivesRebuild() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                           runningAppsProvider: routedApps)
+        popover.test_selectAppRow(bundleID: "com.example.music")
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music")
+
+        // Force a full rebuild via a volume change on the row (goes through
+        // `appRow(_:didSetVolume:for:)` → `rebuild()`, recreating every row).
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+        row.test_setVolume(55)
+
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music",
+                       "selection state on the controller survives the rebuild")
+        XCTAssertEqual(popover.test_appRowIsSelected(for: "com.example.music"), true,
+                       "the RECREATED row is re-pushed isSelected == true")
+
+        // Also survives a device-driven rebuild path (`update(devices:)`).
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music")
+        XCTAssertEqual(popover.test_appRowIsSelected(for: "com.example.music"), true)
+    }
+
+    /// Removing the selected app via the footer's "−" segment calls through to
+    /// `AppRoutingController.removeRoute` and advances selection to the
+    /// neighbor (LOCKED DECISION).
+    func testFooterRemoveCallsRemoveRouteAndAdvancesSelection() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        appRouting.addRoute(bundleID: "com.example.safari", displayName: "Safari")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        popover.test_selectAppRow(bundleID: "com.example.music")
+
+        popover.test_tapApplicationsFooterRemove()
+
+        XCTAssertEqual(appRouting.appRoutes.map(\.bundleID), ["com.example.safari"],
+                       "the − segment reached AppRoutingController.removeRoute")
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.safari",
+                       "selection advances to the neighbor that slid into the removed row's slot")
+        XCTAssertEqual(popover.test_appRowIsSelected(for: "com.example.safari"), true)
+        XCTAssertTrue(popover.test_applicationsFooterRemoveEnabled,
+                      "still enabled — the neighbor is now selected")
+    }
+
+    /// Removing the last remaining app clears selection and disables the −
+    /// segment again.
+    func testFooterRemoveLastAppClearsSelection() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        popover.test_selectAppRow(bundleID: "com.example.music")
+
+        popover.test_tapApplicationsFooterRemove()
+
+        XCTAssertTrue(appRouting.appRoutes.isEmpty)
+        XCTAssertNil(popover.test_selectedAppBundleID, "no neighbor left ⇒ selection clears")
+        XCTAssertFalse(popover.test_applicationsFooterRemoveEnabled)
+    }
+
+    /// The − segment is a no-op (does not call `removeRoute`) when nothing is
+    /// selected, matching the real disabled-segment behavior.
+    func testFooterRemoveNoopWithoutSelection() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        popover.test_tapApplicationsFooterRemove()
+
+        XCTAssertEqual(appRouting.appRoutes.map(\.bundleID), ["com.example.music"],
+                       "nothing removed — no selection to act on")
+    }
+
+    /// The context-menu "Remove from list" path and Delete/Backspace both
+    /// funnel through the SAME `removeApp` neighbor-advance logic as the
+    /// footer's − segment (LOCKED DECISION — one remove API, three triggers).
+    func testContextMenuRemoveAlsoAdvancesSelection() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        appRouting.addRoute(bundleID: "com.example.safari", displayName: "Safari")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        popover.test_selectAppRow(bundleID: "com.example.safari")
+
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.safari"))
+        row.test_selectRemoveFromListMenuItem()
+
+        XCTAssertEqual(appRouting.appRoutes.map(\.bundleID), ["com.example.music"])
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music",
+                       "no next neighbor ⇒ falls back to the previous one")
+    }
+
+    /// The footer's "+" segment is wired to the SAME running-app picker the
+    /// header would use — `presentAddApplicationPicker`, unchanged, so its
+    /// candidate list (already covered by `testPickerExcludesAlreadyRoutedApps`)
+    /// applies identically regardless of which affordance triggered it. A live
+    /// `NSMenu.popUp(...)` can't be synthesized headlessly (it needs a real
+    /// window), so this only proves the candidate-list plumbing the footer's
+    /// picker call reuses, not the actual popup — `test_pickApp` (T-7) already
+    /// covers "a pick reaches `AppRoutingController.addRoute`".
+    func testFooterAddSharesPickerCandidatesWithHeaderPath() async throws {
+        let appRouting = tempAppRoutingController()
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        XCTAssertEqual(popover.test_availableAppsForPicker().map(\.bundleID).sorted(),
+                       ["com.example.music", "com.example.safari"])
+        popover.test_pickApp(bundleID: "com.example.music")
+        XCTAssertEqual(appRouting.appRoutes.map(\.bundleID), ["com.example.music"],
+                       "picking from the (footer-triggered) picker still reaches AppRoutingController")
     }
 
     /// PLAN decision 7 (silent fallback): when a routed device drops out of the

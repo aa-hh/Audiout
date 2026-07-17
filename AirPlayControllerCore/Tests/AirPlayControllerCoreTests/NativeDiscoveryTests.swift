@@ -335,8 +335,10 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A device that advertises BOTH `_airplay._tcp` and `_raop._tcp` (the common
     /// real-world case for AP2 receivers) is de-duped to ONE `DiscoveredDevice`,
     /// classified AP2 (the airplay advert wins), and only fully disappears once
-    /// BOTH adverts are gone — losing just the airplay side flips it to an
-    /// `.updated` AP1-only, not a removal.
+    /// BOTH adverts are gone. Losing just the airplay side marks it OFFLINE
+    /// (`.updated`, `isAvailable == false`) while STAYING AP2 — a real AP2
+    /// receiver powering off (its `_raop._tcp` lingers longer than its
+    /// `_airplay._tcp`), NOT an AP1 downgrade — not a removal.
     func testDedupesDeviceAdvertisingBothServiceTypes() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
@@ -365,14 +367,16 @@ final class NativeDiscoveryTests: XCTestCase {
         XCTAssertEqual(discovery.devices.first?.id, id)
         XCTAssertTrue(discovery.devices.first?.isAirPlay2Supported ?? false)
 
-        // Losing the _airplay._tcp advert alone (still has _raop._tcp) flips it to
-        // AP1-only via .updated, NOT a removal.
+        // Losing the _airplay._tcp advert alone (still has _raop._tcp) marks it
+        // OFFLINE via .updated — STAYS AP2 (sticky), becomes unavailable. NOT an
+        // AP1 downgrade, NOT a removal.
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Both"))
         let flipped = events.wait(count: 2)
         guard case .updated(let updated)? = flipped.last else {
-            return XCTFail("expected .updated (AP2->AP1 flip), got \(flipped)")
+            return XCTFail("expected .updated (AP2 offline), got \(flipped)")
         }
-        XCTAssertFalse(updated.isAirPlay2Supported, "losing the airplay advert (raop still present) must flip to AP1-only")
+        XCTAssertTrue(updated.isAirPlay2Supported, "losing the airplay advert must NOT downgrade a sticky-AP2 device to AP1")
+        XCTAssertFalse(updated.isAvailable, "losing the airplay advert (raop still present) marks a sticky-AP2 device offline")
         XCTAssertEqual(discovery.devices.count, 1, "device must still be present, not removed, after losing only one advert")
 
         // Now losing the remaining _raop._tcp advert removes it entirely.
@@ -382,7 +386,7 @@ final class NativeDiscoveryTests: XCTestCase {
             return XCTFail("expected .disappeared, got \(gone)")
         }
         XCTAssertEqual(goneID, id)
-        XCTAssertFalse(wasAP2, "by the time it fully disappeared it had already flipped to AP1-only")
+        XCTAssertTrue(wasAP2, "a sticky-AP2 device is still AP2 when it fully disappears (engine teardown routes on this)")
         XCTAssertTrue(discovery.devices.isEmpty)
 
         discovery.stop()
@@ -411,6 +415,98 @@ final class NativeDiscoveryTests: XCTestCase {
         }
         XCTAssertTrue(upgraded.isAirPlay2Supported, "gaining the airplay advert must flip AP1 -> AP2")
         XCTAssertEqual(discovery.devices.count, 1)
+
+        discovery.stop()
+    }
+
+    // MARK: Sticky-AP2 (offline vs downgrade)
+
+    /// THE BUG: an AP2 device (advertising both `_airplay._tcp` and `_raop._tcp`)
+    /// whose `_airplay._tcp` record times out while `_raop._tcp` lingers — exactly
+    /// what a Sonos Move does when powered off — must be reported as OFFLINE
+    /// (`isAvailable == false`) while STAYING AP2 (`isAirPlay2Supported == true`),
+    /// NOT reclassified AP1-only. It must NOT `.disappeared` (raop still present).
+    func testAP2LosingAirplayAdvertGoesOfflineNotAP1() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:42"
+        // Both adverts present → AP2, available.
+        browser.resolve(airplayService(id: id, name: "Sonos Move", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos Move"))
+        guard case .appeared(let appeared)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertTrue(appeared.isAirPlay2Supported)
+        XCTAssertTrue(appeared.isAvailable)
+
+        // Power off: the `_airplay._tcp` record drops first, `_raop._tcp` lingers.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos Move"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            return XCTFail("expected .updated when the airplay advert drops")
+        }
+        XCTAssertTrue(offline.isAirPlay2Supported,
+                      "a sticky-AP2 device must STAY AP2 when it loses its airplay advert — it went offline, it did not downgrade")
+        XCTAssertFalse(offline.isAvailable,
+                       "losing the airplay advert (raop lingers) means the AP2 device is OFFLINE")
+        XCTAssertEqual(discovery.devices.count, 1, "still present (raop lingers), not disappeared")
+
+        discovery.stop()
+    }
+
+    /// A sticky-AP2 device that goes offline (airplay advert dropped) and then
+    /// comes back (airplay advert re-resolves) returns to available AP2 — the
+    /// sticky bit doesn't wedge it permanently offline.
+    func testAP2OfflineThenBackOnlineRecoversAvailable() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:43"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            return XCTFail("expected offline .updated")
+        }
+        XCTAssertFalse(offline.isAvailable)
+        XCTAssertTrue(offline.isAirPlay2Supported)
+
+        // Powers back on: airplay advert re-resolves.
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        guard case .updated(let back)? = events.wait(count: 3).last else {
+            return XCTFail("expected recovery .updated")
+        }
+        XCTAssertTrue(back.isAirPlay2Supported)
+        XCTAssertTrue(back.isAvailable, "an AP2 device that re-advertises airplay is reachable again")
+
+        discovery.stop()
+    }
+
+    /// A genuine raop-only device (NEVER advertised `_airplay._tcp`) stays
+    /// AP1-only and available — the sticky mechanism only affects devices that
+    /// were EVER AP2. This is the regression guard for the "coming soon" row.
+    func testGenuineAP1OnlyStaysAP1AndAvailable() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        // raop-only from the start, and a re-resolve — never any airplay advert.
+        browser.resolve(raopService(id: "AA:BB:CC:DD:EE:44", name: "Old Express"))
+        guard case .appeared(let d)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertFalse(d.isAirPlay2Supported, "a never-AP2 device must classify AP1-only")
+        XCTAssertTrue(d.isAvailable, "a genuine AP1-only device is not marked offline by the sticky mechanism")
 
         discovery.stop()
     }

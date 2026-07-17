@@ -500,15 +500,27 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
             feedEngineIfAP2(discovered, appearing: true)
             stateQueue.async { self.addOrUpdate(discovered) }
         case .updated(let discovered):
-            if discovered.isAirPlay2Supported {
+            if discovered.isAirPlay2Supported && discovered.isAvailable {
                 feedEngineIfAP2(discovered, appearing: true)
             } else {
-                // AP2 → AP1 downgrade: the device lost its `_airplay._tcp` advert
-                // but is still on the network (raop-only). It is NOT `.disappeared`,
-                // so the removal path below never runs otherwise — tear down any
-                // live engine session/registration so we don't leak a live RTSP/PTP
-                // session and a stale engine descriptor while the UI flips it to
-                // unavailable. Safe/idempotent if it was never AP2 or never added.
+                // Two cases reach here, both requiring the same engine teardown:
+                //
+                //  1. A sticky-AP2 device going OFFLINE (`isAirPlay2Supported`
+                //     stays true, `isAvailable == false`): it lost its
+                //     `_airplay._tcp` advert while its `_raop._tcp` record lingers
+                //     — a real AP2 receiver powering off, NOT an AP1 downgrade.
+                //     `supportsAirPlay2` STAYS true so the UI shows an unavailable
+                //     (retry-on-click) row, never the AP1 "coming soon" popover.
+                //
+                //  2. A genuine AP1-only device (`isAirPlay2Supported == false`):
+                //     never streamable (D6); if it was somehow added, drop it.
+                //     (In practice a never-AP2 device is never fed/added, so this
+                //     is a no-op belt-and-suspenders.)
+                //
+                // Either way it is NOT `.disappeared`, so the removal path below
+                // never runs otherwise — tear down any live engine session and
+                // deregister its descriptor so we don't leak a live RTSP/PTP
+                // session. Safe/idempotent if it was never AP2 or never added.
                 teardownEngineOutput(id: discovered.id)
                 removeEngineDiscovery(id: discovered.id)
             }
@@ -588,7 +600,15 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     private func addOrUpdate(_ discovered: DiscoveredDevice) {
         let id = discovered.id                        // colon-hex TXT id, verbatim
         self.outputIDs[id] = discovered.outputID
-        if discovered.isAirPlay2Supported {
+        // "Streamable right now" = AP2-capable AND currently reachable. A
+        // sticky-AP2 device that went offline (`supportsAirPlay2` true but
+        // `isAvailable` false) is NOT streamable right now — treat it like the
+        // AP2-advert-gone case (drop the descriptor/fed-memo, don't re-kick),
+        // but it KEEPS `supportsAirPlay2 == true` in the model (set in
+        // `mapDiscovered`/`merge`) so the UI never shows the AP1 "coming soon"
+        // row — it shows an unavailable/retry-on-click row instead.
+        let streamableNow = discovered.isAirPlay2Supported && discovered.isAvailable
+        if streamableNow {
             self.lastDescriptors[id] = discovered.descriptor
             // Availability recovery (root cause 4): a fresh AP2 (re-)resolution is
             // evidence the device is reachable again, so clear any terminal-failure
@@ -597,8 +617,9 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
             self.failedGate.remove(id)
         } else {
             self.lastDescriptors[id] = nil
-            // The AP2 advert is gone: the engine descriptor will be removed, so a
-            // future re-add must re-feed. Drop the fed-descriptor memo.
+            // The AP2 advert is gone (downgrade) or the device went offline: the
+            // engine descriptor will be removed, so a future re-add must re-feed.
+            // Drop the fed-descriptor memo.
             self.fedDescriptors[id] = nil
         }
 
@@ -622,7 +643,7 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         // but isn't streaming and no op is in flight (e.g. it just recovered from a
         // failure park cleared above, or re-appeared after dropping), re-kick the
         // converge loop so the intended selection is retried without a user toggle.
-        if discovered.isAirPlay2Supported,
+        if streamableNow,
            self.desiredOn[id] == true,
            !self.added.contains(id),
            !self.converging.contains(id),
@@ -763,9 +784,14 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         let id = discovered.id
         let isMuted = muted.contains(id)
         let supportsAP2 = discovered.isAirPlay2Supported
-        // AP1-only devices are surfaced but never controllable: available=false
-        // (dimmed/disabled in the UI), and NEVER addOutput-ed (D6).
-        let isAvailable = supportsAP2
+        // Availability rules:
+        //  - AP1-only (never AP2): surfaced but never controllable — available=false
+        //    (dimmed/disabled "coming soon"), NEVER addOutput-ed (D6).
+        //  - AP2 online: available.
+        //  - AP2 OFFLINE (sticky-AP2, `discovered.isAvailable == false`): keeps
+        //    supportsAP2=true but available=false — surfaced as an unavailable
+        //    (retry-on-click) row, NOT the AP1 "coming soon" row.
+        let isAvailable = supportsAP2 && discovered.isAvailable
         let baseVolume = known[id]?.volume ?? 50
         return Device(
             id: id,
@@ -789,18 +815,26 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         result.name = discovered.name
         result.kind = discovered.kind
         result.supportsAirPlay2 = discovered.supportsAirPlay2
-        // AP1 devices can never become available; an AP2 device that re-resolved is
-        // reachable again (a dropped→returned device comes back available).
-        if discovered.supportsAirPlay2 {
+        if discovered.supportsAirPlay2 && discovered.isAvailable {
+            // An AP2 device that re-resolved is reachable again (a dropped→
+            // returned device comes back available).
             result.isAvailable = true
-        } else {
+        } else if discovered.supportsAirPlay2 {
+            // Sticky-AP2 device that went OFFLINE (lost its `_airplay._tcp`
+            // advert; `_raop._tcp` lingers): supportsAirPlay2 STAYS true, but it
+            // is unavailable and deselected. `teardownEngineOutput` already
+            // stopped any live session before this merge runs. Surface a resting
+            // `.failed` dot so it reads as "went away, click to retry" (the
+            // existing failed-click path re-attempts on the next user toggle),
+            // NOT `.off` (which would look like a clean, deliberate stop).
             result.isAvailable = false
             result.isSelected = false
-            // AP1-only devices are never routed (D6) and must never show a
-            // connecting/failed dot. An AP2→AP1 downgrade tears down any live
-            // engine session (`teardownEngineOutput`) before this merge runs, so
-            // force the dot back to `.off` here too — it's the permanent state
-            // for a device that can no longer be added.
+            result.connectionState = .failed(ConnectionFailure(cause: .unknown))
+        } else {
+            // Genuine AP1-only device (never AP2). Never routed (D6) and must
+            // never show a connecting/failed dot — force the dot to `.off`.
+            result.isAvailable = false
+            result.isSelected = false
             result.connectionState = .off
         }
         return result

@@ -398,6 +398,85 @@ final class NativeBackendTests: XCTestCase {
                       "an AP2→AP1 downgrade must deregister the engine descriptor (finding 6)")
     }
 
+    /// THE BUG (live-gated 2026-07-17): a real AP2 device (Sonos Move) powered OFF
+    /// loses its `_airplay._tcp` advert while `_raop._tcp` lingers. Discovery now
+    /// reports this as an `.updated` with `isAirPlay2Supported == true` (STICKY)
+    /// and `isAvailable == false`. The backend must: keep `supportsAirPlay2 == true`
+    /// (so the UI never shows the AP1 "coming soon" row — `isUnsupported` keys off
+    /// `supportsAirPlay2`), mark the device `isAvailable == false` and deselected,
+    /// tear down any live engine session/descriptor, and surface a `.failed`
+    /// (retry-on-click) dot — NOT the AP1 `.off` "coming soon" state.
+    func testAP2GoingOfflineStaysAP2Unavailable() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap2 = ap2Device(id: "AA:BB:CC:DD:EE:08", name: "Sonos Move")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap2.id } else { return false } }
+        } after: { discovery.fire(.appeared(ap2)) }
+
+        // Stream to it (live engine output).
+        backend.setOutputSet([ap2.id])
+        await pollUntil { engine.addedIDs.contains(ap2.outputID) }
+
+        // Power OFF: airplay advert dropped, raop lingers → sticky-AP2 offline.
+        let offline = DiscoveredDevice(
+            id: ap2.id,
+            descriptor: ap2.descriptor,
+            outputID: ap2.outputID,
+            isAirPlay2Supported: true,   // STICKY — did NOT downgrade
+            isAvailable: false)          // but went offline
+        discovery.fire(.updated(offline))
+
+        // Engine session torn down + descriptor deregistered (no leaked RTSP/PTP).
+        await pollUntil { engine.removedIDs.contains(ap2.outputID) }
+        XCTAssertTrue(engine.removedIDs.contains(ap2.outputID),
+                      "an AP2 device going offline must removeOutput the live engine session")
+        await pollUntil { engine.discoveryRemovedNames.contains(ap2.descriptor.name) }
+        XCTAssertTrue(engine.discoveryRemovedNames.contains(ap2.descriptor.name),
+                      "an AP2 device going offline must deregister the engine descriptor")
+
+        // Model: STILL AP2, now unavailable, deselected, resting .failed dot.
+        await pollUntil {
+            let d = backend.devices.first { $0.id == ap2.id }
+            return d?.supportsAirPlay2 == true && d?.isAvailable == false && d?.isSelected == false
+        }
+        let d = backend.devices.first { $0.id == ap2.id }
+        XCTAssertEqual(d?.supportsAirPlay2, true,
+                       "an offline AP2 device MUST stay supportsAirPlay2==true — NOT reclassified AP1-only (the bug)")
+        XCTAssertEqual(d?.isAvailable, false, "an offline AP2 device is unavailable")
+        XCTAssertEqual(d?.isSelected, false)
+        XCTAssertEqual(d?.connectionState, .failed(ConnectionFailure(cause: .unknown)),
+                       "an offline AP2 device shows a retry-on-click .failed dot, not the AP1 .off state")
+    }
+
+    /// An offline AP2 device coming back (airplay advert re-resolves → `.updated`
+    /// with `isAvailable == true`) recovers to available AP2 and is re-feedable.
+    func testAP2OfflineThenBackRecoversAvailable() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap2 = ap2Device(id: "AA:BB:CC:DD:EE:09", name: "Sonos")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap2.id } else { return false } }
+        } after: { discovery.fire(.appeared(ap2)) }
+
+        // Offline.
+        discovery.fire(.updated(DiscoveredDevice(
+            id: ap2.id, descriptor: ap2.descriptor, outputID: ap2.outputID,
+            isAirPlay2Supported: true, isAvailable: false)))
+        await pollUntil { backend.devices.first { $0.id == ap2.id }?.isAvailable == false }
+
+        // Back online (available AP2 again).
+        discovery.fire(.updated(ap2))   // ap2Device() is available by default
+        await pollUntil { backend.devices.first { $0.id == ap2.id }?.isAvailable == true }
+        let d = backend.devices.first { $0.id == ap2.id }
+        XCTAssertEqual(d?.isAvailable, true, "a returning AP2 device is available again")
+        XCTAssertEqual(d?.supportsAirPlay2, true)
+    }
+
     /// Finding 7: selecting an AP2 device immediately after it appears must not
     /// spuriously fail. The fire-and-forget `updateDiscovery` feed may not have
     /// resolved yet, so converge re-feeds the descriptor and awaits it before

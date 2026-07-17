@@ -37,6 +37,7 @@ public struct DiscoveredDevice: Sendable, Equatable {
         lhs.id == rhs.id &&
         lhs.outputID == rhs.outputID &&
         lhs.isAirPlay2Supported == rhs.isAirPlay2Supported &&
+        lhs.isAvailable == rhs.isAvailable &&
         lhs.descriptor.name == rhs.descriptor.name &&
         lhs.descriptor.hostname == rhs.descriptor.hostname &&
         lhs.descriptor.address == rhs.descriptor.address &&
@@ -72,13 +73,36 @@ public struct DiscoveredDevice: Sendable, Equatable {
     /// engine. False for AP1-only receivers (raop-only, or missing the AP2
     /// feature bits), which are surfaced but never `addOutput`-ed (D6). Mirrors
     /// the vendored sender's own AP2 gate exactly (see ``NativeDiscovery/classify``).
+    ///
+    /// STICKY once true (see ``NativeDiscovery/Entry/hasEverBeenAP2``): a real AP2
+    /// device that has EVER advertised `_airplay._tcp` keeps this `true` for the
+    /// rest of the session even if that advert later times out. Losing the advert
+    /// means the device is going OFFLINE (see ``isAvailable``), NOT that it
+    /// downgraded to an AP1-only receiver — a Sonos powering off drops its
+    /// `_airplay._tcp` and `_raop._tcp` records SEPARATELY, and the `_raop` one
+    /// commonly lingers, which used to spuriously reclassify it AP1-only.
     public let isAirPlay2Supported: Bool
 
-    public init(id: String, descriptor: DeviceDescriptor, outputID: OutputID, isAirPlay2Supported: Bool) {
+    /// Whether the device is reachable RIGHT NOW. A sticky-AP2 device that lost
+    /// its `_airplay._tcp` advert (but still lingers on `_raop._tcp`) is reported
+    /// `isAirPlay2Supported == true` with `isAvailable == false` — i.e. an AP2
+    /// device that is temporarily OFFLINE, which the backend surfaces as an
+    /// unavailable/failed row (retry-on-click), NOT as an AP1 "coming soon" row.
+    ///
+    /// A genuinely-AP1-only device (never advertised `_airplay._tcp`) is reported
+    /// `isAvailable == true` here — the backend derives its own D6 "AP1 is
+    /// surfaced-but-unavailable" state from `isAirPlay2Supported == false`
+    /// independently; this flag only ever goes `false` for a device that WAS
+    /// streamable and has now gone offline.
+    public let isAvailable: Bool
+
+    public init(id: String, descriptor: DeviceDescriptor, outputID: OutputID,
+                isAirPlay2Supported: Bool, isAvailable: Bool = true) {
         self.id = id
         self.descriptor = descriptor
         self.outputID = outputID
         self.isAirPlay2Supported = isAirPlay2Supported
+        self.isAvailable = isAvailable
     }
 }
 
@@ -217,6 +241,14 @@ public final class NativeDiscovery: @unchecked Sendable {
         var airplay: ResolvedService?
         /// The last resolved `_raop._tcp` service, if any (AP1 fallback).
         var raop: ResolvedService?
+        /// STICKY: once this device has EVER classified AP2 (advertised
+        /// `_airplay._tcp` with the AP2 feature bits), it stays AP2 for the rest
+        /// of the session. A real AP2 receiver does NOT downgrade to AP1 at
+        /// runtime — losing its `_airplay._tcp` advert means it's going offline,
+        /// not that it became an AP1-only device. Set true in `buildDevice`
+        /// whenever `classify` returns true; never cleared. Gates the
+        /// offline-vs-downgrade decision in `handleRemove`.
+        var hasEverBeenAP2: Bool = false
     }
 
     /// - Parameter browser: the browse layer. Defaults to a real
@@ -294,7 +326,17 @@ public final class NativeDiscovery: @unchecked Sendable {
         case .raop:    entry.raop = service
         }
 
-        let rebuilt = Self.buildDevice(id: id, outputID: outputID, entry: entry)
+        // Latch the sticky-AP2 bit the moment this device classifies AP2. A
+        // resolve always carries a live `_airplay._tcp` advert when it classifies
+        // AP2, so the device is reachable now — availability is unconditionally
+        // true on the resolve path (only a REMOVE can make a sticky-AP2 device
+        // unavailable; see `handleRemove`).
+        if Self.classify(airplay: entry.airplay) {
+            entry.hasEverBeenAP2 = true
+        }
+
+        let rebuilt = Self.buildDevice(
+            id: id, outputID: outputID, entry: entry, available: true)
         entry.device = rebuilt
 
         let previous = known[id]
@@ -329,7 +371,8 @@ public final class NativeDiscovery: @unchecked Sendable {
 
         // Clear only the service type that departed. A device advertising both
         // must lose BOTH before it disappears — losing its `_airplay._tcp`
-        // advert alone flips it AP2 → AP1-only (an `.updated`), not gone.
+        // advert alone marks a sticky-AP2 device OFFLINE (an `.updated` with
+        // `isAvailable == false`), it does NOT downgrade it to AP1-only.
         switch removed.serviceType {
         case .airplay: entry.airplay = nil
         case .raop:    entry.raop = nil
@@ -342,8 +385,17 @@ public final class NativeDiscovery: @unchecked Sendable {
             return
         }
 
-        // Still advertising on the other type → rebuild (may have flipped AP2↔AP1).
-        let rebuilt = Self.buildDevice(id: id, outputID: entry.device.outputID, entry: entry)
+        // Still advertising on the OTHER service type. Availability is now
+        // false iff a sticky-AP2 device just lost its `_airplay._tcp` advert:
+        // it's a real AP2 receiver going offline (its `_raop._tcp` record simply
+        // lingers longer than the `_airplay._tcp` one when it powers off), so it
+        // stays `isAirPlay2Supported == true` but becomes unavailable — the
+        // backend tears down any engine session and the UI shows an unavailable
+        // (retry-on-click) row, NOT the AP1 "coming soon" popover. A device that
+        // was NEVER AP2 (genuine AP1-only) is unaffected and stays available.
+        let available = !(entry.hasEverBeenAP2 && entry.airplay == nil)
+        let rebuilt = Self.buildDevice(
+            id: id, outputID: entry.device.outputID, entry: entry, available: available)
         let before = entry.device
         entry.device = rebuilt
         known[id] = entry
@@ -364,12 +416,23 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// currently advertise it. `_airplay._tcp` is preferred as the descriptor
     /// source (it carries the AP2 features/pk the engine needs); `_raop._tcp` is
     /// the AP1 fallback.
-    private static func buildDevice(id: String, outputID: OutputID, entry: Entry) -> DiscoveredDevice {
+    private static func buildDevice(id: String, outputID: OutputID, entry: Entry, available: Bool) -> DiscoveredDevice {
         // Prefer the airplay advertisement for the engine descriptor; fall back
         // to raop so AP1-only devices still carry an address/port.
         let source = entry.airplay ?? entry.raop!
-        let isAP2 = classify(airplay: entry.airplay)
-        var built = descriptor(from: source)
+        // AP2 is STICKY: a device that has EVER classified AP2 stays AP2 even
+        // after its `_airplay._tcp` advert times out (it's going offline, not
+        // downgrading — see `Entry.hasEverBeenAP2`). A device that has never
+        // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
+        let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
+        // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
+        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor — name,
+        // address, port, TXT all stay put — so the row doesn't cosmetically flip
+        // to the raop-decorated name just because the device powered off. It's
+        // the same physical device at the same address; only availability changed.
+        var built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+            ? entry.device.descriptor
+            : descriptor(from: source)
         // When the descriptor comes from `_raop._tcp` (no `_airplay._tcp`
         // advertisement to prefer instead), the instance name is often MAC-
         // decorated by the receiver's stack ("6B2E52B73717@Dev Speaker" — see
@@ -389,7 +452,8 @@ public final class NativeDiscovery: @unchecked Sendable {
             id: id,
             descriptor: built,
             outputID: outputID,
-            isAirPlay2Supported: isAP2
+            isAirPlay2Supported: isAP2,
+            isAvailable: available
         )
     }
 

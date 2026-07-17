@@ -70,20 +70,31 @@ phase status materially changes, or the dev tooling gains a new layer.
   — several were written 2026-07-17 specifically to de-risk the next phases
   before implementation starts.
 
-## AGENTS.md must never reach `main` ahead of its code (HARD RULE)
+## `main` is MERGE-ONLY — author in your own worktree (HARD RULE)
 
-**An `AGENTS.md` change describing code MUST land on `main` in the same merge as
-that code — never before it.** Other agents read `main`'s AGENTS.md as their map
-of this repo. A doc that describes code `main` does not have doesn't just fail to
-help them; it actively sends them looking for symbols that do not exist, and they
-will not think to doubt it. Docs ahead of code are worse than no docs.
+**Never run `git commit` while standing on `main`.** Everything — code, docs,
+notes, one-line fixes — is authored and committed in YOUR OWN worktree and
+reaches `main` only as a **merge**. `main` receives merges; it never receives an
+original commit. Guard 1 in `.githooks/pre-commit` enforces precisely this line:
+merges pass untouched, a bare `git commit` on `main` is refused.
+
+**The consequence that makes this non-negotiable: an `AGENTS.md` change
+describing code then CANNOT reach `main` ahead of that code.** They sit on the
+same branch, so they land in the same merge, and become true on `main` at the
+same instant. That guarantee is free — it falls out of merge-only, rather than
+depending on anyone remembering to be careful. Other agents read `main`'s
+AGENTS.md as their map of this repo: a doc describing code `main` does not have
+doesn't merely fail to help them, it sends them hunting for symbols that do not
+exist, and they will not think to doubt it. Docs ahead of code are worse than no
+docs.
 
 **How to work (Alec, 2026-07-17):**
 1. **Do not work in the `main` checkout at all.** Use a worktree. This is the
-   root fix, not an aesthetic preference — see the incident below.
-2. Edit `AGENTS.md` in YOUR OWN worktree, alongside the code it describes.
-3. Commit both together, then merge the branch into `main` as one unit. Docs and
-   code become true on `main` at the same instant.
+   root fix, not an aesthetic preference — see the incident below. Note that
+   merely EDITING `main` starts the accident even if you never commit: your loose
+   edits become the next agent's blocked merge, and it will commit them for you.
+2. Author code and its `AGENTS.md` together in your worktree.
+3. Commit both there, then merge the branch into `main` as ONE unit.
 4. Never commit a docs-only "I'll land the code next" change. There is no "next".
 5. If the code is dropped, deferred, or stashed, the doc describing it does not
    land either. Landing half is what creates an orphan.

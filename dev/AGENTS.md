@@ -2,104 +2,51 @@
 
 ## Purpose
 
-Offline development tooling for working on the app with no real AirPlay speakers.
-This folder owns the *optional* real-wire sanity check (a shairport-sync fake
-receiver); it does not own the primary offline tool, which is the in-app
-`MockBackend` in [../AirPlayControllerCore](../AirPlayControllerCore/AGENTS.md).
-Full human-facing docs (setup, rationale, troubleshooting) live in
-[README.md](README.md) — read that before changing these scripts; this file only
-adds what an agent needs to avoid re-discovering the gotchas below.
+Offline development tooling for working on the app without real AirPlay
+speakers, plus `dev/notes/`, home for pre-implementation research briefs.
+Owns the *optional* real-wire sanity check (a shairport-sync fake receiver) —
+not the primary offline tool, which is the in-app `MockBackend` in
+`../AirPlayControllerCore`. Full setup docs live in `README.md`.
 
-Keep this file up to date when: a script here is renamed/replaced, the
-single-instance port limitation is fixed upstream (shairport-sync starts
-honouring `-p`/`port` in Classic AirPlay mode), or a new dummy-setup layer is added.
+## Rules
 
-## Notable Patterns
+- **Target `MockBackend` for UI/control work, not a fake speaker.** The fake
+  speaker only exercises Classic AirPlay-1 wire framing; multi-device, group,
+  and sync testing is the mock backend's job.
+- **At most one fake speaker will actually run.** `fake-speakers.sh` assigns
+  a distinct port per instance, but the installed shairport-sync build
+  ignores the port setting in Classic mode and binds `:5000` regardless —
+  every instance past the first dies "Address already in use." Known
+  upstream limitation; don't add retry/backoff to work around it.
+- **macOS's own AirPlay Receiver squats on `:5000` too.** If a fake speaker's
+  health check reports it died, check AirDrop & Handoff ▸ AirPlay Receiver is
+  off before suspecting the script.
+- **`.run/` is generated, gitignored state** — safe to delete, never
+  hand-edit or commit it.
+- **Real AirPlay 2 (PTP sync) cannot be faked locally.** The `native` backend
+  binds privileged PTP ports 319/320, fighting OwnTone's own PTP daemon on
+  the same machine — needs real hardware or a second host.
+- **`native` is a real sender, not a dummy layer.** `AIRPLAY_BACKEND=native`
+  opens actual sockets and needs a real TCC grant; not for casual offline
+  dev — see `README.md`'s "Layer 3" and `notes/p2b-nativebackend-runbook.md`.
+- **Read the relevant `notes/` brief before related implementation work** —
+  briefs de-risk a phase before code is written; don't re-derive it.
 
-- **A third layer now exists: the real `native` backend.** `AIRPLAY_BACKEND=native`
-  drives a real, in-process AirPlay 2 sender (`AirPlayEngine`) — not a dummy.
-  It's real enough to need actual sockets/PTP ports and a real TCC grant. See
-  `README.md`'s "Layer 3" section for the summary and
-  `notes/p2b-nativebackend-runbook.md` for the full headless-run + in-app TCC
-  grant flow + gated live-verification checklist. Don't confuse this with the
-  two dummy layers below — `native` is not for casual offline dev, it's the
-  real sender path.
+## Map
 
-- **At most one fake speaker will actually run.** [fake-speakers.sh](fake-speakers.sh)
-  generates a distinct RTSP port per named instance, but the installed
-  shairport-sync 5.1 build ignores the port setting in Classic (AirPlay-1) mode and
-  binds `:5000` regardless — so every instance past the first dies with "Address
-  already in use." Don't "fix" this by adding retry/backoff logic; it's a known
-  upstream limitation (verified 2026-07-13, see README.md). Multi-device/group/sync
-  testing is the mock backend's job, not this script's.
-- **macOS's own AirPlay Receiver squats on :5000 too.** If the health check in
-  `fake-speakers.sh` reports the instance died, the first thing to check is System
-  Settings ▸ General ▸ AirDrop & Handoff ▸ AirPlay Receiver — it must be off.
-- **`.run/` is generated, gitignored state** (pidfiles, per-instance `.conf` files,
-  logs) — safe to delete, never hand-edit or commit it.
-- **Real AirPlay-2 (PTP sync) cannot be faked locally.** A source build with
-  `--with-airplay-2` would fight the OwnTone sender for the privileged PTP ports
-  319/320 on one machine. There is no local stand-in for this — it needs the real
-  Sonos/AirPort Express hardware (or a second host).
-
-## Folder Map
-
-- [audiocap/](audiocap/README.md) — a standalone Core Audio process-tap
-  capture CLI (proved out the Phase 0e capture layer; own README covers
-  build/usage). Not the mock backend, not the fake-speaker script — a third,
-  independent offline dev tool.
-- [notes/](notes/) — **research briefs and phase write-ups**, this project's
-  established home for pre-implementation research (see below) and
-  phase-completion reports.
-
-## Research briefs (`dev/notes/*-brief.md` / `*-research.md`)
-
-This repo's pattern for de-risking a phase of work *before* writing code: a
-research brief that reads the actual code/APIs involved, proposes an
-approach, and ranks the walls likely to be hit — written to `dev/notes/` so
-a future agent (fresh context, no chat history) can pick it up by file path
-alone. **Read the relevant brief before starting related implementation
-work; don't re-derive what's already there.** Naming loosely follows the
-phase that motivated it (`0e-`/`0f-` = Phase 0 capture/e2e spikes, `p1-` =
-Phase 1 UI, `p2-`/`p2b-` = Phase 2 engine and its sequels — see
-`../PLAN-PHASE-2.md`).
-
-Current briefs, newest first:
-
-| Brief | Covers |
+| Name | What it is |
 |---|---|
-| [p2b-multistream-brief.md](notes/p2b-multistream-brief.md) | Whether the vendored AirPlay 2 sender can host multiple independent-content streams — the architectural unknown behind per-app routing. Recommends a localized `stream_id` addition over per-instance or per-process alternatives. |
-| [p2b-nativebackend-seam-brief.md](notes/p2b-nativebackend-seam-brief.md) | Gap analysis: every `OutputBackend`/`OwnToneBackend` behavior the UI relies on vs. what `AirPlayEngine` provides today — the checklist for writing `NativeBackend`. |
-| [p2b-helper-productionization-brief.md](notes/p2b-helper-productionization-brief.md) | Reviews `AirPlayEngine/docs/ptp-helper-design.md` against real `SMAppService`/codesign/firewall behavior. Flags that the sanctioned daemon-install path needs a paid Developer ID certificate. |
-| [p2b-synced-local-brief.md](notes/p2b-synced-local-brief.md) | Core Audio design for the Mac's own speakers as a first-class, PTP-synced output ("play everywhere" — SPEC §8.1). |
-| [p2b-v2-smallwork-brief.md](notes/p2b-v2-smallwork-brief.md) | Combined light brief for auto-reconnect and EQ/L-R balance (SPEC §3 v2) — neither needs new infrastructure. |
-| [playback-meter-research.md](notes/playback-meter-research.md) | Level-meter design (`NSLevelIndicator` in the device row) — researched, not yet built. |
-| [p1-owntone-api-brief.md](notes/p1-owntone-api-brief.md), [p1-menu-brief.md](notes/p1-menu-brief.md), [p1-cc-slider-research.md](notes/p1-cc-slider-research.md) | Phase 1 UI/API research (OwnTone JSON API, popover menu structure, Control-Center-style slider). |
-| [0e-taps-brief.md](notes/0e-taps-brief.md), [0f-pipe-brief.md](notes/0f-pipe-brief.md), [p2-ptp-bind-probe.md](notes/p2-ptp-bind-probe.md) | Phase 0 capture/pipe/PTP-bind spikes. |
-
-`AirPlayEngine/docs/first-light-report.md` (in that package, not here) is the
-write-up for the 2026-07-17 gated live-hardware test — read it before
-debugging anything that looks like a repeat of a first-light symptom.
-
-## Files
-
-| File | Role |
-|---|---|
-| [fake-speakers.sh](fake-speakers.sh) | Launches one or more `shairport-sync` processes as fake AirPlay-1 receivers (see single-instance caveat above). `SILENT=0` to hear audio instead of discarding it. |
-| [stop-fake-speakers.sh](stop-fake-speakers.sh) | Kills every process tracked by a pidfile in `.run/` and cleans them up. |
-| [README.md](README.md) | Full setup/usage/rationale for both dummy layers (in-app mock + shairport fake speaker) plus the real `native` backend (Layer 3). |
-
-## Research briefs (`notes/`)
-
-Roadmap/design briefs written during Phase 2b planning and execution
-(`PLAN-PHASE-2B.md`), read-only research unless noted:
-
-| Brief | Covers |
-|---|---|
-| `notes/p2b-nativebackend-runbook.md` | **How to run `native` today**: headless build/test, the in-app TCC grant flow via `scripts/make-app.sh`'s stable bundle path, and the D7 gated live-verification checklist. Start here for anything `native`-backend-operational. |
-| `notes/p2b-nativebackend-seam-brief.md` | Design brief `NativeBackend` was built from: gap analysis of everything `OutputBackend` needs that `AirPlayEngine` doesn't provide out of the box. |
-| `notes/p2b-multistream-brief.md` | Deferred: `stream_id` design for per-app audio routing. |
-| `notes/p2b-synced-local-brief.md` | Deferred: synced local (this-Mac) Core Audio output alongside AirPlay outputs. |
-| `notes/p2b-helper-productionization-brief.md` | Deferred: SMAppService PTP helper productionization — needs a paid Developer ID cert for the sanctioned install path. |
-| `notes/p2b-v2-smallwork-brief.md` | Deferred: smaller v2 backlog items. |
-| `notes/0f-pipe-brief.md` | Historical (pre-engine-extraction): OwnTone pipe-input rate/autostart findings. |
+| `fake-speakers.sh` | Launches shairport-sync fake receivers (single-instance caveat above). |
+| `stop-fake-speakers.sh` | Kills every process tracked by a pidfile in `.run/`. |
+| `audiocap/` | Standalone Core Audio process-tap capture CLI; independent tool. |
+| `README.md` | Setup/rationale for the mock, fake-speaker, and `native` backends. |
+| `notes/p2b-nativebackend-runbook.md` | How to run `native`: build/test, TCC grant, verification. |
+| `notes/p2b-nativebackend-seam-brief.md` | Gap analysis behind `NativeBackend`'s design. |
+| `notes/p2b-multistream-brief.md` | `stream_id` design, per-app routing (deferred). |
+| `notes/p2b-synced-local-brief.md` | Synced local Core Audio output design (deferred). |
+| `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
+| `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
+| `notes/playback-meter-research.md` | Level-meter design research (not built). |
+| `notes/p1-*.md` | Phase 1 UI/API research. |
+| `notes/0e-taps-brief.md`, `0f-pipe-brief.md`, `p2-ptp-bind-probe.md` | Early capture/pipe/PTP-bind spikes. |
+| `../AirPlayEngine/docs/first-light-report.md` | Live-hardware-test ledger (that package). |

@@ -2,16 +2,22 @@
 
 ## Purpose
 
-This Swift package is the platform-agnostic core of the AirPlay Controller app: it
-defines the `Device` model, the `OutputBackend` protocol that decouples the (future)
-AppKit UI from wherever audio actually goes, a fully-working `MockBackend` for offline
-UI development, and an unimplemented `OwnToneBackend` stub for the real speaker
-integration. It owns no UI code (no AppKit/SwiftUI imports) — that lives in a
-not-yet-created app target that will link against this library.
+This Swift package is the whole app in one place. Its **library target**
+(`AirPlayControllerCore`) is the platform-agnostic core: the `Device` model, the
+`OutputBackend` seam that decouples UI from wherever audio actually goes, the
+routing brain (`GroupController`, `AppRoutingController`) and its JSON persistence,
+per-device connection status + diagnosis, a fully-working offline `MockBackend`,
+and an unimplemented `OwnToneBackend` stub. The package **also** hosts the AppKit
+UI as separate targets (`AirPlayControllerSharedUI`, `AirPlayControllerPopoverUI`,
+`AirPlayControllerWindowUI`) and the shipping menu-bar executable
+(`AirPlayControllerApp`), plus offline harnesses. The core library target stays
+UI-agnostic (no AppKit imports, verified); UI code lives only in the UI targets
+that link against it.
 
-Keep this file up to date when: `OutputBackend`'s protocol surface changes, a new
-backend implementation is added, `OwnToneBackend` moves from stub to real
-implementation, or the demo fleet / event model changes shape.
+Keep this file up to date when: `OutputBackend`'s protocol surface changes, a
+backend implementation is added, `OwnToneBackend` moves from stub to real, the
+routing model / demo fleet / event model changes shape, or a target is added to /
+removed from `Package.swift`.
 
 ## Notable Patterns
 
@@ -24,78 +30,105 @@ implementation, or the demo fleet / event model changes shape.
   `BackendEvent` (`deviceAdded`/`deviceRemoved`/`deviceUpdated`/`level`) via
   `makeEventStream()` is how the UI learns about every state change, including the
   echo of its own control calls. See [OutputBackend.swift](Sources/AirPlayControllerCore/OutputBackend.swift).
+- **Connection status rides on `Device`.** `Device.connectionState` flows through the
+  same `deviceUpdated` echo — the backend owns the state machine, the UI only reacts to
+  transitions. Don't add a side channel for it.
 - **No-op changes must not emit.** `MockBackend.mutate(_:_:)` compares before/after and
   only emits `deviceUpdated` if something actually changed — a call site setting volume
   to its current value is silent. Preserve this if you touch backend mutation logic
   (`MockBackendTests.testNoOpChangeDoesNotEmit` guards it).
 - **`MockBackend` is single-queue-confined.** All mutable state is touched only on its
   private serial `queue`; `@unchecked Sendable` is justified by that discipline, not a
-  workaround. Any new mutable state must go through `queue.async`/`queue.sync`, not be
-  accessed directly.
+  workaround. Any new mutable state must go through `queue.async`/`queue.sync`.
 - **`OutputBackend` is the only seam the app should depend on.** `makeBackend(_:)` in
   [OwnToneBackend.swift](Sources/AirPlayControllerCore/OwnToneBackend.swift) is the one
-  place that knows about concrete backend types (`MockBackend` vs `OwnToneBackend`).
-  New callers should take an `OutputBackend`, never a concrete type.
-- Device/backend behavior is spec'd in [SPEC.md](../SPEC.md), particularly §8 (Phase 0
-  feasibility findings, e.g. Sonos AirPlay-2/PTP requirement) and §9 (UI design — device
-  row, groups, interaction model). Comments in this package cite specific subsections.
+  place that knows about concrete backend types. New callers take an `OutputBackend`.
+- Device/backend/UI behavior is spec'd in [SPEC.md](../SPEC.md), particularly §8 (Phase 0
+  feasibility findings) and §9 (UI design — device row, groups, per-app routing). Comments
+  cite specific subsections; the connection-status design is `dev/notes/p1-connection-status-brief.md`.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    UI["App UI (not yet built)"] -->|calls control methods| OutputBackend
+    UI["AppKit UI targets (SharedUI / PopoverUI / WindowUI / App)"] -->|control methods| OutputBackend
     OutputBackend -->|"makeEventStream()"| UI
+    UI -->|routing intent| GroupController
+    UI -->|per-app routes| AppRoutingController
     OutputBackend["OutputBackend (protocol)"]
     MockBackend -.implements.-> OutputBackend
     OwnToneBackend -.implements.-> OutputBackend
     MockBackend --> Device
     OwnToneBackend --> Device
-    MockBackend --> BackendEvent
+    OwnToneBackend -->|"why did it fail?"| ConnectionDiagnosing
     makeBackend["makeBackend(_:)"] -->|constructs| MockBackend
     makeBackend -->|constructs| OwnToneBackend
 ```
 
 ## Folder Map
 
-- [Sources/AirPlayControllerCore/](Sources/AirPlayControllerCore/) — the library: `Device`,
-  `OutputBackend`/`BackendEvent`, `ConnectionState`/`ConnectionFailure`,
-  `ConnectionDiagnostics` (`NetworkConnectionDiagnostics`), `MockBackend`,
-  `OwnToneBackend` + `makeBackend`.
-- [Sources/mock-speakers-demo/](Sources/mock-speakers-demo/) — headless CLI executable
-  (`swift run mock-speakers-demo`) that drives `MockBackend` and prints every event, for
-  watching backend behavior with no UI.
-- [Tests/AirPlayControllerCoreTests/](Tests/AirPlayControllerCoreTests/) — `MockBackend`
-  behavioral tests.
+- [Sources/AirPlayControllerCore/](Sources/AirPlayControllerCore/) — the UI-free library:
+  `Device`, `OutputBackend`/`BackendEvent`, `ConnectionState`/`ConnectionFailure`,
+  `ConnectionDiagnostics`, `GroupController`, `AppRoutingController`, `RoutingStore`/
+  `AppRouteStore`, `CaptureCoordinator`, `MockBackend`, `OwnToneBackend` + `makeBackend`.
+- [Sources/AirPlayControllerSharedUI/](Sources/AirPlayControllerSharedUI/) — AppKit row
+  views shared by popover + window: `DeviceRowView`, `StatusDotView`, `AppRowView`,
+  `PopoverColumnGrid`.
+- [Sources/AirPlayControllerPopoverUI/](Sources/AirPlayControllerPopoverUI/) — the menu-bar
+  popover: `PopoverController`, `CardView`, `ConnectionDiagnosisView`, `MainOutRowView`,
+  `GroupRowView`.
+- [Sources/AirPlayControllerWindowUI/](Sources/AirPlayControllerWindowUI/) — the full mixer
+  window (`MixerViewController`, `SidebarViewController`).
+- [Sources/AirPlayControllerApp/](Sources/AirPlayControllerApp/) — the shipping menu-bar app
+  (`NSStatusItem` + popover); built into "AirPlay Controller.app" by `../scripts/make-app.sh`.
+- [Sources/mock-speakers-demo/](Sources/mock-speakers-demo/) — headless CLI that drives
+  `MockBackend` and prints every event.
+- `Sources/popover-harness/`, `window-harness/`, `popover-snapshot/` — offline structure-check
+  + snapshot harnesses (assert the view tree / write PNGs with no on-screen UI).
 
 ## Key Types
 
 | Type | Role |
 |---|---|
-| `Device` | Value-type snapshot of one AirPlay output (identity, kind, volume, mute/solo/selected state, `connectionState`). |
-| `Device.Kind` | Receiver category (`homePod`, `appleTV`, `airportExpress`, `sonos`, `generic`) — drives SF Symbol and AirPlay-1-vs-2 assumptions. |
-| `ConnectionState` / `ConnectionFailure` | Live per-device connection lifecycle (`off`/`connecting`/`connected`/`reconnecting`/`failed(ConnectionFailure)`) and the plain-English cause+suggestion behind a failure. Backend-owned, UI-rendered — see [ConnectionState.swift](Sources/AirPlayControllerCore/ConnectionState.swift) and `dev/notes/p1-connection-status-brief.md`. |
-| `ConnectionDiagnosing` / `NetworkConnectionDiagnostics` | Protocol seam + real implementation for "why didn't it connect" — engine-log tail, Bonjour presence, TCP probe, auth flags, in that decision order. See [ConnectionDiagnostics.swift](Sources/AirPlayControllerCore/ConnectionDiagnostics.swift). |
-| `BackendEvent` | The single push channel from backend to UI: device added/removed/updated, or a level-meter sample. |
-| `OutputBackend` | Protocol seam between the app and audio routing — implemented by `MockBackend` and `OwnToneBackend`. |
-| `MockBackend` | Fully-working offline backend: fabricates a fleet, staggers discovery, emits level samples, can simulate dropout/reconnect. |
-| `OwnToneBackend` | Stub for the real backend (OwnTone JSON API + AirPlay-2 sender) — `start()`/`setVolume`/`setMuted`/`setSoloed`/`setOutputSet` are still `unimplemented()`/assert. Its connection-state machine (`connectionStates` dict, transition hooks off `setOutputSet`/`confirmSelectionOrRecover`/`applyPoll`, injected `diagnostics: ConnectionDiagnosing?`) is real, though — see §3 of `dev/notes/p1-connection-status-brief.md`. |
-| `makeBackend(_:)` | The one factory function that knows about concrete backend types; everything else depends on `OutputBackend`. |
-| `AppRoutingController` | Owns per-app routing state (sibling of `GroupController`, not folded into it): `appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`, `routedAppCount`, `handleDeviceUnavailable(id:)` (silent fallback to Current device when a route's target disappears). Persists every mutation via `AppRouteStore`. See [AppRoutingController.swift](Sources/AirPlayControllerCore/AppRoutingController.swift). |
-| `AppRouteStore` | Versioned-JSON persistence for per-app routes, mirroring `RoutingStore`: writes `app-routes.json` in the same `Application Support/AirPlay Controller/` directory, schemaVersion-gated (newer schema on disk → treated as missing). See [AppRouteStore.swift](Sources/AirPlayControllerCore/AppRouteStore.swift). |
-| `AppRowView` / `AddApplicationRowView` | Popover row views for the Applications card (`AirPlayControllerSharedUI` target, not this library's own sources): icon/name/volume/destination-popup row, and the full-width "+ Add application…" row that doubles as the card's empty state. Both defined in [AppRowView.swift](Sources/AirPlayControllerSharedUI/AppRowView.swift). |
+| `Device` | Value-type snapshot of one AirPlay output (identity, kind, volume, mute/solo/selected, `connectionState`). |
+| `Device.Kind` | Receiver category — drives SF Symbol and AirPlay-1-vs-2 assumptions. |
+| `ConnectionState` / `ConnectionFailure` | Live per-device connection lifecycle (`off`/`connecting`/`connected`/`reconnecting`/`failed`) + the plain-English cause behind a failure. Backend-owned, UI-rendered. See [ConnectionState.swift](Sources/AirPlayControllerCore/ConnectionState.swift). |
+| `ConnectionDiagnosing` / `NetworkConnectionDiagnostics` | Protocol seam + real "why didn't it connect" — engine-log tail, Bonjour presence, TCP probe, auth flags, in that decision order. See [ConnectionDiagnostics.swift](Sources/AirPlayControllerCore/ConnectionDiagnostics.swift). |
+| `GroupController` | The routing brain: owns the persistent "Enabled Devices" set + Main Out target + saved output groups; composes the set, resolves Main Out, saves/activates/dedups groups. |
+| `AppRoutingController` | Per-app routing state (sibling of `GroupController`): `appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`, `handleDeviceUnavailable(id:)` silent fallback. Persists via `AppRouteStore`. |
+| `AppRouteStore` / `RoutingStore` | Versioned-JSON persistence (`app-routes.json` / routing) in `Application Support/AirPlay Controller/`, schemaVersion-gated. |
+| `BackendEvent` | The single push channel backend→UI: device added/removed/updated, or a level sample. |
+| `OutputBackend` | The seam between app and audio routing — implemented by `MockBackend` and `OwnToneBackend`. |
+| `MockBackend` | Fully-working offline backend: fabricates a fleet, staggers discovery, emits levels, simulates dropout/reconnect, and runs scripted connect/fail/drop choreography (`ConnectScript`). |
+| `OwnToneBackend` | Stub for the real backend — control methods still `unimplemented()`, but its connection-state machine + injected `diagnostics: ConnectionDiagnosing?` are real. |
+| `makeBackend(_:)` | The one factory that knows concrete backend types; everything else depends on `OutputBackend`. |
 
 ## In-Progress Work
 
 | Area | Status |
 |---|---|
-| `OwnToneBackend` | Control methods (`start()`/`setVolume`/`setMuted`/`setSoloed`/`setOutputSet`) still call `unimplemented()` (assertion failure) — real implementation is Phase 0d/0f → Phase 1 work per SPEC.md §5, blocked on physical speaker access (see project memory: speakers currently unavailable, mock rig is primary dev target). The connection-state machine and diagnostics wiring (`dev/notes/p1-connection-status-brief.md`) are implemented independently of that gap. OwnTone pipe-input rate/autostart findings are captured in `dev/notes/0f-pipe-brief.md` at the repo root, not in this package. |
-| Per-app routing (`AppRoutingController`/`AppRouteStore`) | UI + model + persistence COMPLETE (SPEC.md §9, PLAN-POPOVER-ROUTING.md T-1..T-8/T-11, all landed). Routes persist and render but move no audio yet — wired against `MockBackend` only; blocked on the native engine gaining per-app capture streams (`CaptureCoordinator` is still a single global tap today). |
-| Per-device connection status | On-icon status badge (`StatusDotView`) + inline diagnosis panel (`ConnectionDiagnosisView`), driven by `OwnToneBackend`'s connection-state machine and `NetworkConnectionDiagnostics` — see `dev/notes/p1-connection-status-brief.md`. |
-| AppKit app target | Not yet created — this package is pure logic today; nothing in the repo links against it as a UI. Popover UI (`PopoverController`, `AppRowView`, etc.) lives in the separate `AirPlayControllerPopoverUI`/`AirPlayControllerSharedUI` targets in this same package, not yet a shipping app. |
+| `OwnToneBackend` | Control methods (`start()`/`setVolume`/`setMuted`/`setSoloed`/`setOutputSet`) still call `unimplemented()` — real implementation is Phase 0d/0f → Phase 1 per SPEC.md §5, blocked on physical speaker access (mock rig is primary dev target). The connection-state machine + diagnostics wiring are implemented independently. Pipe-input findings: `dev/notes/0f-pipe-brief.md`. |
+| Per-app routing (`AppRoutingController`/`AppRouteStore`) | UI + model + persistence COMPLETE (SPEC.md §9, PLAN-POPOVER-ROUTING.md T-1..T-8/T-11). Routes persist and render but move no audio yet — wired against `MockBackend`; blocked on the native engine gaining per-app capture streams (`CaptureCoordinator` is a single global tap today). |
+| Per-device connection status | COMPLETE against the mock: on-icon `StatusDotView` badge + inline `ConnectionDiagnosisView`, driven by `OwnToneBackend`'s state machine + `NetworkConnectionDiagnostics`. Real signals arrive once `OwnToneBackend` is live. |
+| `AirPlayControllerApp` | A real menu-bar (`NSStatusItem`, `LSUIElement`) executable target — built into "AirPlay Controller.app" by `scripts/make-app.sh` (ad-hoc signed), runnable offline via `AIRPLAY_BACKEND=mock AIRPLAY_MOCK_SCENARIO=connection-demo`. NOT yet distributed/notarized, and moves no real audio until `OwnToneBackend` lands. |
 
 ## Tests
 
+`Tests/AirPlayControllerCoreTests/`. `MockBackendTests` uses
+`makeBackend(fleet:staggerDiscovery:false, emitsLevels:false, simulatesDropouts:false)`
+for determinism and small private actors (`EventBox`/`DeviceBox`/`FlagBox`) to carry
+state across the async event stream — reuse that pattern for new backend tests. The
+popover/window structure harnesses (`swift run popover-harness` / `window-harness`) and
+`popover-snapshot` are the offscreen UI checks; run them alongside `swift test`.
+
 | File | Focus |
 |---|---|
-| [MockBackendTests.swift](Tests/AirPlayControllerCoreTests/MockBackendTests.swift) | Discovery emits the whole fleet; `devices` snapshot matches fleet order after discovery; `setVolume` clamps to 0–100 and echoes `deviceUpdated`; `setOutputSet` selects exactly the given ids; no-op changes don't emit. Uses `makeBackend(fleet:staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)` for determinism, and small private actors (`EventBox`/`DeviceBox`/`FlagBox`) to carry state across the async event stream. |
+| `MockBackendTests` | Discovery, snapshot order, volume clamp/echo, `setOutputSet`, no-op-doesn't-emit. |
+| `OwnToneBackendTests` | Connection-state transitions, diagnostics dispatch, post-stop resurrection guard. |
+| `ConnectionStateTests` / `ConnectionDiagnosticsTests` | Failure copy/equality; `NetworkConnectionDiagnostics` decision order. |
+| `GroupControllerTests` | Enabled-set composition, Main Out routing, group save/activate/dedup, persistence. |
+| `AppRoutingControllerTests` / `AppRouteStoreTests` | Per-app route model + silent fallback; JSON persistence round-trip + schema gating. |
+| `PopoverControllerTests` | Popover build, collapsible cards, Applications card, connection-status flow + diagnosis panels. |
+| `DeviceRowConnectionStateTests` / `ConnectionDiagnosisViewTests` / `AppRowViewTests` | Row status badge per state; failure-panel copy/actions; app-row config. |
+| `MixerWindowControllerTests` | Full mixer-window wiring (shared row reuse). |
+| `CaptureCoordinatorTests` / `BackendKindResolutionTests` | Capture-tap coordination; `makeBackend` kind resolution. |

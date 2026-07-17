@@ -83,6 +83,18 @@ public final class AppRoutingController {
         appRoutes.reduce(0) { $0 + ($1.destination != .currentDevice ? 1 : 0) }
     }
 
+    /// App display names whose route destination is this device (bypassed to
+    /// it), in stable route order. Excludes `.currentDevice` (local / no
+    /// redirect) — those apps aren't routed to any AirPlay device. Backs the
+    /// device row's routing sublabel (`DeviceRowView.apply(routedAppNames:)`)
+    /// in both host controllers (popover + window).
+    public func routedAppNames(for deviceID: String) -> [String] {
+        appRoutes.compactMap { route in
+            if case .device(let id) = route.destination, id == deviceID { return route.displayName }
+            return nil
+        }
+    }
+
     /// PLAN decision 7 (silent fallback): any route targeting the now-gone
     /// device `id` resets to `.currentDevice`. Persists only if something
     /// actually changed.

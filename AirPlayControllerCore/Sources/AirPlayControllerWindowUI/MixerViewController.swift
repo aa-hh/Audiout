@@ -17,6 +17,12 @@ public final class MixerViewController: NSViewController {
 
     private let groupController: GroupController
 
+    /// Backs each device row's routing sublabel — the bypassed-app names
+    /// assigned to that device (see `applySelection(to:device:)`). Defaulted
+    /// to a non-persisting instance so existing call sites/tests that construct
+    /// `MixerViewController(groupController:)` without one keep compiling.
+    private let appRouting: AppRoutingController
+
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -29,8 +35,10 @@ public final class MixerViewController: NSViewController {
     /// The group whose members are shown, or nil for "all devices".
     private var scopedGroupID: String?
 
-    public init(groupController: GroupController) {
+    public init(groupController: GroupController,
+                appRouting: AppRoutingController = AppRoutingController(loadPersisted: false)) {
         self.groupController = groupController
+        self.appRouting = appRouting
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -108,8 +116,10 @@ public final class MixerViewController: NSViewController {
         let blocked = device.isLocalDevice && !selected && !groupController.canSelectLocalSpeaker(device.id)
         row.apply(device,
                   selected: selected,
+                  controllable: selected || !appRouting.routedAppNames(for: device.id).isEmpty,
                   blocked: blocked,
-                  blockReason: blocked ? GroupController.localMixRefusalReason : nil)
+                  blockReason: blocked ? GroupController.localMixRefusalReason : nil,
+                  routedAppNames: appRouting.routedAppNames(for: device.id))
     }
 
     private func rebuild(devices: [Device]) {

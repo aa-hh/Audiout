@@ -52,7 +52,21 @@ public struct AppSettings {
     private enum Keys {
         static let theme = "appearance.theme"
         static let density = "appearance.density"
+        static let startBufferMs = "audio.startBufferMs"
     }
+
+    /// The user-selectable sender start-buffer options in ms (Settings › Audio
+    /// › Advanced "Audio buffer", PLAN-LATENCY-SETTING.md). Bare numeric values
+    /// by design (Alec, 2026-07-17): named presets with embedded delay text
+    /// don't survive localization. 1000 is both the default and the floor —
+    /// it leaves receivers a 750 ms jitter buffer, comfortably safe on
+    /// ordinary Wi-Fi; 2250 is OwnTone-parity (the old behavior). The engine
+    /// shim independently hard-clamps to 300...5000, so no stored value can
+    /// produce a non-working session.
+    public static let startBufferOptionsMs: [Int] = [1000, 1500, 2250]
+
+    /// The default (and lowest offered) start buffer in ms.
+    public static let defaultStartBufferMs = 1000
 
     /// The appearance override. Defaults to `.system` when unset or unrecognised
     /// (a value written by a newer build).
@@ -65,5 +79,17 @@ public struct AppSettings {
     public var density: InterfaceDensity {
         get { defaults.string(forKey: Keys.density).flatMap(InterfaceDensity.init(rawValue:)) ?? .comfortable }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.density) }
+    }
+
+    /// The persisted sender start buffer (ms). Values outside
+    /// ``startBufferOptionsMs`` — including unset (0) and anything written by a
+    /// newer/older build — resolve to ``defaultStartBufferMs``, so the getter
+    /// can never return a value the UI doesn't offer.
+    public var startBufferMs: Int {
+        get {
+            let stored = defaults.integer(forKey: Keys.startBufferMs)
+            return Self.startBufferOptionsMs.contains(stored) ? stored : Self.defaultStartBufferMs
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.startBufferMs) }
     }
 }

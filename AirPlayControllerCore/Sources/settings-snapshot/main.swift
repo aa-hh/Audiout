@@ -60,11 +60,22 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     // just the "Add application…" empty state.
     excludedApps.exclude(bundleID: "us.zoom.xos", displayName: "Zoom")
 
+    // Advanced › Audio buffer (PLAN-LATENCY-SETTING.md): render the section so
+    // its layout/dark-mode/light-mode appearance is checkable, same as every
+    // other control on this pane.
+    let latency = LatencySettingModel(
+        optionsMs: AppSettings.startBufferOptionsMs,
+        initialMs: AppSettings.defaultStartBufferMs,
+        envOverrideMs: nil,
+        isStreaming: { false },
+        apply: { _ in })
+
     let controller = SettingsWindowController(
         settings: settings,
         loginItem: SnapshotLoginItem(),
         excludedApps: excludedApps,
-        runningAppsProvider: { [] })
+        runningAppsProvider: { [] },
+        latency: latency)
 
     let appearance = NSAppearance(named: appearanceName)
     let rootView = controller.test_rootView

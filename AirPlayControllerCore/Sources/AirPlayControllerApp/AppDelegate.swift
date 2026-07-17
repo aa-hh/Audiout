@@ -160,13 +160,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = settingsWindowController {
             controller = existing
         } else {
-            controller = SettingsWindowController(settings: settings, excludedApps: excludedApps)
+            controller = SettingsWindowController(settings: settings,
+                                                  excludedApps: excludedApps,
+                                                  latency: makeLatencySettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
             settingsWindowController = controller
         }
         controller.showWindow()
         log("Open Settings (window shown)")
+    }
+
+    /// The Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md), or nil when
+    /// the resolved backend can't honor the control (the section then never
+    /// renders). The apply closure persists FIRST, then reconnects — a partial
+    /// reconnect failure must not lose the chosen setting for the next launch.
+    @MainActor
+    private func makeLatencySettingModel() -> LatencySettingModel? {
+        guard let configurable = backend as? LatencyConfigurable else { return nil }
+        return LatencySettingModel(
+            optionsMs: AppSettings.startBufferOptionsMs,
+            initialMs: configurable.startBufferMs,
+            envOverrideMs: nativeStartBufferEnvOverrideMs(),
+            isStreaming: { [weak self] in
+                self?.devicesByID.values.contains { $0.isSelected } ?? false
+            },
+            apply: { [weak self] ms in
+                self?.settings.startBufferMs = ms
+                await configurable.applyStartBuffer(ms: ms)
+            }
+        )
     }
 
     /// The excluded-apps list changed (Settings › Audio). Enforce the "excluded ⇒
@@ -236,6 +259,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .level:
             // Meters are SKIPPED in Phase 1 (RESOLVED Q8) — ignore for now.
             return
+        case .systemVolumeChanged(let volume):
+            // The volume keys move the system output = the local "Current Device",
+            // which the capture tap mutes while streaming — so they were adjusting a
+            // device the user couldn't hear. Hand the fact to the routing brain, which
+            // mirrors it onto the Main Out master so the keys drive what's actually
+            // playing (and no-ops in passthrough, where the keys already did the job).
+            //
+            // This delegate is the whole reason the backend can stay below the routing
+            // brain: `NativeBackend` owns the system-volume listener but must not know
+            // `GroupController` exists, so it publishes the fact and this — already the
+            // place backend events meet app-level controllers — does the wiring.
+            groupController.mirrorSystemVolumeToMainOut(volume)
+            log("event: \(describe(event))")
+            // Falls through to the repaint below. The mirror's own `setVolume` calls
+            // echo back as `deviceUpdated`s and repaint again with the settled values;
+            // this pass just keeps the master readout honest in the meantime.
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -262,6 +301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "deviceRemoved(\(id))"
         case .level(let id, let rms):
             return "level(\(id), \(rms))"
+        case .systemVolumeChanged(let volume):
+            return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
         }
     }
 

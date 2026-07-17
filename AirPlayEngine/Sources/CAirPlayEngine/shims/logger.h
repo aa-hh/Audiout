@@ -89,6 +89,14 @@ DVPRINTF(int severity, int domain, const char *fmt, va_list ap);
 void
 DHEXDUMP(int severity, int domain, const unsigned char *data, int data_len, const char *heading);
 
+/* Route libevent's own diagnostics (event_set_log_callback) into this logger
+ * under the L_EVENT domain, env-gated by AIRPLAYENGINE_LOG_LEVEL like every
+ * other message (first-light hardening #5). OwnTone bridges libevent logging;
+ * our hosting didn't, so libevent-level failures were silently dropped. The
+ * Swift wrapper calls this once on the engine thread at start(). Idempotent. */
+void
+engine_logger_wire_libevent(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -56,6 +56,12 @@ public final class DeviceRowView: NSView {
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String)
         /// The user flipped the row's primary "send audio here" ON/OFF switch.
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String)
+        /// The user clicked an AP1-only (``Device/supportsAirPlay2`` == false,
+        /// non-local) row — T-UI-AP1-1 (PLAN-PHASE-2B D6). The host presents the
+        /// small transient "AirPlay 1 support is coming soon" explanation
+        /// popover anchored to `row`. Default no-op so existing conformers still
+        /// compile.
+        func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -168,6 +174,14 @@ public final class DeviceRowView: NSView {
     /// instance is correct wherever it's parented.
     private var isInMenu: Bool { enclosingMenuItem != nil }
 
+    /// True for an AP1-only receiver (T-UI-AP1-1, PLAN-PHASE-2B D6): AirPlay-2
+    /// discovery found it but `NativeBackend` never `addOutput`s it (no perfect
+    /// sync). The local device is EXCLUDED even though it also carries
+    /// `supportsAirPlay2 == false` — it's not an AirPlay receiver at all, it's
+    /// the Mac's own passthrough output, and its toggle is disabled/enabled by
+    /// the separate local-mix-block path, not this one.
+    private var isUnsupported: Bool { !device.isLocalDevice && !device.supportsAirPlay2 }
+
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
                paintsSelectionBackground: Bool = true) {
         self.device = device
@@ -224,10 +238,14 @@ public final class DeviceRowView: NSView {
 
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
-        // hide the toggle entirely (task C) — membership there is fixed.
+        // hide the toggle entirely (task C) — membership there is fixed. An
+        // AP1-only receiver's toggle is always disabled (T-UI-AP1-1) — the
+        // backend never `addOutput`s it, so there's nothing to route.
         enableCheckbox.state = selected ? .on : .off
-        enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked
-        enableCheckbox.toolTip = (showsToggle && blocked) ? blockReason : nil
+        enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked && !isUnsupported
+        enableCheckbox.toolTip = isUnsupported
+            ? Self.unsupportedExplanation
+            : ((showsToggle && blocked) ? blockReason : nil)
 
         iconView.image = NSImage(
             systemSymbolName: device.kind.symbolName,
@@ -238,10 +256,15 @@ public final class DeviceRowView: NSView {
         )
         // The icon is ALWAYS neutral now (2026-07-17): identity only, no
         // accent-when-selected fill. Selection reads from the switch state; the
-        // on-icon corner dot carries the connection status instead.
+        // on-icon corner dot carries the connection status instead. (This also
+        // covers unsupported/AP1 rows — no accent regardless of stale selection.)
         iconView.contentTintColor = .secondaryLabelColor
         nameLabel.stringValue = device.name
         nameLabel.textColor = rowTextColor
+        // The whole row reads dimmed for an unsupported device (T-UI-AP1-1) —
+        // matches the existing `!isAvailable` dimming so "can't be used right
+        // now" and "can never be used (yet)" look consistently de-emphasized.
+        alphaValue = isUnsupported ? 0.5 : 1.0
 
         // On-icon status badge is idempotent and always driven off the state.
         statusDotView.apply(device.connectionState)
@@ -260,17 +283,31 @@ public final class DeviceRowView: NSView {
         // The volume slider + mute are usable whenever the device is available
         // and controllable (selected member OR an app-redirect target) — kept
         // SEPARATE from `selected` so the "System" routing token stays keyed off
-        // set membership only.
-        slider.isEnabled = device.isAvailable && controllable && !device.isMuted
-        muteButton.isEnabled = device.isAvailable && controllable
+        // set membership only. Never for an unsupported (AP1-only) device: the
+        // backend never `addOutput`s it, so it's never actually an output — that
+        // veto outranks `controllable` (a stale app route can name an AP1-only
+        // device, which would otherwise hand it a live-looking slider).
+        slider.isEnabled = device.isAvailable && controllable && !device.isMuted && !isUnsupported
+        muteButton.isEnabled = device.isAvailable && controllable && !isUnsupported
         muteButton.state = device.isMuted ? .on : .off
 
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
 
+    /// The "coming soon" explanation text (T-UI-AP1-1, PLAN-PHASE-2B D6) — used
+    /// both as the disabled-toggle tooltip and as the transient popover's body.
+    public static let unsupportedExplanation = "AirPlay 1 support is coming soon."
+
     /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
     private static let routingTokenSeparator = " · "
+
+    // MERGE NOTE (2026-07-17, phase2b ← main): the old `applyConnectionStatus(_:)`
+    // (badge + failed-only sublabel) is gone — not dropped, SUPERSEDED. `apply`
+    // now drives `StatusDotView.apply(_:)` directly (same idempotent reset, so a
+    // repeated `apply` still can't leave a stale breathing animation running) and
+    // routes every sublabel through `resolveSublabel(routedAppNames:)`'s ladder,
+    // which subsumes the failed-only case as its highest rung.
 
     /// Decide the single sublabel line via one precedence ladder (highest first;
     /// exactly one line, or none), then show/hide `statusLabel` and center the
@@ -326,7 +363,13 @@ public final class DeviceRowView: NSView {
 
     /// Backward-compatible one-arg update (selection derived from the backend
     /// `isSelected` flag). Retained for callers/tests not yet passing explicit
-    /// membership; new hosts should use ``apply(_:selected:blocked:blockReason:)``.
+    /// membership; new hosts should use
+    /// ``apply(_:selected:controllable:blocked:blockReason:routedAppNames:)``.
+    ///
+    /// NOTE: this path leaves `controllable` at its `false` default, so the
+    /// slider/mute come up DISABLED regardless of `selected` — see that
+    /// parameter's doc. Both real hosts (popover + mixer) pass `controllable`
+    /// explicitly and never rely on this shim for a live row.
     public func apply(_ device: Device) {
         apply(device, selected: device.isSelected)
     }
@@ -650,6 +693,19 @@ public final class DeviceRowView: NSView {
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
+    /// Whether this row is currently rendered as an unsupported AP1-only
+    /// receiver (T-UI-AP1-1): dimmed, toggle disabled, click asks for the
+    /// "coming soon" explanation.
+    public var test_isUnsupported: Bool { isUnsupported }
+
+    /// Simulate a click on the row body (T-UI-AP1-1) — drives the same path a
+    /// real `mouseDown:` on an unsupported row takes. No-op (like the real
+    /// handler) when the row is supported.
+    public func test_simulateClick() {
+        guard isUnsupported else { return }
+        delegate?.deviceRowDidRequestUnsupportedExplanation(self)
+    }
+
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
     public override func updateTrackingAreas() {
@@ -664,6 +720,15 @@ public final class DeviceRowView: NSView {
 
     public override func mouseEntered(with event: NSEvent) { setHovered(true) }
     public override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// A click anywhere on an unsupported (AP1-only) row asks the host to
+    /// present the "coming soon" explanation (T-UI-AP1-1). Supported rows fall
+    /// through to the normal subview control handling (slider drag, switch,
+    /// mute button all sit above and consume their own mouse events first).
+    public override func mouseDown(with event: NSEvent) {
+        guard isUnsupported else { super.mouseDown(with: event); return }
+        delegate?.deviceRowDidRequestUnsupportedExplanation(self)
+    }
 
     /// Set the transient hover flag and repaint only when it actually changes.
     private func setHovered(_ hovered: Bool) {
@@ -780,16 +845,26 @@ public final class DeviceRowView: NSView {
         setAccessibilityElement(true)
         // A menu row is a `.menuItem`; a mixer-window row is a plain grouping.
         setAccessibilityRole(isInMenu ? .menuItem : .group)
-        let membership = isSelectedInSet ? "selected" : "not selected"
-        // Connection state reads as a trailing clause (brief §6) — omitted
-        // entirely for `.off` so an unrouted row's label is unchanged.
-        let state = accessibilityStateSuffix
-        let stateClause = state.map { ", \($0)" } ?? ""
-        setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
+        if isUnsupported {
+            // T-UI-AP1-1: explicitly call out AirPlay 1 rather than the usual
+            // "selected/volume" phrasing — there's no membership or volume to
+            // report on a device that's never actually routed to (and never a
+            // connection state to append — an unsupported row stays `.off`).
+            setAccessibilityLabel("\(device.name), AirPlay 1 only, not yet supported")
+        } else {
+            let membership = isSelectedInSet ? "selected" : "not selected"
+            // Connection state reads as a trailing clause (brief §6) — omitted
+            // entirely for `.off` so an unrouted row's label is unchanged.
+            let state = accessibilityStateSuffix
+            let stateClause = state.map { ", \($0)" } ?? ""
+            setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
+        }
 
         enableCheckbox.setAccessibilityLabel(
-            isSelectedInSet ? "Remove \(device.name) from Selected Devices"
-                            : "Add \(device.name) to Selected Devices")
+            isUnsupported
+                ? "\(device.name) requires AirPlay 1, not yet supported"
+                : (isSelectedInSet ? "Remove \(device.name) from Selected Devices"
+                                   : "Add \(device.name) to Selected Devices"))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
@@ -822,4 +897,8 @@ public extension DeviceRowView.Delegate {
     /// The real hosts (popover + mixer window) override this to call
     /// `GroupController.setDeviceEnabled`.
     func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {}
+
+    /// Default no-op (T-UI-AP1-1) so conformers that predate the AP1
+    /// "coming soon" affordance still compile.
+    func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView) {}
 }

@@ -449,7 +449,13 @@ final class GroupControllerTests: XCTestCase {
 
     // MARK: Routing persistence (SPEC §9b — Selected Devices + Main Out)
 
-    func testRoutingPersistenceRoundTrip() async throws {
+    // DECISION (Alec, 2026-07-17): the live Selected-Devices routing set does
+    // NOT auto-resume on launch — every launch defaults to {current device} =
+    // passthrough. Saved GROUPS still persist and stay re-applyable. This test
+    // pins that split: the group loads on session 2, but the previously-selected
+    // AirPlay set + group Main Out target do NOT restore — they reset to the
+    // local-passthrough default.
+    func testGroupsPersistButRoutingResetsToLocalOnLaunch() async throws {
         let dir = tempDirectory()
         let routingStore = RoutingStore(directory: dir)
 
@@ -462,12 +468,21 @@ final class GroupControllerTests: XCTestCase {
         _ = c1.setDeviceSelected("homepod-bed", true)
         c1.setMainOut(.group(id: "g1"))
 
-        // Session 2: a fresh controller over the same stores reloads the state.
+        // Session 2: a fresh controller over the same stores. The GROUP is
+        // reloaded, but the live routing set is NOT resumed — it resets to the
+        // local-passthrough default once the fleet is known.
         let backend2 = try await makeBackend()
         let c2 = GroupController(backend: backend2, store: GroupStore(directory: dir),
                                  routingStore: RoutingStore(directory: dir), loadPersisted: true)
-        XCTAssertEqual(c2.selectedDeviceIDs, ["office", "homepod-bed"], "Selected Devices round-tripped")
-        XCTAssertEqual(c2.mainOut, .group(id: "g1"), "Main Out target round-tripped")
+        XCTAssertEqual(c2.groups.map(\.id), ["g1"], "saved group still persists")
+        XCTAssertTrue(c2.selectedDeviceIDs.isEmpty,
+                      "persisted AirPlay selection is NOT auto-resumed on launch")
+        XCTAssertEqual(c2.mainOut, .selectedDevices,
+                       "persisted group Main Out target is NOT auto-resumed on launch")
+        c2.ensureDefaultSelection()
+        XCTAssertEqual(c2.selectedDeviceIDs, ["local-mac"],
+                       "launch default = {current device} = passthrough")
+        XCTAssertTrue(c2.isPassthrough)
     }
 
     func testRoutingDefaultWhenNoPersistedState() async throws {
@@ -615,6 +630,303 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), ["office"],
                        "with no appRouteTargets injected, the output set is exactly Selected Devices")
     }
+
+    // MARK: System-volume mirror — the volume keys drive what's actually playing
+    //
+    // The bug (Alec, live session 2026-07-17): the volume keys move the system
+    // output = the local "Current Device", but the capture tap mutes that output
+    // while streaming — so the keys adjusted a device nobody could hear. The mirror
+    // pushes an external system-volume change onto the Main Out master instead.
+    //
+    // The fixture below fixes the members at 80/40 (a clean 2:1 at master 60) so the
+    // proportional assertions are exact rather than approximate.
+
+    /// A local device plus two AirPlay speakers at a clean 2:1 balance.
+    private var mirrorFleet: [Device] {
+        [
+            Device(id: "local-mac", name: "MacBook Pro Speakers", kind: .localMac,
+                   supportsAirPlay2: false, volume: 65, isLocalDevice: true),
+            Device(id: "loud", name: "Loud Speaker", kind: .sonos, volume: 80),
+            Device(id: "quiet", name: "Quiet Speaker", kind: .sonos, volume: 40),
+        ]
+    }
+
+    /// A controller over a write-recording backend, already streaming to both AirPlay
+    /// speakers (selecting the first auto-swaps the local device out, exactly as
+    /// toggling a speaker in the popover does).
+    private func makeStreamingMirrorController() async throws -> (GroupController, WriteCountingBackend) {
+        let mock = try await makeBackend(mirrorFleet)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        controller.ensureDefaultSelection()                    // {local} — passthrough
+        _ = controller.setDeviceSelected("loud", true)         // auto-swap drops local
+        _ = controller.setDeviceSelected("quiet", true)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(controller.isPassthrough, "fixture precondition: streaming, not passthrough")
+        XCTAssertEqual(controller.mainOutMasterVolume, 60, "fixture precondition: (80+40)/2")
+        spy.reset()
+        return (controller, spy)
+    }
+
+    /// THE FIX: an external system-volume change while streaming drives the Main Out
+    /// master, scaling the AirPlay members proportionally — so the volume keys move
+    /// the speakers that are actually playing.
+    func testSystemVolumeMirrorDrivesMainOutMasterWhileStreaming() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(controller.mainOutMasterVolume, 30, "the Main Out master follows the system volume")
+        XCTAssertEqual(spy.volume(of: "loud"), 40, "80 scaled by 30/60")
+        XCTAssertEqual(spy.volume(of: "quiet"), 20, "40 scaled by 30/60 — the 2:1 balance is preserved")
+    }
+
+    /// NO FEEDBACK LOOP, structurally: the mirror writes to the AirPlay members and
+    /// NOTHING else. The local id is the only one whose `setVolume` reaches the
+    /// system volume (`NativeBackend.setVolume`'s `isLocalDevice` branch), so never
+    /// writing it means the listener that fired the mirror can never be re-fired by
+    /// it. The write count is exactly the member count — one pass, no cascade.
+    func testSystemVolumeMirrorIssuesBoundedWritesAndNeverTouchesLocalDevice() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(spy.volumeWrites.count, 2,
+                       "exactly one write per Main Out member — a mirrored change must not cascade")
+        XCTAssertEqual(Set(spy.volumeWrites.map(\.id)), ["loud", "quiet"])
+        XCTAssertTrue(spy.volumeWrites.allSatisfy { $0.id != "local-mac" },
+                      "the mirror must NEVER write the local device — that is the whole no-feedback argument")
+    }
+
+    /// A whole BURST of volume-key steps still cannot loop: writes stay bounded at
+    /// (steps × members), which is only true if each mirrored change produces one
+    /// pass and provokes nothing further.
+    func testSystemVolumeMirrorBurstStaysBounded() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        let steps = [63, 69, 75, 81, 88, 94, 100]
+        for step in steps { controller.mirrorSystemVolumeToMainOut(step) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(spy.volumeWrites.count, steps.count * 2,
+                       "a burst of \(steps.count) steps over 2 members must be exactly \(steps.count * 2) writes")
+        XCTAssertTrue(spy.volumeWrites.allSatisfy { $0.id != "local-mac" })
+    }
+
+    /// PASSTHROUGH: the local device is the sole Main Out member, so mirroring would
+    /// be circular — the keys already moved the only thing Main Out names. Nothing
+    /// is written at all.
+    func testSystemVolumeMirrorDoesNotDriveMasterInPassthrough() async throws {
+        let mock = try await makeBackend(mirrorFleet)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        controller.ensureDefaultSelection()
+        XCTAssertTrue(controller.isPassthrough, "precondition: set == {local}")
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(spy.volumeWrites.isEmpty,
+                      "passthrough must not drive the Main Out master — no circular write")
+        XCTAssertEqual(spy.volume(of: "local-mac"), 65, "the local device's own volume is untouched")
+    }
+
+    /// `isPassthrough` is false for EVERY `.group` target — but a group's members can
+    /// include the Mac, and `saveCurrentSetupAsGroup` while in passthrough saves
+    /// exactly such a group. Pointing Main Out at it must still not mirror: the local
+    /// device is the only member, so the volume key already moved it.
+    func testSystemVolumeMirrorRefusesGroupWhoseOnlyMemberIsLocalDevice() async throws {
+        let mock = try await makeBackend(mirrorFleet)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        controller.ensureDefaultSelection()                    // {local}
+        let saved = try controller.saveCurrentSetupAsGroup(name: "Just the Mac")
+        controller.setMainOut(.group(id: saved.group.id))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(controller.isPassthrough, "a group target is never passthrough — which is exactly the trap")
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(spy.volumeWrites.isEmpty,
+                      "a group whose member is the Mac must not be mirrored despite !isPassthrough")
+    }
+
+    /// The dangerous shape of the same trap: a group MIXING the Mac with an AirPlay
+    /// speaker. Here the local ratio isn't 1, so a mirrored keypress would scale the
+    /// Mac to a value the user never asked for and yank the system volume out from
+    /// under them. The local-member guard refuses the whole mirror.
+    func testSystemVolumeMirrorRefusesGroupMixingLocalDeviceWithAirPlay() async throws {
+        let mock = try await makeBackend(mirrorFleet)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let saved = try controller.createGroup(name: "Everything", memberIDs: ["local-mac", "loud"])
+        controller.setMainOut(.group(id: saved.group.id))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(controller.isPassthrough)
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(spy.volumeWrites.isEmpty,
+                      "no member may be written when the Mac is one of them — not even the AirPlay member")
+        XCTAssertEqual(spy.volume(of: "local-mac"), 65, "the system volume is never written back")
+    }
+
+    /// BURST STABILITY through the 100 clamp. The mirror holds ONE ratio snapshot for
+    /// the whole burst, so a run of keypresses up into the clamp and back down returns
+    /// the members exactly where they started — the drag semantics, applied to keys.
+    func testSystemVolumeMirrorPreservesBalanceAcrossBurstThroughClamp() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        // Up past the point where `loud` (80, ratio 1.333) clamps at 100, then back
+        // down to the starting master.
+        for step in [69, 75, 81, 88, 94, 100, 94, 88, 81, 75, 69, 63, 60] {
+            controller.mirrorSystemVolumeToMainOut(step)
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(spy.volume(of: "loud"), 80, "a clamped member un-clamps on the way down, exactly as in a drag")
+        XCTAssertEqual(spy.volume(of: "quiet"), 40, "the 2:1 balance survives the whole burst")
+    }
+
+    /// The same for a burst down to ZERO and back. Re-deriving ratios at 0 is the
+    /// worst case — every member is 0, so `mainOutRatios()`'s `master > 0` fallback
+    /// hands out a flat 1.0 and the way back up is uniform instead of proportional.
+    /// The held snapshot never consults it.
+    func testSystemVolumeMirrorPreservesBalanceAcrossBurstThroughZero() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        for step in [30, 13, 6, 0, 6, 13, 30, 60] {
+            controller.mirrorSystemVolumeToMainOut(step)
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(spy.volume(of: "loud"), 80, "a burst through 0 must not collapse the balance to unity")
+        XCTAssertEqual(spy.volume(of: "quiet"), 40)
+    }
+
+    /// GUARD ON THE GUARD: proves the two tests above aren't vacuous. Driving the
+    /// SAME steps through `setMainOutMasterVolume` with no drag open — i.e. re-deriving
+    /// ratios every step, which is what the mirror would do without its snapshot —
+    /// ratchets 2:1 apart toward unity and never recovers. This is the drift the
+    /// snapshot exists to prevent; if this ever starts passing at 80/40, the mirror's
+    /// snapshot has stopped being load-bearing.
+    func testPerStepRatioRecomputationDriftsWhichIsWhyTheMirrorSnapshots() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        for step in [69, 75, 81, 88, 94, 100, 94, 88, 81, 75, 69, 63, 60] {
+            controller.setMainOutMasterVolume(step)   // no beginMainOutMasterDrag()
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let loud = try XCTUnwrap(spy.volume(of: "loud"))
+        let quiet = try XCTUnwrap(spy.volume(of: "quiet"))
+        XCTAssertNotEqual(loud, 80, "per-step recomputation does NOT return to the starting balance")
+        XCTAssertLessThan(Double(loud) / Double(quiet), 1.5,
+                          "the clamp ratchet compresses 2:1 toward unity (measured ~1.18:1 at \(loud)/\(quiet))")
+    }
+
+    /// The snapshot is held on EVIDENCE, not a timer: it survives only while the
+    /// members sit exactly where the mirror put them. A user dragging a member's own
+    /// slider mid-burst moves one, so the next keypress re-derives from the new
+    /// balance rather than scaling from a snapshot that no longer describes reality.
+    func testSystemVolumeMirrorReSnapshotsAfterSomethingElseMovesAMember() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        controller.mirrorSystemVolumeToMainOut(30)          // → loud 40, quiet 20
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(spy.volume(of: "loud"), 40)
+
+        // The user drags `quiet` up to match `loud` — a 1:1 balance at master 40.
+        controller.setMemberVolume(40, for: "quiet")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(controller.mainOutMasterVolume, 40)
+
+        controller.mirrorSystemVolumeToMainOut(80)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(spy.volume(of: "loud"), 80, "re-derived from the NEW 1:1 balance…")
+        XCTAssertEqual(spy.volume(of: "quiet"), 80, "…not from the stale 2:1 snapshot (which would give 40)")
+    }
+
+    /// A muted member must stay silent across a mirrored change. Mute realizes as
+    /// volume 0 (`applySilence`), which moves a member and so re-derives the snapshot;
+    /// the fresh ratio for a 0-volume member is 0, which pins it at 0.
+    func testSystemVolumeMirrorKeepsMutedMemberSilent() async throws {
+        let (controller, spy) = try await makeStreamingMirrorController()
+
+        controller.setMuted(true, for: "quiet")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(spy.volume(of: "quiet"), 0, "precondition: mute is volume 0")
+        XCTAssertEqual(controller.mainOutMasterVolume, 40,
+                       "precondition: the master averages the muted member's 0 in — existing `mainOutMasterVolume` semantics")
+
+        controller.mirrorSystemVolumeToMainOut(20)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(spy.volume(of: "quiet"), 0, "a volume key must not resurrect a muted member")
+        XCTAssertEqual(spy.volume(of: "loud"), 40,
+                       "the unmuted member still follows — halving a master of 40 halves it from 80")
+    }
+
+    /// An empty Main Out target has nothing to scale — and must not trap or write.
+    func testSystemVolumeMirrorNoOpsWithEmptyMainOutTarget() async throws {
+        let mock = try await makeBackend(mirrorFleet)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        XCTAssertFalse(controller.isPassthrough, "an EMPTY set is not passthrough either")
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(spy.volumeWrites.isEmpty)
+    }
+}
+
+/// Wraps a real ``MockBackend`` — so `devices`, echoes and queue ordering behave
+/// exactly as in every other test here — and records every `setVolume` that reaches
+/// it. `MockBackend` alone can't express "how many writes did that provoke?", which
+/// is precisely the assertion a no-feedback-loop proof needs.
+///
+/// Not `Sendable` and doesn't need to be: `OutputBackend` isn't `Sendable`-constrained
+/// and every call is made from the test's own thread.
+private final class WriteCountingBackend: OutputBackend {
+    private let inner: MockBackend
+    private(set) var volumeWrites: [(id: String, volume: Int)] = []
+
+    init(_ inner: MockBackend) { self.inner = inner }
+
+    var devices: [Device] { inner.devices }
+    func start() { inner.start() }
+    func stop() { inner.stop() }
+    func makeEventStream() -> AsyncStream<BackendEvent> { inner.makeEventStream() }
+    func setMuted(_ muted: Bool, for id: String) { inner.setMuted(muted, for: id) }
+    func setOutputSet(_ ids: Set<String>) { inner.setOutputSet(ids) }
+
+    func setVolume(_ volume: Int, for id: String) {
+        volumeWrites.append((id: id, volume: volume))
+        inner.setVolume(volume, for: id)
+    }
+
+    /// Forget recorded writes — fixture setup (selection, group activation) issues
+    /// its own, and only what the mirror does afterwards is under test.
+    func reset() { volumeWrites = [] }
+
+    /// The device's CURRENT volume as the backend actually holds it (not what was
+    /// commanded) — so clamping and the no-op guard are reflected honestly.
+    func volume(of id: String) -> Int? { inner.devices.first { $0.id == id }?.volume }
 }
 
 private actor CountBox {

@@ -1,9 +1,21 @@
 // swift-tools-version:5.10
 import PackageDescription
 
+// Platform floor: raised from .v13 to .v14 for T-NB-PKGDEP-1. AirPlayEngine
+// (../AirPlayEngine/Package.swift) is .macOS(.v14) — its Core Audio process
+// tap capture (T-NB-CAPTURE-1) needs the tap API, which is 14.4+ (Alec runs
+// 14.4.1) — and a SwiftPM package's platform floor cannot be lower than any
+// local dependency it links (Xcode/SwiftPM enforces the dependency's
+// deployment target as a floor on any target that depends on it, and will
+// fail to build/resolve otherwise). Rather than fighting per-symbol
+// `@available` annotations to keep .v13 alive for code paths that never run
+// on 13 anyway (NativeBackend is opt-in via AIRPLAY_BACKEND=native), we take
+// the whole package to .v14. The mock/OwnTone-backed paths are unaffected —
+// they don't reference anything gated above .v13; this only tightens the
+// deployment target the app links for and installs on.
 let package = Package(
     name: "AirPlayControllerCore",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [
         // The core library the AppKit app links against. It knows nothing about
         // AppKit — it's the seam between "the UI" and "wherever audio actually goes."
@@ -43,8 +55,20 @@ let package = Package(
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
         .executable(name: "AirPlayControllerApp", targets: ["AirPlayControllerApp"]),
     ],
+    dependencies: [
+        // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
+        // Local path dependency, sibling package — NativeBackend
+        // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
+        // the consumers; the Mock/OwnTone backends do not import it.
+        .package(path: "../AirPlayEngine"),
+    ],
     targets: [
-        .target(name: "AirPlayControllerCore"),
+        .target(
+            name: "AirPlayControllerCore",
+            dependencies: [
+                .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+            ]
+        ),
         .executableTarget(
             name: "mock-speakers-demo",
             dependencies: ["AirPlayControllerCore"]

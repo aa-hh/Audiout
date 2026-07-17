@@ -70,6 +70,14 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// separate thing tracked in `GroupController.selectedDeviceIDs`).
     public var isSelected: Bool
 
+    /// Live connection lifecycle for this device — off/connecting/connected/
+    /// reconnecting/failed. The backend is the only writer; see
+    /// `ConnectionState` and `dev/notes/p1-connection-status-brief.md` §1 for
+    /// the full state machine, including the "sticky-failed" rule (a `.failed`
+    /// device stays failed even after it's dropped from the expected-selected
+    /// set).
+    public var connectionState: ConnectionState
+
     public init(
         id: String,
         name: String,
@@ -79,7 +87,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         volume: Int = 50,
         isMuted: Bool = false,
         isSelected: Bool = false,
-        isLocalDevice: Bool = false
+        isLocalDevice: Bool = false,
+        connectionState: ConnectionState = .off
     ) {
         self.id = id
         self.name = name
@@ -90,6 +99,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.isMuted = isMuted
         self.isSelected = isSelected
         self.isLocalDevice = isLocalDevice
+        self.connectionState = connectionState
     }
 }
 

@@ -13,7 +13,16 @@ public enum BackendEvent: Sendable, Equatable {
     /// A device dropped off the network. It stays in the model as unavailable;
     /// this signals availability, not deletion.
     case deviceRemoved(id: String)
-    /// Any field of a device changed — volume, mute, availability, selection.
+    /// Any field of a device changed — volume, mute, availability, selection,
+    /// or `connectionState`. The latter is how the UI learns about the
+    /// connection lifecycle (`.off → .connecting → .connected`, drops into
+    /// `.reconnecting`/`.failed`) — there is no separate event for it, it's
+    /// just another field on the echoed `Device`
+    /// (`dev/notes/p1-connection-status-brief.md` §1/§3). Note the
+    /// "sticky-failed" rule: a `.failed` device can be echoed here with
+    /// `isSelected = false` (the honest-toggle cleanup removed it from the
+    /// expected set) while `connectionState` stays `.failed` — that's
+    /// intentional, not a stale event.
     case deviceUpdated(Device)
     /// A cheap RMS level sample (0…1) for the per-device level meter
     /// (`NSLevelIndicator`, display-only — SPEC.md §9). Emitted only for
@@ -54,5 +63,14 @@ public protocol OutputBackend: AnyObject {
     /// Replace the output set with exactly these devices. Activating a saved
     /// group calls this with the group's members — "one active group at a time,"
     /// groups behave like output presets (SPEC.md §9 interaction model).
+    ///
+    /// Also the entry point for the connection state machine: ids newly in the
+    /// set move to `.connecting` (verified later to `.connected`); ids leaving
+    /// the set drop to `.off` — **unless** they're currently `.failed`, in
+    /// which case that state is sticky and survives the removal (the popover
+    /// uses this exact call to clean up a failed toggle's membership without
+    /// erasing the warning it's showing). Re-adding a `.failed` id is the retry
+    /// path and moves it back to `.connecting`
+    /// (`dev/notes/p1-connection-status-brief.md` §1/§3).
     func setOutputSet(_ ids: Set<String>)
 }

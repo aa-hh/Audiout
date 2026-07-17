@@ -18,6 +18,14 @@
 // running" path).
 //
 // Run: `swift run popover-snapshot [output-dir]`.
+//
+// Set `AIRPLAY_SNAPSHOT_MODE=connection-states` to render a second scenario
+// instead (`p1-connection-status-brief.md` §8): one row per
+// `ConnectionState` case (connecting/connected/reconnecting/failed) with the
+// failed row's diagnosis panel open, written to
+// `popover-connection-{light,dark}.png`. States are set directly on hand-built
+// `Device` values and pushed through `PopoverController.update(devices:)` —
+// no script timing to wait on, so the render is fully deterministic.
 
 import AppKit
 import AirPlayControllerCore
@@ -137,6 +145,92 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     window.contentView = NSView()   // detach so the next run gets a fresh panel
 }
 
+/// A small fleet with one row per `ConnectionState` case, for the
+/// `connection-states` snapshot mode. Each device's name says what it's
+/// demoing so the PNG is self-explanatory without cross-referencing code. This
+/// now exercises the on-icon corner dot (2026-07-17): `.off` hides it,
+/// `.connecting`/`.reconnecting` breathe a neutral dot, `.connected` a green
+/// dot, `.failed` an amber dot with the "Couldn't connect" sublabel.
+private var connectionStatesFleet: [Device] {
+    [
+        Device(id: "cs-off", name: "Idle Speaker", kind: .generic,
+               volume: 40, connectionState: .off),
+        Device(id: "cs-connecting", name: "Connecting Speaker", kind: .sonos,
+               volume: 45, connectionState: .connecting),
+        Device(id: "cs-connected", name: "Connected Speaker", kind: .homePod,
+               volume: 60, isSelected: true, connectionState: .connected),
+        Device(id: "cs-reconnecting", name: "Reconnecting Speaker", kind: .appleTV,
+               volume: 50, isSelected: true, connectionState: .reconnecting),
+        Device(id: "cs-failed", name: "Failed Speaker", kind: .airportExpress,
+               supportsAirPlay2: false, volume: 30,
+               connectionState: .failed(ConnectionFailure(cause: .notResponding))),
+    ]
+}
+
+/// Render the `connection-states` scenario (brief §8): one row per
+/// `ConnectionState` case, with the failed row's diagnosis panel open. Bypasses
+/// `ConnectScript` timing entirely — the fleet's `Device` values already carry
+/// their target `connectionState`, so a single `update(devices:)` call is all
+/// it takes for the panel to reconcile (including the auto-expand-once-on-
+/// `.failed` transition in `PopoverController`).
+@MainActor
+func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let fleet = connectionStatesFleet
+    let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let popover = PopoverController()
+    backend.start()
+    guard waitForFleet(backend, count: fleet.count) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+
+    // Membership in the Selected Devices set drives the switch (never
+    // `connectionState` directly — §7.3 "honest toggle"). `.connecting`/
+    // `.connected`/`.reconnecting` are all still "expected selected"; only
+    // `.failed` should render OFF, and that bounce-off happens for free below
+    // via the real `.off → .failed` transition handling.
+    for device in fleet {
+        guard case .failed = device.connectionState else {
+            _ = popover.test_toggleDeviceEnabled(deviceID: device.id, on: true)
+            continue
+        }
+    }
+
+    // Push the fleet's explicit connection states straight through — this is
+    // also what auto-expands the failed row's diagnosis panel (§7.3: the
+    // `.off → .failed` transition on this first `update` call).
+    popover.update(devices: fleet)
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame,
+                          styleMask: [.borderless],
+                          backing: .buffered,
+                          defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-connection-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 @MainActor
 func run() -> Int32 {
     let app = NSApplication.shared
@@ -158,6 +252,17 @@ func run() -> Int32 {
     }
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     print("Rendering popover snapshots to: \(outDir.path)")
+
+    // Mode switch, matching the mock scenario knob's convention
+    // (`AIRPLAY_MOCK_SCENARIO`): env var selects an alternate render, default
+    // mode is unaffected. See brief §8.
+    let mode = ProcessInfo.processInfo.environment["AIRPLAY_SNAPSHOT_MODE"]
+    if mode == "connection-states" {
+        snapshotConnectionStates(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotConnectionStates(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
 
     snapshot(appearanceName: .aqua, label: "light", outDir: outDir)
     snapshot(appearanceName: .darkAqua, label: "dark", outDir: outDir)

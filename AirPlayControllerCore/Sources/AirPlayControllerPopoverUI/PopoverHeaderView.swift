@@ -9,8 +9,9 @@ import AppKit
 ///
 /// Layout, left → right:
 /// - a **centered title** ("AudioControl", medium ~14pt, label color); and
-/// - two right-aligned, stock `NSButton` (`bezelStyle = .smallSquare`),
-///   image-only icon buttons:
+/// - two right-aligned, stock `NSButton` (`bezelStyle = .accessoryBar` — the
+///   system's borderless toolbar-glyph bezel: no outline at rest, a soft
+///   rounded-rect highlight on hover/press), image-only icon buttons:
 ///   1. **Open Groups editor** — a system SF Symbol
 ///      (`hifispeaker.and.homepod.mini.badge.plus.fill`, template-rendered,
 ///      verified non-nil at runtime with graceful fallbacks).
@@ -120,28 +121,40 @@ final class PopoverHeaderView: NSView {
     /// `configureIconButton`, so the button is never blank.
     static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
 
-    /// A stock `NSButton` with `bezelStyle = .smallSquare`, image-only SF-Symbol
-    /// content (re-derived from branch commit 18e5133, `claude/serene-elion-24763c`).
-    /// The symbol is **template-rendered** (system vector, not a bundled raster),
-    /// verified non-nil at runtime; if the preferred name fails to resolve it
-    /// tries the fallbacks in order.
+    /// A stock `NSButton` with `bezelStyle = .accessoryBar` and
+    /// `showsBorderOnlyWhileMouseInside = true` — the system's borderless
+    /// toolbar-glyph convention (matches the icon buttons already used
+    /// elsewhere in this popover, e.g. `GroupRowView`/`DeviceRowView`): no
+    /// box at rest, a soft rounded-rect highlight only while the mouse is
+    /// over the button. The symbol is rendered with SF Symbols'
+    /// **hierarchical** color style (`NSImage.SymbolConfiguration(hierarchicalColor:)`),
+    /// which shades the glyph's sub-parts by depth for a less flat, more
+    /// "system" look than a single flat tint; verified non-nil at runtime,
+    /// falling back through `fallbacks` in order.
     private func configureIconButton(_ button: NSButton,
                                      symbol: String,
                                      fallbacks: [String],
                                      accessibilityLabel: String,
                                      action: Selector) {
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .smallSquare
+        button.bezelStyle = .accessoryBar
+        button.isBordered = true
+        button.showsBorderOnlyWhileMouseInside = true
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
-        button.contentTintColor = .secondaryLabelColor
         button.target = self
         button.action = action
 
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+            .applying(.init(hierarchicalColor: .secondaryLabelColor))
         for name in [symbol] + fallbacks {
             if let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityLabel) {
-                image.isTemplate = true          // system-rendered template vector
-                button.image = image
+                if let hierarchical = image.withSymbolConfiguration(symbolConfig) {
+                    button.image = hierarchical
+                } else {
+                    image.isTemplate = true
+                    button.image = image
+                }
                 break
             }
         }

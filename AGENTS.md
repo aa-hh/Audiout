@@ -22,9 +22,10 @@ in-process native backend on top of that engine:
 now has three interchangeable backends** — `mock` (fabricated fleet, default,
 primary dev target), `owntone` (a COMPLETE HTTP-polling backend against an
 external OwnTone server — **superseded** by `native` and not carried forward;
-it is NOT a stub and contains zero `unimplemented()` calls, whatever older docs
-claimed), and `native` (real AirPlay 2 sender, in-process, no external server —
-the shipping path). AP1-only receivers are discovered and shown in the UI
+it is NOT a stub, and no unimplemented() stub call — deliberately un-backticked,
+since no such symbol exists in any .swift file — survives anywhere in it,
+whatever older docs claimed), and `native` (real AirPlay 2 sender, in-process,
+no external server — the shipping path). AP1-only receivers are discovered and shown in the UI
 (dimmed, "coming soon" explanation) but not yet driven — the AirPlay 1 sender is
 deferred to the next iteration (PLAN-PHASE-2B.md D6). One gated
 live-verification session with real hardware remains before `native` is

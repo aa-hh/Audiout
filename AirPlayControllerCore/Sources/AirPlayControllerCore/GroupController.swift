@@ -641,12 +641,151 @@ public final class GroupController {
 
     /// Scale the Main Out target proportionally to `target` (0–100).
     public func setMainOutMasterVolume(_ target: Int) {
+        scaleMainOutMembers(to: target, ratios: dragRatios ?? mainOutRatios())
+    }
+
+    /// Write `target × ratio` to every Main Out member, clamped. The shared body of
+    /// the slider path above and the volume-key mirror below — which differ ONLY in
+    /// where their ratios come from.
+    ///
+    /// - Returns: the exact volume commanded per member. The mirror keeps this as the
+    ///   evidence behind its ratio snapshot; ``setMainOutMasterVolume(_:)`` discards it.
+    @discardableResult
+    private func scaleMainOutMembers(to target: Int, ratios: [String: Double]) -> [String: Int] {
         let target = target.clampedToVolume
-        let ratios = dragRatios ?? mainOutRatios()
+        var commanded: [String: Int] = [:]
         for id in mainOutMemberIDs {
             guard let ratio = ratios[id] else { continue }
-            backend.setVolume(Int((Double(target) * ratio).rounded()).clampedToVolume, for: id)
+            let scaled = Int((Double(target) * ratio).rounded()).clampedToVolume
+            backend.setVolume(scaled, for: id)
+            commanded[id] = scaled
         }
+        return commanded
+    }
+
+    // MARK: System-volume mirror — the volume keys drive what's actually playing
+    //
+    // THE BUG (Alec, live hardware session 2026-07-17): "when i use the volume keys
+    // only the current device slider moves up and down not the selected devices".
+    // The macOS volume keys move the system default output, which IS the local
+    // "Current Device" row, and `NativeBackend`'s two-way sync faithfully moves that
+    // row's slider. But while streaming, the capture tap MUTES the local output — so
+    // the keys diligently adjusted a device the user could not hear while the
+    // speakers actually playing ignored them.
+    //
+    // THE FIX: on an external system-volume change outside passthrough, mirror the
+    // new volume onto the Main Out master, so the keys drive whatever Main Out
+    // actually points at.
+    //
+    // NOT via CGEventTap/media-key interception — that needs an Accessibility grant.
+    // The `SystemOutputVolume` listener already exists and already reports only
+    // genuinely external changes, which is the whole design.
+
+    /// The ratio snapshot an in-flight mirror burst is scaling from, plus the exact
+    /// per-member volumes the last mirror write COMMANDED. `nil` when no burst is
+    /// live. See ``mirrorSystemVolumeToMainOut(_:)``.
+    ///
+    /// Deliberately NOT ``dragRatios``: that field is shared with the group master
+    /// (``setMasterVolume(_:)`` falls back to it), so parking mirror ratios — keyed
+    /// to *Main Out* membership — in it would silently corrupt an undragged group
+    /// master. The two snapshots answer different questions and get different fields.
+    private var mirrorRatios: (ratios: [String: Double], commanded: [String: Int])?
+
+    /// Mirror an EXTERNAL system-output-volume change onto the Main Out master, so
+    /// the macOS volume keys drive whatever is actually playing rather than the
+    /// tap-muted local output.
+    ///
+    /// Driven by ``BackendEvent/systemVolumeChanged(volume:)`` via `AppDelegate`.
+    /// The backend only ever emits that for a genuine outside change —
+    /// `SystemOutputVolume` suppresses echoes of its own writes by comparing a fresh
+    /// read against its last-known state — so "the user pressed a volume key" and
+    /// "the user dragged our Current Device slider" arrive already distinguished, and
+    /// this needs no flag of its own to tell them apart.
+    ///
+    /// ## Why this cannot feed back
+    ///
+    /// The mirror never writes to the local device, because it refuses to run at all
+    /// when the local device is a Main Out member. `backend.setVolume` reaches
+    /// `SystemVolumeControlling` — and thus the listener that called us — for exactly
+    /// one id, the local one (`NativeBackend.setVolume`'s `isLocalDevice` branch);
+    /// every other id goes to the engine and can never come back around. No write to
+    /// that id, no loop: the property is structural, not a race we happen to win.
+    ///
+    /// The two guards that establish it:
+    /// - `!isPassthrough` — the agreed condition. In passthrough the local device is
+    ///   the SOLE member, so mirroring would be circular *and* pointless: the keys
+    ///   already moved the only thing Main Out names.
+    /// - no local member — covers what `isPassthrough` does NOT. `isPassthrough` is
+    ///   false for EVERY `.group` target, but a group's members can absolutely include
+    ///   the Mac: `saveCurrentSetupAsGroup(name:id:)` while in passthrough saves
+    ///   exactly such a group, and pointing Main Out at it afterwards is a normal
+    ///   thing to do. Without this guard a volume key in that state would scale the
+    ///   Mac by its own ratio and yank the system volume somewhere the user didn't
+    ///   ask for. (`SystemOutputVolume`'s echo suppression would stop it *spinning* —
+    ///   but no-loop should be a property of this method, not a behavior inherited
+    ///   from a HAL helper two layers down.)
+    ///
+    /// ## Burst stability — why the ratios are held
+    ///
+    /// Volume keys arrive as a rapid series of ~16 discrete steps, each a separate
+    /// call. Re-deriving ratios per step — what ``setMainOutMasterVolume(_:)`` does
+    /// with no drag open — measurably DRIFTS, because `mainOutRatios()` normalizes
+    /// against the members' *average* while the write scales to the *target*. The
+    /// three ways it goes wrong, all reachable with two members at 80/40:
+    /// 1. **Clamp ratchet.** Once any member clamps at 100 the average falls below
+    ///    the target, so the next step's ratios re-normalize against that lower
+    ///    average and re-expand everyone else. Stepping 80/40 up to the top and back
+    ///    down lands at ~69/58 — the 2:1 balance is gone and does NOT come back.
+    /// 2. **Zero collapse.** A burst down to 0 leaves every member at 0, where
+    ///    `mainOutRatios()`'s `master > 0` fallback hands out a flat 1.0 — so the way
+    ///    back up is uniform, not proportional. 80/40 returns as 6/6.
+    /// 3. **Rounding noise.** Each member's own `.rounded()` is ±0.5 per step, which
+    ///    random-walks over a burst; worst for quiet members, where ±0.5 is a large
+    ///    fraction of the value.
+    /// The existing slider path dodges all three by snapshotting once
+    /// (``beginMainOutMasterDrag()``), and a keypress burst is morally a drag: a
+    /// series of steps between two settled states. So the mirror holds one snapshot
+    /// across the burst — giving it exactly the drag's semantics, including the
+    /// documented "a clamped member stays pinned and un-clamps on the way down".
+    ///
+    /// It holds that snapshot with **no timer and no debounce**: `commanded` records
+    /// what the last mirror write asked for, so if every member still sits exactly
+    /// there, nothing but the mirror has touched them and the snapshot is still the
+    /// right thing to scale from. Anything else moving a member — a slider, a mute,
+    /// a group activation, a membership change — fails the comparison and re-derives.
+    /// That is deliberately evidence rather than a list of invalidation call sites to
+    /// keep in sync: a future path that moves a member gets this right by default
+    /// instead of by remembering to.
+    public func mirrorSystemVolumeToMainOut(_ volume: Int) {
+        guard !isPassthrough else { mirrorRatios = nil; return }
+        let members = mainOutMemberIDs
+        guard !members.isEmpty else { mirrorRatios = nil; return }
+        guard !members.contains(where: { device($0)?.isLocalDevice == true }) else {
+            mirrorRatios = nil
+            return
+        }
+
+        let current = currentMemberVolumes(members)
+        let ratios: [String: Double]
+        if let held = mirrorRatios, held.commanded == current {
+            ratios = held.ratios        // still the same burst — hold the snapshot
+        } else {
+            ratios = mainOutRatios()    // fresh burst, or something else moved a member
+        }
+        mirrorRatios = (ratios, scaleMainOutMembers(to: volume, ratios: ratios))
+    }
+
+    /// Each member's current backend volume, skipping ids with no device. The key set
+    /// matches ``mainOutRatios()``'s exactly (both skip the same ids), which is what
+    /// makes the `commanded == current` comparison above meaningful: a member
+    /// appearing or vanishing changes the keys and correctly forces a fresh snapshot.
+    private func currentMemberVolumes(_ ids: [String]) -> [String: Int] {
+        var volumes: [String: Int] = [:]
+        for id in ids {
+            guard let device = device(id) else { continue }
+            volumes[id] = device.volume
+        }
+        return volumes
     }
 
     // MARK: Mute (Q4 — volume-based; see "Mute semantics" above)

@@ -46,8 +46,23 @@ public protocol SystemVolumeControlling: Sendable {
     /// this object's own ``setVolume(_:)``/``setMuted(_:)`` writes are suppressed,
     /// so a UI can drive the slider from this without a feedback loop.
     ///
+    /// `defaultDeviceChanged` separates the two reasons above, and a caller that
+    /// acts on the *value* rather than just displaying it MUST NOT conflate them:
+    ///
+    /// - `false` — the user made a volume/mute gesture on the device that was
+    ///   already the default. A real intent about the level.
+    /// - `true` — the default output device itself switched. The reported pair is
+    ///   a *different device's* pre-existing state; nobody expressed any intent
+    ///   about a level. Only the fact that the device changed is news.
+    ///
+    /// The volume-key mirror (``BackendEvent/systemVolumeChanged(volume:)`` →
+    /// `GroupController.mirrorSystemVolumeToMainOut(_:)`) acts only on the first:
+    /// treating a headphone plug as a gesture would slam every AirPlay speaker to
+    /// whatever the headphones happened to be set to. Displaying the row can and
+    /// does use both.
+    ///
     /// Called on a private serial queue, **not** the main queue — hop yourself.
-    var onExternalChange: (@Sendable (_ volume: Int?, _ muted: Bool?) -> Void)? { get set }
+    var onExternalChange: (@Sendable (_ volume: Int?, _ muted: Bool?, _ defaultDeviceChanged: Bool) -> Void)? { get set }
 
     /// Begin observing. Idempotent.
     func start()
@@ -148,9 +163,9 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// listener blocks run *on* `queue`, so a `queue.sync` getter would deadlock
     /// the moment a callback tried to read it.
     private let callbackLock = NSLock()
-    private var _onExternalChange: (@Sendable (Int?, Bool?) -> Void)?
+    private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
 
-    public var onExternalChange: (@Sendable (Int?, Bool?) -> Void)? {
+    public var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
         get {
             callbackLock.lock()
             defer { callbackLock.unlock() }
@@ -447,12 +462,19 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// `report: true` fires ``onExternalChange`` unconditionally, even if the new
     /// device's numbers happen to equal the old one's: the device *itself* changing
     /// is the news, and the caller needs the fresh pair regardless.
+    ///
+    /// Every fire from here carries `defaultDeviceChanged: true`, and that is exact
+    /// rather than approximate: the only caller that passes `report: true` is the
+    /// default-device listener, so a report from here always IS a device switch
+    /// (`start()`, the other caller, passes `report: false` — coming up is not a
+    /// change). That is what lets a caller act on a volume gesture without also
+    /// acting on a headphone plug; see ``onExternalChange``.
     private func retargetLocked(to deviceID: AudioObjectID, report: Bool) {
         removeDeviceListenersLocked()
         guard deviceID != AudioObjectID(kAudioObjectUnknown) else {
             lastKnownVolume = nil
             lastKnownMuted = nil
-            if report { fire(volume: nil, muted: nil) }
+            if report { fire(volume: nil, muted: nil, defaultDeviceChanged: true) }
             return
         }
         addDeviceListenersLocked(deviceID)
@@ -461,7 +483,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
         // device's.
         lastKnownVolume = Self.readVolume(deviceID)
         lastKnownMuted = Self.readMuted(deviceID)
-        if report { fire(volume: lastKnownVolume, muted: lastKnownMuted) }
+        if report { fire(volume: lastKnownVolume, muted: lastKnownMuted, defaultDeviceChanged: true) }
     }
 
     private func addDeviceListenersLocked(_ deviceID: AudioObjectID) {
@@ -571,22 +593,27 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// sits at that value, setting it again changes nothing and the HAL sends no
     /// notification, so there is nothing to miss. Any real external change must
     /// move the value away from `lastKnown`, which mismatches and reports.
+    ///
+    /// Fires with `defaultDeviceChanged: false`: reaching here means a property on
+    /// the device that was ALREADY the default moved, i.e. somebody made a gesture.
+    /// A switch of the default device itself never lands here — it lands on the
+    /// system-object listener and goes through ``retargetLocked(to:report:)``.
     private func handleDeviceChangeLocked() {
         let volume = currentVolume()
         let muted = currentMuted()
         guard volume != lastKnownVolume || muted != lastKnownMuted else { return }
         lastKnownVolume = volume
         lastKnownMuted = muted
-        fire(volume: volume, muted: muted)
+        fire(volume: volume, muted: muted, defaultDeviceChanged: false)
     }
 
     /// Snapshot the callback under the lock but invoke it *outside* — a handler
     /// that re-entered `onExternalChange`'s setter would otherwise deadlock.
-    private func fire(volume: Int?, muted: Bool?) {
+    private func fire(volume: Int?, muted: Bool?, defaultDeviceChanged: Bool) {
         callbackLock.lock()
         let handler = _onExternalChange
         callbackLock.unlock()
-        handler?(volume, muted)
+        handler?(volume, muted, defaultDeviceChanged)
     }
 }
 

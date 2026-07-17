@@ -170,7 +170,7 @@ final class NativeBackendTests: XCTestCase {
         private var _muted: Bool?
         private var _volumeCalls: [Int] = []
         private var _mutedCalls: [Bool] = []
-        private var _onExternalChange: (@Sendable (Int?, Bool?) -> Void)?
+        private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
         private var _startCount = 0
         private var _stopCount = 0
 
@@ -193,7 +193,7 @@ final class NativeBackendTests: XCTestCase {
             lock.withLock { _mutedCalls.append(muted) }
         }
 
-        var onExternalChange: (@Sendable (Int?, Bool?) -> Void)? {
+        var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
             get { lock.withLock { _onExternalChange } }
             set { lock.withLock { _onExternalChange = newValue } }
         }
@@ -211,9 +211,15 @@ final class NativeBackendTests: XCTestCase {
         /// `NativeBackend.start()` registered. A harmless no-op if nothing is
         /// registered yet (e.g. fired before `backend.start()`, or after
         /// `backend.stop()` cleared it).
-        func fireExternalChange(volume: Int?, muted: Bool?) {
+        ///
+        /// `defaultDeviceChanged` defaults to `false` — a volume/mute gesture on the
+        /// device that was already the default, which is what every pre-existing
+        /// caller here means. Pass `true` to simulate the default output device
+        /// itself switching (speakers → AirPods), which reports the NEW device's
+        /// state and must not be mistaken for a gesture.
+        func fireExternalChange(volume: Int?, muted: Bool?, defaultDeviceChanged: Bool = false) {
             let handler = lock.withLock { _onExternalChange }
-            handler?(volume, muted)
+            handler?(volume, muted, defaultDeviceChanged)
         }
     }
 
@@ -575,6 +581,167 @@ final class NativeBackendTests: XCTestCase {
             if case .deviceUpdated(let d) = $0 { return d.isLocalDevice }
             return false
         }, "onExternalChange with unchanged volume/mute must emit nothing")
+    }
+
+    // MARK: Volume-key mirror — `BackendEvent.systemVolumeChanged`
+    //
+    // The volume keys move the system output = the local "Current Device", which the
+    // capture tap MUTES while streaming — so they adjusted a device nobody could hear
+    // (Alec, live session 2026-07-17). This backend republishes a genuine external
+    // change as `.systemVolumeChanged` and `AppDelegate` hands it to
+    // `GroupController.mirrorSystemVolumeToMainOut(_:)`. The backend must NOT know
+    // `GroupController` exists — it only states the fact.
+    //
+    // What these pin down is WHICH facts qualify: the filters are the whole safety
+    // story, since anything emitted here ends up scaling real speakers.
+
+    private func systemVolumeEvents(in events: [BackendEvent]) -> [Int] {
+        events.compactMap { if case .systemVolumeChanged(let v) = $0 { return v } else { return nil } }
+    }
+
+    /// A genuine external volume change (media keys / Sound menu) republishes as
+    /// `.systemVolumeChanged` alongside the local row's `deviceUpdated`.
+    func testExternalVolumeChangeEmitsSystemVolumeChanged() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
+        } after: { volume.fireExternalChange(volume: 30, muted: false) }
+
+        XCTAssertEqual(systemVolumeEvents(in: events), [30],
+                       "an external volume change must republish for the Main Out mirror")
+    }
+
+    /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume, but
+    /// that's the new device's pre-existing level — not a user gesture. It must
+    /// relabel/sync the row and emit NOTHING for the mirror: mirroring it would slam
+    /// every AirPlay speaker to whatever the headphones happened to be set to.
+    func testDefaultDeviceSwitchSyncsRowButDoesNotEmitSystemVolumeChanged() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+
+        // The row still syncs (that's the two-way sync's job) — wait on THAT, so the
+        // absence of the mirror event below is observed after the work is done.
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 90 }
+                return false
+            }
+        } after: { volume.fireExternalChange(volume: 90, muted: false, defaultDeviceChanged: true) }
+
+        XCTAssertTrue(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 90 }
+            return false
+        }, "a default-device switch must still sync the local row")
+        XCTAssertEqual(systemVolumeEvents(in: events), [],
+                       "a device switch is NOT a volume gesture — it must never drive the mirror")
+    }
+
+    /// `onExternalChange` also fires for a mute-only change. The volume didn't move,
+    /// so there is nothing to mirror — emitting would write the same values back to
+    /// every speaker for a keypress that wasn't about volume.
+    func testMuteOnlyExternalChangeDoesNotEmitSystemVolumeChanged() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.isMuted }
+                return false
+            }
+        } after: { volume.fireExternalChange(volume: 50, muted: true) }   // volume UNCHANGED
+
+        XCTAssertEqual(systemVolumeEvents(in: events), [],
+                       "a mute-only change must not republish an unmoved volume")
+    }
+
+    /// OUR OWN WRITES MUST NOT MIRROR. Dragging the Current Device slider goes through
+    /// `setVolume(_:for:)` on the local id; that must never come back as an external
+    /// change, or the slider would scale the AirPlay speakers too.
+    ///
+    /// On real hardware `SystemOutputVolume` is what guarantees it — its echo
+    /// suppression compares a fresh read against its last-known state (updated on
+    /// every write), so `onExternalChange` never fires for a value we set. This pins
+    /// the other half: the backend doesn't manufacture the event on its own.
+    func testOwnLocalVolumeWriteDoesNotEmitSystemVolumeChanged() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 70 }
+                return false
+            }
+        } after: { backend.setVolume(70, for: NativeBackend.localDeviceID) }
+
+        XCTAssertEqual(volume.volumeCalls, [70], "precondition: the write did reach the hardware seam")
+        XCTAssertEqual(systemVolumeEvents(in: events), [],
+                       "our own local write must not be republished as an external change")
+    }
+
+    /// END-TO-END NO-FEEDBACK PROOF, across the real seam rather than by inspection:
+    /// backend event → `AppDelegate`'s one-line wiring → `GroupController` mirror →
+    /// `backend.setVolume`. A volume key while streaming must move the AirPlay
+    /// device's volume and write NOTHING back to the system volume — if it did, the
+    /// listener that started this would re-fire and the loop would spin.
+    func testVolumeKeyMirrorDrivesAirPlayAndNeverWritesBackToSystemVolume() async throws {
+        let systemVolume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let speaker = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == speaker.id } else { return false } }
+        } after: { discovery.fire(.appeared(speaker)) }
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        let controller = GroupController(
+            backend: backend,
+            store: GroupStore(directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+            loadPersisted: false)
+        controller.ensureDefaultSelection()                     // {local} — passthrough
+        _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming
+        XCTAssertFalse(controller.isPassthrough, "precondition: streaming to the AirPlay speaker")
+
+        // Exactly what AppDelegate.apply(_:) does with this event, and nothing more.
+        let stream = backend.makeEventStream()
+        let mirrored = expectation(description: "system volume mirrored")
+        let task = Task {
+            for await event in stream {
+                if case .systemVolumeChanged(let v) = event {
+                    controller.mirrorSystemVolumeToMainOut(v)
+                    mirrored.fulfill()
+                }
+            }
+        }
+        defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)          // let the subscription register
+
+        systemVolume.fireExternalChange(volume: 25, muted: false)   // ← the volume key
+        await fulfillment(of: [mirrored], timeout: 3)
+        await pollUntil { backend.devices.first { $0.id == speaker.id }?.volume == 25 }
+
+        XCTAssertEqual(backend.devices.first { $0.id == speaker.id }?.volume, 25,
+                       "the volume key drove the speaker that is actually playing")
+        XCTAssertTrue(systemVolume.volumeCalls.isEmpty,
+                      "THE NO-FEEDBACK PROOF: the mirror wrote nothing back to the system volume, so the listener cannot re-fire")
+        XCTAssertEqual(backend.devices.first { $0.isLocalDevice }?.volume, 25,
+                       "the local row still tracks the system volume via the two-way sync — it just isn't written TO")
     }
 
     /// INVARIANT: the local id is NEVER fed to the engine and never added as an

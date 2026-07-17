@@ -28,6 +28,40 @@ public enum BackendEvent: Sendable, Equatable {
     /// (`NSLevelIndicator`, display-only — SPEC.md §9). Emitted only for
     /// selected, unmuted devices while "playing."
     case level(id: String, rms: Float)
+    /// The Mac's system output volume was changed from **outside this app** —
+    /// the volume keys, the Sound menu, another app — while the default output
+    /// device stayed put. The one event here that isn't about a `Device`.
+    ///
+    /// It exists to fix a live-session complaint: the volume keys move the
+    /// system output, which IS the local "Current Device" row, but while
+    /// streaming the capture tap MUTES that output — so the keys diligently
+    /// adjusted a device nobody could hear while the AirPlay speakers actually
+    /// playing ignored them. `AppDelegate` forwards this to
+    /// ``GroupController/mirrorSystemVolumeToMainOut(_:)``, which mirrors it
+    /// onto the Main Out master so the keys drive whatever is really playing.
+    ///
+    /// Why an event rather than the backend calling the routing brain: the
+    /// backend owns the system-volume listener but sits BELOW `GroupController`
+    /// and reaches it only through ``OutputBackend``. This is already the
+    /// backend→UI push channel and `AppDelegate` is already where backend events
+    /// meet app-level controllers, so the fact travels the way every other
+    /// backend fact does, and no layer is inverted.
+    ///
+    /// Only ``NativeBackend`` emits it (it's the only backend that owns a
+    /// ``SystemVolumeControlling``); `MockBackend`/`OwnToneBackend` never do.
+    /// Guarantees a consumer may rely on:
+    /// - **External only.** ``SystemOutputVolume`` suppresses echoes of its own
+    ///   writes, so this never fires for a volume *we* set — "volume keys" and
+    ///   "user dragged our Current Device slider" are already distinguishable
+    ///   with no flag of anyone's own.
+    /// - **Not a device switch.** A default-output switch (speakers → AirPods)
+    ///   also reports a fresh volume, but that's a different device's
+    ///   pre-existing level, not a user gesture; it is filtered out upstream and
+    ///   never arrives here. Mirroring it would slam every speaker to whatever
+    ///   the headphones happened to be set to.
+    /// - **A real move.** Never emitted when the volume didn't actually change
+    ///   (e.g. only mute did).
+    case systemVolumeChanged(volume: Int)
 }
 
 /// The seam between the app and wherever audio actually goes.

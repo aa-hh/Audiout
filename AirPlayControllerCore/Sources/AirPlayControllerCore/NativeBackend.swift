@@ -258,7 +258,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
         //     (same reason `surfaceLocalDevice` runs unconditionally above). The
         //     helper suppresses echoes of our own writes, so this cannot loop back
         //     against `setVolume`/`setMuted`.
-        systemVolume.onExternalChange = { [weak self] volume, muted in
+        systemVolume.onExternalChange = { [weak self] volume, muted, defaultDeviceChanged in
             guard let self else { return }
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
@@ -267,12 +267,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
                 // this is the one path that relabels the row (an unchanged name costs
                 // one HAL read and `applyLocal` suppresses the no-op emit anyway).
                 let name = Self.currentOutputDeviceName()
+                let previousVolume = self.known[Self.localDeviceID]?.volume
                 self.applyLocal(Self.localDeviceID) { device in
                     device.name = name
                     // nil = that control is unreadable on this device; leave the last
                     // known value rather than fabricating a 0/false.
                     if let volume { device.volume = volume }
                     if let muted { device.isMuted = muted }
+                }
+
+                // 1c. VOLUME-KEY MIRROR. Syncing the row above is necessary but not
+                //     sufficient: while streaming, the capture tap MUTES the local
+                //     output, so the keys move a slider for a device nobody can hear
+                //     while the AirPlay speakers ignore them (Alec, live session
+                //     2026-07-17). Republish the change so the routing brain can
+                //     mirror it onto whatever is actually playing.
+                //
+                //     This backend must NOT reach up into `GroupController` — it sits
+                //     BELOW the routing brain and knows nothing about Main Out — so it
+                //     states the FACT on the event stream and lets `AppDelegate` route
+                //     it. Deciding what to do with it is emphatically not this layer's
+                //     business; this layer only knows the system volume moved.
+                //
+                //     Two filters, both load-bearing:
+                //     - `!defaultDeviceChanged` — a speakers → AirPods switch also
+                //       reports a fresh volume, but that's the NEW device's existing
+                //       level, not a gesture. Mirroring it would slam every AirPlay
+                //       speaker to whatever the headphones sat at.
+                //     - `volume != previousVolume` — `onExternalChange` also fires for
+                //       a mute-only change. Mirroring an unmoved volume would be a
+                //       no-op write per keypress-that-wasn't; only a real move is news.
+                //     Echoes of our OWN writes never arrive here at all —
+                //     `SystemOutputVolume` suppresses those by comparing a fresh read
+                //     against its last-known state, which is why no flag is needed to
+                //     tell the volume keys from our own slider.
+                if !defaultDeviceChanged, let volume, volume != previousVolume {
+                    self.emit(.systemVolumeChanged(volume: volume))
                 }
             }
         }

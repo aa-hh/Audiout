@@ -52,4 +52,39 @@ final class AppSettingsTests: XCTestCase {
         defaults.set("chartreuse", forKey: "appearance.theme")
         XCTAssertEqual(AppSettings(defaults: defaults).theme, .system)
     }
+
+    // MARK: Audio buffer (PLAN-LATENCY-SETTING.md)
+
+    func testStartBufferDefaultsWhenUnset() {
+        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+                       AppSettings.defaultStartBufferMs)
+    }
+
+    func testStartBufferRoundTripsEveryOfferedOption() {
+        let settings = AppSettings(defaults: defaults)
+        for option in AppSettings.startBufferOptionsMs {
+            settings.startBufferMs = option
+            XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs, option)
+        }
+    }
+
+    func testStartBufferUnofferedStoredValueFallsBack() {
+        // A value the UI never offers (e.g. written by a newer build with a
+        // different option list, or hand-edited defaults) resolves to the
+        // default rather than leaking into the popup.
+        defaults.set(750, forKey: "audio.startBufferMs")
+        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+                       AppSettings.defaultStartBufferMs)
+        defaults.set(-40, forKey: "audio.startBufferMs")
+        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+                       AppSettings.defaultStartBufferMs)
+    }
+
+    func testStartBufferOptionListInvariants() {
+        // The default must be offered, the floor is the first option, and the
+        // whole list must sit inside the engine shim's accepted 300...5000.
+        XCTAssertTrue(AppSettings.startBufferOptionsMs.contains(AppSettings.defaultStartBufferMs))
+        XCTAssertEqual(AppSettings.startBufferOptionsMs, AppSettings.startBufferOptionsMs.sorted())
+        XCTAssertTrue(AppSettings.startBufferOptionsMs.allSatisfy { (300...5000).contains($0) })
+    }
 }

@@ -76,29 +76,81 @@ the hosting seam first.**
 
 ## Known follow-ups (ranked; none block first light)
 
-1. **Teardown SIGABRT (exit 134)** at "Stopping airptp event loop" on
-   `engine.stop()` after streaming — pre-existing, does not affect playback.
-2. **SIGPIPE unprotected**: no `SIG_IGN`/`SO_NOSIGPIPE`/`MSG_NOSIGNAL`
-   anywhere; a receiver-closed socket during a send could kill the process
-   (OwnTone masks SIGPIPE on all non-main threads, main.c:718-732).
-3. **No post-CONNECTED device callback**: session failures after `addOutput`
-   resolves are silently swallowed (`callback_id` spent). NativeBackend needs
-   an async state channel — see dev/notes/p2b-nativebackend-seam-brief.md.
-4. **No write-cadence deficit/overrun detection** (OwnTone player.c
-   pb_write_deficit_max model absent) — diagnostic/robustness gap.
-5. Hardening backlog from the 2026-07-17 hosting-delta audit: `libhash` is a
-   fixed constant (every install advertises the same AirPlay device id + PTP
-   clock-id seed — two machines on one LAN collide); `general.ipv6` shim
-   default = on vs OwnTone off; `event_set_log_callback` not wired; conffile
-   shim silently returns 0/NULL for unknown keys; `gcry_check_version(NULL)`
-   skips min-version enforcement; device_start/stop idempotency guards;
-   `device_flush` primitive (needed for pause/seek).
+**Status update, Phase 2b (2026-07-17): all six items below are FIXED.** See
+`PLAN-PHASE-2B.md` D3 ("fix ALL of it") and the T-ENG-* task reports. None of
+the fixes required a vendored-C change — see `docs/VENDORED-DIFFS.md`'s
+"Phase 2b engine hardening tasks" audit table for the per-item disposition.
 
-## What's next (see dev/notes/p2b-*.md briefs, written 2026-07-17)
+1. ~~**Teardown SIGABRT (exit 134)** at "Stopping airptp event loop" on
+   `engine.stop()` after streaming.~~ **FIXED (T-ENG-SIGABRT-1).**
+   Root-caused to a double `ptpd_deinit()` — the vendored `airplay_deinit()`
+   already tears down the PTP daemon, and the hosting `stop()` path called it
+   a second time for symmetry with the hosting-added `ptpd_find_or_bind()` in
+   `start()`. `airptp_end()` frees the handle but doesn't null the caller's
+   pointer, so the second call re-entered `daemon_stop()` and
+   `pthread_join()`'d an already-joined thread → abort. Fixed by making
+   `shims/ptpd.c`'s `ptpd_deinit()` idempotent (nulls `ptpd_hdl` after
+   `airptp_end()`, so repeat calls are clean no-ops).
+2. ~~**SIGPIPE unprotected**: no `SIG_IGN`/`SO_NOSIGPIPE`/`MSG_NOSIGNAL`
+   anywhere; a receiver-closed socket during a send could kill the
+   process.~~ **FIXED (T-ENG-SIGPIPE-1).** `engine_mask_sigpipe()`
+   (`shims/engine_bridge.c`) sets `SIGPIPE` to `SIG_IGN` process-wide,
+   mirroring OwnTone `main.c:718-732`; called from `AirPlayEngine.start()`
+   before any socket opens.
+3. ~~**No post-CONNECTED device callback**: session failures after
+   `addOutput` resolves are silently swallowed.~~ **FIXED
+   (T-ENG-STATESTREAM-1).** `makeStateStream() -> AsyncStream<(OutputID,
+   OutputState)>` on `AirPlayEngine` fans out every `outputs_cb` report,
+   including out-of-band post-terminal ones the dispatcher used to drop once
+   `callback_id` was spent. `NativeBackend` (T-NB-BACKEND-1) subscribes this
+   instead of polling.
+4. ~~**No write-cadence deficit/overrun detection**.~~ **FIXED
+   (T-ENG-CADENCE-1).** `writeCadenceSnapshot() -> WriteCadenceSnapshot` on
+   `AirPlayEngine` tracks cumulative deficit/overrun seconds and the last
+   per-write gap against `CLOCK_MONOTONIC_RAW`, allocation-free on the hot
+   `write(pcm:pts:)` path; diagnostic only, never gates a write.
+5. ~~Hardening backlog from the 2026-07-17 hosting-delta audit.~~ **FIXED**,
+   split across two tasks:
+   - **libhash per-install seed collision — FIXED (T-ENG-LIBHASH-1).**
+     `EngineConfig.installSeed` (defaults to a fresh random value per
+     construction) is mixed into `hashClientName`'s FNV-1a input, so two
+     installs with the same client name no longer collide on AirPlay device
+     id / PTP clock-id. Caveat recorded in that task's notes: the random
+     default only prevents collisions between concurrently-constructed
+     engines in one process — persisting a stable per-install seed across
+     relaunches is app-level work, not yet done.
+   - **Remaining items (ipv6 default, loud config misses, gcry version
+     floor, libevent log hook, start/stop idempotency, `device_flush`
+     seam) — FIXED (T-ENG-HARDEN-1).** `general.ipv6` shim default flipped
+     to off (Swift `EngineConfig` still re-enables it via
+     `conffile_set_ipv6`); `event_set_log_callback` wired to the logger shim
+     (`engine_logger_wire_libevent()`); conffile unknown-key lookups now log
+     at `E_WARN` + `assert()` in debug; `engine_crypto_init` passes a real
+     `1.8.0` min-version floor to `gcry_check_version` instead of `NULL`;
+     `addOutput`/`removeOutput` are now idempotent (no-op on an
+     already-active/already-stopped output); `flushOutput(_:)` added as an
+     explicit no-op seam for a future pause/seek primitive (validates
+     started + known-output, does not yet issue `device_flush`).
 
-Multi-room sync checkpoint (extend the probe to 2+ outputs — speakers are
-back); then T-BACKEND-1 NativeBackend (seam brief has the 10-step checklist);
-multistream `stream_id` design for per-app routing (p2b-multistream-brief);
-synced local output (p2b-synced-local-brief); SMAppService helper
-productionization — NB: requires a paid Developer ID cert for the sanctioned
-install path (p2b-helper-productionization-brief).
+## What's next
+
+Phase 2b (`PLAN-PHASE-2B.md`) picked up immediately after this report and is
+now complete: `NativeBackend : OutputBackend` (in-process engine + app-owned
+`NativeDiscovery` over both `_airplay._tcp`/`_raop._tcp`), an in-process Core
+Audio process-tap capture path (`NativeCaptureCoordinator`), the
+`AIRPLAY_BACKEND=native` resolver wiring, and dimmed/disabled AP1-only device
+rows in the popover with a "coming soon" explanation. See
+`dev/notes/p2b-nativebackend-runbook.md` for how to run it and the gated
+live-verification checklist (D7) — that gated session (multi-room 2-output
+sync, native end-to-end on a real speaker, volume A/B, real-fleet discovery
+watch, teardown stress) is the one piece of Phase 2b that still requires
+Alec present with real hardware; everything else is headless-verified.
+
+Deferred beyond Phase 2b (see the roadmap briefs in `dev/notes/p2b-*.md`,
+indexed in `dev/AGENTS.md`): the AP1 (`raop.c`) sender port (D6 — AP1-only
+devices are discovered and shown, but never driven; deferred to the next
+iteration since the current fleet is all AP2-capable); multistream
+`stream_id` design for per-app routing (`p2b-multistream-brief.md`); synced
+local output (`p2b-synced-local-brief.md`); SMAppService helper
+productionization — requires a paid Developer ID cert for the sanctioned
+install path (`p2b-helper-productionization-brief.md`).

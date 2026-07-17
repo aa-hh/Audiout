@@ -36,6 +36,11 @@ func describe(_ event: BackendEvent) -> String? {
         return "≈ updated     \(d.name.padding(toLength: 18, withPad: " ", startingAt: 0)) vol \(d.volume)  [\(flags.joined(separator: ","))]"
     case .level:
         return nil   // too chatty to print every 100ms; see the meter note below
+    case .systemVolumeChanged(let volume):
+        // Only `NativeBackend` ever emits this (it owns the system-volume listener);
+        // under `mock` — this driver's default — it never fires. Handled anyway so
+        // the switch stays exhaustive and `AIRPLAY_BACKEND=native` prints it.
+        return "♪ system vol  \(volume) (changed outside the app)"
     }
 }
 

@@ -1,0 +1,145 @@
+import CoreAudio
+import Foundation
+
+/// Lightweight Core Audio observer that tracks the macOS default audio output
+/// device name (e.g. "MacBook Pro Speakers", "AirPods Pro"). Thread-safe via a
+/// private serial queue; never crashes — falls back to "Mac" if a query fails.
+public final class DefaultOutputObserver: @unchecked Sendable {
+
+    // MARK: - Public API
+
+    /// Called on the observer's private queue when the default output device changes.
+    /// The argument is the new device name.
+    public var onChange: ((String) -> Void)?
+
+    /// The current default output device name. Readable from any thread (the
+    /// backing store is only mutated on `queue`).
+    public private(set) var currentDeviceName: String = "Mac"
+
+    // MARK: - Private state
+
+    private let queue = DispatchQueue(label: "com.airplaycontroller.defaultoutput")
+
+    /// The property address we listen on — stored so add/remove use the same value.
+    private var defaultDeviceAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// The listener block reference. Must be the exact same object passed to
+    /// add and remove.
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+
+    private var isListening = false
+
+    // MARK: - Lifecycle
+
+    deinit {
+        // Remove listener synchronously — safe because `queue` is not the
+        // current queue at deinit (callers don't call deinit from our queue).
+        stopListening()
+    }
+
+    // MARK: - Start / Stop
+
+    public func start() {
+        queue.sync { [self] in
+            guard !isListening else { return }
+
+            // Snapshot the current default device name.
+            currentDeviceName = Self.queryDefaultOutputDeviceName()
+
+            // Install the property listener.
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self else { return }
+                let name = Self.queryDefaultOutputDeviceName()
+                self.currentDeviceName = name
+                self.onChange?(name)
+            }
+            listenerBlock = block
+
+            let status = AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &defaultDeviceAddress,
+                queue,
+                block
+            )
+            if status == noErr {
+                isListening = true
+            }
+        }
+    }
+
+    public func stop() {
+        queue.sync { [self] in
+            stopListening()
+        }
+    }
+
+    // MARK: - Private helpers
+
+    /// Remove the listener if one is installed. Must be called on `queue` or
+    /// when no concurrent access is possible (deinit).
+    private func stopListening() {
+        guard isListening, let block = listenerBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultDeviceAddress,
+            queue,
+            block
+        )
+        listenerBlock = nil
+        isListening = false
+    }
+
+    // MARK: - Core Audio queries
+
+    /// Returns the name of the current default output device, or "Mac" on any failure.
+    private static func queryDefaultOutputDeviceName() -> String {
+        // 1. Get the default output device ID.
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var deviceID = AudioDeviceID()
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let idStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &deviceID
+        )
+        guard idStatus == noErr, deviceID != kAudioObjectUnknown else {
+            return "Mac"
+        }
+
+        // 2. Get the device name.
+        var nameAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var name: CFString = "" as CFString
+        var nameSize = UInt32(MemoryLayout<CFString>.size)
+        let nameStatus = AudioObjectGetPropertyData(
+            deviceID,
+            &nameAddress,
+            0,
+            nil,
+            &nameSize,
+            &name
+        )
+        guard nameStatus == noErr else {
+            return "Mac"
+        }
+
+        let result = name as String
+        return result.isEmpty ? "Mac" : result
+    }
+}

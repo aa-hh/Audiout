@@ -16,6 +16,15 @@ honouring `-p`/`port` in Classic AirPlay mode), or a new dummy-setup layer is ad
 
 ## Notable Patterns
 
+- **A third layer now exists: the real `native` backend.** `AIRPLAY_BACKEND=native`
+  drives a real, in-process AirPlay 2 sender (`AirPlayEngine`) — not a dummy.
+  It's real enough to need actual sockets/PTP ports and a real TCC grant. See
+  `README.md`'s "Layer 3" section for the summary and
+  `notes/p2b-nativebackend-runbook.md` for the full headless-run + in-app TCC
+  grant flow + gated live-verification checklist. Don't confuse this with the
+  two dummy layers below — `native` is not for casual offline dev, it's the
+  real sender path.
+
 - **At most one fake speaker will actually run.** [fake-speakers.sh](fake-speakers.sh)
   generates a distinct RTSP port per named instance, but the installed
   shairport-sync 5.1 build ignores the port setting in Classic (AirPlay-1) mode and
@@ -78,4 +87,19 @@ debugging anything that looks like a repeat of a first-light symptom.
 |---|---|
 | [fake-speakers.sh](fake-speakers.sh) | Launches one or more `shairport-sync` processes as fake AirPlay-1 receivers (see single-instance caveat above). `SILENT=0` to hear audio instead of discarding it. |
 | [stop-fake-speakers.sh](stop-fake-speakers.sh) | Kills every process tracked by a pidfile in `.run/` and cleans them up. |
-| [README.md](README.md) | Full setup/usage/rationale for both dummy layers (in-app mock + shairport fake speaker). |
+| [README.md](README.md) | Full setup/usage/rationale for both dummy layers (in-app mock + shairport fake speaker) plus the real `native` backend (Layer 3). |
+
+## Research briefs (`notes/`)
+
+Roadmap/design briefs written during Phase 2b planning and execution
+(`PLAN-PHASE-2B.md`), read-only research unless noted:
+
+| Brief | Covers |
+|---|---|
+| `notes/p2b-nativebackend-runbook.md` | **How to run `native` today**: headless build/test, the in-app TCC grant flow via `scripts/make-app.sh`'s stable bundle path, and the D7 gated live-verification checklist. Start here for anything `native`-backend-operational. |
+| `notes/p2b-nativebackend-seam-brief.md` | Design brief `NativeBackend` was built from: gap analysis of everything `OutputBackend` needs that `AirPlayEngine` doesn't provide out of the box. |
+| `notes/p2b-multistream-brief.md` | Deferred: `stream_id` design for per-app audio routing. |
+| `notes/p2b-synced-local-brief.md` | Deferred: synced local (this-Mac) Core Audio output alongside AirPlay outputs. |
+| `notes/p2b-helper-productionization-brief.md` | Deferred: SMAppService PTP helper productionization — needs a paid Developer ID cert for the sanctioned install path. |
+| `notes/p2b-v2-smallwork-brief.md` | Deferred: smaller v2 backlog items. |
+| `notes/0f-pipe-brief.md` | Historical (pre-engine-extraction): OwnTone pipe-input rate/autostart findings. |

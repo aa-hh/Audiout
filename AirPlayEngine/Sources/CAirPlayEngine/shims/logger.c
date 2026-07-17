@@ -23,6 +23,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <os/log.h>
+#include <event2/event.h>
 
 /* seam-map §3.2: default to E_LOG. Overridable via env for bring-up. */
 static int
@@ -194,4 +195,46 @@ DHEXDUMP(int severity, int domain, const unsigned char *data, int data_len, cons
     }
 #undef HEXDUMP_MAX_BYTES
 #undef HEXDUMP_COLS
+}
+
+/* --- libevent log bridge (first-light hardening #5) ------------------------
+ *
+ * libevent emits its own diagnostics (event base warnings, evrtsp transport
+ * errors, kqueue failures) through an internal default callback that writes to
+ * stderr with no severity control and no route into Console.app — invisible
+ * once the engine runs as an installed helper. OwnTone wires libevent's log
+ * output into its own logger; our hosting never did, so a libevent-level
+ * failure during a session was silently lost. Route it through the same
+ * os_log/stderr path (under the L_EVENT domain, env-gated by
+ * AIRPLAYENGINE_LOG_LEVEL) as everything else. */
+
+static int
+severity_for_event_log(int event_severity)
+{
+  switch (event_severity)
+    {
+      case EVENT_LOG_DEBUG: return E_DBG;
+      case EVENT_LOG_MSG:   return E_INFO;
+      case EVENT_LOG_WARN:  return E_WARN;
+      case EVENT_LOG_ERR:   return E_LOG; /* libevent's hard errors -> visible */
+      default:              return E_LOG;
+    }
+}
+
+static void
+libevent_log_adapter(int severity, const char *msg)
+{
+  int mapped = severity_for_event_log(severity);
+  if (mapped > log_threshold())
+    return;
+  emit(mapped, L_EVENT, msg ? msg : "(libevent: null message)");
+}
+
+void
+engine_logger_wire_libevent(void)
+{
+  // Idempotent: event_set_log_callback just stores the pointer, so re-calling
+  // with the same adapter is a no-op. Passing NULL would restore libevent's
+  // default stderr writer — we always install ours.
+  event_set_log_callback(libevent_log_adapter);
 }

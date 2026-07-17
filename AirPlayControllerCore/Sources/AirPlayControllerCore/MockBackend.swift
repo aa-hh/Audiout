@@ -66,6 +66,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     private let staggerDiscovery: Bool
     private let emitsLevels: Bool
     private let simulatesDropouts: Bool
+    private let outputObserver: DefaultOutputObserver?
     private let connectScripts: [String: ConnectScript]
 
     /// The ids `setOutputSet` currently expects to be routed to — i.e. what
@@ -84,6 +85,9 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// superseded attempt become no-ops instead of clobbering newer state.
     private var generations: [String: UInt64] = [:]
 
+    /// Fake start buffer for the `LatencyConfigurable` conformance (on `queue`).
+    private var fakeStartBufferMs: Int = AppSettings.defaultStartBufferMs
+
     /// - Parameters:
     ///   - fleet: the devices to fabricate. Defaults to ``Array/demoFleet``.
     ///   - staggerDiscovery: reveal devices over ~2s instead of all at once,
@@ -95,17 +99,26 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     ///     id. A device absent from this dict keeps the exact pre-existing
     ///     synchronous behaviour (immediate `.connected`/`.off`) — see
     ///     `setOutputSet`.
+    ///   - outputObserver: when provided, tracks the macOS default audio output
+    ///     device and renames the local device (`local-mac`) to match reality
+    ///     instead of the hardcoded "MacBook Pro Speakers". `nil` by default so
+    ///     existing call sites (mainly tests) are unaffected. NOTE the native
+    ///     path does NOT use this — `NativeBackend` owns `SystemOutputVolume`,
+    ///     which covers the same default-device tracking plus volume/mute. This
+    ///     observer serves the mock and the superseded OwnTone backend only.
     public init(
         fleet: [Device] = .demoFleet,
         staggerDiscovery: Bool = true,
         emitsLevels: Bool = true,
         simulatesDropouts: Bool = false,
-        connectScripts: [String: ConnectScript] = [:]
+        connectScripts: [String: ConnectScript] = [:],
+        outputObserver: DefaultOutputObserver? = nil
     ) {
         self.fleet = fleet
         self.staggerDiscovery = staggerDiscovery
         self.emitsLevels = emitsLevels
         self.simulatesDropouts = simulatesDropouts
+        self.outputObserver = outputObserver
         self.connectScripts = connectScripts
         // Seed `expectedSelected` from the fleet's initial `isSelected` so a
         // device that starts selected (e.g. the demo fleet's Sonos speakers)
@@ -147,6 +160,15 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
             if self.emitsLevels { self.startLevelTimer() }
             if self.simulatesDropouts { self.startDropoutTimer() }
+
+            if let observer = self.outputObserver {
+                observer.onChange = { [weak self] name in
+                    guard let self else { return }
+                    self.queue.async { self.updateLocalDeviceName(name) }
+                }
+                observer.start()
+                self.updateLocalDeviceName(observer.currentDeviceName)
+            }
         }
     }
 
@@ -159,6 +181,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             self.live.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
+        outputObserver?.stop()
     }
 
     public func setVolume(_ volume: Int, for id: String) {
@@ -321,6 +344,17 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         for continuation in continuations.values { continuation.yield(event) }
     }
 
+    /// Rename the local device (`isLocalDevice == true`) to match the real
+    /// macOS default output device. No-op if the local device hasn't been
+    /// discovered yet or the name hasn't changed. Must be called on `queue`.
+    private func updateLocalDeviceName(_ name: String) {
+        guard var device = live.values.first(where: { $0.isLocalDevice }) else { return }
+        guard device.name != name else { return }
+        device.name = name
+        live[device.id] = device
+        emit(.deviceUpdated(device))
+    }
+
     private func startLevelTimer() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
@@ -463,5 +497,42 @@ public extension Array where Element == Device {
             Device(id: "homepod-bed",  name: "Bedroom HomePod", kind: .homePod,      volume: 25),
             Device(id: "office",       name: "Office",        kind: .generic,        volume: 50),
         ]
+    }
+
+    /// `demoFleet` PLUS one extra, explicitly-named AP1-only fixture
+    /// (T-UI-AP1-1, PLAN-PHASE-2B D6): discovered but `NativeBackend` never
+    /// `addOutput`s it — the popover renders it dimmed/disabled with a
+    /// "coming soon" explanation on click. A SEPARATE array (not appended to
+    /// `demoFleet` itself) so the many existing hardcoded `count == 7`
+    /// assertions elsewhere stay untouched; tests that want the AP1-only row
+    /// opt in with this fleet instead.
+    static var demoFleetWithAP1Only: [Device] {
+        demoFleet + [
+            Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,
+                   supportsAirPlay2: false, volume: 20),
+        ]
+    }
+}
+
+// MARK: - LatencyConfigurable (fake — UI development without hardware)
+
+/// A FAKE conformance (PLAN-LATENCY-SETTING.md §3, included by design): the
+/// mock has no sender, so "apply" just records the value — plus a ~1 s pause
+/// when anything is "streaming" so the Settings pane's reconnecting state is
+/// visible/exercisable in the default `AIRPLAY_BACKEND=mock` run. No device
+/// events are emitted; the real teardown/re-add choreography belongs to
+/// `NativeBackend.applyStartBuffer` and is tested there.
+extension MockBackend: LatencyConfigurable {
+
+    public var startBufferMs: Int {
+        queue.sync { fakeStartBufferMs }
+    }
+
+    public func applyStartBuffer(ms: Int) async {
+        let streaming = queue.sync { !expectedSelected.isEmpty }
+        if streaming {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        queue.sync { fakeStartBufferMs = ms }
     }
 }

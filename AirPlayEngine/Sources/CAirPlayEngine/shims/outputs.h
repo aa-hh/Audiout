@@ -220,6 +220,26 @@ outputs_device_get(uint64_t device_id);
 uint64_t
 outputs_buffer_duration_ms_get(void);
 
+/* Engine-side setter (NOT an OwnTone symbol — the shim's analogue of OwnTone's
+ * `general.start_buffer_ms` config key, seam-map §3.1). Sets the value
+ * outputs_buffer_duration_ms_get() serves to airplay.c's master_session_make(),
+ * which derives the sender-side scheduling lead from it:
+ *   output_buffer_samples = (start_buffer_ms - AIRPLAY_AUDIO_LATENCY_MS[250])
+ * i.e. this is the dominant, deterministic part of capture->speaker latency
+ * (the receiver buffers exactly this much before playout). Clamped LOUDLY to
+ * [OUTPUTS_START_BUFFER_MS_MIN, OUTPUTS_START_BUFFER_MS_MAX]: airplay.c
+ * hard-fails the whole master session when the value is <= 250, so a caller
+ * passing garbage gets a playable clamp + an E_WARN log instead of silence.
+ * Call BEFORE the first session is created (master_session_make caches the
+ * derived sample count per master session); the engine applies it from
+ * EngineConfig before airplay_init. */
+void
+outputs_set_buffer_duration_ms(uint64_t ms);
+
+#define OUTPUTS_START_BUFFER_MS_DEFAULT 2250 /* OwnTone's default (seam-map §3.1) */
+#define OUTPUTS_START_BUFFER_MS_MIN      300 /* > AIRPLAY_AUDIO_LATENCY_MS(250) hard floor */
+#define OUTPUTS_START_BUFFER_MS_MAX     5000
+
 bool
 outputs_exclusive_mode_get(void);
 
@@ -284,6 +304,31 @@ typedef void (*outputs_engine_completion_cb)(int callback_id, uint64_t device_id
 
 void
 outputs_engine_completion_set(outputs_engine_completion_cb cb, void *context);
+
+/* Engine device-state hook (T-ENG-STATESTREAM-1): fired (deferred, on
+ * evbase_player) for EVERY outputs_cb report, keyed by device_id only — INCLUDING
+ * the out-of-band reports that spend no callback_id.
+ *
+ * The completion hook above is keyed by callback_id and fires exactly once per
+ * armed op, so it can only observe a device's state up to the moment its op
+ * resolves (e.g. device_start's CONNECTED). But the RTSP state machine keeps
+ * reporting AFTER that: session_status() is called again on a later transition
+ * (e.g. rtsp_close_cb -> session_failure -> FAILED) with session->callback_id
+ * already spent (== -1). Those reports flow through outputs_cb(-1, device_id,
+ * state) and were previously DROPPED by the callback_id guard, so a
+ * `.connected -> .failed` transition after addOutput resolved was invisible.
+ *
+ * This hook surfaces those out-of-band transitions: it is called for every
+ * report (armed OR spent id) so the engine can drive an async device-state
+ * stream with no polling. Delivered on the engine thread, in the same deferred
+ * drain, AFTER the output_status_cb and the completion hook. `context` is the
+ * pointer passed to outputs_engine_state_set. */
+typedef void (*outputs_engine_state_cb)(uint64_t device_id,
+                                        enum output_device_state state,
+                                        void *context);
+
+void
+outputs_engine_state_set(outputs_engine_state_cb cb, void *context);
 
 /* Run the deferred-delivery pass synchronously. In production this is what the
  * libevent deferred event invokes; exposed so a unit test (no event loop) can

@@ -141,8 +141,22 @@ ptpd_init(uint64_t clock_id_seed)
 }
 
 // Thread: main (normal privileges)
+//
+// IDEMPOTENT (hosting-safety, T-ENG-SIGABRT-1): airptp_end() frees the handle
+// but does NOT null the caller's pointer. In our hosting the vendored
+// airplay_deinit() already calls ptpd_deinit() (airplay.c, "After freeing
+// sessions, since that's where the active ptp peers get removed"), and the
+// engine's stop() then calls ptpd_deinit() a second time for symmetry with the
+// hosting-added ptpd_find_or_bind() in start(). Without this guard the second
+// call re-entered daemon_stop() on an already-joined pthread (is_running never
+// clears) and pthread_join() on a stale tid → SIGABRT (exit 134) at "Stopping
+// airptp event loop". Nulling ptpd_hdl after airptp_end() makes every call
+// after the first a clean no-op (airptp_end(NULL) returns immediately), and
+// resets the bind-mode flag so a later start()/stop() cycle is well-defined.
 void
 ptpd_deinit(void)
 {
   airptp_end(ptpd_hdl);
+  ptpd_hdl = NULL;
+  airptp_create_own_service = false;
 }

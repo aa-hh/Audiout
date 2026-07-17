@@ -191,6 +191,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     private var deviceRowsByID: [String: DeviceRowView] = [:]
 
+    /// The transient "AirPlay 1 support is coming soon" explanation popover
+    /// (T-UI-AP1-1). Held so a second click can close/reopen it rather than
+    /// leaking a stray `NSPopover`; entirely separate from `popover` (the main
+    /// dropdown), which stays exactly content-sized and is never touched here.
+    private var unsupportedExplanationPopover: NSPopover?
+
     /// Each device's connection state as of the LAST `update(devices:)`, so the
     /// next update can detect transitions (connection-status brief §7.3). The
     /// backend owns the state machine; the popover only reacts to edges —
@@ -331,9 +337,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // needs a full rebuild — but a rebuild here must NOT reset this open's
         // transient collapse state (it's a mid-open repaint, not a reopen), which
         // a plain `rebuild()` guarantees (only `rebuildForOpen()` clears it).
+        //
+        // A device being added or removed also restructures the device rows —
+        // `refreshDeviceRows()` only repaints EXISTING rows, so a device set
+        // change (not just a route change) must force the same full rebuild path.
+        let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if popover.isShown {
-            if routesChanged {
+            if routesChanged || deviceSetChanged {
                 rebuild()
+                panel.panelContentDidChangeHeight(animated: true)
             } else {
                 refreshDeviceRows()
                 refreshMainOutRow()
@@ -940,10 +952,63 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         FileHandle.standardError.write(Data("[AirPlayController] \(reason)\n".utf8))
     }
 
+    // MARK: AP1-only "coming soon" explanation (T-UI-AP1-1, PLAN-PHASE-2B D6)
+
+    /// Present the small transient content-sized explanation popover anchored
+    /// to `row`. Closes any previous instance first (repeat clicks reposition
+    /// rather than stack popovers). No-ops off-screen (`row.window == nil`,
+    /// e.g. a headless test harness that never attaches the panel to a real
+    /// window) — `test_lastUnsupportedExplanationDeviceID` is the headless
+    /// assertion surface instead of a real `NSPopover.show`.
+    private func presentUnsupportedExplanation(anchoredTo row: DeviceRowView) {
+        unsupportedExplanationPopover?.performClose(nil)
+
+        let explanationController = NSViewController()
+        let label = NSTextField(wrappingLabelWithString: DeviceRowView.unsupportedExplanation)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = .labelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 20))
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            content.widthAnchor.constraint(equalToConstant: 220),
+        ])
+        explanationController.view = content
+
+        let explanationPopover = NSPopover()
+        explanationPopover.behavior = .transient   // dismisses on outside click/Esc
+        explanationPopover.contentViewController = explanationController
+        explanationPopover.contentSize = content.fittingSize
+        unsupportedExplanationPopover = explanationPopover
+
+        test_lastUnsupportedExplanationDeviceID = row.device.id
+        // A headless harness/test never attaches the panel to a real
+        // `NSWindow`; guard so this stays crash-free there while still
+        // recording the intent above for `test_` assertions.
+        guard row.window != nil else { return }
+        explanationPopover.show(relativeTo: row.bounds, of: row, preferredEdge: .maxY)
+    }
+
     // MARK: Test-support hooks
 
     public func test_deviceRow(for id: String) -> DeviceRowView? {
         deviceRowsByID[id]
+    }
+
+    /// The device id of the row a "coming soon" explanation was last shown for
+    /// (T-UI-AP1-1), `nil` until one has fired. The headless assertion surface
+    /// for `presentUnsupportedExplanation` — no real `NSWindow` is required.
+    public private(set) var test_lastUnsupportedExplanationDeviceID: String?
+
+    /// Simulate clicking `id`'s row (drives the real `mouseDown:` path via
+    /// `DeviceRowView.test_simulateClick`). No-op if the row is missing or
+    /// isn't currently rendered as unsupported.
+    public func test_clickDeviceRow(id: String) {
+        deviceRowsByID[id]?.test_simulateClick()
     }
 
     /// Simulate the popover being opened (T-5): recomputes collapse defaults and
@@ -1176,6 +1241,14 @@ extension PopoverController: DeviceRowView.Delegate {
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         handleSelection(result, deviceID: id)
+    }
+
+    /// T-UI-AP1-1 (PLAN-PHASE-2B D6): an AP1-only row was clicked. Present a
+    /// SMALL TRANSIENT content-sized `NSPopover` anchored to `row` with the
+    /// "coming soon" explanation — independent of the main popover (which
+    /// stays exactly content-sized and never gets a scrollbar).
+    public func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView) {
+        presentUnsupportedExplanation(anchoredTo: row)
     }
 }
 

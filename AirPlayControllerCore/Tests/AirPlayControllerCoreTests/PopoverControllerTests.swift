@@ -699,6 +699,60 @@ final class PopoverControllerTests: XCTestCase {
                        "a mid-open rebuild preserves the transient toggle instead of resetting it")
     }
 
+    // MARK: Device set changes drive a full row rebuild (not just a repaint)
+
+    /// `update(devices:)` must detect a device ADDED to the fleet and grow the
+    /// device-row set to match — not just repaint the rows that already exist.
+    /// Regression coverage for the fix at `PopoverController.update(devices:)`
+    /// (~line 208): a device-ID-set diff now forces `rebuild()` instead of the
+    /// narrower `refreshDeviceRows()`, which only repaints EXISTING rows and
+    /// would otherwise leave a newly-discovered device with no row at all.
+    func testUpdateWithAddedDeviceGetsARow() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let baselineCount = popover.test_deviceSectionRowCount
+        XCTAssertNil(popover.test_deviceRow(for: "new-speaker"), "not present before the add")
+
+        var devices = backend.devices
+        devices.append(Device(id: "new-speaker", name: "New Speaker", kind: .generic))
+        popover.update(devices: devices)
+
+        XCTAssertEqual(popover.test_deviceSectionRowCount, baselineCount + 1,
+                       "the added device grew the row count")
+        XCTAssertNotNil(popover.test_deviceRow(for: "new-speaker"),
+                        "the newly added device has a row after update(devices:)")
+    }
+
+    /// The inverse: a device REMOVED from the fleet must drop its row, not leave
+    /// a stale one behind.
+    func testUpdateWithRemovedDeviceDropsItsRow() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let baselineCount = popover.test_deviceSectionRowCount
+        XCTAssertNotNil(popover.test_deviceRow(for: "office"), "present before the removal")
+
+        let devices = backend.devices.filter { $0.id != "office" }
+        popover.update(devices: devices)
+
+        XCTAssertEqual(popover.test_deviceSectionRowCount, baselineCount - 1,
+                       "the removed device shrank the row count")
+        XCTAssertNil(popover.test_deviceRow(for: "office"),
+                     "the removed device's row is gone after update(devices:)")
+    }
+
+    /// A device set change must be detected and rebuilt even while the popover is
+    /// mid-open (`test_simulateOpen`), which is when the original bug manifested:
+    /// a plain repaint of existing rows silently dropped added/removed devices.
+    func testUpdateWithDeviceSetChangeRebuildsWhileOpen() async throws {
+        let (popover, _, backend) = try await makePopover()
+        popover.test_simulateOpen()
+
+        var devices = backend.devices
+        devices.append(Device(id: "another-speaker", name: "Another Speaker", kind: .generic))
+        popover.update(devices: devices)
+
+        XCTAssertNotNil(popover.test_deviceRow(for: "another-speaker"),
+                        "device added while the popover is open still gets a row")
+    }
+
     // MARK: T-7 — running-app picker (PLAN decision 6)
 
     /// The picker excludes apps that already have a route, and only offers

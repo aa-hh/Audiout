@@ -9,7 +9,8 @@ import AppKit
 ///
 /// Layout, left → right:
 /// - a **centered title** ("AudioControl", medium ~14pt, label color); and
-/// - two right-aligned, borderless, image-only icon buttons:
+/// - two right-aligned, stock `NSButton` (`bezelStyle = .smallSquare`),
+///   image-only icon buttons:
 ///   1. **Open Groups editor** — a system SF Symbol
 ///      (`hifispeaker.and.homepod.mini.badge.plus.fill`, template-rendered,
 ///      verified non-nil at runtime with graceful fallbacks).
@@ -41,9 +42,9 @@ final class PopoverHeaderView: NSView {
     var onQuit: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "AudioControl")
-    private let groupsButton = HoverActionButton()
-    private let settingsButton = HoverActionButton()
-    private let quitButton = HoverActionButton()
+    private let groupsButton = NSButton()
+    private let settingsButton = NSButton()
+    private let quitButton = NSButton()
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 460, height: Self.barHeight))
@@ -119,21 +120,18 @@ final class PopoverHeaderView: NSView {
     /// `configureIconButton`, so the button is never blank.
     static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
 
-    /// A borderless, image-only SF-Symbol button. Hover feedback is the subtle
-    /// rounded accent fill drawn by `HoverActionButton` — stock borderless
-    /// `NSButton` (and `.accessoryBar` + `showsBorderOnlyWhileMouseInside`) gave
-    /// no usable hover in the popover, so we use the purpose-built button that
-    /// paints the Control-Center-style rounded highlight. The symbol is
-    /// **template-rendered** (system vector, not a bundled raster), verified
-    /// non-nil at runtime; if the preferred name fails to resolve it tries the
-    /// fallbacks in order.
+    /// A stock `NSButton` with `bezelStyle = .smallSquare`, image-only SF-Symbol
+    /// content (re-derived from branch commit 18e5133, `claude/serene-elion-24763c`).
+    /// The symbol is **template-rendered** (system vector, not a bundled raster),
+    /// verified non-nil at runtime; if the preferred name fails to resolve it
+    /// tries the fallbacks in order.
     private func configureIconButton(_ button: NSButton,
                                      symbol: String,
                                      fallbacks: [String],
                                      accessibilityLabel: String,
                                      action: Selector) {
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
+        button.bezelStyle = .smallSquare
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.contentTintColor = .secondaryLabelColor

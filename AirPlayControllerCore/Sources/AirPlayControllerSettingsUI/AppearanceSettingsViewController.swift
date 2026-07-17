@@ -16,7 +16,7 @@ import AirPlayControllerCore
 ///
 /// Custom-drawn (`ThemeTileButton`), the same idiom this codebase already uses
 /// for controls AppKit doesn't style natively (`RowHoverButton`,
-/// `HoverActionButton`, `ControlCenterSlider`).
+/// `ControlCenterSlider`).
 ///
 /// The pane owns persistence (writes `AppSettings.theme`) but NOT the side
 /// effect: applying the override app-wide means touching `NSApp.appearance`,

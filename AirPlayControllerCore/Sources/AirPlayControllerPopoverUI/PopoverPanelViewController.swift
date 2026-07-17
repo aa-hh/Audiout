@@ -345,12 +345,13 @@ final class PopoverPanelViewController: NSViewController {
         }
 
         if let accessory {
-            let button = HoverActionButton()
+            // Dead code: nothing currently constructs a `HeaderAccessory`, so this
+            // path never runs. Kept building for whenever a caller adopts it;
+            // styled with the same stock bezel (`bezelStyle = .smallSquare`) as
+            // the header icon buttons (`PopoverHeaderView`).
+            let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.isBordered = false
-            // Custom rounded accent hover fill (HoverActionButton) — stock
-            // borderless NSButton has no usable hover feedback; matches the
-            // header icon buttons.
+            button.bezelStyle = .smallSquare
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.contentTintColor = .secondaryLabelColor

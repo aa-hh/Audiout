@@ -95,7 +95,7 @@ flowchart TD
 | `CardView` | One rounded Control-Center-style module: header rows + a clipping collapsible body (`setBodyCollapsed`), drop shadow + raised-edge rim chrome. |
 | `MainOutRowView` | The System card's Main Out row: master slider + `%` + mute + the named destination dropdown ("Enabled Devices" / saved groups) — THE routing control. |
 | `ConnectionDiagnosisView` | Inline "Couldn't connect" panel under a failed device row: cause + suggestion + Try again / Copy details. Pure renderer of a `ConnectionFailure`. |
-| `PopoverHeaderView` | Top bar: centered title + Groups-editor / Settings / Quit icon buttons (callbacks only; Settings is a `// TODO` stub). Buttons are borderless `HoverActionButton`s — stock `NSButton` (and `.accessoryBar` + `showsBorderOnlyWhileMouseInside`) gave no usable hover in the popover, so the buttons paint their own Control-Center-style rounded accent hover fill (reverted to `HoverActionButton` 2026-07-17 after the stock swap regressed hover). |
+| `PopoverHeaderView` | Top bar: centered title + Groups-editor / Settings / Quit icon buttons (callbacks only; Settings is a `// TODO` stub). Buttons are stock `NSButton`s with `bezelStyle = .smallSquare`. |
 | `GroupRowView` | A saved group's master row (activate + chevron + name + master slider). Built for the mixer window's group section — the popover no longer renders a Groups section, so it is unused by `PopoverController` here. |
 | `RunningAppInfo` | Plain-value snapshot of a running app for the "+ Add application…" picker (icon-independent `Equatable`). |
 

@@ -291,7 +291,7 @@ final class PopoverControllerTests: XCTestCase {
         let group = controller.groups[0]
 
         popover.test_selectMainOut(.selectedDevices); await drain()
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Enabled Devices",
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
                        "the named dropdown shows the current target")
         popover.test_selectMainOut(.group(id: group.id)); await drain()
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, group.name,

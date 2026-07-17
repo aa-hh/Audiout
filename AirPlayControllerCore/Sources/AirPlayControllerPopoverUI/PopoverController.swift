@@ -541,7 +541,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else { return }
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Enabled Devices", target: .selectedDevices),
+            .init(title: "Selected Devices", target: .selectedDevices),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))

@@ -96,9 +96,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// otherwise wants the mixer window shown.
     public var onOpenMixer: (() -> Void)?
 
-    /// Called when the user taps the header's Settings button (task A). Stubbed —
-    /// no settings surface exists yet (`// TODO: settings`).
+    /// Called when the user taps the header's Settings button (task A). The app
+    /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
+
+    /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
+    /// captured")? An excluded app is un-routable — dropped from the "+ Add
+    /// application…" picker and its route row skipped in `rebuild` (defensive; the
+    /// app also prunes the persisted route when an app is excluded). Wired by the
+    /// app; defaults to "never excluded" so existing call sites/tests are
+    /// unaffected.
+    public var isAppExcluded: (String) -> Bool = { _ in false }
 
     private let panel = PopoverPanelViewController()
 
@@ -328,7 +336,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
-        for route in appRouting.appRoutes {
+        for route in appRouting.appRoutes where !isAppExcluded(route.bundleID) {
             panel.addRow(makeAppRow(route, devices: allDevices))
         }
         panel.addRow(makeAddApplicationRow())
@@ -583,7 +591,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// duplicate, but filtering here keeps the menu from offering a dead choice).
     private func availableAppsForPicker() -> [RunningAppInfo] {
         let routed = Set(appRouting.appRoutes.map(\.bundleID))
-        return runningAppsProvider().filter { !routed.contains($0.bundleID) }
+        // Also drop excluded apps (Settings › Audio, "never captured") — routing
+        // an app the user has excluded would contradict the exclusion.
+        return runningAppsProvider().filter { !routed.contains($0.bundleID) && !isAppExcluded($0.bundleID) }
     }
 
     /// Add a route for `bundleID`/`displayName` (defaults to `.currentDevice` —

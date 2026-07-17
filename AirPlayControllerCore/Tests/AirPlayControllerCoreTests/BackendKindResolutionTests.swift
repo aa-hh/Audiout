@@ -39,4 +39,26 @@ final class BackendKindResolutionTests: XCTestCase {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "Native"])
         XCTAssertEqual(resolved, .native)
     }
+
+    // MARK: - AIRPLAY_START_BUFFER_MS (native path's sender start buffer)
+
+    func testStartBufferDefaultsTo1000WithNoEnv() {
+        XCTAssertEqual(nativeStartBufferMs(environment: [:]), 1000)
+    }
+
+    func testStartBufferReadsEnvWithinRange() {
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "2250"]), 2250)
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "300"]), 300)
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "5000"]), 5000)
+    }
+
+    func testStartBufferRejectsOutOfRangeAndGarbage() {
+        // Out of range or non-numeric → the product default, not a clamp: this
+        // is a dev knob, and a typo should behave like "unset" (same policy as
+        // AIRPLAY_BACKEND's unknown-value fallback).
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "250"]), 1000)
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "60000"]), 1000)
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "fast"]), 1000)
+        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": ""]), 1000)
+    }
 }

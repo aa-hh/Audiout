@@ -538,9 +538,37 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         // NativeBackend.swift / NativeCaptureCoordinator.swift (T-NB-BACKEND-1,
         // T-NB-CAPTURE-1) for the engine-driven equivalent of the OwnTone path
         // above.
-        let engine = AirPlayEngine()
+        //
+        // startBufferMs: the product runs a LOWER sender-side start buffer than
+        // the engine's OwnTone-parity default (2250 ms → ~3.5 s click-to-sound
+        // measured on the Sonos fleet, 2026-07-17). 1000 ms cuts the
+        // deterministic scheduling lead from 2.0 s to 0.75 s (expected total
+        // ≈ 2.2 s) while leaving the receivers a 750 ms jitter/multi-room
+        // buffer. Tunable per run via AIRPLAY_START_BUFFER_MS for the gated
+        // by-ear verification — see AirPlayEngine/docs/latency-analysis.md.
+        let engine = AirPlayEngine(
+            config: EngineConfig(startBufferMs: nativeStartBufferMs()))
         let nativeBackend = NativeBackend(engine: engine)
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(engine: engine)
         return nativeBackend
     }
+}
+
+/// The native backend's sender-side start buffer in ms: the
+/// `AIRPLAY_START_BUFFER_MS` env var when set to a usable integer, else the
+/// product default of 1000. Values outside the engine shim's accepted
+/// 300...5000 range (or non-numeric) fall back to the default with one stderr
+/// warning — same dev-knob-not-config policy as `AIRPLAY_BACKEND` itself.
+func nativeStartBufferMs(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Int {
+    let defaultMs = 1000
+    guard let raw = environment["AIRPLAY_START_BUFFER_MS"] else { return defaultMs }
+    guard let ms = Int(raw), (300...5000).contains(ms) else {
+        FileHandle.standardError.write(
+            Data("warning: AIRPLAY_START_BUFFER_MS \"\(raw)\" is not an integer in 300...5000 — using \(defaultMs)\n".utf8)
+        )
+        return defaultMs
+    }
+    return ms
 }

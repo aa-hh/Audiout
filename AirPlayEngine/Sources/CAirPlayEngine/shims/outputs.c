@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h> /* memset */
+#include <inttypes.h> /* PRIu64 (start-buffer clamp log) */
 
 /* The player thread's libevent base. airplay.c declares `extern struct
  * event_base *evbase_player;` (airplay.c:459) and uses it to own the timing/
@@ -572,11 +573,36 @@ outputs_quality_unsubscribe(struct media_quality *quality)
   (void)quality;
 }
 
+/* The served start-buffer duration. Default = OwnTone's general.start_buffer_ms
+ * default (seam-map §3.1). airplay.c turns this into the sender-side scheduling
+ * lead (output_buffer_samples = (ms - 250) worth of samples), which is the
+ * dominant deterministic term of capture->speaker latency — see
+ * docs/latency-analysis.md. Mutated only by outputs_set_buffer_duration_ms()
+ * (engine config, before airplay_init). */
+static uint64_t outputs_start_buffer_ms = OUTPUTS_START_BUFFER_MS_DEFAULT;
+
 uint64_t
 outputs_buffer_duration_ms_get(void)
 {
-  // seam-map §3.1: general.start_buffer_ms default 2250.
-  return 2250;
+  return outputs_start_buffer_ms;
+}
+
+void
+outputs_set_buffer_duration_ms(uint64_t ms)
+{
+  uint64_t clamped = ms;
+
+  if (clamped < OUTPUTS_START_BUFFER_MS_MIN)
+    clamped = OUTPUTS_START_BUFFER_MS_MIN;
+  else if (clamped > OUTPUTS_START_BUFFER_MS_MAX)
+    clamped = OUTPUTS_START_BUFFER_MS_MAX;
+
+  if (clamped != ms)
+    DPRINTF(E_WARN, L_PLAYER,
+            "start_buffer_ms %" PRIu64 " out of range [%d, %d] — clamped to %" PRIu64 "\n",
+            ms, OUTPUTS_START_BUFFER_MS_MIN, OUTPUTS_START_BUFFER_MS_MAX, clamped);
+
+  outputs_start_buffer_ms = clamped;
 }
 
 bool

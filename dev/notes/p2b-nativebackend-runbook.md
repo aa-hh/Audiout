@@ -197,6 +197,13 @@ covered by `NativeDiscoveryLiveTests` / `AIRPLAY_LIVE_DISCOVERY=1`).
    (T-ENG-SIGABRT-1's fix). Force-drop a receiver mid-stream (e.g. power it
    off) — confirm no SIGPIPE death (T-ENG-SIGPIPE-1's fix); the app should
    surface a `deviceUpdated`/failed state via `makeStateStream`, not crash.
+6. **Latency re-verify (2026-07-17 follow-up).** The native path now defaults
+   to a 1000 ms sender start buffer (was effectively 2250; measured ~3.5 s
+   click-to-sound → expected ~2.2 s). Run the by-ear checklist in
+   `AirPlayEngine/docs/latency-analysis.md` — baseline vs default vs floor
+   sweep, multi-room sync walk test, and record the receiver-applied latency
+   it derives. Knobs: `AIRPLAY_START_BUFFER_MS` (300…5000),
+   `AIRPLAY_DEBUG_LATENCY=1` (probe lines on stderr/os_log).
 
 **After the session:** update `AirPlayEngine/docs/first-light-report.md`'s
 "What's next" section (or a new dated addendum) with the outcome — pass/fail

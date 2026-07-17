@@ -42,6 +42,22 @@ public struct EngineConfig: Sendable {
     public var timingPort: Int
     /// Control service UDP port (0 = ephemeral).
     public var controlPort: Int
+    /// The sender-side start buffer in milliseconds — OwnTone's
+    /// `general.start_buffer_ms`, served to the vendored sender via the
+    /// `outputs_buffer_duration_ms_get()` shim. The sender schedules every
+    /// captured sample to play `startBufferMs − 250 ms` after its `pts`
+    /// (`airplay.c` `master_session_make`/`timestamp_set`: the receiver is told,
+    /// via sync packets, to hold exactly that much audio before playout; the
+    /// remaining 250 ms is `AIRPLAY_AUDIO_LATENCY_MS`, the receiver-side minimum
+    /// advertised as `latencyMin` in SETUP). This is the DOMINANT deterministic
+    /// term of click-to-sound latency AND the receiver's entire jitter/multi-room
+    /// buffer — lower it for snappier response, raise it for resilience on lossy
+    /// networks. Clamped by the shim to 300...5000 ms (values ≤ 250 would make
+    /// the vendored sender reject every session). Applied at `start()`, before
+    /// `airplay_init`; changing it later has no effect on live sessions.
+    /// Default matches OwnTone's 2250 ms. See docs/latency-analysis.md.
+    public var startBufferMs: Int
+
     /// A per-install stable value that seeds the device id / PTP clock-id hash
     /// (`libhash`), so two installs on one LAN with the same `clientName`
     /// advertise distinct ids (first-light backlog #5.1). Callers should pass
@@ -61,6 +77,7 @@ public struct EngineConfig: Sendable {
         enableIPv6: Bool = true,
         timingPort: Int = 0,
         controlPort: Int = 0,
+        startBufferMs: Int = 2250,
         installSeed: UInt64 = SystemRandomNumberGenerator.freshInstallSeed()
     ) {
         self.clientName = clientName
@@ -69,6 +86,7 @@ public struct EngineConfig: Sendable {
         self.enableIPv6 = enableIPv6
         self.timingPort = timingPort
         self.controlPort = controlPort
+        self.startBufferMs = startBufferMs
         self.installSeed = installSeed
     }
 }
@@ -141,6 +159,12 @@ public actor AirPlayEngine {
     // hop. Diagnostic only — never consulted to gate/throttle a write.
     private nonisolated let cadence = WriteCadenceTracker()
 
+    // Env-gated (AIRPLAY_DEBUG_LATENCY=1) pts-freshness probe for the latency
+    // budget (docs/latency-analysis.md). Same off-actor placement and
+    // diagnostic-only contract as `cadence`; a disabled probe costs one Bool
+    // check per write.
+    private nonisolated let latencyProbe: WriteLatencyProbe
+
     // Test seam (headless verification). When set, `issueOverride` replaces the
     // backend device_* call in startOp: it still arms the REAL C dispatcher
     // waiter (outputs_callback_add + CompletionRegistry) and returns N, but does
@@ -156,6 +180,7 @@ public actor AirPlayEngine {
     public init(config: EngineConfig = EngineConfig()) {
         self.config = config
         self.engineThread = EngineThread()
+        self.latencyProbe = WriteLatencyProbe(startBufferMs: config.startBufferMs)
     }
 
     // MARK: Backward-compatible scaffold probe (kept so T-BUILD-1 tests pass)
@@ -329,6 +354,10 @@ public actor AirPlayEngine {
         conffile_set_bind_address(bindAddressC) // NULL = any
         conffile_set_ipv6(config.enableIPv6)
         conffile_set_ports(config.timingPort, config.controlPort)
+        // Sender-side start buffer (scheduling lead + receiver jitter buffer).
+        // Must land before airplay_init: master_session_make caches the derived
+        // output_buffer_samples per master session. The shim clamps to 300...5000.
+        outputs_set_buffer_duration_ms(UInt64(max(0, config.startBufferMs)))
         // Derive libhash from client name + per-install seed (device id / PTP
         // clock-id seed) so two installs advertising the same clientName on
         // one LAN don't collide (first-light backlog #5.1).
@@ -623,6 +652,11 @@ public actor AirPlayEngine {
         // NSLock — no closures/collections created here) and never gates the
         // write below; `record` only accumulates counters.
         cadence.record(samples: samples, sampleRate: PCMFormat.airplay.sampleRate)
+        // Latency budget probe (env-gated, diagnostic only): how stale is the
+        // pts the producer stamped, measured on the pts's own CLOCK_MONOTONIC
+        // domain? Seconds here would mean upstream capture queuing/aggregation;
+        // ~10-30 ms is a healthy tap→convert→write pipeline.
+        latencyProbe.record(pts: pts)
         let quality = media_quality(
             sample_rate: Int32(PCMFormat.airplay.sampleRate),
             bits_per_sample: Int32(PCMFormat.airplay.bitsPerSample),
@@ -657,6 +691,13 @@ public actor AirPlayEngine {
     /// an actor hop, same rationale as `write` itself.
     public nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
         cadence.snapshot()
+    }
+
+    /// A snapshot of the env-gated pts-freshness probe (`AIRPLAY_DEBUG_LATENCY=1`,
+    /// docs/latency-analysis.md). Zeros with `isEnabled == false` when the probe
+    /// is off. `nonisolated` for the same reason as `writeCadenceSnapshot()`.
+    public nonisolated func writeLatencySnapshot() -> WriteLatencySnapshot {
+        latencyProbe.snapshot()
     }
 
     /// Test/diagnostic seam: reset the cadence counters (e.g. after a known
@@ -995,5 +1036,125 @@ final class WriteCadenceTracker: @unchecked Sendable {
         var ts = timespec()
         clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
         return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1e9
+    }
+}
+
+/// A consistent snapshot of ``WriteLatencyProbe`` counters (cumulative since
+/// engine start / last reset).
+public struct WriteLatencySnapshot: Sendable, Equatable {
+    /// Writes observed (0 when the probe is disabled — see `isEnabled`).
+    public var writeCount: UInt64
+    /// Mean pts→now age across all observed writes, in milliseconds.
+    public var averagePtsAgeMs: Double
+    /// Smallest observed pts→now age, in milliseconds (0 when no writes yet).
+    public var minPtsAgeMs: Double
+    /// Largest observed pts→now age, in milliseconds (0 when no writes yet).
+    public var maxPtsAgeMs: Double
+    /// Whether the probe was enabled (`AIRPLAY_DEBUG_LATENCY=1` or injected).
+    public var isEnabled: Bool
+}
+
+/// Env-gated pts-freshness probe for the click-to-sound latency budget
+/// (docs/latency-analysis.md). Measures, per `write(pcm:pts:)`, how far the
+/// producer's `pts` lags "now" on `CLOCK_MONOTONIC` — the SAME clock domain the
+/// pts is stamped on (`CoreAudioSystemTap.timespec(fromHostTime:)` rebases mach
+/// host time onto CLOCK_MONOTONIC) and the same domain the vendored sync path
+/// compares against (`timestamp_set`/`packets_sync_send`). NOT
+/// `CLOCK_MONOTONIC_RAW` (the cadence tracker's clock): pts age straddles two
+/// timestamps on the pts domain, so it must be measured there.
+///
+/// WHY: total click-to-sound decomposes as
+///   pts age (this probe, expect ~10–30 ms)
+///   + sender scheduling lead (startBufferMs − 250, deterministic)
+///   + receiver-applied latency (the receiver's own choice, ≥ 250 ms)
+/// so with this probe's number and a stopwatch measurement, the
+/// receiver-applied share falls out by subtraction — the one term we can't
+/// observe from the sender side.
+///
+/// HOT-PATH CONTRACT: mirrors ``WriteCadenceTracker`` — allocation-free scalar
+/// updates under an `NSLock`, never gates the write, and a DISABLED probe
+/// (the default: enablement is read once from `AIRPLAY_DEBUG_LATENCY`) costs a
+/// single Bool check. Logging is rate-limited to one line per `logInterval`
+/// (default 5 s), emitted via os_log AND stderr (gated runs watch a terminal).
+final class WriteLatencyProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let log = Logger(subsystem: "com.airplayengine", category: "latency")
+    private let startBufferMs: Int
+    private let enabled: Bool
+    private let logInterval: Double
+
+    // Cumulative (served by snapshot()).
+    private var writeCount: UInt64 = 0
+    private var sumAgeMs: Double = 0
+    private var minAgeMs: Double = .infinity
+    private var maxAgeMs: Double = -.infinity
+
+    // Current log window.
+    private var windowCount: UInt64 = 0
+    private var windowSumMs: Double = 0
+    private var windowStart: Double?
+
+    init(
+        startBufferMs: Int,
+        enabled: Bool = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LATENCY"] == "1",
+        logInterval: Double = 5.0
+    ) {
+        self.startBufferMs = startBufferMs
+        self.enabled = enabled
+        self.logInterval = logInterval
+    }
+
+    /// Record one write's pts against CLOCK_MONOTONIC now. No-op when disabled.
+    func record(pts: timespec) {
+        guard enabled else { return }
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        let nowSeconds = Double(now.tv_sec) + Double(now.tv_nsec) / 1e9
+        let ptsSeconds = Double(pts.tv_sec) + Double(pts.tv_nsec) / 1e9
+        let ageMs = (nowSeconds - ptsSeconds) * 1000
+
+        lock.lock()
+        defer { lock.unlock() }
+        writeCount &+= 1
+        sumAgeMs += ageMs
+        minAgeMs = Swift.min(minAgeMs, ageMs)
+        maxAgeMs = Swift.max(maxAgeMs, ageMs)
+        windowCount &+= 1
+        windowSumMs += ageMs
+
+        guard let start = windowStart else {
+            windowStart = nowSeconds
+            return
+        }
+        let elapsed = nowSeconds - start
+        guard elapsed >= logInterval, windowCount > 0 else { return }
+
+        let windowAvg = windowSumMs / Double(windowCount)
+        let writesPerSec = Double(windowCount) / elapsed
+        let senderLeadMs = Double(startBufferMs - 250)
+        let predictedSeconds = (senderLeadMs + windowAvg) / 1000
+        let line = String(
+            format: "latency probe: pts age avg %.1fms (min %.1f / max %.1f cumulative) | %.0f writes/s | "
+                + "sender lead %.0fms (start_buffer %dms − 250) | click-to-sound ≈ %.2fs + receiver-applied (≥0.25s)",
+            windowAvg, minAgeMs, maxAgeMs, writesPerSec, senderLeadMs, startBufferMs, predictedSeconds)
+        log.notice("\(line, privacy: .public)")
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+
+        windowCount = 0
+        windowSumMs = 0
+        windowStart = nowSeconds
+    }
+
+    /// A consistent snapshot of the cumulative counters.
+    func snapshot() -> WriteLatencySnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return WriteLatencySnapshot(
+            writeCount: writeCount,
+            averagePtsAgeMs: writeCount > 0 ? sumAgeMs / Double(writeCount) : 0,
+            minPtsAgeMs: minAgeMs.isFinite ? minAgeMs : 0,
+            maxPtsAgeMs: maxAgeMs.isFinite ? maxAgeMs : 0,
+            isEnabled: enabled
+        )
     }
 }

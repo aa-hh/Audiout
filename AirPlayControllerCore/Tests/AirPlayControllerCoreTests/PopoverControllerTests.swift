@@ -443,7 +443,9 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "connected cleared the panel")
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
         XCTAssertEqual(row.test_statusKind, .connected)
-        XCTAssertNil(row.test_statusText, "connected is single-line (no sublabel)")
+        // The retried device is a selected member with no routed apps, so its
+        // routing sublabel is the bare "System" token (selected ⇒ in the set).
+        XCTAssertEqual(row.test_statusText, "System", "selected device shows the System routing token")
         XCTAssertTrue(row.test_isEnabledOn, "the honest toggle now rests ON")
     }
 

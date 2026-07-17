@@ -483,6 +483,138 @@ final class GroupControllerTests: XCTestCase {
         controller.ensureDefaultSelection()
         XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"])
     }
+
+    // MARK: Redirect-connects-and-controls — appRouteTargets union (LOCKED DECISIONS)
+
+    /// Q1/Q5 — the connect set under `.selectedDevices` is Selected ∪ redirect
+    /// targets, but a redirect-only device (in `appRouteTargets`, NOT in
+    /// `selectedDeviceIDs`) is never added to `selectedDeviceIDs` itself.
+    func testReapplyRoutingUnionsRedirectTargetsUnderSelectedDevices() async throws {
+        let (controller, backend) = try await makeController()
+        controller.appRouteTargets = { ["homepod-bed"] }
+        _ = controller.setDeviceSelected("office", true)
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
+        XCTAssertEqual(outputs, ["office", "homepod-bed"],
+                       "the redirect-only target is unioned into the connect set")
+        XCTAssertFalse(controller.isSpeakerSelected("homepod-bed"),
+                       "the redirect target is connected but NOT added to Selected Devices")
+        XCTAssertTrue(controller.isSpeakerSelected("office"))
+    }
+
+    /// Q1 — with Main Out pointed at a group, `activateGroup`/`.group` case must
+    /// also union redirect targets so they aren't dropped.
+    func testActivateGroupUnionsRedirectTargets() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
+        controller.appRouteTargets = { ["homepod-bed"] }
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
+        XCTAssertEqual(outputs, ["sonos-move", "homepod-bed"],
+                       "activateGroup unions the group's members with redirect targets")
+    }
+
+    /// Q1 — `reapplyRouting()` re-runs the union so a device newly added to
+    /// `appRouteTargets` connects without any other model mutation.
+    func testReapplyRoutingConnectsNewRedirectTarget() async throws {
+        let (controller, backend) = try await makeController()
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(backend.devices.filter(\.isSelected).isEmpty)
+
+        controller.appRouteTargets = { ["office"] }
+        controller.reapplyRouting()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertTrue(backend.devices.first { $0.id == "office" }?.isSelected == true,
+                      "reapplyRouting() connects a newly redirected device")
+        XCTAssertFalse(controller.isSpeakerSelected("office"))
+    }
+
+    /// Teardown — removing the last app route targeting a device (simulated by
+    /// clearing `appRouteTargets` and calling `reapplyRouting()`) drops it out of
+    /// the output set (→ `.off` at the backend/state level).
+    func testReapplyRoutingDropsDeviceWhenRedirectRemoved() async throws {
+        let (controller, backend) = try await makeController()
+        controller.appRouteTargets = { ["office"] }
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(backend.devices.first { $0.id == "office" }?.isSelected == true)
+
+        controller.appRouteTargets = { [] }
+        controller.reapplyRouting()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertFalse(backend.devices.first { $0.id == "office" }?.isSelected ?? false,
+                       "the device leaves the output set once no longer a redirect target or selected")
+    }
+
+    /// Q5 — the Main Out master (`mainOutMasterVolume`) and its member set must
+    /// EXCLUDE redirect-only targets; moving the master must not touch a
+    /// redirect-only device's volume.
+    func testMainOutMasterExcludesRedirectOnlyTarget() async throws {
+        let (controller, backend) = try await makeController()
+        controller.appRouteTargets = { ["homepod-bed"] }
+        _ = controller.setDeviceSelected("office", true)
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        backend.setVolume(80, for: "office")
+        backend.setVolume(10, for: "homepod-bed")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(controller.mainOutMasterVolume, 80,
+                       "master reflects only Selected members (office), not the redirect-only device")
+
+        controller.beginMainOutMasterDrag()
+        controller.setMainOutMasterVolume(20)
+        controller.endMainOutMasterDrag()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(volume("office", in: backend), 20, "master drag scales the Selected member")
+        XCTAssertEqual(volume("homepod-bed", in: backend), 10,
+                       "the redirect-only device's volume is untouched by the master drag")
+    }
+
+    /// Q3 — group identity must key off `selectedDeviceIDs`, not the live output
+    /// set. A redirect-only connection must not pollute `groupMatchingCurrentSelection`.
+    func testGroupMatchingCurrentSelectionIgnoresRedirectOnlyConnection() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
+        _ = controller.setDeviceSelected("office", true)
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(controller.groupMatchingCurrentSelection?.id, "g1",
+                       "Selected Devices set alone still matches the saved group")
+
+        // Redirect-connect a SECOND device — the live output set now differs from
+        // the group's member set, but selectedDeviceIDs (and thus the match) must
+        // be unaffected.
+        controller.appRouteTargets = { ["homepod-bed"] }
+        controller.reapplyRouting()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
+        XCTAssertEqual(outputs, ["office", "homepod-bed"], "the redirect target did enter the output set")
+        XCTAssertEqual(controller.groupMatchingCurrentSelection?.id, "g1",
+                       "group identity is keyed off selectedDeviceIDs, unaffected by the redirect-polluted output set")
+    }
+
+    /// Default `appRouteTargets` is `{ [] }` so every existing constructor/call
+    /// site (tests included) is unaffected until it's explicitly set.
+    func testAppRouteTargetsDefaultsToEmpty() async throws {
+        let (controller, backend) = try await makeController()
+        _ = controller.setDeviceSelected("office", true)
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), ["office"],
+                       "with no appRouteTargets injected, the output set is exactly Selected Devices")
+    }
 }
 
 private actor CountBox {

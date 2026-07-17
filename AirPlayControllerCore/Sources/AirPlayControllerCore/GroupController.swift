@@ -52,6 +52,15 @@ public final class GroupController {
 
     private var memberState: [String: MemberState] = [:]
 
+    /// App-route redirect targets that must ALSO be connected (an AirPlay session
+    /// opens the moment an app is redirected, before per-app capture exists). These
+    /// device ids are UNIONed into the backend output set at every applyRouting()
+    /// call site, but are deliberately kept OUT of selectedDeviceIDs and
+    /// mainOutMemberIDs (Q5: a redirect must not move the system master). Injected
+    /// as a closure so GroupController does not depend on AppRoutingController.
+    /// Defaults to {} so tests and legacy callers are unaffected.
+    public var appRouteTargets: () -> Set<String> = { [] }
+
     // MARK: Main Out / Selected Devices (SPEC.md §9 2026-07-14b — SoundSource model)
     //
     // Per-device toggles no longer route audio. They compose a PERSISTENT ad-hoc
@@ -86,7 +95,8 @@ public final class GroupController {
     public init(backend: OutputBackend,
                 store: GroupStore = GroupStore(),
                 routingStore: RoutingStore = RoutingStore(),
-                loadPersisted: Bool = true) {
+                loadPersisted: Bool = true,
+                appRouteTargets: @escaping () -> Set<String> = { [] }) {
         self.backend = backend
         self.store = store
         self.routingStore = routingStore
@@ -96,6 +106,7 @@ public final class GroupController {
             self.mainOut = state.mainOut
             self.loadedPersistedRouting = true
         }
+        self.appRouteTargets = appRouteTargets
     }
 
     /// True once persisted routing has been loaded (or established), so
@@ -275,13 +286,30 @@ public final class GroupController {
         case .selectedDevices:
             activeGroupID = nil
             // Only real (AirPlay) outputs go to the backend; the local device is
-            // the Mac's own output, represented by an EMPTY output set.
+            // the Mac's own output, represented by an EMPTY output set. Redirect
+            // targets (app routes) are UNIONed in so an AirPlay session opens the
+            // moment an app is redirected (Q1) — kept out of selectedDeviceIDs.
             let outputs = selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
-            backend.setOutputSet(outputs)
+            backend.setOutputSet(outputs.union(redirectOutputIDs()))
         case .group(let id):
             activateGroup(id: id)
         }
     }
+
+    /// The redirect-target output ids to union into the backend set: the injected
+    /// app-route targets, filtered to devices that exist and are NOT the local Mac
+    /// (defensive — .device(id:) is non-local by construction, but a target may be
+    /// unknown/stale). Never touches selectedDeviceIDs or mainOutMemberIDs.
+    private func redirectOutputIDs() -> Set<String> {
+        appRouteTargets().filter { device($0)?.isLocalDevice == false }
+    }
+
+    /// Re-run routing against the CURRENT Main Out target + Selected set + the
+    /// injected app-route targets. Call after app routes change (redirect set /
+    /// changed / removed) so the redirect-target union is recomputed and the
+    /// affected device connects or leaves the output set (→ .off). Cheap; the
+    /// backend no-ops when the set is unchanged.
+    public func reapplyRouting() { applyRouting() }
 
     // MARK: Group identity — member-set matching (SPEC.md §9 "DEDUP / group identity")
     //
@@ -302,13 +330,17 @@ public final class GroupController {
         return groups.first { Set($0.memberIDs) == memberSet }
     }
 
-    /// The saved group whose members equal the current output set (the devices
-    /// the backend reports as `isSelected`), or nil for an ad-hoc selection that
-    /// matches no group. This is the derived notion behind
-    /// ``syncActiveGroupToSelection()``.
+    /// The saved group whose members equal the current Main Out target's
+    /// membership, or nil for an ad-hoc selection that matches no group. This is
+    /// the derived notion behind ``syncActiveGroupToSelection()``.
     public var groupMatchingCurrentSelection: Group? {
-        let selected = Set(backend.devices.filter(\.isSelected).map(\.id))
-        return group(matchingMemberSet: selected)
+        // Keyed off the MEMBERSHIP the Main Out target names (`mainOutMemberIDs`
+        // — selectedDeviceIDs when targeting Selected Devices, the group's own
+        // members when targeting a group), NOT the live output set
+        // (`Device.isSelected`): redirect targets now enter the output set, so
+        // matching on it would spuriously pollute group identity (Q3).
+        // `mainOutMemberIDs` is exactly the redirect-free membership set.
+        return group(matchingMemberSet: mainOutMemberIDs)
     }
 
     /// Reconcile ``activeGroupID`` with the live output set: if the current
@@ -425,7 +457,10 @@ public final class GroupController {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
         memberState.removeAll()
-        backend.setOutputSet(Set(group.memberIDs))
+        // Union redirect targets so an app-redirect session isn't dropped when
+        // Main Out points at a group (Q1). Redirect ids stay out of the group's
+        // membership + the Main Out master set (Q5).
+        backend.setOutputSet(Set(group.memberIDs).union(redirectOutputIDs()))
         for memberID in group.memberIDs {
             if let volume = group.memberVolumes[memberID] {
                 backend.setVolume(volume, for: memberID)

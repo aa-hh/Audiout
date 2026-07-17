@@ -173,4 +173,55 @@ final class AppRoutingControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.appRoutes, before)
     }
+
+    // MARK: routedAppNames(for:) — feeds the DeviceRowView routing sublabel
+
+    func testRoutedAppNamesFiltersByDeviceIDAndExcludesCurrentDevice() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.addRoute(bundleID: "com.spotify.client", displayName: "Spotify")
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+
+        controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
+        controller.setDestination(.device(id: "office"), for: "com.spotify.client")
+        // com.apple.Safari stays .currentDevice (no redirect) — must be excluded.
+
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), ["Music"])
+        XCTAssertEqual(controller.routedAppNames(for: "office"), ["Spotify"])
+        XCTAssertEqual(controller.routedAppNames(for: "some-other-device"), [],
+                       "a device with no routes gets an empty list")
+    }
+
+    func testRoutedAppNamesExcludesCurrentDeviceRoutesEntirely() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        // Never redirected — stays .currentDevice.
+
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), [])
+    }
+
+    func testRoutedAppNamesPreservesStableRouteOrder() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "b", displayName: "Zebra App")
+        controller.addRoute(bundleID: "a", displayName: "Alpha App")
+        controller.addRoute(bundleID: "c", displayName: "Charlie App")
+
+        controller.setDestination(.device(id: "homepod-1"), for: "b")
+        controller.setDestination(.device(id: "homepod-1"), for: "a")
+        controller.setDestination(.device(id: "homepod-1"), for: "c")
+
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), ["Zebra App", "Alpha App", "Charlie App"],
+                       "insertion order is preserved, not sorted")
+    }
+
+    func testRoutedAppNamesUpdatesWhenDestinationChanges() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), ["Music"])
+
+        controller.setDestination(.currentDevice, for: "com.apple.Music")
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), [],
+                       "reverting to .currentDevice removes it from the routing set")
+    }
 }

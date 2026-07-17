@@ -1,13 +1,71 @@
 # PLAN — Phase 2b: `NativeBackend` on the extracted engine
 
-Status: APPROVED (Alec, 2026-07-17). Executed via parallel agents in the
-worktree `phase2-native-backend` (branch `claude/phase2-native-backend`,
-branched from merged main 2127b4b — includes engine first light + popover
-per-app routing).
+**Status: ✅ CLOSED — merged to `main` 2026-07-17 (`ceef81b`, + `723b72a` for
+the popover fix). The native AirPlay 2 backend is THE shipping path.** No
+OwnTone server, no runtime dependency. Gate PASSED by ear against real Sonos.
+On main: core **411 / 0 failures** (2 live-gated skips), engine **98 / 0**,
+harnesses 67/67 + 33/33. See "Outcome" below before reading the task list —
+several things changed during execution.
+
+Executed via parallel agents in the worktree `phase2-native-backend` (branch
+`claude/phase2-native-backend`, branched from merged main 2127b4b — includes
+engine first light + popover per-app routing).
 
 Predecessor: PLAN-PHASE-2.md (extraction — complete through T-API-1 + first
 light PASSED). Evidence ledger: `AirPlayEngine/docs/first-light-report.md`.
 Roadmap briefs: `dev/notes/p2b-*.md` (indexed in `dev/AGENTS.md`).
+
+---
+
+## Outcome (2026-07-17) — what actually happened
+
+All 14 planned tasks landed, plus a full adversarial review pass. Then the
+**gated live session did its job**: it found bugs no headless suite could,
+because the suites were green the whole time. What the plan did NOT anticipate
+is that **the two worst bugs were in the app's DEFAULT state** — not edge
+cases. Every launch, every user.
+
+**Found by the gate and fixed (all verified by ear on real hardware):**
+
+| Bug | Cause |
+|---|---|
+| No audio, green LED | Discovery raced onto an IPv6 link-local address; engine runs `ipv6=0`. Now IPv4-only + a 12s op timeout (a stalled op was leaking continuations and hanging quit). |
+| Powered-off Sonos read as "AirPlay 1 coming soon" | `_airplay` drops before `_raop` on shutdown, so it looked raop-only. Sticky-AP2 bit + `isAvailable`. |
+| Previous AirPlay device auto-streamed on launch | Persisted routing was auto-resumed. **Alec's decision: every launch defaults to `{current device}` = passthrough.** Saved groups still persist. |
+| **Passthrough was SILENT** | The tap is `.mutedWhenTapped` (correct while streaming) but ran **unconditionally from launch** — muting system audio and sending it nowhere. `isPassthrough` was documented as the gate for exactly this and was wired to **nothing**. Capture is now gated on the live AirPlay output set. |
+| **Current Device slider + mute did nothing** | The local device is display-only, so `setVolume`/`setMuted` hit the `outputIDs` guard and no-op'd. New `SystemOutputVolume` drives the real default output device, two-way. |
+| Devices invisible until popover reopened | The mid-open repaint path only walked existing rows. A device-set change now forces a rebuild + animated resize. |
+| Volume keys adjusted a muted device | Keys change system volume = the local device, which is muted while streaming. They now drive the Main Out target. |
+| Permission prompt had no rationale | `make-app.sh` wrote no `NSAudioCaptureUsageDescription`. macOS asked to "record" — in the *Screen* & System Audio Recording bucket — with no reason, against a user model of "send audio to a speaker". |
+
+**Deltas from the plan as written** (the task list below is the original and is
+NOT edited to match — this section is the correction):
+- The plan assumed capture lifecycle was settled. It was not: gating capture on
+  the output set is the single most important change in 2b, and it was not a
+  planned task.
+- `AP1 raop port` stays deferred (unchanged). AP1 devices are discovered and
+  shown unsupported, as designed — verified live.
+- Latency: start buffer is configurable, product default 1000ms (~2.2s vs the
+  old 3.5s); Settings › Audio › Advanced exposes it.
+
+**Gated session checklist: PASSED.** Multi-room Move+Move 2 sync, native e2e
+audio, smooth volume, AP1 dimmed/coming-soon, toggle-spam clean, clean quit,
+no SIGABRT/SIGPIPE. Re-gate after the fixes also passed: launch→Mac plays,
+deselect→audio returns, slider moves real audio, volume keys tracked live,
+powered-off Sonos = failed (not AP1).
+
+**Next iteration: synced-local output + multistream per-app engine routing.**
+Its prereqs all landed here (monotonic pts, state stream, D5 vendored-diff
+posture). Known open items are tracked as separate tasks, not here:
+- **`redirect-connect` is INERT on main**: `reapplyRouting()` has ZERO
+  production callers — routes save but never open a session. Do NOT simply wire
+  it up: the redirect union feeds the capture gate, so one redirect would start
+  the single global tap and mute the whole Mac.
+- First-run permission setup flow (release-readiness, same bucket as the AP1
+  port — irrelevant for Alec, essential before anyone else runs this).
+- Default-output selector divergence: `NativeBackend` reads
+  `kAudioHardwarePropertyDefaultOutputDevice` but `NativeCaptureCoordinator`
+  listens on `...DefaultSystemOutputDevice` — different devices.
 
 ---
 

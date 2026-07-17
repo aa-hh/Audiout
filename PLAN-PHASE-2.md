@@ -7,8 +7,28 @@ and land it behind the existing `OutputBackend` seam as `NativeBackend`
 (`AIRPLAY_BACKEND=native`). The shipped product carries **zero OwnTone
 references** (SPEC.md §4). Only a tiny PTP clock helper ever runs privileged.
 
-Status: PLANNING. Phase 1 is being planned/executed in parallel — this plan does
-**not** edit `PLAN-PHASE-1.md` or claim its files.
+**Status: ✅ DELIVERED — merged to `main` 2026-07-17 (`ceef81b`).** The engine is
+extracted, Swift-wrapped, verified against real hardware, and `NativeBackend` is
+THE shipping path — not a seam behind an env var. `AIRPLAY_BACKEND=native` is
+still honoured, but native is what ships; `OwnToneBackend` is superseded (it is
+code-complete, NOT a stub — it is simply not carried forward).
+
+Delivered in two stages, each with its own plan and evidence ledger:
+- **Extraction + first light** — `AirPlayEngine/docs/first-light-report.md`.
+  Six hosting bugs found on first contact with a real Sonos, zero vendored bugs.
+- **Phase 2b: `NativeBackend` end-to-end** — `PLAN-PHASE-2B.md` (read its
+  "Outcome" section: the gated live session found bugs in the app's DEFAULT
+  state that a green 391-test suite never could).
+
+On main: core **411 / 0 failures**, engine **98 / 0**. Only the tiny PTP clock
+helper needs privilege — though note the app currently runs under `sudo` in
+gated sessions as an interim measure until the SMAppService helper ships
+(`dev/notes/p2b-nativebackend-runbook.md` §3).
+
+Still deferred, deliberately: the AP1 (`raop`) sender, synced local output, and
+per-app capture streams. AP1-only is ~0% of Alec's fleet but ~20-30% of active
+receivers generally — a prerequisite for any broad public release, not for
+personal use.
 
 ---
 

@@ -243,6 +243,59 @@ static struct event *outputs_deferredev = NULL;
 static outputs_engine_completion_cb outputs_engine_completion = NULL;
 static void *outputs_engine_completion_ctx = NULL;
 
+/* Engine device-state hook (T-ENG-STATESTREAM-1). Fired for EVERY delivered
+ * report — armed slots AND the out-of-band, spent-id reports below — so the
+ * engine can drive an async device-state stream with no polling. */
+static outputs_engine_state_cb outputs_engine_state = NULL;
+static void *outputs_engine_state_ctx = NULL;
+
+/* Out-of-band state-notification ring (T-ENG-STATESTREAM-1).
+ *
+ * A report whose callback_id is spent (< 0, the sentinel airplay.c sets after a
+ * terminal completion) or otherwise not tied to a live registry slot has no slot
+ * to ride in the callback register. To make those transitions observable to the
+ * state hook WITHOUT resurrecting a completion (the async waiter must stay a
+ * once-only, callback_id-keyed contract — contract §1), we record them in a
+ * small deferred ring keyed by device_id only, drained in the same pass and
+ * routed ONLY to the state hook (never the completion hook).
+ *
+ * A ring (not a growable queue) keeps the shim allocation-free and bounded; the
+ * volume of out-of-band transitions between two drains is tiny (one device
+ * emits at most a couple of post-terminal transitions per drain interval). If it
+ * ever overflows we drop the oldest and log — a dropped state note only costs a
+ * momentarily stale stream value, never a hang. */
+#define OUTPUTS_MAX_STATE_NOTES 64
+
+struct outputs_state_note
+{
+  uint64_t device_id;
+  enum output_device_state state;
+};
+
+static struct outputs_state_note outputs_state_ring[OUTPUTS_MAX_STATE_NOTES];
+static unsigned int outputs_state_ring_head; /* next slot to write */
+static unsigned int outputs_state_ring_count;
+
+/* Enqueue an out-of-band state note for deferred delivery to the state hook. */
+static void
+outputs_state_note_enqueue(uint64_t device_id, enum output_device_state state)
+{
+  unsigned int slot;
+
+  if (outputs_state_ring_count == OUTPUTS_MAX_STATE_NOTES)
+    {
+      /* Full: drop the oldest to make room (state notes are advisory). */
+      DPRINTF(E_LOG, L_AIRPLAY, "Output state-note ring full (size %d); dropping oldest\n", OUTPUTS_MAX_STATE_NOTES);
+      outputs_state_ring_head = (outputs_state_ring_head + 1) % OUTPUTS_MAX_STATE_NOTES;
+      outputs_state_ring_count--;
+    }
+
+  slot = (outputs_state_ring_head + outputs_state_ring_count) % OUTPUTS_MAX_STATE_NOTES;
+  outputs_state_ring[slot].device_id = device_id;
+  outputs_state_ring[slot].state = state;
+  outputs_state_ring_count++;
+}
+
 output_status_cb
 outputs_callback_get(struct output_device *device)
 {
@@ -341,10 +394,53 @@ outputs_cb_deferred_drain(void)
       if (cb)
         cb(device, state);
 
-      /* Engine completion hook LAST: unblock the async waiter on this id. */
+      /* Engine completion hook: unblock the async waiter on this id. */
       if (outputs_engine_completion)
         outputs_engine_completion((int)callback_id, device_id, state, outputs_engine_completion_ctx);
+
+      /* Engine state hook LAST: an armed report is also a state transition, so
+       * feed it to the device-state stream (T-ENG-STATESTREAM-1). The
+       * out-of-band ring below carries the transitions that spend no slot. */
+      if (outputs_engine_state)
+        outputs_engine_state(device_id, state, outputs_engine_state_ctx);
     }
+
+  /* Drain the out-of-band state notes (spent-id / not-a-slot reports). These go
+   * ONLY to the state hook — never the completion hook — so the once-only,
+   * callback_id-keyed async waiter contract (§1) is preserved. Snapshot the
+   * count first: the state hook must not be able to grow the ring mid-drain
+   * (it runs on this same thread; a re-entrant enqueue is deferred to the next
+   * pass, exactly like the callback register above). */
+  {
+    unsigned int n = outputs_state_ring_count;
+    unsigned int i;
+    for (i = 0; i < n; i++)
+      {
+        uint64_t device_id = outputs_state_ring[outputs_state_ring_head].device_id;
+        enum output_device_state state = outputs_state_ring[outputs_state_ring_head].state;
+        struct output_device *device;
+
+        outputs_state_ring_head = (outputs_state_ring_head + 1) % OUTPUTS_MAX_STATE_NOTES;
+        outputs_state_ring_count--;
+
+        /* Update device->state for the out-of-band report too, mirroring the
+         * armed-slot path above (device->state = state). airplay.c only ever
+         * writes session->state, never device->state, so this drain is the SOLE
+         * writer of device->state — and without this the field stays pinned at
+         * the value the last armed completion left (e.g. CONNECTED) even after a
+         * receiver drops RTSP and reports FAILED via outputs_cb(-1,…). The
+         * engine's idempotency guards read device->state (AirPlayEngine
+         * liveDeviceState); a stale CONNECTED there would defeat the recovery
+         * re-issue of device_start. Re-resolve by id — the device may have been
+         * freed between report and delivery. */
+        device = outputs_device_get(device_id);
+        if (device)
+          device->state = state;
+
+        if (outputs_engine_state)
+          outputs_engine_state(device_id, state, outputs_engine_state_ctx);
+      }
+  }
 }
 
 /* libevent entry point (production). */
@@ -360,11 +456,19 @@ deferred_cb(int fd, short what, void *arg)
 void
 outputs_cb(int callback_id, uint64_t device_id, enum output_device_state state)
 {
-  /* Defensive: negative / out-of-range / empty-slot ids are a no-op, never a
-   * hang. A negative id is the legitimate "no callback promised" sentinel that
-   * airplay.c clears to -1 after firing (contract §1). */
+  /* A negative id is the legitimate "no callback promised / already spent"
+   * sentinel that airplay.c clears to -1 after firing a terminal completion
+   * (contract §1). It resolves NO async waiter — but it IS still a real device
+   * state transition (e.g. rtsp_close_cb -> session_failure -> FAILED reported
+   * after device_start's CONNECTED already spent the id). Route it out-of-band
+   * to the device-state stream (T-ENG-STATESTREAM-1) instead of dropping it. */
   if (callback_id < 0)
-    return;
+    {
+      outputs_state_note_enqueue(device_id, state);
+      if (outputs_deferredev)
+        event_active(outputs_deferredev, 0, 0);
+      return;
+    }
 
   if (!((unsigned int)callback_id < ARRAY_SIZE(outputs_cb_register)) ||
       !outputs_cb_register[callback_id].cb)
@@ -392,6 +496,13 @@ outputs_engine_completion_set(outputs_engine_completion_cb cb, void *context)
 }
 
 void
+outputs_engine_state_set(outputs_engine_state_cb cb, void *context)
+{
+  outputs_engine_state = cb;
+  outputs_engine_state_ctx = context;
+}
+
+void
 outputs_cb_deferred_run(void)
 {
   outputs_cb_deferred_drain();
@@ -403,6 +514,11 @@ outputs_dispatcher_reset(void)
   memset(outputs_cb_register, 0, sizeof(outputs_cb_register));
   outputs_engine_completion = NULL;
   outputs_engine_completion_ctx = NULL;
+  outputs_engine_state = NULL;
+  outputs_engine_state_ctx = NULL;
+  memset(outputs_state_ring, 0, sizeof(outputs_state_ring));
+  outputs_state_ring_head = 0;
+  outputs_state_ring_count = 0;
 }
 
 /* Wire the deferred event to evbase_player. T-API-1 calls this after setting

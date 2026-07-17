@@ -24,13 +24,13 @@
 
 import Foundation
 import CAirPlayEngine
+import os
 
 /// The engine's configuration, applied to the vendored `conffile` shim before
 /// `airplay_init` runs. Strings are retained by the engine for its lifetime
 /// (the C side does NOT copy them — build-notes §6 item 3).
 public struct EngineConfig: Sendable {
-    /// Client name advertised to receivers (`library.name`). Also seeds the
-    /// device id / PTP clock id via a hash (`libhash`).
+    /// Client name advertised to receivers (`library.name`).
     public var clientName: String
     /// The RTSP `User-Agent` string.
     public var userAgent: String
@@ -42,6 +42,17 @@ public struct EngineConfig: Sendable {
     public var timingPort: Int
     /// Control service UDP port (0 = ephemeral).
     public var controlPort: Int
+    /// A per-install stable value that seeds the device id / PTP clock-id hash
+    /// (`libhash`), so two installs on one LAN with the same `clientName`
+    /// advertise distinct ids (first-light backlog #5.1). Callers should pass
+    /// something stable across launches but unique per install — e.g. a
+    /// persisted random token or the host UUID (`IOPlatformUUID` /
+    /// `gethostuuid`) — NOT a value that changes every run, or the AirPlay
+    /// device id / PTP clock id will churn on every launch. Defaults to a
+    /// fresh random seed generated once per `EngineConfig` value, so simply
+    /// not overriding it still avoids collisions between installs as long as
+    /// callers don't re-construct the config with a fresh default each launch.
+    public var installSeed: UInt64
 
     public init(
         clientName: String = "AirPlayEngine",
@@ -49,7 +60,8 @@ public struct EngineConfig: Sendable {
         bindAddress: String? = nil,
         enableIPv6: Bool = true,
         timingPort: Int = 0,
-        controlPort: Int = 0
+        controlPort: Int = 0,
+        installSeed: UInt64 = SystemRandomNumberGenerator.freshInstallSeed()
     ) {
         self.clientName = clientName
         self.userAgent = userAgent
@@ -57,6 +69,19 @@ public struct EngineConfig: Sendable {
         self.enableIPv6 = enableIPv6
         self.timingPort = timingPort
         self.controlPort = controlPort
+        self.installSeed = installSeed
+    }
+}
+
+extension SystemRandomNumberGenerator {
+    /// Generates a random 64-bit seed for ``EngineConfig/installSeed``. Not
+    /// itself persisted — callers that want stability across relaunches
+    /// (the common case) should persist a per-install token themselves (e.g.
+    /// in `UserDefaults` or Keychain) and pass it in explicitly; this default
+    /// only guarantees two *concurrently constructed* engines won't collide.
+    public static func freshInstallSeed() -> UInt64 {
+        var rng = SystemRandomNumberGenerator()
+        return rng.next()
     }
 }
 
@@ -75,6 +100,7 @@ public actor AirPlayEngine {
     private let config: EngineConfig
     private let engineThread: EngineThread
     private let completions = CompletionRegistry()
+    private let stateHub = StateStreamHub()
 
     private var started = false
     // A nonisolated mirror of `started` the hot write path can read without an
@@ -88,11 +114,32 @@ public actor AirPlayEngine {
 
     /// Outputs the app has added, by id. The vendored registry owns the actual
     /// `output_device`; we keep just the id and last-known state.
+    ///
+    /// KEPT IN SYNC WITH OUT-OF-BAND TRANSITIONS (first-light hardening #5 fix):
+    /// `startOp` completions are not the only writer. A private subscriber
+    /// (`stateReconcileTask`) drains this engine's OWN `makeStateStream()` and
+    /// folds every reported transition — INCLUDING the out-of-band ones that
+    /// arrive after an op's completion resolved (e.g. a receiver dropping RTSP
+    /// flips `.connected -> .failed`) — back into this map. Without that, the
+    /// idempotency guard in `addOutput`/`removeOutput` would trust a stale
+    /// `.connected`/`.stopped` and silently no-op a recovery that must actually
+    /// re-issue `device_start`.
     private var knownOutputs: [OutputID: OutputState] = [:]
+
+    /// Drains this engine's own device-state stream to keep `knownOutputs`
+    /// reconciled with out-of-band transitions (see `knownOutputs`). Started by
+    /// `start()`/`enterHeadlessTestMode`, cancelled by `stop()`.
+    private var stateReconcileTask: Task<Void, Never>?
 
     /// Placeholder for the synced local Core Audio sink (SPEC §8.1). Not
     /// implemented in T-API-1 — see ``localOutput``.
     private var localOutputEnabled = false
+
+    // Write-cadence deficit/overrun tracker (T-ENG-CADENCE-1, first-light
+    // backlog #4). Lives off the actor so the hot `write(pcm:pts:)` path (which
+    // is `nonisolated` on purpose, see below) can update it without an actor
+    // hop. Diagnostic only — never consulted to gate/throttle a write.
+    private nonisolated let cadence = WriteCadenceTracker()
 
     // Test seam (headless verification). When set, `issueOverride` replaces the
     // backend device_* call in startOp: it still arms the REAL C dispatcher
@@ -153,6 +200,18 @@ public actor AirPlayEngine {
                 return -102 // crypto init failed
             }
 
+            // 0b. Mask SIGPIPE process-wide (first-light backlog #2) before any
+            //     socket is opened, mirroring OwnTone's main() (main.c:718-732).
+            //     Without this, a peer closing its end of an RTSP/data socket
+            //     mid-write can kill the process with an unhandled signal.
+            engine_mask_sigpipe()
+
+            // 0c. Route libevent's own diagnostics into the engine logger
+            //     (first-light hardening #5) before the base does any work, so
+            //     an event-base/evrtsp failure is visible in Console/stderr
+            //     under L_EVENT instead of libevent's default bare-stderr writer.
+            engine_logger_wire_libevent()
+
             // 1. Set evbase_player BEFORE airplay_init (seam-map §8).
             evbase_player = base
 
@@ -162,6 +221,7 @@ public actor AirPlayEngine {
                 return -100 // dispatcher wiring failed
             }
             completions.install()
+            stateHub.install() // device-state stream hook (T-ENG-STATESTREAM-1)
 
             // 3. Apply config via conffile setters (strings NOT copied — retained
             //    on `self` for the engine lifetime).
@@ -189,6 +249,7 @@ public actor AirPlayEngine {
             // Roll back the thread; nothing is streaming yet.
             await engineThread.run { [self] in
                 completions.uninstall()
+                stateHub.uninstall()
                 outputs_dispatcher_deinit()
             }
             engineThread.stop()
@@ -199,6 +260,35 @@ public actor AirPlayEngine {
 
         started = true
         startedFlag.store(true)
+        startStateReconcile()
+    }
+
+    /// Subscribe this engine to its OWN device-state stream and fold every
+    /// reported transition back into `knownOutputs`, so the idempotency guards in
+    /// `addOutput`/`removeOutput` never trust a value the stream is documented to
+    /// make stale (first-light hardening #5 fix). Ordering is safe: for an armed
+    /// op the completion resolves FIRST and then the stream yields the same
+    /// transition (STATESTREAM contract), so `startOp`'s own `knownOutputs[id] =
+    /// terminal` write and this reconcile converge on the same value; the case
+    /// this exists for is the OUT-OF-BAND transition with no armed waiter.
+    private func startStateReconcile() {
+        guard stateReconcileTask == nil else { return }
+        let stream = stateHub.makeStream()
+        stateReconcileTask = Task { [weak self] in
+            for await (id, state) in stream {
+                await self?.reconcileKnownOutput(id: id, state: state)
+            }
+        }
+    }
+
+    /// Fold one reported transition into `knownOutputs`. Only tracks ids the
+    /// engine already knows (registered via discovery) — an unknown id is a
+    /// transition for a device this engine never added, and must not
+    /// spuriously create a `knownOutputs` entry that would let `addOutput`
+    /// bypass its `unknownOutput` guard.
+    private func reconcileKnownOutput(id: OutputID, state: OutputState) {
+        guard knownOutputs[id] != nil else { return }
+        knownOutputs[id] = state
     }
 
     /// Stop the engine: tear down all sessions (`airplay_deinit`), unwire the
@@ -207,6 +297,8 @@ public actor AirPlayEngine {
         guard started else { return }
         started = false
         startedFlag.store(false)
+        stateReconcileTask?.cancel()
+        stateReconcileTask = nil
 
         await engineThread.run { [self] in
             if let deinitFn = output_airplay.deinit {
@@ -216,6 +308,7 @@ public actor AirPlayEngine {
             // airptp_end() guards a never-bound handle.
             ptpd_deinit()
             completions.uninstall()
+            stateHub.uninstall()
             outputs_dispatcher_deinit()
             evbase_player = nil
         }
@@ -236,8 +329,10 @@ public actor AirPlayEngine {
         conffile_set_bind_address(bindAddressC) // NULL = any
         conffile_set_ipv6(config.enableIPv6)
         conffile_set_ports(config.timingPort, config.controlPort)
-        // Derive a stable libhash from the client name (device id / PTP seed).
-        conffile_set_libhash(Self.hashClientName(config.clientName))
+        // Derive libhash from client name + per-install seed (device id / PTP
+        // clock-id seed) so two installs advertising the same clientName on
+        // one LAN don't collide (first-light backlog #5.1).
+        conffile_set_libhash(Self.hashClientName(config.clientName, seed: config.installSeed))
     }
 
     private func freeConfigStrings() {
@@ -245,9 +340,20 @@ public actor AirPlayEngine {
         clientNameC = nil; userAgentC = nil; bindAddressC = nil
     }
 
-    /// A stable 64-bit hash of the client name (FNV-1a), used as `libhash`.
-    static func hashClientName(_ s: String) -> UInt64 {
+    /// A stable 64-bit hash of the client name mixed with a per-install seed
+    /// (FNV-1a over `"<seed-hex>:<clientName>"`), used as `libhash`. Two
+    /// installs with the same `clientName` but different `seed` produce
+    /// different (non-zero) hashes, avoiding the device-id/PTP-clock-id
+    /// collision the fixed-FNV-of-name-only scheme had (first-light backlog
+    /// #5.1).
+    static func hashClientName(_ s: String, seed: UInt64) -> UInt64 {
         var hash: UInt64 = 0xcbf29ce484222325
+        for byte in String(seed, radix: 16).utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        hash ^= UInt64(UInt8(ascii: ":"))
+        hash = hash &* 0x100000001b3
         for byte in s.utf8 {
             hash ^= UInt64(byte)
             hash = hash &* 0x100000001b3
@@ -306,6 +412,32 @@ public actor AirPlayEngine {
         }
     }
 
+    // MARK: - Device-state stream (T-ENG-STATESTREAM-1)
+
+    /// An async stream of device-state transitions, one element per state change
+    /// the vendored sender reports for any registered output — INCLUDING the
+    /// out-of-band transitions that arrive after an op's completion has already
+    /// resolved (e.g. a receiver dropping its RTSP connection flips a `.connected`
+    /// output to `.failed`; `addOutput` has long since returned, so the completion
+    /// bridge can't see it). No polling: each transition is pushed the moment the
+    /// dispatcher drains it on the engine thread.
+    ///
+    /// Each call returns an independent stream; finishing/cancelling one does not
+    /// affect the others. This mirrors `OutputBackend.makeEventStream()` on the
+    /// app side — a `NativeBackend` subscribes once and turns each
+    /// `(OutputID, OutputState)` into a `deviceUpdated` event.
+    ///
+    /// Ordering vs. the completion bridge: for an armed op, the completion (which
+    /// resolves `addOutput`/`setVolume`/`removeOutput`) fires FIRST, then this
+    /// stream yields the same transition — so a subscriber that awaited
+    /// `addOutput` and reads the stream sees a consistent picture.
+    ///
+    /// `nonisolated` so a subscriber can be wired without an actor hop; the hub is
+    /// its own synchronized type.
+    public nonisolated func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
+        stateHub.makeStream()
+    }
+
     // MARK: - Session lifecycle
 
     /// Begin streaming to the output with `id`: arm a completion waiter, call
@@ -317,6 +449,31 @@ public actor AirPlayEngine {
     public func addOutput(_ id: OutputID) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        // Idempotency guard (first-light hardening #5): an output already in a
+        // live session is a no-op success — don't re-issue device_start, which
+        // would arm a second RTSP SETUP against a receiver that's already
+        // streaming (the vendored airplay_device_start assumes a fresh device).
+        // A caller that saw addOutput succeed and calls it again (e.g. a
+        // setOutputSet converge that re-adds an unchanged device) just gets the
+        // already-active result back.
+        //
+        // CRITICAL (hardening #5 fix): consult the LIVE C device state, not the
+        // cached `knownOutputs` value. `knownOutputs` is reconciled from the
+        // out-of-band state stream asynchronously, so it can still momentarily
+        // read `.connected` after the receiver dropped RTSP and the C session
+        // flipped to FAILED (`outputs_cb(-1,…)` updated `device->state`). Reading
+        // the C device's own `state` on the engine thread closes that race: a
+        // failed/stopped session correctly falls through and re-issues
+        // device_start to re-establish the RTSP SETUP.
+        let liveState = await liveDeviceState(id)
+        switch liveState {
+        case .streaming, .connected:
+            // Keep the cache honest for callers that inspect it.
+            knownOutputs[id] = liveState
+            return
+        default: break
+        }
 
         let terminal = try await startOp(id: id) { device, cbId in
             guard let startFn = output_airplay.device_start else { return -1 }
@@ -339,11 +496,43 @@ public actor AirPlayEngine {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
+        // Idempotency guard (first-light hardening #5): stopping an output that
+        // isn't in a session is a no-op success. device_stop on an already-idle
+        // device would arm a completion the vendored teardown never fires (no
+        // active RTSP session to TEARDOWN), so a naive re-stop could hang; skip
+        // it and report the already-stopped state.
+        //
+        // Mirror addOutput: consult the LIVE C device state so a stale cached
+        // `.connected` (out-of-band FAILED not yet reconciled) doesn't wrongly
+        // drive a stop against an already-torn-down session, and a stale cached
+        // `.stopped` doesn't skip a stop the live session still needs.
+        let liveState = await liveDeviceState(id)
+        if liveState == .stopped { knownOutputs[id] = .stopped; return }
+
         let terminal = try await startOp(id: id) { device, cbId in
             guard let stopFn = output_airplay.device_stop else { return -1 }
             return stopFn(device, cbId)
         }
         knownOutputs[id] = terminal
+    }
+
+    /// Flush any buffered/in-flight audio for `id` — the primitive a future
+    /// pause/seek feature builds on (AirPlay FLUSH: RTSP FLUSH re-anchors the
+    /// receiver's RTP position so playback can resume from a new point).
+    ///
+    /// NO-OP SEAM (first-light hardening #5): pause/seek is explicitly OUT OF
+    /// SCOPE for this phase, so this deliberately does NOT call the vendored
+    /// `output_airplay.device_flush` yet — it only validates the engine/output
+    /// state and returns, giving `NativeBackend` and a later pause/seek task a
+    /// stable API surface to target without a redesign. When pause/seek lands,
+    /// the body becomes a `startOp` over `output_airplay.device_flush` (which
+    /// already exists in the vendored sender, `airplay_device_flush`), mirroring
+    /// `removeOutput`. Throws `unknownOutput` if `id` isn't registered so a
+    /// caller can't silently flush a device the engine never saw.
+    public func flushOutput(_ id: OutputID) async throws {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+        // Intentionally no device_flush issue: seam only (pause/seek deferred).
     }
 
     /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
@@ -387,6 +576,23 @@ public actor AirPlayEngine {
         if issueOverride != nil { apply() } else { await engineThread.run(apply) }
     }
 
+    /// The LIVE state of the vendored C `output_device` for `id` — read straight
+    /// off `device->state`, which `outputs_cb` keeps current (including the
+    /// out-of-band `outputs_cb(-1,…)` FAILED after a receiver drops RTSP). This is
+    /// the authoritative source the idempotency guards consult, immune to the
+    /// async reconcile lag on `knownOutputs`. Runs on the engine thread (or inline
+    /// in headless test mode). Returns the last cached state if the C device has
+    /// gone (e.g. deregistered), so a caller still gets a sensible value.
+    private func liveDeviceState(_ id: OutputID) async -> OutputState {
+        let read: () -> OutputState? = {
+            guard let device = outputs_device_get(id.rawValue) else { return nil }
+            return OutputState(device.pointee.state)
+        }
+        let live: OutputState?
+        if issueOverride != nil { live = read() } else { live = await engineThread.run(read) }
+        return live ?? knownOutputs[id] ?? .stopped
+    }
+
     /// Feed one buffer of interleaved S16LE PCM (44100/16/2) to all active
     /// sessions. The bytes are copied onto the engine thread and handed to
     /// `output_airplay.write` there (R-B: write MUST run on the engine thread).
@@ -410,6 +616,13 @@ public actor AirPlayEngine {
         pcm.copyBytes(to: cbuf, count: byteCount)
 
         let samples = byteCount / (PCMFormat.airplay.channels * PCMFormat.airplay.bitsPerSample / 8)
+
+        // T-ENG-CADENCE-1: record this write's audio-time contribution against
+        // the wall clock BEFORE handing off to the engine thread. Allocation-
+        // free (fixed-size struct, lock already held by the tracker's own
+        // NSLock — no closures/collections created here) and never gates the
+        // write below; `record` only accumulates counters.
+        cadence.record(samples: samples, sampleRate: PCMFormat.airplay.sampleRate)
         let quality = media_quality(
             sample_rate: Int32(PCMFormat.airplay.sampleRate),
             bits_per_sample: Int32(PCMFormat.airplay.bitsPerSample),
@@ -435,6 +648,21 @@ public actor AirPlayEngine {
             // data[1].buffer stays NULL: airplay_write loops `for (i; obuf->data[i].buffer; i++)`.
             writeFn(&obuf)
         }
+    }
+
+    // MARK: - Write-cadence diagnostics (T-ENG-CADENCE-1)
+
+    /// A snapshot of the write-cadence deficit/overrun counters (first-light
+    /// backlog #4). `nonisolated` — safe to poll from any thread/task without
+    /// an actor hop, same rationale as `write` itself.
+    public nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
+        cadence.snapshot()
+    }
+
+    /// Test/diagnostic seam: reset the cadence counters (e.g. after a known
+    /// gap such as a deliberate pause) without recreating the engine.
+    func resetWriteCadence() {
+        cadence.reset()
     }
 
     // MARK: - localOutput placeholder (SPEC §8.1)
@@ -538,6 +766,13 @@ public actor AirPlayEngine {
     ) {
         issueOverride = issue
         completions.install() // wire the C completion hook (start() isn't called)
+        stateHub.install()    // wire the C device-state hook (T-ENG-STATESTREAM-1)
+        // So the hot `write(pcm:pts:)` path's started-guard passes in headless
+        // tests (T-ENG-CADENCE-1) without running the real engine thread/init.
+        startedFlag.store(true)
+        // Reconcile knownOutputs from the state stream (first-light hardening #5
+        // fix) — exercised by the headless idempotency-guard test.
+        startStateReconcile()
     }
 
     /// Register a known output (test seam) so addOutput's guard passes, without
@@ -567,4 +802,198 @@ public struct LocalOutputSink: Sendable {
     public let isEnabled: Bool
     /// Always false in T-API-1 — the sink is a placeholder.
     public var isImplemented: Bool { false }
+}
+
+/// Fans the C device-state hook (`outputs_engine_state`, shims/outputs.c) out to
+/// any number of `AsyncStream<(OutputID, OutputState)>` subscribers — the state
+/// half of the dispatcher bridge (T-ENG-STATESTREAM-1).
+///
+/// This is the state-stream counterpart to `CompletionRegistry`: the C hook is a
+/// `@convention(c)` pointer that can't capture Swift state, so it targets one
+/// process-wide `shared` hub (one engine per process in practice). The hub fires
+/// on the engine thread (that's where the deferred drain runs) and yields into
+/// each live continuation. `AsyncStream`'s buffer + continuation are themselves
+/// thread-safe; we guard the subscriber table with a lock for the rare
+/// subscribe/terminate races off the engine thread.
+///
+/// NB device-state deliveries are advisory and continuous — a slow/paused
+/// consumer must never wedge the engine thread — so streams use an
+/// `.unbounded` buffer (state notes are tiny and low-rate; see the C ring bound).
+final class StateStreamHub: @unchecked Sendable {
+
+    /// The single active hub the C hook reads. Set by `install()`.
+    static private(set) var shared: StateStreamHub?
+
+    private var continuations: [UUID: AsyncStream<(OutputID, OutputState)>.Continuation] = [:]
+    private let lock = NSLock()
+
+    /// Install this hub as the process-wide target and wire the C hook. Called on
+    /// the engine thread right after the dispatcher is initialised (alongside
+    /// `CompletionRegistry.install()`).
+    func install() {
+        StateStreamHub.shared = self
+        outputs_engine_state_set({ deviceId, state, _ in
+            StateStreamHub.shared?.deliver(deviceId: deviceId, state: state)
+        }, nil)
+    }
+
+    /// Tear down the hook and finish every live stream (on stop).
+    func uninstall() {
+        outputs_engine_state_set(nil, nil)
+        lock.lock()
+        let live = continuations
+        continuations.removeAll()
+        lock.unlock()
+        for (_, c) in live { c.finish() }
+        if StateStreamHub.shared === self { StateStreamHub.shared = nil }
+    }
+
+    /// A fresh independent stream of `(OutputID, OutputState)` transitions.
+    func makeStream() -> AsyncStream<(OutputID, OutputState)> {
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            let key = UUID()
+            lock.lock(); continuations[key] = continuation; lock.unlock()
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.continuations[key] = nil; self.lock.unlock()
+            }
+        }
+    }
+
+    /// Called by the C hook on the engine thread for every reported transition
+    /// (armed op completions AND spent-id out-of-band reports). Maps the C state
+    /// and yields `(OutputID, OutputState)` to each live subscriber.
+    private func deliver(deviceId: UInt64, state: output_device_state) {
+        let mapped = OutputState(state)
+        let id = OutputID(rawValue: deviceId)
+        lock.lock(); let targets = Array(continuations.values); lock.unlock()
+        for c in targets { c.yield((id, mapped)) }
+    }
+}
+
+/// Write-cadence deficit/overrun tracker (T-ENG-CADENCE-1, first-light
+/// backlog #4). Models OwnTone's `player.c` `pb_write_deficit_max`
+/// bookkeeping in the neutral Swift layer (no vendored C touched — the write
+/// hot path already runs entirely in Swift/`EngineThread.enqueue` before
+/// reaching `output_airplay.write`).
+///
+/// DESIGN: every `write(pcm:pts:)` call carries a fixed amount of audio time
+/// (`samples / sampleRate`). Comparing the wall-clock time actually elapsed
+/// between two consecutive writes (`CLOCK_MONOTONIC_RAW`, immune to
+/// wall-clock adjustment) against that audio-time delta yields a per-write
+/// "gap": positive means the caller took LONGER than the audio it just
+/// delivered represents (a deficit — the producer is behind, e.g. capture
+/// underfeeding/buffer starvation) and negative means it took LESS time (an
+/// overrun — bursty/ahead-of-real-time delivery, e.g. catching up after a
+/// stall). Deficit and overrun are accumulated into SEPARATE running totals
+/// (never let one cancel the other — the plan explicitly wants both surfaced)
+/// while `lastGapSeconds` reports the instantaneous value.
+///
+/// HOT-PATH CONTRACT: `record` is allocation-free — every field is a fixed-
+/// size scalar guarded by an `NSLock` (no arrays/dictionaries/closures
+/// created), matching the allocation-free requirement for `write(pcm:pts:)`,
+/// which already allocates exactly one C buffer per call and nothing else.
+/// `record` NEVER throws, blocks the caller beyond the lock, or influences
+/// whether the write proceeds — purely diagnostic bookkeeping.
+///
+/// LOGGING: crossing a coarse threshold (currently >= 250ms of accumulated
+/// deficit or overrun since the last log) emits one `os_log` line via the
+/// `.default` level so sustained cadence trouble is visible without spamming
+/// a log line per write (which, at ~226 writes/sec for 352-sample frames at
+/// 44.1kHz, would be prohibitively noisy).
+final class WriteCadenceTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private let log = Logger(subsystem: "com.airplayengine", category: "write-cadence")
+
+    private var writeCount: UInt64 = 0
+    private var deficitSeconds: Double = 0
+    private var overrunSeconds: Double = 0
+    private var lastGapSeconds: Double = 0
+    private var lastWriteMonotonic: Double?
+
+    /// Deficit/overrun accumulated (independently) since the last threshold
+    /// log, so repeated small gaps don't each re-trigger a log line.
+    private var deficitSinceLog: Double = 0
+    private var overrunSinceLog: Double = 0
+    private static let logThresholdSeconds: Double = 0.25
+
+    /// Record one write's audio-time contribution against the wall clock.
+    /// Called on every `write(pcm:pts:)` invocation, off the actor, possibly
+    /// from a producer thread under load — hence the lock rather than actor
+    /// isolation (an actor hop is exactly what the hot path must avoid).
+    func record(samples: Int, sampleRate: Int) {
+        guard samples > 0, sampleRate > 0 else { return }
+        let now = Self.monotonicSeconds()
+        let audioSeconds = Double(samples) / Double(sampleRate)
+
+        lock.lock()
+        writeCount &+= 1
+        defer { lock.unlock() }
+
+        guard let last = lastWriteMonotonic else {
+            // First write: nothing to compare against yet.
+            lastWriteMonotonic = now
+            return
+        }
+        lastWriteMonotonic = now
+
+        let wallElapsed = now - last
+        // gap > 0: wall clock ran ahead of the audio delivered (deficit).
+        // gap < 0: audio delivered outran the wall clock (overrun/burst).
+        let gap = wallElapsed - audioSeconds
+        lastGapSeconds = gap
+
+        if gap > 0 {
+            deficitSeconds += gap
+            deficitSinceLog += gap
+        } else if gap < 0 {
+            overrunSeconds += -gap
+            overrunSinceLog += -gap
+        }
+
+        if deficitSinceLog >= Self.logThresholdSeconds {
+            let total = deficitSeconds
+            deficitSinceLog = 0
+            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+        } else if overrunSinceLog >= Self.logThresholdSeconds {
+            let total = overrunSeconds
+            overrunSinceLog = 0
+            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+        }
+    }
+
+    /// A consistent snapshot of the counters.
+    func snapshot() -> WriteCadenceSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return WriteCadenceSnapshot(
+            writeCount: writeCount,
+            deficitSeconds: deficitSeconds,
+            overrunSeconds: overrunSeconds,
+            lastGapSeconds: lastGapSeconds
+        )
+    }
+
+    /// Reset all counters and forget the last-write timestamp (the next
+    /// `record` call starts a fresh baseline instead of comparing against a
+    /// stale timestamp).
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        writeCount = 0
+        deficitSeconds = 0
+        overrunSeconds = 0
+        lastGapSeconds = 0
+        lastWriteMonotonic = nil
+        deficitSinceLog = 0
+        overrunSinceLog = 0
+    }
+
+    /// `CLOCK_MONOTONIC_RAW` in seconds — immune to NTP/wall-clock slew,
+    /// matching the intent of comparing REAL elapsed producer time (not the
+    /// `pts` the caller claims, which is exactly what a broken producer would
+    /// get wrong).
+    private static func monotonicSeconds() -> Double {
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
+        return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1e9
+    }
 }

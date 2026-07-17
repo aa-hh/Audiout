@@ -88,6 +88,18 @@ void conffile_set_ipv6(bool enabled);
 void conffile_set_ports(long int timing_port, long int control_port);
 void conffile_set_libhash(uint64_t h);              /* device id / PTP clock seed */
 
+/* --- Unknown-key loud-miss policy (first-light hardening #5) ---
+ * cfg_getstr/getint/getbool no longer silently return 0/NULL for a key the
+ * shim doesn't serve: the miss is logged at E_WARN and (in debug builds)
+ * asserts, so a typo'd or newly-required config key trips immediately instead
+ * of masquerading as an empty/zero default. These two symbols are a TEST SEAM:
+ * a hermetic test sets conffile_unknown_key_assert = false to exercise the
+ * log+default path without the assert aborting the process, and reads the
+ * monotonic conffile_unknown_key_count to confirm a miss fired. Not for
+ * production use — leave the flag true so the assert bites in debug. */
+extern bool conffile_unknown_key_assert;
+extern unsigned long conffile_unknown_key_count;
+
 #ifdef __cplusplus
 }
 #endif

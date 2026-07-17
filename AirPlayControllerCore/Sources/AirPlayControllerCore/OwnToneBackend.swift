@@ -809,9 +809,51 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         // NativeBackend.swift / NativeCaptureCoordinator.swift (T-NB-BACKEND-1,
         // T-NB-CAPTURE-1) for the engine-driven equivalent of the OwnTone path
         // above.
-        let engine = AirPlayEngine()
+        //
+        // startBufferMs: the product runs a LOWER sender-side start buffer than
+        // the engine's OwnTone-parity default (2250 ms → ~3.5 s click-to-sound
+        // measured on the Sonos fleet, 2026-07-17). 1000 ms cuts the
+        // deterministic scheduling lead from 2.0 s to 0.75 s (expected total
+        // ≈ 2.2 s) while leaving the receivers a 750 ms jitter/multi-room
+        // buffer. Tunable per run via AIRPLAY_START_BUFFER_MS for the gated
+        // by-ear verification — see AirPlayEngine/docs/latency-analysis.md.
+        let startBufferMs = nativeStartBufferMs()
+        let engine = AirPlayEngine(
+            config: EngineConfig(startBufferMs: startBufferMs))
         let nativeBackend = NativeBackend(engine: engine)
+        nativeBackend.seedStartBufferMs(startBufferMs)
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(engine: engine)
         return nativeBackend
     }
+}
+
+/// The `AIRPLAY_START_BUFFER_MS` env override, when set AND valid (an integer
+/// in the engine shim's accepted 300...5000 range) — the per-launch dev knob,
+/// which beats the persisted user setting (a deliberately-set env var is a
+/// stronger signal than a stored preference). Returns nil when unset; an
+/// invalid value is IGNORED with one stderr warning (behaves like unset — same
+/// dev-knob-not-config policy as `AIRPLAY_BACKEND`). Public so the settings
+/// pane can render its "overridden for this launch" disabled state.
+public func nativeStartBufferEnvOverrideMs(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Int? {
+    guard let raw = environment["AIRPLAY_START_BUFFER_MS"] else { return nil }
+    guard let ms = Int(raw), (300...5000).contains(ms) else {
+        FileHandle.standardError.write(
+            Data("warning: AIRPLAY_START_BUFFER_MS \"\(raw)\" is not an integer in 300...5000 — ignoring\n".utf8)
+        )
+        return nil
+    }
+    return ms
+}
+
+/// The native backend's launch-time start buffer in ms, resolved
+/// **env override → persisted setting → default** (PLAN-LATENCY-SETTING.md §3;
+/// `AppSettings.startBufferMs` already folds unknown stored values to the
+/// default, so this can only return an offered option or a valid env value).
+func nativeStartBufferMs(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    settings: AppSettings = AppSettings()
+) -> Int {
+    nativeStartBufferEnvOverrideMs(environment: environment) ?? settings.startBufferMs
 }

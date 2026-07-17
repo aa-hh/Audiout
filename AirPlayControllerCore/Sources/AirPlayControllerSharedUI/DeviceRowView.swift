@@ -766,7 +766,8 @@ public final class DeviceRowView: NSView {
         if isUnsupported {
             // T-UI-AP1-1: explicitly call out AirPlay 1 rather than the usual
             // "selected/volume" phrasing — there's no membership or volume to
-            // report on a device that's never actually routed to.
+            // report on a device that's never actually routed to (and never a
+            // connection state to append — an unsupported row stays `.off`).
             setAccessibilityLabel("\(device.name), AirPlay 1 only, not yet supported")
         } else {
             let membership = isSelectedInSet ? "selected" : "not selected"

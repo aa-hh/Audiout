@@ -74,3 +74,26 @@ public protocol OutputBackend: AnyObject {
     /// (`dev/notes/p1-connection-status-brief.md` §1/§3).
     func setOutputSet(_ ids: Set<String>)
 }
+
+/// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend
+/// that can honor the Settings › Audio › Advanced "Audio buffer" control adopts
+/// this; the settings pane shows the section only when
+/// `backend as? LatencyConfigurable` succeeds, so backends without the concept
+/// (`OwnToneBackend` — its buffer belongs to the external server) never render
+/// a dead knob. Deliberately NOT part of ``OutputBackend``: the base seam stays
+/// capability-free.
+public protocol LatencyConfigurable: AnyObject {
+
+    /// The sender start buffer currently in force, in milliseconds. The UI
+    /// reads this once when building the pane (it's also the persisted
+    /// `AppSettings.startBufferMs` unless an env override won at launch).
+    var startBufferMs: Int { get }
+
+    /// Apply a new start buffer. If sessions are streaming this tears them ALL
+    /// down, applies the value, and re-establishes the same set (brief audible
+    /// gap, ~3–5 s — which is why the UI gates it behind an explicit
+    /// "Apply & Reconnect" CTA); when idle it applies silently. Returns when
+    /// the re-add pass has completed (per-device failures follow the D4
+    /// best-effort rule: marked unavailable, the rest proceed).
+    func applyStartBuffer(ms: Int) async
+}

@@ -220,6 +220,26 @@ outputs_device_get(uint64_t device_id);
 uint64_t
 outputs_buffer_duration_ms_get(void);
 
+/* Engine-side setter (NOT an OwnTone symbol — the shim's analogue of OwnTone's
+ * `general.start_buffer_ms` config key, seam-map §3.1). Sets the value
+ * outputs_buffer_duration_ms_get() serves to airplay.c's master_session_make(),
+ * which derives the sender-side scheduling lead from it:
+ *   output_buffer_samples = (start_buffer_ms - AIRPLAY_AUDIO_LATENCY_MS[250])
+ * i.e. this is the dominant, deterministic part of capture->speaker latency
+ * (the receiver buffers exactly this much before playout). Clamped LOUDLY to
+ * [OUTPUTS_START_BUFFER_MS_MIN, OUTPUTS_START_BUFFER_MS_MAX]: airplay.c
+ * hard-fails the whole master session when the value is <= 250, so a caller
+ * passing garbage gets a playable clamp + an E_WARN log instead of silence.
+ * Call BEFORE the first session is created (master_session_make caches the
+ * derived sample count per master session); the engine applies it from
+ * EngineConfig before airplay_init. */
+void
+outputs_set_buffer_duration_ms(uint64_t ms);
+
+#define OUTPUTS_START_BUFFER_MS_DEFAULT 2250 /* OwnTone's default (seam-map §3.1) */
+#define OUTPUTS_START_BUFFER_MS_MIN      300 /* > AIRPLAY_AUDIO_LATENCY_MS(250) hard floor */
+#define OUTPUTS_START_BUFFER_MS_MAX     5000
+
 bool
 outputs_exclusive_mode_get(void);
 

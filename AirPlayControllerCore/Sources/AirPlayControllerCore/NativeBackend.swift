@@ -37,7 +37,7 @@ import AirPlayEngine
 /// `isAvailable = false`, and are **NEVER** `addOutput`-ed (the engine is an
 /// AP2-only sender). The future raop (AP1) sender slots in behind
 /// ``AirPlay1Sending`` — see the seam comment at the bottom of this file.
-public final class NativeBackend: OutputBackend, @unchecked Sendable {
+public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked Sendable {
 
     // MARK: Injected dependencies (protocols so tests are hermetic)
 
@@ -576,6 +576,131 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         return str.isEmpty ? fallback : str
     }
 
+    // MARK: LatencyConfigurable (PLAN-LATENCY-SETTING.md)
+
+    /// The sender start buffer currently in force (ms). Seeded by
+    /// `makeBackend` from the resolved launch value (env → setting → default);
+    /// updated by ``applyStartBuffer(ms:)``. Confined to `stateQueue`.
+    private var _startBufferMs: Int = 1000
+
+    public var startBufferMs: Int {
+        stateQueue.sync { _startBufferMs }
+    }
+
+    /// Seed the initial value without triggering an apply (`makeBackend` only —
+    /// the engine was just constructed with this same value in its config).
+    func seedStartBufferMs(_ ms: Int) {
+        stateQueue.sync { _startBufferMs = ms }
+    }
+
+    /// Apply a new start buffer at runtime. The vendored sender reads the value
+    /// at STREAM-SESSION creation and caches it in the (shared) master session,
+    /// so the sequence below is an invariant, not a style choice:
+    ///
+    /// 1. Remove ALL currently-streaming outputs and AWAIT each removal — if
+    ///    even one stays attached, the old master session (old buffer) survives
+    ///    and step 3's re-adds would join it, silently keeping the old latency.
+    /// 2. Set the new value on the engine (next master session reads it).
+    /// 3. Re-add the same set (re-feeding descriptors + re-pushing volume/mute
+    ///    for free) by driving HEAD's per-device converge back to on.
+    ///
+    /// The teardown/re-add is driven through the SAME serialized `convergeDevice`
+    /// loop `setOutputSet` uses (design-doc work item 2: "re-add via existing
+    /// converge"), NOT a private direct add/remove loop. What this method adds
+    /// on top of plain converge is a HARD BARRIER between the phases: converge
+    /// coalesces and its per-device Tasks run concurrently across devices, so a
+    /// naive "flip all off then all on" could interleave a re-add ahead of
+    /// another device's removal and let the old master session survive. We
+    /// therefore await ALL removals (phase 1) before the engine set (phase 2)
+    /// before ALL re-adds (phase 3). Because we own the `converging` slot for
+    /// each id for the duration, `setOutputSet` calls arriving during the gap
+    /// just update `desiredOn`; whichever intent is newest is chased once we
+    /// release. Per-device failures keep D4 best-effort semantics (converge
+    /// marks the device unavailable + parks it; the rest proceed).
+    ///
+    /// With nothing streaming, phases 1 and 3 are empty and this reduces to the
+    /// engine set — silent/instant.
+    public func applyStartBuffer(ms: Int) async {
+        // Snapshot the streaming set under the lock and record the new value.
+        // (Re-feed + volume/mute restoration are handled by convergeDevice via
+        // `lastDescriptors` / `restoreEffectiveVolume`, so we only need the ids.)
+        let streaming: [(id: String, outputID: OutputID)] = stateQueue.sync {
+            self._startBufferMs = ms
+            return self.added.compactMap { id in
+                guard let outputID = self.outputIDs[id] else { return nil }
+                return (id, outputID)
+            }
+        }
+
+        // 1. Drive every streaming device OFF via converge and AWAIT completion
+        //    (barrier: all removals resolve before the buffer set). Each
+        //    convergeDevice runs to quiescence for its id, so on return the
+        //    removeOutput has completed.
+        await withTaskGroup(of: Void.self) { group in
+            for item in streaming {
+                group.addTask { [weak self] in
+                    await self?.convergeToTarget(id: item.id, outputID: item.outputID, on: false)
+                }
+            }
+        }
+
+        // 2. New buffer value; the next master session picks it up.
+        await engine.setStartBufferMs(ms)
+
+        // 3. Re-add the same set via converge (best-effort, D4). Converge
+        //    re-feeds the descriptor through its normal add path.
+        await withTaskGroup(of: Void.self) { group in
+            for item in streaming {
+                group.addTask { [weak self] in
+                    await self?.convergeToTarget(id: item.id, outputID: item.outputID, on: true)
+                }
+            }
+        }
+
+        // Re-push each device's effective volume (mute = stashed-0) onto the
+        // fresh session — the add path doesn't set volume, and the new master
+        // session starts at the engine's default. Only for devices that actually
+        // came back (a D4 re-add failure left them out of `added`). Awaited (not
+        // the fire-and-forget `pushVolume`) so the apply is fully settled on
+        // return — the CTA's "Reconnecting…" clears only once everything's live.
+        let toPush: [(OutputID, Double)] = stateQueue.sync {
+            streaming.compactMap { item in
+                guard self.added.contains(item.id) else { return nil }
+                let intended = self.stashedVolume[item.id] ?? self.known[item.id]?.volume ?? 0
+                let effective = self.muted.contains(item.id) ? 0 : intended
+                return (item.outputID, Self.engineVolume(effective))
+            }
+        }
+        for (outputID, value) in toPush {
+            try? await engine.setVolume(outputID, value)
+        }
+    }
+
+    /// Set `desiredOn[id] = target`, claim the (awaited) `converging` slot, then
+    /// drive `convergeDevice` to quiescence and AWAIT it — the awaitable
+    /// counterpart to `setOutputSet`'s fire-and-forget kick, used by
+    /// `applyStartBuffer` to impose its remove-all → set → re-add barrier.
+    ///
+    /// If another converge already owns the slot for this id, we just publish the
+    /// new target (`desiredOn`) and return: the running loop re-reads `desiredOn`
+    /// when its current op settles and chases our value, so the target is still
+    /// honored — we simply don't double-drive the same id. A parked (`failedGate`)
+    /// device stays parked on a teardown (nothing to remove) and is un-parked on a
+    /// re-add so it can be retried, mirroring `setOutputSet`.
+    private func convergeToTarget(id: String, outputID: OutputID, on target: Bool) async {
+        let shouldDrive: Bool = stateQueue.sync {
+            if target { self.failedGate.remove(id) } // re-add clears a park (retryable)
+            self.desiredOn[id] = target
+            // Reflect intent immediately, same as setOutputSet's eager set.
+            self.setConnectionState(target ? .connecting : .off, for: id)
+            guard !self.converging.contains(id) else { return false }
+            self.converging.insert(id)
+            return true
+        }
+        guard shouldDrive else { return }
+        await convergeDevice(id: id, outputID: outputID)
+    }
+
     // MARK: Discovery → app model (all on stateQueue)
 
     private func handleDiscovery(_ event: DiscoveryEvent) {
@@ -1057,6 +1182,7 @@ protocol EngineControlling: Sendable {
     func addOutput(_ id: OutputID) async throws
     func removeOutput(_ id: OutputID) async throws
     func setVolume(_ id: OutputID, _ volume: Double) async throws
+    func setStartBufferMs(_ ms: Int) async
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
 }
 
@@ -1076,6 +1202,7 @@ struct EngineAdapter: EngineControlling {
     func addOutput(_ id: OutputID) async throws { try await engine.addOutput(id) }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
+    func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { engine.makeStateStream() }
 }
 

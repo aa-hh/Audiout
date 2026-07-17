@@ -215,6 +215,13 @@ final class NativeBackendTests: XCTestCase {
         func currentVolume() -> Int? { lock.withLock { _volume } }
         func currentMuted() -> Bool? { lock.withLock { _muted } }
 
+        /// Re-script what the "hardware" reports for `currentVolume()`, simulating
+        /// the user turning the Mac's system volume knob between connect episodes.
+        /// (`setVolume` records the app's WRITES; this changes what a subsequent
+        /// `currentVolume()` READ returns — the two are independent, matching real
+        /// hardware where a read reflects the device's live level.)
+        func scriptVolume(_ v: Int?) { lock.withLock { _volume = v } }
+
         func setVolume(_ volume: Int) {
             lock.withLock { _volumeCalls.append(volume) }
         }
@@ -1111,6 +1118,303 @@ final class NativeBackendTests: XCTestCase {
                        "the succeeding re-add must not be affected (D4)")
         XCTAssertEqual(devs.first { $0.id == bad.id }?.isSelected, false)
         XCTAssertEqual(devs.first { $0.id == bad.id }?.isAvailable, false)
+    }
+
+    /// Connecting a device with NO prior slider touch must push a real starting
+    /// volume to the engine, sourced from the Mac's CURRENT system output level.
+    /// Without it the engine's zero-initialized volume field leaves the session at
+    /// ≈ −30 dB (silent) until the first manual slider drag — the −30 dB trap.
+    func testConnectSeedsEngineVolumeFromSystemLevel() async {
+        let systemVolume = FakeSystemVolume(volume: 42)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.42) < 0.001 },
+                      "connect must seed the engine volume from the system level (42% → 0.42)")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 42,
+                       "the model row must reflect the seeded level")
+    }
+
+    /// When the system output volume is unreadable (`currentVolume()` == nil), the
+    /// connect seed is 0% — deliberate silence, NOT a guessed non-zero level.
+    func testConnectSeedsZeroWhenSystemVolumeUnreadable() async {
+        let systemVolume = FakeSystemVolume(volume: nil)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 },
+                      "an unreadable system volume must seed 0%, not a guess")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 0)
+    }
+
+    /// The carve-out: a buffer-size change tears every streaming device down and
+    /// re-adds it through the SAME add-success branch a reconnect uses — but it is
+    /// NOT a reconnect. The user's in-session level (80%) must survive; the system
+    /// level (30%) must NOT leak onto the re-added session.
+    func testApplyStartBufferPreservesInSessionVolumeNotSystemLevel() async {
+        let systemVolume = FakeSystemVolume(volume: 30)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        // User dials in an in-session level distinct from the system level.
+        backend.setVolume(80, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
+
+        await backend.applyStartBuffer(ms: 1500)
+
+        // If the re-add had reseeded from the system level, the model would read 30.
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 80,
+                       "a buffer change must preserve the in-session level, not reset to the system level")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.80) < 0.001 } ?? false,
+                      "the re-push after the buffer set must restore the in-session level (0.80)")
+    }
+
+    /// Auto-recovery is NOT excluded from the connect-time reseed (product
+    /// decision) — only `applyStartBuffer`'s internal re-add carve-out is. This
+    /// exercises `applyEngineState`'s `.connected`/`.streaming` add-success
+    /// branch directly (via `engine.pushState`), never going through
+    /// `convergeDevice`'s add path, to prove the OTHER seed call site also fires.
+    /// The device had a distinct in-session level (75) before it dropped; if the
+    /// auto-recovery seed were (wrongly) suppressed like the buffer carve-out,
+    /// the model/engine would still read 75 after the reconnect instead of the
+    /// current system level (42).
+    func testAutoRecoveryReconnectReseedsEngineVolume() async {
+        let systemVolume = FakeSystemVolume(volume: 42)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+
+        // User dials in an in-session level distinct from the system level.
+        backend.setVolume(75, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 75 }
+
+        // Receiver drops out of band (NOT a user toggle) — e.g. the RTSP
+        // session died. desiredOn[id] stays true (the user never deselected).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        // It auto-recovers: the engine reports a good transition on its own —
+        // this never travels through convergeDevice's add-success branch.
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 42,
+                       "an auto-recovery reconnect must reseed from the system level (42), not preserve the pre-drop in-session level (75)")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.42) < 0.001 } ?? false,
+                      "the auto-recovery reconnect must push the system volume to the engine, not skip the seed")
+    }
+
+    /// Regression (live Sonos Move test, 2026-07-17): the vendored C dispatcher
+    /// always mirrors an armed `addOutput` completion onto the engine's
+    /// device-state stream too (shims/outputs.c's `outputs_cb_deferred_drain`
+    /// fires the completion hook, THEN the state hook, for the SAME report), so
+    /// an ordinary user-initiated connect reaches BOTH connect-seed sites —
+    /// `convergeDevice`'s post-`addOutput` write AND `applyEngineState`'s
+    /// `.connected`/`.streaming` branch — not just the out-of-band auto-recovery
+    /// case the latter exists for. Before the fix this fired TWO concurrent
+    /// `engine.setVolume` calls for the SAME output; the vendored dispatcher's
+    /// "one pending callback per device" `outputs_callback_add` contract turns a
+    /// second concurrent call into a clobbered/leaked waiter for the first
+    /// (`SWIFT TASK CONTINUATION MISUSE`), and in the live test enough of those
+    /// piled up that the device eventually disconnected.
+    ///
+    /// This deterministically reproduces the exact race — the state-stream
+    /// mirror of the connect arriving BEFORE `convergeDevice`'s own post-success
+    /// write, via the same `onAddOutputBody` interleave technique
+    /// `testOutOfBandFailedNotClobberedByAddSuccessWrite` uses above — and
+    /// asserts the engine sees at most ONE `setVolume` call for the device, not
+    /// two, no matter which of the two add-success sites gets there first.
+    func testNormalConnectDoesNotDoubleSeedEngineVolumeAcrossBothSites() async {
+        let systemVolume = FakeSystemVolume(volume: 55)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:24", name: "Double Seed Race")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Force the race: the state-stream mirror of THIS SAME connect (what the
+        // real dispatcher always sends) lands from inside addOutput's body — i.e.
+        // before addOutput returns and before convergeDevice's own post-success
+        // `stateQueue.sync` write runs — so `applyEngineState` observes
+        // `wasAdded == false` and is a live candidate to seed, exactly like the
+        // production race between the op-continuation resume and the state-hook
+        // yield.
+        engine.onAddOutputBody = { [weak engine] id in
+            engine?.pushState(id, .connected)
+            Thread.sleep(forTimeInterval: 0.1) // let applyEngineState run first
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        // Let any (wrongly) second fire-and-forget push land.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let callsForDevice = engine.volumeCalls.filter { $0.0 == device.outputID }
+        XCTAssertEqual(callsForDevice.count, 1,
+                       "a single connect event must push volume to the engine exactly once, even though both add-success sites raced for it")
+        XCTAssertTrue(callsForDevice.first.map { abs($0.1 - 0.55) < 0.001 } ?? false,
+                      "the single push must still carry the correct seeded level")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 55,
+                       "the model must reflect the seeded level regardless of which site won the race")
+    }
+
+    /// Regression (live Move 2 test, 2026-07-17): a device connected, disconnected,
+    /// and reconnected MULTIPLE times in one running session must reseed from the
+    /// CURRENT system volume on EVERY reconnect — not just the first. The original
+    /// bug: the connect-time seed was de-duped via a hand-maintained `volumeSeeded`
+    /// set that had to be cleared at every teardown path; the FIRST reconnect
+    /// reseeded, but a SECOND disconnect→reconnect cycle kept the first reconnect's
+    /// stale level (the set was still marked "seeded this session"), so the device
+    /// came back at the wrong volume. The fix keys the seed on the `added` false→
+    /// true edge — the connection ground truth already cleared at every teardown —
+    /// so a missed/reordered clear can't silently skip a reseed.
+    ///
+    /// This drives TWO full disconnect / volume-change / reconnect cycles with the
+    /// dispatcher's state-stream mirror ACTIVE (every `addOutput` also yields a
+    /// `.connected` on the state stream, exactly as the vendored dispatcher does —
+    /// so BOTH add-success seed sites are exercised on every connect), and asserts
+    /// each reconnect reflects the new system level, on both the model and the wire.
+    func testSecondReconnectReseedsFromCurrentSystemVolume() async {
+        let systemVolume = FakeSystemVolume(volume: 50)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Model the vendored dispatcher: every armed addOutput completion is ALSO
+        // mirrored onto the device-state stream, so an ordinary connect reaches
+        // `applyEngineState`'s add-success branch too (not just convergeDevice's).
+        engine.onAddOutputBody = { [weak engine] id in engine?.pushState(id, .connected) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:2C", name: "Move 2")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Drives one connect (setOutputSet ON) at a scripted system level and
+        // returns once the seed for THIS episode has landed on model + engine.
+        func connect(at level: Int) async {
+            systemVolume.scriptVolume(level)
+            let baselineVolumeCalls = engine.volumeCalls.count
+            backend.setOutputSet([device.id])
+            await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+            // Wait for a NEW push (this episode's seed), not a stale earlier one.
+            await pollUntil { engine.volumeCalls.count > baselineVolumeCalls }
+        }
+        func disconnect() async {
+            backend.setOutputSet([])
+            await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == false }
+            // Model the dispatcher mirroring the teardown too.
+            engine.pushState(device.outputID, .stopped)
+            await pollUntil { !Self.netAdded(engine, device.outputID) }
+        }
+
+        // Initial connect at 50.
+        await connect(at: 50)
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 50,
+                       "initial connect must seed the current system level (50)")
+
+        // Cycle 1: disconnect, raise system volume to 75, reconnect.
+        await disconnect()
+        await connect(at: 75)
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 75,
+                       "the FIRST reconnect must reseed from the new system level (75)")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.75) < 0.001 } ?? false,
+                      "the first reconnect must push 0.75 to the engine")
+
+        // Cycle 2: disconnect, DROP system volume to 25, reconnect. THIS is the
+        // exact step that regressed live — the second reconnect kept 75.
+        await disconnect()
+        await connect(at: 25)
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 25,
+                       "the SECOND reconnect must ALSO reseed — from 25, not keep the first reconnect's stale 75")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } ?? false,
+                      "the second reconnect must push 0.25 to the engine, proving the reseed wasn't skipped")
+    }
+
+    /// Requirement: a device muted BEFORE it (re)connects must stay effective-0
+    /// on the wire — the connect-time seed must never audibly un-mute it — while
+    /// its stashed/intended level is updated to track the CURRENT system volume,
+    /// so a later unmute restores to that level rather than whatever the device
+    /// happened to hold before it was muted.
+    func testMutedDeviceStaysEffectiveZeroAfterConnectTimeSeed() async {
+        let systemVolume = FakeSystemVolume(volume: 60)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Mute BEFORE connecting (e.g. a group-mute applied ahead of selection).
+        backend.setMuted(true, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == true }
+
+        // Now connect.
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+
+        // (a) The device is not audibly un-muted: the engine must never see the
+        // seeded system level (0.60) on the wire for this output, only 0.
+        XCTAssertFalse(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.60) < 0.001 },
+                       "a muted device's connect-time seed must never push the unmuted level to the engine")
+        XCTAssertTrue(engine.volumeCalls.allSatisfy { $0.0 != device.outputID || $0.1 == 0.0 },
+                      "every engine push for a muted device must stay 0")
+
+        // (b) The intended level tracks the CURRENT system level (60) — proven
+        // by unmuting and observing the restore. Before the connect-time seed,
+        // the pre-mute stash would have been 50 (the device's default), so
+        // restoring 60 here proves the seed updated the stash, not left it stale.
+        backend.setMuted(false, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == false }
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 60,
+                       "unmuting after a connect-time seed must restore the current system level (60), not a stale pre-mute value")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.60) < 0.001 } ?? false,
+                      "unmute must push the seeded system level (0.60) to the engine")
     }
 
     /// Mute stashes the pre-mute volume and pushes 0 to the engine; unmute restores

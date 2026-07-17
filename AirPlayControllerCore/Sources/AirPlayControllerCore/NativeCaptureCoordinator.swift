@@ -594,8 +594,17 @@ final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
 /// output device, registers a realtime IOProc, and delivers buffers with a `pts`
 /// taken from the IOProc's `AudioTimeStamp.mHostTime`.
 ///
-/// It also installs a listener on `kAudioHardwarePropertyDefaultSystemOutputDevice`
+/// It also installs a listener on `kAudioHardwarePropertyDefaultOutputDevice`
 /// so the coordinator can recreate the tap when the default output changes.
+///
+/// NOT `kAudioHardwarePropertyDefaultSystemOutputDevice` — that selector names the
+/// alert-sound device (System Preferences ▸ Sound ▸ "Play sound effects through"),
+/// which is frequently NOT the device actually rendering audio. Pinning the
+/// aggregate's sub-device to it silently taps the wrong hardware — the tap reports
+/// success and the pipeline runs, but it captures near-silence because nothing
+/// deliberately plays through the alert device. This selector was copied verbatim
+/// from the `dev/audiocap/TapEngine.swift` reference sample; keep it pinned to
+/// `DefaultOutputDevice` (the actual current output) everywhere below.
 ///
 /// `AudioHardwareCreateProcessTap`/`AudioHardwareDestroyProcessTap` are macOS
 /// 14.2+ (the package floor is 14.0); on 14.0–14.1 the coordinator gets an
@@ -722,7 +731,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let outputID: AudioObjectID
         let outputUID: String
         do {
-            outputID = try Self.defaultSystemOutputDeviceID()
+            outputID = try Self.defaultOutputDeviceID()
             outputUID = try Self.readDeviceUID(outputID)
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
@@ -815,7 +824,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     private func installDefaultDeviceListener() {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -829,7 +838,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     private func removeDefaultDeviceListener() {
         guard let block = deviceChangeBlock else { return }
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         AudioObjectRemovePropertyListenerBlock(
@@ -913,9 +922,9 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     // MARK: Device reads (adapted from CAHelpers.swift)
 
-    static func defaultSystemOutputDeviceID() throws -> AudioObjectID {
+    static func defaultOutputDeviceID() throws -> AudioObjectID {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var deviceID: AudioObjectID = kAudioObjectUnknown
@@ -923,7 +932,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let err = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
         guard err == noErr, deviceID != kAudioObjectUnknown else {
-            throw NativeCaptureError.deviceLost(reason: "no default system output device (\(err))")
+            throw NativeCaptureError.deviceLost(reason: "no default output device (\(err))")
         }
         return deviceID
     }

@@ -200,6 +200,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     private var muted: Set<String> = []
     private var stashedVolume: [String: Int] = [:]      // pre-mute volume by id
 
+    /// Ids currently mid-``applyStartBuffer`` teardown/re-add. A buffer-size change
+    /// removes every streaming output and re-adds it through the SAME converge
+    /// add-success branch a real (re)connect uses — but it is NOT a reconnect: the
+    /// user's in-session volume must survive it (``applyStartBuffer`` re-pushes that
+    /// exact level itself). This set is how the shared add path tells the two apart:
+    /// while an id is in it, ``connectVolumeSeed(_:outputID:)`` is suppressed, so a
+    /// plain buffer change never slams the level back to the system volume. See
+    /// ``connectVolumeSeed(_:outputID:)`` for the −30 dB trap the whole seed exists
+    /// to avoid.
+    private var bufferReAdding: Set<String> = []
+
     private var stateStreamTask: Task<Void, Never>?
 
     // MARK: Per-app routing state (T6 — all confined to `stateQueue`)
@@ -580,6 +591,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             self.order.removeAll()
             self.outputIDs.removeAll()
             self.added.removeAll()
+            self.volumeInFlight.removeAll()
+            self.volumePending.removeAll()
             self.expectedSelected.removeAll()
             self.desiredOn.removeAll()
             self.converging.removeAll()
@@ -605,6 +618,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
+            self.bufferReAdding.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -1075,8 +1089,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                         // if the device was parked in the interim, leave it parked and
                         // don't re-add — the failure the engine just reported wins.
                         guard !self.failedGate.contains(id) else { return }
+                        // Seed a real starting volume onto the fresh session so it is
+                        // AUDIBLE immediately: the engine's volume field is 0 until an
+                        // explicit setVolume, and 0 maps to ≈ −30 dB (silent) — the
+                        // −30 dB trap, see `connectVolumeSeed`. Suppressed for an
+                        // `applyStartBuffer` re-add (which restores the in-session
+                        // level itself), so a plain buffer change never resets volume.
+                        //
+                        // The seed fires ONLY on the `added` false→true edge — the
+                        // moment THIS write actually turns the streaming session on.
+                        // That single fact both de-dupes the double-seed race and
+                        // guarantees a reseed on every genuine reconnect: the other
+                        // add-success site (`applyEngineState`) may observe this same
+                        // connect first (the dispatcher mirrors the completion onto
+                        // the state stream), but whichever site runs first flips
+                        // `added` under `stateQueue` and the second sees `wasAdded ==
+                        // true` and skips — so exactly one push per connect. See
+                        // `connectVolumeSeed`.
+                        let wasAdded = self.added.contains(id)
                         self.added.insert(id)
-                        self.applyLocal(id) { $0.isSelected = true; $0.isAvailable = true }
+                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
+                        self.applyLocal(id) {
+                            $0.isSelected = true; $0.isAvailable = true
+                            if let seededVolume { $0.volume = seededVolume }
+                        }
                         // Engine confirmed the add — connecting → connected. (An
                         // interim out-of-band `.failed` already returned above and
                         // left connectionState `.failed` via `applyEngineState`.)
@@ -1294,10 +1330,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         // `lastDescriptors` / `restoreEffectiveVolume`, so we only need the ids.)
         let streaming: [(id: String, outputID: OutputID)] = stateQueue.sync {
             self._startBufferMs = ms
-            return self.added.compactMap { id in
+            let items: [(id: String, outputID: OutputID)] = self.added.compactMap { id in
                 guard let outputID = self.outputIDs[id] else { return nil }
                 return (id, outputID)
             }
+            // Mark these ids as an internal buffer re-add for the WHOLE apply, so the
+            // shared converge add path (and any engine state-stream event that races
+            // it) does NOT reseed their volume from the current system level. This is
+            // a buffer-size change, not a user reconnect: each device's in-session
+            // level must survive, and the explicit re-push at the end of this method
+            // restores it. Without this guard, `connectVolumeSeed` would slam every
+            // running device back to the system volume on a plain buffer change.
+            // Cleared once the apply has fully settled (below).
+            for item in items { self.bufferReAdding.insert(item.id) }
+            return items
         }
 
         // 1. Drive every streaming device OFF via converge and AWAIT completion
@@ -1341,6 +1387,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         }
         for (outputID, value) in toPush {
             try? await engine.setVolume(outputID, value)
+        }
+
+        // The apply has fully settled — teardown, buffer set, re-add, and the
+        // in-session volume re-push above have all run. Lift the seed suppression so
+        // any subsequent REAL (re)connect reseeds from the system volume as usual.
+        stateQueue.sync {
+            for item in streaming { self.bufferReAdding.remove(item.id) }
         }
     }
 
@@ -1609,6 +1662,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                     }
                     return nil
                 }
+                let wasAdded = self.added.contains(id)
                 device.isAvailable = true
                 device.isSelected = true
                 device.connectionState = .connected
@@ -1616,6 +1670,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
                 self.failedGate.remove(id)
+                // A (re)connect the engine reported out-of-band — e.g. an
+                // auto-recovery it drove itself — never went through convergeDevice's
+                // add path, so it too lands at engine volume 0 = ≈ −30 dB (silent).
+                // Seed its starting volume here on a genuine new-add (`!wasAdded`).
+                // Suppressed during an `applyStartBuffer` re-add so a buffer change
+                // whose good-state event races this branch can't reset the level —
+                // see `connectVolumeSeed`.
+                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
+                    device.volume = seededVolume
+                }
             case .failed, .passwordRequired:
                 // A live session died / needs a PIN we don't have: surface it as
                 // unavailable + deselected and drop it from the streaming set. PARK
@@ -1742,12 +1806,59 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         Double(uiVolume.clampedToVolume) / 100.0
     }
 
-    /// Push a volume to the engine off-queue (the engine op is async). Failures are
-    /// non-fatal (volume completions don't gate anything) — swallowed, the next
-    /// state event / user action reconciles.
+    /// Ids with a `setVolume` op currently in flight against the engine. Guards
+    /// against the general case behind the live Sonos Move regression
+    /// (2026-07-17): the vendored C dispatcher's "one pending callback per
+    /// device" `outputs_callback_add` contract (shims/outputs.c) means a SECOND
+    /// concurrent `setVolume` for the same output clobbers the first's
+    /// still-armed waiter — that first waiter's continuation then never gets a
+    /// real completion, surfacing as a leaked `SWIFT TASK CONTINUATION MISUSE`
+    /// and, once enough pile up, the session dying outright. `connectVolumeSeed`
+    /// firing only on the `added` false→true edge closes the double-seed
+    /// specifically (both add-success sites racing on ONE connect); this closes the
+    /// general fire-and-forget hazard so no caller — a seed, a slider drag, a
+    /// mute/unmute — can ever have two `setVolume` calls for the same output in
+    /// flight at once, regardless of what raced what.
+    private var volumeInFlight: Set<OutputID> = []
+    /// The newest value queued behind an in-flight push for an id. Only the
+    /// latest matters for volume (unlike add/remove ops), so a burst of pushes
+    /// for one id (e.g. a fast slider drag) collapses to at most one extra call
+    /// once the in-flight one completes, instead of replaying every
+    /// intermediate value.
+    private var volumePending: [OutputID: Double] = [:]
+
+    /// Push a volume to the engine off-queue (the engine op is async), serialized
+    /// per output id via ``volumeInFlight``/``volumePending`` so at most one
+    /// `engine.setVolume` call for a given output is ever in flight concurrently.
+    /// Failures are non-fatal (volume completions don't gate anything) —
+    /// swallowed, the next state event / user action reconciles. On `stateQueue`.
     private func pushVolume(_ outputID: OutputID, engineValue: Double) {
+        guard !volumeInFlight.contains(outputID) else {
+            volumePending[outputID] = engineValue
+            return
+        }
+        volumeInFlight.insert(outputID)
+        issueVolumePush(outputID, engineValue)
+    }
+
+    /// Issue one `setVolume` call and, on completion, either chase the latest
+    /// superseding value queued in ``volumePending`` or clear ``volumeInFlight``.
+    /// Not on `stateQueue` itself (the engine call is async) — re-enters it only
+    /// to touch the two dictionaries, matching every other engine-callback
+    /// pattern in this file.
+    private func issueVolumePush(_ outputID: OutputID, _ engineValue: Double) {
         let engine = self.engine
-        Task { try? await engine.setVolume(outputID, engineValue) }
+        Task { [weak self] in
+            try? await engine.setVolume(outputID, engineValue)
+            guard let self else { return }
+            self.stateQueue.async {
+                if let next = self.volumePending.removeValue(forKey: outputID) {
+                    self.issueVolumePush(outputID, next)
+                } else {
+                    self.volumeInFlight.remove(outputID)
+                }
+            }
+        }
     }
 
     // MARK: Local optimistic updates + availability (on stateQueue)
@@ -1810,6 +1921,65 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         stashedVolume[id] = nil
         applyLocal(id) { $0.volume = intended }
         pushVolume(outputID, engineValue: Self.engineVolume(intended))
+    }
+
+    /// Seed a just-(re)connected engine output's starting volume from the Mac's
+    /// CURRENT system output level. Pushes the level to the engine and returns the
+    /// value to display on the model, or `nil` when the seed is suppressed (leave
+    /// the model volume untouched). On `stateQueue`.
+    ///
+    /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
+    /// The engine's per-output volume field is zero-initialized and is only ever set
+    /// by an explicit `setVolume`; the AirPlay volume model maps 0 to about −30 dB,
+    /// the quietest non-muted level — effectively silent on the receiver
+    /// (`AirPlayEngine.swift:650-657`). So a freshly connected output nobody touched
+    /// streams INAUDIBLY until the first slider drag. Every real (re)connect must
+    /// push a real starting volume; this is that push, called from BOTH add-success
+    /// sites (`convergeDevice` and `applyEngineState`).
+    ///
+    /// Source of the level: ``SystemVolumeControlling/currentVolume()`` — wherever
+    /// the Mac's own volume sits right now. When that is unreadable (`nil`), seed 0%:
+    /// deliberate silence over a guessed level (product decision), NOT a 65% guess.
+    ///
+    /// Mute carve-out: a device the user explicitly muted stays effective-0. Seed the
+    /// INTENDED level into `stashedVolume` (so a later unmute restores the system
+    /// level) and keep the wire at 0 — never un-mute here.
+    ///
+    /// Suppression: returns `nil` and pushes nothing while `id` is in
+    /// ``bufferReAdding``, so ``applyStartBuffer(ms:)``'s internal teardown/re-add —
+    /// a buffer-size change, NOT a user reconnect — preserves the device's existing
+    /// in-session level instead of resetting it to the system volume.
+    ///
+    /// ## De-dup rides on the `added` false→true edge, NOT a separate set
+    /// This method is reachable from BOTH add-success sites (`convergeDevice` and
+    /// `applyEngineState`), and the vendored dispatcher mirrors a normal `addOutput`
+    /// completion onto the engine's device-state stream too
+    /// (`outputs_cb_deferred_drain` in shims/outputs.c fires the completion hook THEN
+    /// the state hook for the same armed report) — so a plain user-initiated connect
+    /// reaches both sites, not just the out-of-band auto-recovery case site 2 exists
+    /// for. Each caller invokes this ONLY on the `added` false→true transition it
+    /// observes: whichever of the two flips `added` first (both under the serial
+    /// `stateQueue`) seeds; the other sees `added` already true and never calls in.
+    /// That caps the seed at one push per connect episode WITHOUT a separate
+    /// membership set to maintain. An earlier design used a `volumeSeeded: Set` that
+    /// had to be cleared by hand at every teardown path; a single missed/reordered
+    /// clear silently skipped the reseed on a later reconnect (live Move 2 bug,
+    /// 2026-07-17: the SECOND reconnect in a session kept the first reconnect's
+    /// stale level). Keying on `added` — the connection ground truth that is already
+    /// removed at every real teardown — makes that whole class of drift impossible:
+    /// there is no second set that can be stuck-set while `added` is clear, so every
+    /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
+    private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
+        guard !bufferReAdding.contains(id) else { return nil }
+        let seed = systemVolume.currentVolume() ?? 0
+        if muted.contains(id) {
+            // Keep the mute; only update the level an unmute will restore.
+            stashedVolume[id] = seed
+            pushVolume(outputID, engineValue: Self.engineVolume(0))
+        } else {
+            pushVolume(outputID, engineValue: Self.engineVolume(seed))
+        }
+        return seed
     }
 
     // MARK: Capture gate

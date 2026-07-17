@@ -119,17 +119,20 @@ final class PopoverHeaderView: NSView {
     /// `configureIconButton`, so the button is never blank.
     static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
 
-    /// A borderless, image-only SF-Symbol button (task A — subtle hover via
-    /// `HoverActionButton`). The symbol is **template-rendered** (system vector,
-    /// not a bundled raster), verified non-nil at runtime; if the preferred name
-    /// fails to resolve it tries the fallbacks in order.
-    private func configureIconButton(_ button: HoverActionButton,
+    /// A borderless, image-only SF-Symbol button. Hover feedback is the subtle
+    /// rounded accent fill drawn by `HoverActionButton` — stock borderless
+    /// `NSButton` (and `.accessoryBar` + `showsBorderOnlyWhileMouseInside`) gave
+    /// no usable hover in the popover, so we use the purpose-built button that
+    /// paints the Control-Center-style rounded highlight. The symbol is
+    /// **template-rendered** (system vector, not a bundled raster), verified
+    /// non-nil at runtime; if the preferred name fails to resolve it tries the
+    /// fallbacks in order.
+    private func configureIconButton(_ button: NSButton,
                                      symbol: String,
                                      fallbacks: [String],
                                      accessibilityLabel: String,
                                      action: Selector) {
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .accessoryBar
         button.isBordered = false
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown

@@ -347,8 +347,10 @@ final class PopoverPanelViewController: NSViewController {
         if let accessory {
             let button = HoverActionButton()
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.bezelStyle = .accessoryBar
             button.isBordered = false
+            // Custom rounded accent hover fill (HoverActionButton) — stock
+            // borderless NSButton has no usable hover feedback; matches the
+            // header icon buttons.
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.contentTintColor = .secondaryLabelColor
@@ -364,7 +366,13 @@ final class PopoverPanelViewController: NSViewController {
             }
             button.setAccessibilityLabel(accessory.label)
             button.toolTip = accessory.label
-            button.onClick = accessory.action
+            // Same closure-forwarding idiom as the chevron above (T-4): retain
+            // the target via an associated object on the button itself so it
+            // lives exactly as long as the button.
+            let onAccessory = ClosureActionTarget(accessory.action)
+            button.target = onAccessory
+            button.action = #selector(ClosureActionTarget.fire)
+            objc_setAssociatedObject(button, &Self.actionTargetKey, onAccessory, .OBJC_ASSOCIATION_RETAIN)
             headerWrap.addSubview(button)
             NSLayoutConstraint.activate([
                 button.trailingAnchor.constraint(equalTo: headerWrap.trailingAnchor,

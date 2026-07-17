@@ -106,6 +106,17 @@ Corollary for readers: docs orient, code decides. If an `AGENTS.md` names a symb
 you cannot find in source, believe the source and fix the doc — do not assume you
 are looking in the wrong place. `git grep '<symbol>' -- '*.swift'` settles it.
 
+**Backed by a warn-only pre-commit hook** (`.githooks/`, enable once per clone with
+`git config core.hooksPath .githooks`). It flags symbols an AGENTS.md change names
+that exist nowhere in the commit's own source. It compares against **the commit you
+are creating** — deliberately NOT against `main` (which would falsely accuse every
+worktree whose work hasn't merged yet) and NOT against the working tree (which would
+have let f1f3e94 through, since its code was unstaged at commit time and stashed
+after). It never blocks. Backtested over this repo's whole AGENTS.md history: it
+fires on f1f3e94 and d033466, and stays quiet on honest docs+code commits. Known
+false positives: an AppKit type named as design guidance but used nowhere (e.g.
+hudWindow) — ignore those.
+
 ## UI / Design Conventions (all targets)
 
 This app should look and feel like a native macOS citizen, not a cross-platform

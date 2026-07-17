@@ -141,6 +141,82 @@ final class NativeBackendTests: XCTestCase {
         func fire(_ event: DiscoveryEvent) { onEvent?(event) }
     }
 
+    /// Fakes the Mac's own default-output volume/mute (``SystemVolumeControlling``)
+    /// with NO Core Audio HAL reads and NO property listeners on real hardware.
+    ///
+    /// This closes a hermeticity gap: `NativeBackend`'s designated init defaults
+    /// `systemVolume` to a real `SystemOutputVolume()`, so every one of this
+    /// file's ~34 `backend.start()` calls used to construct a real one — reading
+    /// the developer's actual default output device and installing real
+    /// `AudioObjectAddPropertyListenerBlock` registrations on it. No test writes
+    /// volume, so there was no hardware-slamming risk, but if the machine's
+    /// volume/output changed mid-run, `onExternalChange` would fire and emit a
+    /// genuine `local-mac` `deviceUpdated`, perturbing an event-sequence
+    /// assertion elsewhere in the suite — the prime suspect for a real, one-off,
+    /// never-reproduced flake (358 tests / 2 skips / 1 unnamed failure). Injecting
+    /// this fake as `makeBackend()`'s default takes real hardware out of every
+    /// test's path unconditionally.
+    ///
+    /// Records every `setVolume`/`setMuted` call, serves scripted
+    /// `currentVolume()`/`currentMuted()` reads (independent of what was written —
+    /// a test dials in whatever the "hardware" currently reports), and lets a
+    /// test fire `onExternalChange` on demand to simulate a change made outside
+    /// the app (media keys, the Sound menu, a default-output-device switch).
+    /// Mutable state is guarded by `lock`, matching `SpyEngine`/`FakeCapture`'s
+    /// discipline.
+    private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _volume: Int?
+        private var _muted: Bool?
+        private var _volumeCalls: [Int] = []
+        private var _mutedCalls: [Bool] = []
+        private var _onExternalChange: (@Sendable (Int?, Bool?) -> Void)?
+        private var _startCount = 0
+        private var _stopCount = 0
+
+        /// Seeds the scripted hardware reads `NativeBackend.surfaceLocalDevice()`
+        /// consults via `currentVolume()`/`currentMuted()`. Both default `nil` —
+        /// the "unreadable control" case a real aggregate/HDMI output can hit,
+        /// which exercises the `?? 65` / `?? false` fallback.
+        init(volume: Int? = nil, muted: Bool? = nil) {
+            _volume = volume
+            _muted = muted
+        }
+
+        func currentVolume() -> Int? { lock.withLock { _volume } }
+        func currentMuted() -> Bool? { lock.withLock { _muted } }
+
+        func setVolume(_ volume: Int) {
+            lock.withLock { _volumeCalls.append(volume) }
+        }
+        func setMuted(_ muted: Bool) {
+            lock.withLock { _mutedCalls.append(muted) }
+        }
+
+        var onExternalChange: (@Sendable (Int?, Bool?) -> Void)? {
+            get { lock.withLock { _onExternalChange } }
+            set { lock.withLock { _onExternalChange = newValue } }
+        }
+
+        func start() { lock.withLock { _startCount += 1 } }
+        func stop() { lock.withLock { _stopCount += 1 } }
+
+        // Thread-safe snapshots for assertions.
+        var volumeCalls: [Int] { lock.withLock { _volumeCalls } }
+        var mutedCalls: [Bool] { lock.withLock { _mutedCalls } }
+        var startCount: Int { lock.withLock { _startCount } }
+        var stopCount: Int { lock.withLock { _stopCount } }
+
+        /// Simulate a change made OUTSIDE this app by firing the callback
+        /// `NativeBackend.start()` registered. A harmless no-op if nothing is
+        /// registered yet (e.g. fired before `backend.start()`, or after
+        /// `backend.stop()` cleared it).
+        func fireExternalChange(volume: Int?, muted: Bool?) {
+            let handler = lock.withLock { _onExternalChange }
+            handler?(volume, muted)
+        }
+    }
+
     // MARK: Fixtures
 
     private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
@@ -157,10 +233,17 @@ final class NativeBackendTests: XCTestCase {
         return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false)
     }
 
-    private func makeBackend() -> (NativeBackend, SpyEngine, FakeDiscovery) {
+    /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
+    /// site — all ~34 of them, unchanged — gets a hermetic double with no
+    /// explicit opt-in; NO test in this file ever constructs a real
+    /// `SystemOutputVolume` (see `FakeSystemVolume`'s doc comment for why that
+    /// matters). Tests that need to script a readback or fire
+    /// `onExternalChange` construct their own `FakeSystemVolume` and pass it
+    /// explicitly to get a handle on it.
+    private func makeBackend(systemVolume: SystemVolumeControlling = FakeSystemVolume()) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
-        let backend = NativeBackend(engineControl: engine, discoverySource: discovery)
+        let backend = NativeBackend(engineControl: engine, discoverySource: discovery, systemVolume: systemVolume)
         return (backend, engine, discovery)
     }
 
@@ -298,6 +381,221 @@ final class NativeBackendTests: XCTestCase {
 
         XCTAssertTrue(engine.fedIDs.isEmpty, "local device must NOT be fed to the engine")
         XCTAssertTrue(engine.addedIDs.isEmpty, "local device must NEVER be addOutput-ed")
+    }
+
+    // MARK: Current (local) device — volume/mute (SystemVolumeControlling)
+    //
+    // The local row's slider/mute drive `SystemVolumeControlling` directly
+    // (`NativeBackend.setVolume`/`setMuted`'s `id == localDeviceID` branch),
+    // never the engine. `FakeSystemVolume` (MARK: Doubles, above) keeps every
+    // one of these hermetic — no Core Audio HAL read/write, no property
+    // listener, ever touches the developer's real Mac.
+
+    /// `setVolume` on the local id writes through the fake's hardware seam
+    /// (recorded) and optimistically echoes the model — and never touches the
+    /// engine (the local id has no `outputIDs` entry).
+    func testSetVolumeOnLocalDeviceWritesHardwareAndEchoesModel() async {
+        let volume = FakeSystemVolume()
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 70 }
+                return false
+            }
+        } after: { backend.setVolume(70, for: NativeBackend.localDeviceID) }
+
+        XCTAssertTrue(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 70 }
+            return false
+        }, "setVolume on the local id must echo the model")
+        XCTAssertEqual(volume.volumeCalls, [70], "setVolume on the local id must write through the hardware seam")
+        XCTAssertTrue(engine.volumeCalls.isEmpty, "local volume must never reach the engine")
+    }
+
+    /// `setMuted` on the local id goes through REAL hardware mute — deliberately
+    /// NOT the engine path's volume-0-with-stash shim. Proven two ways: the
+    /// engine never sees a `setVolume` call, and the model's `volume` field is
+    /// untouched by the mute (the shim would have forced it to 0).
+    func testSetMutedOnLocalDeviceUsesRealHardwareMuteNotVolumeShim() async {
+        let volume = FakeSystemVolume(volume: 55, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 55 }
+
+        backend.setMuted(true, for: NativeBackend.localDeviceID)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
+
+        XCTAssertEqual(volume.mutedCalls, [true], "local mute must go through the real hardware mute path")
+        let d = backend.devices.first { $0.isLocalDevice }
+        XCTAssertEqual(d?.isMuted, true)
+        XCTAssertEqual(d?.volume, 55, "local mute must NOT run the engine's volume-0 shim — the slider position is untouched")
+        XCTAssertTrue(engine.volumeCalls.isEmpty, "local mute must never push a volume to the engine (no outputIDs entry for local-mac)")
+    }
+
+    /// The local row seeds its volume/isMuted from `currentVolume()`/
+    /// `currentMuted()` (scripted here), not a fabricated default — the row must
+    /// open showing where the Mac's volume actually is.
+    func testLocalDeviceSeedsFromScriptedHardwareState() async {
+        let volume = FakeSystemVolume(volume: 42, muted: true)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        let local = backend.devices.first { $0.isLocalDevice }
+        XCTAssertEqual(local?.volume, 42, "the local row must seed from currentVolume(), not a fabricated default")
+        XCTAssertEqual(local?.isMuted, true, "the local row must seed from currentMuted(), not a fabricated default")
+    }
+
+    /// When the hardware read is unreadable (`nil` — many aggregate/HDMI
+    /// outputs), the local row falls back to 65/false rather than propagating
+    /// `nil` (which would either crash or render as a fabricated 0).
+    func testLocalDeviceSeedFallsBackWhenHardwareUnreadable() async {
+        let volume = FakeSystemVolume(volume: nil, muted: nil)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        let local = backend.devices.first { $0.isLocalDevice }
+        XCTAssertEqual(local?.volume, 65, "an unreadable currentVolume() must fall back to 65")
+        XCTAssertEqual(local?.isMuted, false, "an unreadable currentMuted() must fall back to false")
+    }
+
+    /// The local id's volume clamps 0–100 exactly like the AirPlay path
+    /// (`Int.clampedToVolume`), and the fake receives the CLAMPED value, not the
+    /// raw input.
+    func testLocalDeviceVolumeClampingMatchesAirPlayPath() async {
+        let volume = FakeSystemVolume()
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        backend.setVolume(150, for: NativeBackend.localDeviceID)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 100 }
+        XCTAssertEqual(backend.devices.first { $0.isLocalDevice }?.volume, 100, "150 must clamp to 100")
+        XCTAssertEqual(volume.volumeCalls.last, 100, "the fake must receive the CLAMPED value, matching the AirPlay path")
+
+        backend.setVolume(-5, for: NativeBackend.localDeviceID)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 0 }
+        XCTAssertEqual(backend.devices.first { $0.isLocalDevice }?.volume, 0, "-5 must clamp to 0")
+        XCTAssertEqual(volume.volumeCalls.last, 0)
+    }
+
+    /// TWO-WAY SYNC: a change made outside the app (media keys, Sound menu, a
+    /// default-device switch) flows back in as a `local-mac` `deviceUpdated`
+    /// carrying both fresh values.
+    func testLocalDeviceExternalChangeEmitsDeviceUpdated() async {
+        let volume = FakeSystemVolume(volume: 50, muted: true)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil {
+            let d = backend.devices.first { $0.isLocalDevice }
+            return d?.volume == 50 && d?.isMuted == true
+        }
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 30 && d.isMuted == false }
+                return false
+            }
+        } after: { volume.fireExternalChange(volume: 30, muted: false) }
+
+        XCTAssertTrue(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 30 && d.isMuted == false }
+            return false
+        }, "an external hardware change must sync back to the local row as a deviceUpdated")
+    }
+
+    /// A `nil` field in `onExternalChange` (a control that's unreadable at that
+    /// instant) must be SKIPPED, not applied — a nil volume must not zero the
+    /// row, and symmetrically a nil mute must not reset the last-known mute.
+    func testLocalDeviceExternalChangeSkipsNilFields() async {
+        let volume = FakeSystemVolume(volume: 55, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil {
+            let d = backend.devices.first { $0.isLocalDevice }
+            return d?.volume == 55 && d?.isMuted == false
+        }
+
+        // nil VOLUME must not zero the row.
+        volume.fireExternalChange(volume: nil, muted: true)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
+        var d = backend.devices.first { $0.isLocalDevice }
+        XCTAssertEqual(d?.isMuted, true)
+        XCTAssertEqual(d?.volume, 55, "a nil volume in onExternalChange must not zero the row")
+
+        // nil MUTE must not reset the last-known mute state.
+        volume.fireExternalChange(volume: 99, muted: nil)
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 99 }
+        d = backend.devices.first { $0.isLocalDevice }
+        XCTAssertEqual(d?.volume, 99)
+        XCTAssertEqual(d?.isMuted, true, "a nil mute in onExternalChange must not reset the last-known mute state")
+    }
+
+    /// NO-OP SUPPRESSION: `onExternalChange` firing with values equal to the
+    /// row's current state must emit NOTHING — `applyLocal`'s `device != before`
+    /// guard swallows it (nothing legitimately changed).
+    func testLocalDeviceExternalChangeNoOpSuppressesEmit() async {
+        let volume = FakeSystemVolume(volume: 42, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil {
+            let d = backend.devices.first { $0.isLocalDevice }
+            return d?.volume == 42 && d?.isMuted == false
+        }
+
+        // Subscribe BEFORE firing so the (absence of an) emit is actually observed.
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                if case .level = event { continue }
+                _ = await box.append(event)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000) // let the subscription register
+
+        volume.fireExternalChange(volume: 42, muted: false) // == current state exactly
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+
+        let events = await box.snapshot()
+        XCTAssertFalse(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice }
+            return false
+        }, "onExternalChange with unchanged volume/mute must emit nothing")
+    }
+
+    /// INVARIANT: the local id is NEVER fed to the engine and never added as an
+    /// output, across volume writes, mute writes, AND an explicit attempt to
+    /// select it — no `updateDiscovery`/`addOutput`/engine `setVolume`, ever.
+    func testLocalDeviceNeverReachesEngineAcrossVolumeMuteAndSelection() async {
+        let volume = FakeSystemVolume()
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        backend.setVolume(80, for: NativeBackend.localDeviceID)
+        backend.setMuted(true, for: NativeBackend.localDeviceID)
+        backend.setOutputSet([NativeBackend.localDeviceID])
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 80 }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertTrue(engine.fedIDs.isEmpty, "local-mac must never be fed to engine.updateDiscovery")
+        XCTAssertTrue(engine.addedIDs.isEmpty, "local-mac must never be addOutput-ed")
+        XCTAssertTrue(engine.volumeCalls.isEmpty, "local-mac must never push a volume to the engine")
     }
 
     /// An out-of-band engine state transition (`.streaming` → `.failed` after the
@@ -1126,7 +1424,178 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(engine.addedIDs.isEmpty)
     }
 
+    // MARK: Capture gate
+    //
+    // The tap is `.mutedWhenTapped` — while it runs, the Mac's own speakers are
+    // SILENT. `start()` used to run it unconditionally, so the default
+    // out-of-the-box state (passthrough: no AirPlay outputs selected) muted system
+    // audio and sent the capture nowhere: total silence. Capture must run IF AND
+    // ONLY IF at least one real AP2 output is selected.
+
+    /// THE BUG: passthrough (the default launch state — `start()` with no
+    /// selection, and the empty `setOutputSet` GroupController.applyRouting sends
+    /// when Selected Devices == {local Mac}) must NEVER run the tap.
+    func testPassthroughNeverStartsCapture() async {
+        let (backend, engine, _) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // start() alone: nothing selected yet.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(capture.ops, [], "start() must not run the tap — nothing is selected, so it would mute the Mac and send audio nowhere")
+
+        // ...and the empty set GroupController sends for {local Mac} passthrough.
+        backend.setOutputSet([])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(capture.ops, [], "passthrough (empty output set) must not run the tap")
+        XCTAssertFalse(capture.isCapturing)
+    }
+
+    /// Selecting a real AP2 output starts capture; deselecting stops it.
+    func testCaptureStartsOnAP2SelectionAndStopsOnDeselect() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:40", name: "Gate Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        XCTAssertFalse(capture.isCapturing, "discovery alone must not start capture")
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        XCTAssertTrue(capture.isCapturing, "a selected AP2 output must start capture")
+
+        backend.setOutputSet([])
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(capture.isCapturing, "deselecting the last AP2 output must stop capture (unmuting the Mac)")
+        XCTAssertEqual(capture.ops, ["start", "stop"], "no redundant ops — the gate dedups against its own last decision")
+    }
+
+    /// The gate keys on ids that could actually be streamed to. Neither the local
+    /// Mac device (`supportsAirPlay2 == false`) nor an AP1-only receiver (D6, never
+    /// addOutput-ed) may start the tap — selecting either would mute the Mac with
+    /// the audio going nowhere, which is the original bug wearing a different hat.
+    func testNonStreamableSelectionNeverStartsCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap1 = ap1Device(id: "AA:BB:CC:DD:EE:41")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
+        } after: { discovery.fire(.appeared(ap1)) }
+
+        // The local device + an AP1-only receiver + an id we've never discovered.
+        backend.setOutputSet([NativeBackend.localDeviceID, ap1.id, "AA:BB:CC:DD:EE:FF"])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(capture.ops, [], "only a real, discovered AP2 output may start capture")
+    }
+
+    /// Toggle spam: the gate's start/stop calls must replay in the order
+    /// `stateQueue` decided them (no stale start landing after a stop and re-muting
+    /// the Mac), and settle on the LAST intent.
+    func testCaptureGateToggleSpamSettlesOnLastIntent() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        engine.opDelayNanos = 5_000_000 // slow ops race the fast flips
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:42", name: "Spam Target")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        for _ in 0..<10 {
+            backend.setOutputSet([device.id])
+            backend.setOutputSet([])
+        }
+        backend.setOutputSet([device.id])   // last intent: ON
+
+        await pollUntil { capture.isCapturing }
+        XCTAssertTrue(capture.isCapturing, "capture must settle ON — the last intent selected an AP2 output")
+        // Strictly alternating: the gate never issues start-after-start or
+        // stop-after-stop, so the sequence is exactly the decision sequence.
+        XCTAssertEqual(capture.ops.first, "start")
+        for (i, op) in capture.ops.enumerated() {
+            XCTAssertEqual(op, i.isMultiple(of: 2) ? "start" : "stop", "capture ops must alternate, in decision order")
+        }
+    }
+
+    /// `stop()` must leave the tap stopped — the Mac must never stay muted after
+    /// the backend is torn down, even if a start was still queued behind it.
+    func testStopStopsCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:43", name: "Teardown")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        backend.stop()
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(capture.isCapturing, "stop() must leave the tap stopped, whichever way it raced the queued start")
+        XCTAssertEqual(capture.ops.last, "stop")
+    }
+
+    /// `applyStartBuffer` flaps `desiredOn` internally (remove-all → set → re-add)
+    /// but never touches `expectedSelected` — so it must NOT stop/restart capture.
+    /// A tap bounce here would drop audio and briefly unmute the Mac mid-apply.
+    func testApplyStartBufferDoesNotBounceCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:44", name: "Buffer Apply")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        await backend.applyStartBuffer(ms: 1500)
+        XCTAssertEqual(capture.ops, ["start"], "applyStartBuffer must not bounce the tap — it re-adds outputs, it doesn't change the selection")
+        XCTAssertTrue(capture.isCapturing)
+    }
+
     // MARK: Helpers
+
+    /// Records the gate's capture ops in order, with no Core Audio tap / TCC prompt.
+    private final class FakeCapture: CaptureControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _ops: [String] = []
+
+        var onLevel: (@Sendable (_ rms: Float) -> Void)? {
+            get { lock.withLock { _onLevel } }
+            set { lock.withLock { _onLevel = newValue } }
+        }
+        func start() { lock.withLock { _ops.append("start") } }
+        func stop() { lock.withLock { _ops.append("stop") } }
+
+        /// Every start/stop, in the order they executed.
+        var ops: [String] { lock.withLock { _ops } }
+        /// Whether the tap is running right now — i.e. exactly when the real
+        /// `.mutedWhenTapped` tap has the Mac's speakers muted.
+        var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+    }
 
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)

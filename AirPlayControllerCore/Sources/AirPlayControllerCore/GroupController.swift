@@ -257,9 +257,16 @@ public final class GroupController {
     // MARK: Main Out — the routing decision (SPEC §9 2026-07-14b)
 
     /// Whether the app is in passthrough (SPEC §9b — DERIVED): Main Out targets
-    /// Selected Devices and that set is exactly {the local device}. In real mode
-    /// the app consults this to NOT run the capture coordinator. Does NOT rework
-    /// the coordinator here.
+    /// Selected Devices and that set is exactly {the local device}. A UI/test-facing
+    /// predicate only — nothing in the audio path reads it. The real capture gate is
+    /// `NativeBackend.reconcileCaptureGate()`, keyed on the backend's own
+    /// `expectedSelected` (what `setOutputSet` was last called with), not on this
+    /// property; the two agree because `applyRouting()` below always filters the
+    /// local device out of the set it hands the backend, so passthrough reaches the
+    /// backend as an empty output set on its own. Do NOT wire capture to consult
+    /// `isPassthrough` directly — an unconsulted version of exactly that assumption
+    /// is what let a passthrough session mute the Mac in the first place (the tap
+    /// ran unconditionally; nothing here ever stopped it).
     public var isPassthrough: Bool {
         guard mainOut == .selectedDevices, let local = localDeviceID else { return false }
         return selectedDeviceIDs == [local]

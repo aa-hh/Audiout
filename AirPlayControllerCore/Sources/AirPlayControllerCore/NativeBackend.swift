@@ -25,7 +25,11 @@ import AirPlayEngine
 ///   as engine `addOutput`/`removeOutput` calls.
 /// - **Volume / mute**: app-side. The engine has continuous volume only, so mute
 ///   is the stashed-volume shim; volume maps the UI's 0–100 int onto the engine's
-///   0.0–1.0 contract.
+///   0.0–1.0 contract. The LOCAL row is the exception on both counts — it is not an
+///   engine output at all, so it is driven through ``SystemVolumeControlling``
+///   (Core Audio's default output device) and gets REAL hardware mute rather than
+///   the shim. That path is also the only two-way one: external changes (media
+///   keys, the Sound menu, a default-device switch) flow back as `deviceUpdated`.
 /// - **Post-connection liveness**: `engine.makeStateStream()` — every reported
 ///   `(OutputID, OutputState)` transition (including out-of-band ones that arrive
 ///   after an op's completion resolved, e.g. a receiver dropping RTSP) becomes a
@@ -44,11 +48,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     private let engine: EngineControlling
     private let discovery: DiscoverySource
 
+    /// The Mac's own default-output volume/mute. This is the ONLY control path the
+    /// local device row (``localDeviceID``) has: the Mac is the thing *sending*
+    /// audio, so it is never an engine output, has no ``outputIDs`` entry, and every
+    /// engine-shaped control below would silently drop its writes. `setVolume` /
+    /// `setMuted` therefore branch on the local id *before* the `outputIDs` guard and
+    /// come here instead. See ``SystemVolumeControlling``.
+    ///
+    /// `var`, not `let`, only because ``SystemVolumeControlling`` is not
+    /// class-constrained (a fake can be a struct), so Swift treats
+    /// `onExternalChange`'s setter as potentially mutating and requires mutable
+    /// storage to assign through the existential. It is assigned exactly once, in
+    /// `init`; `start()`/`stop()` mutate only the callback, on the caller's thread —
+    /// the same discipline `discovery.onEvent` / `captureCoordinator.onLevel` keep.
+    private var systemVolume: SystemVolumeControlling
+
     /// The in-process capture pipeline (T-NB-CAPTURE-1). When present (the real
-    /// path wired by ``makeBackend(_:)``), the backend starts/stops it alongside
-    /// its own lifecycle and plumbs its per-buffer RMS into `BackendEvent.level`.
-    /// `nil` in tests and the UI-only smoke path — the backend still drives device
-    /// state, there's just no audio pipeline behind it.
+    /// path wired by ``makeBackend(_:)``), the backend GATES it on selection
+    /// (``reconcileCaptureGate()``) and plumbs its per-buffer RMS into
+    /// `BackendEvent.level`. `nil` in tests and the UI-only smoke path — the
+    /// backend still drives device state, there's just no audio pipeline behind it.
+    ///
+    /// Typed as ``CaptureControlling`` rather than the concrete coordinator so the
+    /// gate is assertable with no Core Audio tap / TCC prompt;
+    /// ``NativeCaptureCoordinator`` conforms, so `makeBackend(_:)` wires the real
+    /// one unchanged.
     ///
     /// Mirrors how ``OwnToneBackend/captureCoordinator`` connects the OwnTone path:
     /// the backend owns the coordinator's lifecycle, the coordinator owns capture.
@@ -56,7 +80,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     /// captured buffer (upstream of the engine, per playback-meter-research.md) and
     /// hands it back via `onLevel`; the backend fans it out as `.level` for every
     /// currently-selected, unmuted device.
-    public var captureCoordinator: NativeCaptureCoordinator?
+    public var captureCoordinator: CaptureControlling?
 
     // MARK: State (all confined to `stateQueue`)
 
@@ -79,10 +103,41 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     private var added: Set<String> = []
 
     /// The raw set of ids the app most recently *asked* to be selected (via
-    /// `setOutputSet`), kept for diagnostics/inspection. The actual per-device
-    /// convergence target is `desiredOn` (below), which coalesces rapid flips; this
-    /// is just the last whole-set request.
+    /// `setOutputSet`). Also the CAPTURE GATE's input (`reconcileCaptureGate`).
+    /// The actual per-device convergence target is `desiredOn` (below), which
+    /// coalesces rapid flips; this is just the last whole-set request.
     private var expectedSelected: Set<String> = []
+
+    // MARK: Capture gate (BUG: passthrough ran the tap and muted the Mac)
+    //
+    // The tap is `.mutedWhenTapped` (NativeCaptureCoordinator.swift:122) — it
+    // silences the Mac's own speakers while capturing, which is CORRECT while
+    // streaming (you don't want local audio playing against delayed AirPlay) and
+    // catastrophic otherwise. `start()` used to run it unconditionally, so the
+    // app's out-of-the-box passthrough state (Selected Devices == {local Mac},
+    // output set EMPTY — GroupController.applyRouting filters the local device
+    // out) muted system audio and sent the capture nowhere: total silence.
+    //
+    // So capture runs ONLY while at least one real AP2 output is selected. The
+    // gate keys on INTENT (`expectedSelected`), not availability — see
+    // `reconcileCaptureGate`.
+
+    /// Whether the capture coordinator is currently *desired* running. The gate's
+    /// last decision, NOT a read of the coordinator's own state machine (which
+    /// settles asynchronously on `captureControlQueue`). Confined to `stateQueue`,
+    /// so the start/stop decision is serialized with the selection that drives it.
+    private var captureRunning = false
+
+    /// Where `coordinator.start()`/`stop()` actually run. They must NOT run on
+    /// `stateQueue`: `stop()` tears down a Core Audio tap and MAY BLOCK
+    /// (NativeCaptureCoordinator.swift:184, "teardown may block on Core Audio"),
+    /// which would head-of-line-block every device update behind it. But their
+    /// ORDER must still follow the `stateQueue` decisions exactly, or a stale
+    /// `start()` could land after a `stop()` and re-mute the Mac forever. A serial
+    /// queue that is only ever enqueued-to from INSIDE a `stateQueue` critical
+    /// section gives both: `stateQueue` orders the decisions, this queue replays
+    /// them in that same order, off the hot path.
+    private let captureControlQueue = DispatchQueue(label: "NativeBackend.captureControl")
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -134,9 +189,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     /// Injectable designated initializer (internal — tests pass a spy engine and an
     /// injected discovery double so the whole backend runs with no engine, network,
     /// or TCC).
-    init(engineControl: EngineControlling, discoverySource: DiscoverySource) {
+    ///
+    /// `systemVolume` defaults to the real ``SystemOutputVolume`` so the convenience
+    /// init (and `makeBackend`) stay unchanged; tests inject a fake and drive the
+    /// local row with no audio hardware in the loop.
+    init(
+        engineControl: EngineControlling,
+        discoverySource: DiscoverySource,
+        systemVolume: SystemVolumeControlling = SystemOutputVolume()
+    ) {
         self.engine = engineControl
         self.discovery = discoverySource
+        self.systemVolume = systemVolume
     }
 
     // MARK: OutputBackend
@@ -183,6 +247,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
         //    surfaced but never fed to the engine.
         discovery.onEvent = { [weak self] event in self?.handleDiscovery(event) }
 
+        // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
+        //     output, so changes made outside this app have to flow back in: the
+        //     media keys, the Sound menu, another app — or the default DEVICE itself
+        //     switching (speakers → AirPods), which usually means a wholly different
+        //     volume/mute pair AND a different name is now in force.
+        //
+        //     Deliberately wired here on the caller's thread, NOT inside the engine
+        //     Task below: the local row must work even if the engine never comes up
+        //     (same reason `surfaceLocalDevice` runs unconditionally above). The
+        //     helper suppresses echoes of our own writes, so this cannot loop back
+        //     against `setVolume`/`setMuted`.
+        systemVolume.onExternalChange = { [weak self] volume, muted in
+            guard let self else { return }
+            // Fires on the helper's OWN private serial queue, never main — hop to the
+            // queue that owns `known` before touching the model.
+            self.stateQueue.async {
+                // A default-device switch reports no name, so re-read it every time:
+                // this is the one path that relabels the row (an unchanged name costs
+                // one HAL read and `applyLocal` suppresses the no-op emit anyway).
+                let name = Self.currentOutputDeviceName()
+                self.applyLocal(Self.localDeviceID) { device in
+                    device.name = name
+                    // nil = that control is unreadable on this device; leave the last
+                    // known value rather than fabricating a 0/false.
+                    if let volume { device.volume = volume }
+                    if let muted { device.isMuted = muted }
+                }
+            }
+        }
+        systemVolume.start()
+
         // 2. Start the engine, THEN discovery. The engine's descriptor feed
         //    (`updateDiscovery`) throws `engineNotRunning` until `start()` resolves,
         //    so we gate the discovery start behind it. Discovery events that arrive
@@ -209,12 +304,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
             //    engine.
             self.discovery.start()
 
-            // 5. Start the capture pipeline (real path only) and fan its RMS into
-            //    `.level` for selected, unmuted devices.
-            if let coordinator = self.captureCoordinator {
-                coordinator.onLevel = { [weak self] rms in self?.emitLevel(rms) }
-                coordinator.start()
-            }
+            // 5. WIRE the capture pipeline's metering (real path only) so its RMS
+            //    fans out as `.level` for selected, unmuted devices — but do NOT
+            //    start capture here. The tap mutes the Mac's own speakers while it
+            //    runs, so starting it unconditionally silenced the default
+            //    passthrough state (no AirPlay outputs selected ⇒ captured audio
+            //    goes nowhere). Capture is started/stopped by
+            //    `reconcileCaptureGate()` off `setOutputSet`, i.e. only while a
+            //    real AP2 output is actually selected. `onLevel` is harmless to
+            //    wire early: it only fires while the tap is running.
+            self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
         }
     }
 
@@ -225,6 +324,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
         captureCoordinator?.stop()
         discovery.onEvent = nil
         discovery.stop()
+        // Drop the local row's two-way sync (the row itself is removed below).
+        systemVolume.onExternalChange = nil
+        systemVolume.stop()
 
         let engine = self.engine
         Task { await engine.stop() }
@@ -238,6 +340,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
             self.stateStreamTask?.cancel()
             self.stateStreamTask = nil
             self.started = false
+            // Reset the capture gate: a later start() re-decides from scratch, and
+            // capture stays off until a setOutputSet selects a real AP2 output.
+            self.captureRunning = false
+            // Give `captureControlQueue` the last word, too. The eager stop above
+            // runs on the CALLER's thread, so it is unordered against a start still
+            // queued from a just-prior setOutputSet — that start would land after
+            // it and leave the tap running (muting the Mac) with the backend torn
+            // down. Enqueued from inside this critical section, this stop is
+            // ordered after every gate decision that preceded it, so the FIFO's
+            // final op is always the stop. Idempotent, hence harmless when the
+            // eager stop already won.
+            if let coordinator = self.captureCoordinator {
+                self.captureControlQueue.async { coordinator.stop() }
+            }
             let ids = self.order
             self.known.removeAll()
             self.order.removeAll()
@@ -256,6 +372,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
 
     public func setVolume(_ volume: Int, for id: String) {
         let clamped = volume.clampedToVolume
+        // The local row is not an engine output — it has no `outputIDs` entry, so the
+        // guard below would drop this write on the floor (the reason its slider did
+        // nothing). Drive the Mac's own default output device instead.
+        if id == Self.localDeviceID {
+            // The model update is `stateQueue`'s (it owns `known`); the Core Audio
+            // write is NOT — it must never run on the queue every device update is
+            // behind. Both orders survive a slider drag: same-thread callers enqueue
+            // to `stateQueue` and to the helper's queue in FIFO order.
+            stateQueue.async { self.applyLocal(id) { $0.volume = clamped } }
+            systemVolume.setVolume(clamped)
+            return
+        }
         stateQueue.async {
             guard let outputID = self.outputIDs[id] else { return }
             // If the device is muted, remember the desired level; unmute restores
@@ -271,6 +399,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     }
 
     public func setMuted(_ muted: Bool, for id: String) {
+        // The local row gets REAL hardware mute (`kAudioDevicePropertyMute` on the
+        // Mac's default output), deliberately NOT the stashed-volume shim the engine
+        // path below uses. The shim exists only because the engine has no mute field;
+        // Core Audio has a real one, and a user muting their Mac expects the system
+        // mute — so nothing is stashed or restored here, and `self.muted` (the shim's
+        // bookkeeping) stays untouched for this id. `Device.isMuted` is the row's
+        // only mute state, and `applyLocal` suppresses the emit when it's unchanged.
+        if id == Self.localDeviceID {
+            stateQueue.async { self.applyLocal(id) { $0.isMuted = muted } }
+            systemVolume.setMuted(muted)   // off `stateQueue`, as in `setVolume`
+            return
+        }
         stateQueue.async {
             guard self.muted.contains(id) != muted else { return }
             guard let outputID = self.outputIDs[id] else { return }
@@ -338,6 +478,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
             for id in Array(self.desiredOn.keys) where self.known[id] == nil {
                 self.desiredOn[id] = nil
             }
+
+            // Selection is the ONLY thing that moves the capture gate, so this is
+            // its one call site. Deliberately NOT called from `applyStartBuffer`:
+            // that flaps `desiredOn` internally (remove-all → set → re-add) but
+            // never touches `expectedSelected`, and must not stop/restart the tap
+            // mid-apply. Runs inside this critical section so the enqueued
+            // start/stop order matches the decision order exactly.
+            self.reconcileCaptureGate()
             return kicks
         }
 
@@ -534,7 +682,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
             kind: .localMac,
             isAvailable: true,
             supportsAirPlay2: false,       // mirrors MockBackend's local fixture
-            volume: 65,
+            // Seed from the HARDWARE, not a fixture: the row must open showing where
+            // the Mac's volume actually is, or the first slider touch would jump it.
+            // These reads are lock-free and work before `systemVolume.start()`
+            // (SystemOutputVolume's contract), which is what lets this run here — the
+            // local row is surfaced before the rest of `start()` wires anything up.
+            // The fallbacks cover outputs with no readable volume/mute control (many
+            // aggregate + digital/HDMI devices), where `nil` means "unreadable".
+            volume: systemVolume.currentVolume() ?? 65,
+            isMuted: systemVolume.currentMuted() ?? false,
             isLocalDevice: true
         )
         known[id] = device
@@ -546,11 +702,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
     /// (`kAudioHardwarePropertyDefaultOutputDevice` → `kAudioObjectPropertyName`).
     /// Falls back to "This Mac" if any query fails, so the row always has a label.
     ///
-    /// TODO (nice-to-have, PLAN-PHASE-2B): react to system-default-output changes
-    /// via an `AudioObjectAddPropertyListener` on
-    /// `kAudioHardwarePropertyDefaultOutputDevice` and re-`emit(.deviceUpdated)`
-    /// with the new name. Not required for BUG B — the name is read once at
-    /// `start()`.
+    /// Read at `start()` (``surfaceLocalDevice``) and re-read on every
+    /// `systemVolume.onExternalChange`, which ``SystemOutputVolume`` fires on a
+    /// default-output-device switch (it owns the `kAudioHardwarePropertyDefaultOutputDevice`
+    /// listener) — so switching speakers → AirPods relabels the row. The callback
+    /// carries no name of its own, hence the re-read there.
     static func currentOutputDeviceName(fallback: String = "This Mac") -> String {
         var deviceID = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
@@ -1144,6 +1300,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
         pushVolume(outputID, engineValue: Self.engineVolume(intended))
     }
 
+    // MARK: Capture gate
+
+    /// Start/stop capture so the tap runs IF AND ONLY IF at least one real AP2
+    /// output is selected. On `stateQueue`, called only from `setOutputSet`.
+    ///
+    /// ## Why intent, not availability (deliberate)
+    /// `want` reads `expectedSelected` — what the user ASKED for — and only checks
+    /// `supportsAirPlay2` (never `isAvailable`, `added`, or `converging`). A
+    /// selected receiver that transiently drops therefore KEEPS capture running
+    /// (the Mac stays muted) until it returns or the user deselects it. That's the
+    /// point: a brief dropout must not blast the Mac's speakers mid-song. The
+    /// `supportsAirPlay2` check is what excludes the two id classes that can never
+    /// stream — the local Mac device (`supportsAirPlay2 == false`, and already
+    /// filtered by `GroupController.applyRouting`) and AP1-only receivers (D6) —
+    /// so `want` means exactly "an id `setOutputSet` could actually `addOutput`".
+    /// An id not yet discovered reads `nil` ⇒ excluded, matching the converge loop
+    /// below, which only ever iterates `order` (known devices).
+    ///
+    /// ## Why the flag flips here but the call runs elsewhere
+    /// `captureRunning` is flipped under `stateQueue` (so concurrent
+    /// `setOutputSet`s can't both decide "start"), while the possibly-blocking
+    /// coordinator call is enqueued on `captureControlQueue` — see that queue's
+    /// doc. Enqueuing from inside the caller's critical section is what keeps the
+    /// two in step: decisions are serialized by `stateQueue` and replayed in the
+    /// same order by a serial queue, so N rapid toggles execute
+    /// start/stop/start/… in exactly the decided order and settle on the last one.
+    private func reconcileCaptureGate() {   // on stateQueue
+        guard let coordinator = captureCoordinator else { return }
+        let want = expectedSelected.contains { known[$0]?.supportsAirPlay2 == true }
+        guard want != captureRunning else { return }   // already at target
+        captureRunning = want
+        captureControlQueue.async {
+            if want { coordinator.start() } else { coordinator.stop() }
+        }
+    }
+
     // MARK: Level pass-through
 
     /// Fan a capture-side RMS sample out as `.level` for every currently-selected,
@@ -1216,6 +1408,33 @@ protocol DiscoverySource: AnyObject, Sendable {
 }
 
 extension NativeDiscovery: DiscoverySource {}
+
+/// The slice of ``NativeCaptureCoordinator`` ``NativeBackend`` drives. Extracted
+/// as a protocol so the capture GATE (`NativeBackend.reconcileCaptureGate`) is
+/// assertable with no Core Audio process tap, no TCC prompt, and no engine — the
+/// behavior being guarded is "is the tap running right now?", which is exactly
+/// what a real tap makes untestable offline. ``NativeCaptureCoordinator`` conforms
+/// as-is, so ``makeBackend(_:)`` still wires the concrete coordinator unchanged.
+///
+/// Public — unlike the internal ``EngineControlling``/``DiscoverySource`` seams —
+/// only because ``NativeBackend/captureCoordinator`` is public, and Swift requires
+/// a public property's type to be public too.
+public protocol CaptureControlling: AnyObject, Sendable {
+    /// Fired once per captured buffer with its level in 0.0…1.0, from the tap's
+    /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
+    var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
+    /// Begin capturing system audio. Idempotent.
+    ///
+    /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers
+    /// are SILENT. Only call it when the captured audio actually has somewhere to
+    /// go (`NativeBackend` gates this on a real AP2 output being selected).
+    func start()
+    /// Stop capturing. Idempotent. MAY BLOCK on Core Audio teardown, so callers
+    /// must keep it off `NativeBackend.stateQueue`.
+    func stop()
+}
+
+extension NativeCaptureCoordinator: CaptureControlling {}
 
 // MARK: - Seam for the future AirPlay 1 (raop) sender (D6)
 //

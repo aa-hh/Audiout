@@ -181,6 +181,14 @@ final class CardView: NSView {
         view.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor).isActive = true
     }
 
+    /// Insert a full-width row at `index` in the card's stack — the inline
+    /// diagnosis panel mounts directly under its failed device row
+    /// (connection-status brief §7.2), so appending isn't enough.
+    func insertRow(_ view: NSView, at index: Int) {
+        contentStack.insertArrangedSubview(view, at: index)
+        view.leadingAnchor.constraint(equalTo: contentStack.leadingAnchor).isActive = true
+        view.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor).isActive = true
+    }
     /// Add a full-width **body** row into the card — a row that collapses/expands
     /// with the chevron (device rows, subsection headers, app rows). The first
     /// body row lazily mounts the clip container into `contentStack` (below the

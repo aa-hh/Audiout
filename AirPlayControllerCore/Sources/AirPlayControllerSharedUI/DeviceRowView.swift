@@ -64,12 +64,31 @@ public final class DeviceRowView: NSView {
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
-    /// icon, name, CC slider and mute button with breathing room in a card
-    /// (CC rows read ~34–40pt; 38 lands in that band).
-    public static let rowHeight: CGFloat = 38
+    /// icon, a two-line name/status stack, CC slider and mute button with
+    /// breathing room in a card (CC rows read ~34–40pt; 38 landed in that band
+    /// before the status sublabel — brief §6 sanctions bumping this constant
+    /// once a second text line needs the room, which it does: two 10pt lines
+    /// plus their line gap don't fit 38pt without crowding the slider/switch).
+    public static let rowHeight: CGFloat = 42
 
     // (See `DeviceRowView.Delegate` extension at file end for the
     // `didToggleEnabled` default no-op.)
+
+    /// Which on-icon status dot the row is currently showing — a structural test
+    /// hook (`test_statusKind`) so tests can assert the right badge is visible
+    /// without reaching into the private badge subview. Redefined for the
+    /// 2026-07-17 on-icon redesign: the four states map directly off
+    /// `Device.connectionState`.
+    public enum StatusKind: Equatable {
+        /// `.off` — the badge is hidden.
+        case none
+        /// `.connecting` / `.reconnecting` — the breathing neutral dot.
+        case connecting
+        /// `.connected` — the solid green dot.
+        case connected
+        /// `.failed` — the solid amber dot.
+        case failed
+    }
 
     public weak var delegate: Delegate?
     public private(set) var device: Device
@@ -96,8 +115,18 @@ public final class DeviceRowView: NSView {
     /// sanctions a mini switch for a single-row per-device setting). Leads the row.
     private let enableSwitch = NSSwitch()
     private let iconView = NSImageView()
+    /// The on-icon connection-status badge (2026-07-17): a small corner dot
+    /// overlapping the icon's bottom-right, driven off `device.connectionState`.
+    /// Replaced the retired right-side status slot. See ``StatusDotView``.
+    private let statusDotView = StatusDotView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private let slider = ControlCenterSlider()
+    /// Status sublabel under the name — now shown ONLY for `.failed` (2026-07-17):
+    /// "Couldn't connect" in `.systemOrange`. Every other state (`.off`,
+    /// `.connecting`, `.reconnecting`, `.connected`) is a SINGLE-LINE row with the
+    /// name vertically centered; the on-icon dot carries the in-flight/connected
+    /// signal there instead.
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let slider = NSSlider()
     /// Small right-aligned `%` readout sitting immediately right of the slider
     /// (change 4 — a device row now shows its volume number too, tight against
     /// the slider like the Main Out row, on the same shared column).
@@ -205,17 +234,23 @@ public final class DeviceRowView: NSView {
         iconView.image = NSImage(
             systemSymbolName: device.kind.symbolName,
             accessibilityDescription: device.name
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                        weight: .regular)
         )
-        // Icon tinted (accent) when the device is in the Selected Devices set;
-        // an unsupported row never shows the accent tint even if `selected`
-        // happens to be stale/true, since it's never actually routed.
-        iconView.contentTintColor = (selected && !isUnsupported) ? .controlAccentColor : .secondaryLabelColor
+        // The icon is ALWAYS neutral now (2026-07-17): identity only, no
+        // accent-when-selected fill. Selection reads from the switch state; the
+        // on-icon corner dot carries the connection status instead. (This also
+        // covers unsupported/AP1 rows — no accent regardless of stale selection.)
+        iconView.contentTintColor = .secondaryLabelColor
         nameLabel.stringValue = device.name
         nameLabel.textColor = rowTextColor
         // The whole row reads dimmed for an unsupported device (T-UI-AP1-1) —
         // matches the existing `!isAvailable` dimming so "can't be used right
         // now" and "can never be used (yet)" look consistently de-emphasized.
         alphaValue = isUnsupported ? 0.5 : 1.0
+
+        applyConnectionStatus(device.connectionState)
 
         // Don't fight a live drag: only push the model value into the slider
         // when the user isn't dragging it. (The readout is kept live during a
@@ -239,6 +274,31 @@ public final class DeviceRowView: NSView {
     /// both as the disabled-toggle tooltip and as the transient popover's body.
     public static let unsupportedExplanation = "AirPlay 1 support is coming soon."
 
+    /// Drive the on-icon status badge + the (failed-only) sublabel from
+    /// `device.connectionState` (2026-07-17 redesign). The badge itself is
+    /// idempotent — ``StatusDotView/apply(_:)`` fully resets its layer/animation
+    /// each time — so a repeated `apply` (e.g. a re-render after an unrelated
+    /// volume change) can never leave a stale breathing animation running under a
+    /// since-changed state.
+    ///
+    /// Only `.failed` is a two-line row: the "Couldn't connect" sublabel appears
+    /// there, in `.systemOrange`. Every other state is single-line (sublabel
+    /// hidden, name vertically centered).
+    private func applyConnectionStatus(_ state: ConnectionState) {
+        statusDotView.apply(state)
+
+        if case .failed = state {
+            statusLabel.isHidden = false
+            statusLabel.stringValue = "Couldn't connect"
+            statusLabel.textColor = .systemOrange
+            applyNameStackLayout(twoLine: true)
+        } else {
+            statusLabel.isHidden = true
+            statusLabel.stringValue = ""
+            applyNameStackLayout(twoLine: false)
+        }
+    }
+
     /// Backward-compatible one-arg update (selection derived from the backend
     /// `isSelected` flag). Retained for callers/tests not yet passing explicit
     /// membership; new hosts should use ``apply(_:selected:blocked:blockReason:)``.
@@ -249,6 +309,16 @@ public final class DeviceRowView: NSView {
     // MARK: Build
 
     private var isDraggingSlider = false
+
+    /// The name label's vertical offset off row center. Flipped live by
+    /// ``applyNameStackLayout(twoLine:)``: 0 when the row is single-line (name
+    /// centered), and a half-line rise when `.failed` shows its sublabel so the
+    /// name + sublabel PAIR is centered instead.
+    private var nameCenterYConstraint: NSLayoutConstraint!
+
+    /// Half-line offset used to center the two-line name/sublabel pair on
+    /// `.failed`. Kept at the value the two-line stack used before the redesign.
+    private static let failedNameRise: CGFloat = 7.5
 
     private func buildSubviews() {
         wantsLayer = true
@@ -271,11 +341,28 @@ public final class DeviceRowView: NSView {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
+        // On-icon status badge: overlaps the icon's bottom-right corner. Not
+        // clipped by the icon (added as a row subview, positioned on the icon's
+        // corner) so the punch-out border shows around it.
+        statusDotView.translatesAutoresizingMaskIntoConstraints = false
+        statusDotView.setContentHuggingPriority(.required, for: .horizontal)
+
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = .menuFont(ofSize: 0)
         nameLabel.lineBreakMode = .byTruncatingTail   // task B: "…" tail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Status sublabel (2026-07-17): shown ONLY for `.failed` ("Couldn't
+        // connect", `.systemOrange`). Small and secondary; `applyConnectionStatus`
+        // shows/hides it and `applyNameStackLayout` centers the name accordingly.
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .systemFont(ofSize: 10)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusLabel.isHidden = true   // single-line by default until the first `apply`
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.minValue = 0
@@ -295,9 +382,19 @@ public final class DeviceRowView: NSView {
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
                                   action: #selector(muteToggled(_:)))
 
+        // Name click toggles the ENABLED switch (2026-07-17 convenience — the
+        // name is spatially separate on the left, so a gesture scoped to it can't
+        // interfere with the slider/mute/%/toggle on the right). The switch stays
+        // the authoritative accessibility control; this is a mouse convenience.
+        // A `.failed` device re-enables (retries) on click — intended.
+        let nameClick = NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:)))
+        nameLabel.addGestureRecognizer(nameClick)
+
         addSubview(enableSwitch)
         addSubview(iconView)
+        addSubview(statusDotView)          // over the icon's corner
         addSubview(nameLabel)
+        addSubview(statusLabel)
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
@@ -308,6 +405,14 @@ public final class DeviceRowView: NSView {
         // the TRAILING edge via the shared grid so they line up with every other
         // row type; the `%` readout hangs off the slider's trailing edge (change
         // 4) so the number is tight to the slider on every slider row.
+        //
+        // The name is SINGLE-LINE and centered by default (2026-07-17); only the
+        // `.failed` state shows a sublabel, at which point `applyNameStackLayout`
+        // raises the name by a half-line so the pair is centered. The right-side
+        // status slot was retired — connection status is the on-icon corner dot.
+        let nameCenterY = nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        nameCenterYConstraint = nameCenterY
+
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
@@ -316,12 +421,31 @@ public final class DeviceRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
+            // On-icon status badge: sized to the badge diameter, its center
+            // pulled IN from the icon's bottom-right corner by `statusDotInset`
+            // so it rides the (now box-filling) glyph's corner with a slight
+            // overhang, reading as a distinct badge over the symbol rather than
+            // floating in the box padding below it.
+            statusDotView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
+            statusDotView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
+            statusDotView.centerXAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
+            statusDotView.centerYAnchor.constraint(equalTo: iconView.bottomAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
+
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                constant: PopoverColumnGrid.iconToName),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameCenterY,
             // Name yields to the MUTE glyph now (it sits between name and slider):
             // the name's trailing is a `<=` and the name truncates.
             nameLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: muteButton.leadingAnchor,
+                constant: -PopoverColumnGrid.iconToName),
+
+            // Sublabel (failed-only) sits a half-line under the (raised) name.
+            statusLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
+            statusLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
+            statusLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: muteButton.leadingAnchor,
                 constant: -PopoverColumnGrid.iconToName),
 
@@ -350,6 +474,12 @@ public final class DeviceRowView: NSView {
                 constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
             enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+    }
+
+    /// Center the name for a single-line row, or raise it a half-line when the
+    /// `.failed` sublabel is showing so the name + sublabel pair is centered.
+    private func applyNameStackLayout(twoLine: Bool) {
+        nameCenterYConstraint.constant = twoLine ? -Self.failedNameRise : 0
     }
 
     private func configureAccessoryButton(_ button: NSButton, symbol: String,
@@ -394,6 +524,18 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: sender.state == .on, for: device.id)
     }
 
+    /// Clicking the device NAME toggles the ENABLED switch (2026-07-17), firing
+    /// the SAME delegate path as the switch itself. A no-op when the switch is
+    /// disabled (Phase-1 local-mix block, or an unavailable device) — checks the
+    /// same conditions `enableSwitch.isEnabled` uses. For a `.failed` device this
+    /// re-enables it (= retry), which is intended.
+    @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
+        guard enableSwitch.isEnabled else { return }
+        let flipped = enableSwitch.state != .on
+        enableSwitch.state = flipped ? .on : .off
+        delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
+    }
+
     /// The name/label colour for the current state: menu highlight wins, then a
     /// dropped device greys out, then a not-selected device de-emphasizes (it's
     /// not in the Selected Devices set), then normal.
@@ -425,6 +567,38 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: on, for: device.id)
     }
 
+    /// Simulate the user clicking the device NAME (toggles the ENABLED switch,
+    /// same delegate path). A no-op when the switch is disabled, mirroring the
+    /// real gesture handler.
+    public func test_clickName() {
+        guard enableSwitch.isEnabled else { return }
+        let flipped = enableSwitch.state != .on
+        enableSwitch.state = flipped ? .on : .off
+        delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
+    }
+
+    /// Which on-icon status dot the row is currently showing — derived from
+    /// `device.connectionState` (the single source the badge renders from), so it
+    /// can never drift from what's actually on screen.
+    public var test_statusKind: StatusKind {
+        switch device.connectionState {
+        case .off:                        return .none
+        case .connecting, .reconnecting:  return .connecting
+        case .connected:                  return .connected
+        case .failed:                     return .failed
+        }
+    }
+
+    /// The failed-only sublabel's current text, or `nil` when hidden (every
+    /// non-`.failed` state — the row is single-line there).
+    public var test_statusText: String? {
+        statusLabel.isHidden ? nil : statusLabel.stringValue
+    }
+
+    /// Whether the connecting/reconnecting badge's breathing pulse is installed
+    /// (on screen + Reduce Motion off). Lets tests assert the animation hook.
+    public var test_dotIsPulsing: Bool { statusDotView.test_isBreathing }
+
     /// The primary ON/OFF switch's current state (for structural assertions).
     public var test_isEnabledOn: Bool { enableSwitch.state == .on }
 
@@ -432,8 +606,9 @@ public final class DeviceRowView: NSView {
     /// (task C); Selected-Devices rows show it.
     public var test_showsToggle: Bool { !enableSwitch.isHidden }
 
-    /// The row's icon tint (accent when selected, secondary otherwise) — a
-    /// selection visual asserted by the T-U8 deselect-reset test.
+    /// The row's icon tint. Always `.secondaryLabelColor` now (2026-07-17 — the
+    /// icon is neutral identity-only; selection reads from the switch, status
+    /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
     /// Whether this row is currently rendered as an unsupported AP1-only
@@ -595,7 +770,11 @@ public final class DeviceRowView: NSView {
             setAccessibilityLabel("\(device.name), AirPlay 1 only, not yet supported")
         } else {
             let membership = isSelectedInSet ? "selected" : "not selected"
-            setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent")
+            // Connection state reads as a trailing clause (brief §6) — omitted
+            // entirely for `.off` so an unrouted row's label is unchanged.
+            let state = accessibilityStateSuffix
+            let stateClause = state.map { ", \($0)" } ?? ""
+            setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
         }
 
         enableSwitch.setAccessibilityLabel(
@@ -606,6 +785,24 @@ public final class DeviceRowView: NSView {
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
+        // The name-click is a mouse convenience; the switch stays the
+        // authoritative accessibility control. A hint on the name label documents
+        // the click for VoiceOver users who land on it.
+        nameLabel.setAccessibilityHelp(
+            isSelectedInSet ? "Click to remove from Selected Devices"
+                            : "Click to add to Selected Devices")
+    }
+
+    /// The accessibility-label clause for the current connection state
+    /// (brief §6), or `nil` for `.off` — enriches the row label for VoiceOver.
+    private var accessibilityStateSuffix: String? {
+        switch device.connectionState {
+        case .off:           return nil
+        case .connecting:    return "connecting"
+        case .reconnecting:  return "reconnecting"
+        case .connected:     return "connected"
+        case .failed:        return "couldn't connect"
+        }
     }
 }
 

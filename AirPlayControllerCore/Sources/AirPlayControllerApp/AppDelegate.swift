@@ -5,6 +5,7 @@ import AppKit
 import AirPlayControllerCore
 import AirPlayControllerPopoverUI
 import AirPlayControllerWindowUI
+import AirPlayControllerSettingsUI
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
@@ -40,6 +41,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `GroupController` as the menu, so both views stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
+    /// Scalar user preferences (theme, density, …), backed by `UserDefaults`.
+    /// The app reads `theme` at launch to apply the appearance override, and the
+    /// Settings window writes it back.
+    private let settings = AppSettings()
+
+    /// The Settings window (header gear). Lazily built on first open, then
+    /// reused/focused — same lifecycle as the mixer window.
+    private var settingsWindowController: SettingsWindowController?
+
+    /// Per-app routing model (Applications card). Held here (not just handed to
+    /// the popover) so the app can enforce the excluded-apps precedence — pruning
+    /// a route when its app is excluded.
+    private var appRouting: AppRoutingController!
+
+    /// The excluded-apps denylist (Settings › Audio, "never captured"). Shared
+    /// between the Settings window (edits it) and the popover (reads it to hide /
+    /// filter excluded apps); the app coordinates the "excluded ⇒ un-routable"
+    /// precedence between it and `appRouting`.
+    private let excludedApps = ExcludedAppsController(store: ExcludedAppsStore())
+
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
@@ -59,6 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Apply the persisted appearance override BEFORE building any UI, so the
+        // status item and popover pick it up on first paint (Settings ›
+        // Appearance). `.system` is a no-op (`NSApp.appearance = nil`).
+        applyAppearance(settings.theme)
+
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action toggles the popover (SPEC §9 revised).
         statusItemController = StatusItemController()
@@ -73,10 +99,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Construct the production AppRoutingController explicitly (T-11), using
         // the default store directory so app routes persist to Application Support.
-        let appRouting = AppRoutingController(store: AppRouteStore())
+        appRouting = AppRoutingController(store: AppRouteStore())
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
+        popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
+        // Excluded apps (Settings › Audio) are un-routable: the popover reads this
+        // to drop them from the Applications picker + rows.
+        popoverController.isAppExcluded = { [weak self] bundleID in
+            self?.excludedApps.isExcluded(bundleID) ?? false
+        }
+        // Enforce the precedence up front: prune any persisted route for an
+        // already-excluded app (e.g. excluded in a previous session).
+        pruneRoutesForExcludedApps()
 
         // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
         // burst the backend emits as it enumerates what's already there.
@@ -102,6 +137,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.update(devices: Array(devicesByID.values))
         controller.showWindow()
         log("Open Mixer… (window shown)")
+    }
+
+    /// Header gear target — open/focus the Settings window (previously a
+    /// `// TODO: settings` stub). Lazily built, then reused; theme changes made
+    /// in the Appearance pane are applied app-wide via `applyAppearance`.
+    @MainActor
+    private func openSettings() {
+        let controller: SettingsWindowController
+        if let existing = settingsWindowController {
+            controller = existing
+        } else {
+            controller = SettingsWindowController(settings: settings, excludedApps: excludedApps)
+            controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
+            controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
+            settingsWindowController = controller
+        }
+        controller.showWindow()
+        log("Open Settings (window shown)")
+    }
+
+    /// The excluded-apps list changed (Settings › Audio). Enforce the "excluded ⇒
+    /// un-routable" precedence — prune any per-app route for a now-excluded app —
+    /// then repaint the popover so its Applications card reflects the change.
+    @MainActor
+    private func handleExcludedAppsChanged() {
+        pruneRoutesForExcludedApps()
+        popoverController.update(devices: Array(devicesByID.values))
+    }
+
+    /// Remove any per-app route whose app is currently excluded (an excluded app
+    /// always plays locally, so a redirect for it is contradictory). No-op when
+    /// nothing is excluded / routed.
+    @MainActor
+    private func pruneRoutesForExcludedApps() {
+        for bundleID in excludedApps.excludedBundleIDs {
+            appRouting.removeRoute(bundleID: bundleID)
+        }
+    }
+
+    /// Apply the appearance override app-wide (Settings › Appearance). `.system`
+    /// clears the override so the app follows the system again (SPEC §9 — the
+    /// historical default). The adaptive UI reads `effectiveAppearance`, which
+    /// reflects this immediately.
+    @MainActor
+    private func applyAppearance(_ theme: AppearanceTheme) {
+        switch theme {
+        case .system: NSApp.appearance = nil
+        case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -538,11 +538,15 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 | Element | AppKit API | Documented usage we follow |
 |---|---|---|
 | Row container | `NSStackView` | Docs position it for "simple, linear layouts" without recycling — right for ≤10 rows (vs `NSTableView` for scrolling data grids, `NSCollectionView` explicitly overkill). |
-| Device icon | `NSImage(systemSymbolName:variableValue:…)` | Speaker symbol; `variableValue` mirrors that device's volume. |
+| Device icon | `NSImage(systemSymbolName:variableValue:…)` | Speaker symbol; `variableValue` mirrors that device's volume. **26pt, always NEUTRAL** (`.secondaryLabelColor`) — identity only, no accent-when-selected fill (2026-07-17); selection reads from the ENABLED switch, connection status from the on-icon dot below. |
+| On-icon status dot (2026-07-17) | Custom `NSView` (`StatusDotView`) — a `CAShapeLayer` filled circle with a ~1.5pt punch-out border in the card/window background | A small **10pt corner badge** overlapping the icon's bottom-right (notification-badge position), replacing the retired right-side status slot. `.off` → hidden; `.connecting`/`.reconnecting` → **breathing** (pulsing) neutral dot (`.secondaryLabelColor`, `CABasicAnimation` opacity 0.3→1.0 + scale 0.82→1.0, ~1.6s, auto-reversed, forever — **static dot under Reduce Motion**); `.connected` → solid `.systemGreen`; `.failed` → solid `.systemOrange`. Appearance-adaptive (`updateLayer`/`viewDidChangeEffectiveAppearance`). Sizes are named constants in `PopoverColumnGrid` (swappable for a future compact/normal/large density). |
+| Name click | `NSClickGestureRecognizer` on the name label | Clicking the device NAME toggles the ENABLED switch (same delegate path as the switch); a no-op when the switch is disabled (local-mix block / unavailable). The switch stays the authoritative accessibility control. For a `.failed` device this re-enables it (= retry). |
 | Enable toggle | `NSSwitch`, mini size | HIG toggles: "within a grouped form, consider using a mini switch to control the setting in a single row" — sanctioned for per-device on/off. Never in toolbar/status areas (HIG). |
 | Volume | `NSSlider(value:minValue:maxValue:target:action:)`, horizontal | `isContinuous = true` for live drag feedback (HIG sliders: live feedback required). Min at leading edge, speaker icons at ends per HIG. (HIG's "don't use a slider for volume" is iOS-only — macOS's own Sound menu is a slider.) |
 | Mute / Solo | `NSButton`, `bezelStyle = .accessoryBar`, `setButtonType(.pushOnPushOff)` | `.accessoryBar` is documented for on/off-style buttons; NOT `NSSwitch` (HIG: switches only for emphasized settings, don't replace checkbox-like toggles). SF Symbols `speaker.slash.fill` / `headphones`. |
 | Level meter | `NSLevelIndicator`, `.discreteCapacity` | Docs describe this style as "similar to audio level indicators in audio playback applications" — with `warningValue`/`criticalValue` for free green/yellow/red. Display-only. |
+| Status sublabel (2026-07-16; failed-only 2026-07-17) | Second `NSTextField` under the device name, `systemFont(ofSize: 10)` | Shown ONLY for `.failed`: "Couldn't connect" in `.systemOrange`. `.failed` is the only two-line row (name raised a half-line so the pair centers); every other state (`.off`/`.connecting`/`.reconnecting`/`.connected`) is single-line with the name centered — the on-icon dot carries their status. Retired 2026-07-17: the right-side status slot + the `ArcSpinnerView` arc spinner (both replaced by the on-icon corner dot above). |
+| Diagnosis panel (2026-07-16) | Custom `NSView` (`ConnectionDiagnosisView`) inserted as its own stack-view row directly under the failed device's row, `NSColor.systemOrange.withAlphaComponent(0.12)` rounded background | Headline + wrapping suggestion body + "Try again"/"Copy details" (`NSButton`, `bezelStyle = .rounded`, `.small`). Inserted/removed with the same animated approach as group expansion. Auto-expands once per failure episode and auto-collapses when the device leaves `.failed`; purely auto-driven off the connection-state transitions since the manual warning-button toggle was retired 2026-07-17. |
 
 ### Full window (Mixer)
 | Element | AppKit API | Documented usage we follow |
@@ -565,6 +569,32 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
   materials only, and `NSMenu`/sidebar supply their own automatically.
 - Switches for mute/solo, switches in toolbars (HIG toggles).
 - Cell-based `NSTableView` (view-based only).
+
+### Connection status & diagnostics (2026-07-16)
+
+Enabling a speaker can silently fail after OwnTone's API already returned
+success, and a connected speaker can silently drop mid-stream (the "zombie"
+case) — see `dev/notes/p1-connection-status-brief.md` for the full design.
+Summary of what shipped:
+
+- **State machine** on `Device.connectionState`: `off → connecting →
+  connected`, `connecting → failed`, `connected → reconnecting →
+  connected|failed`. The backend (`MockBackend` and `OwnToneBackend`) is the
+  only writer; the UI is a pure renderer, same as every other `Device` field.
+- **Honest toggle:** the row's switch only rests ON once the connection is
+  confirmed stable, not just requested. On failure it animates back OFF via
+  ordinary Selected-Devices membership removal.
+- **Sticky-failed:** a `.failed` device keeps showing its warning even after
+  that membership-removal cleanup drops its id from the backend's expected-
+  selected set; it only clears on retry (`.failed → .connecting`) or the
+  device disappearing entirely (`.failed → .off`).
+- **Retry policy:** the backend's one automatic recovery attempt is covered by
+  the connecting/reconnecting phase; after that, `.failed` is a resting state
+  — retry is manual ("Try again" or toggling back on). No background retry
+  loops.
+- **Diagnosis:** engine-log tail + Bonjour presence + a bounded TCP probe +
+  auth flags map to one plain-English cause + suggested action, shown in the
+  inline panel with a "Copy details" action for the raw evidence.
 
 ---
 

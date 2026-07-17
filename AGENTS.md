@@ -70,6 +70,42 @@ phase status materially changes, or the dev tooling gains a new layer.
   — several were written 2026-07-17 specifically to de-risk the next phases
   before implementation starts.
 
+## AGENTS.md must never reach `main` ahead of its code (HARD RULE)
+
+**An `AGENTS.md` change describing code MUST land on `main` in the same merge as
+that code — never before it.** Other agents read `main`'s AGENTS.md as their map
+of this repo. A doc that describes code `main` does not have doesn't just fail to
+help them; it actively sends them looking for symbols that do not exist, and they
+will not think to doubt it. Docs ahead of code are worse than no docs.
+
+**How to work (Alec, 2026-07-17):**
+1. Edit `AGENTS.md` in YOUR OWN worktree, alongside the code it describes.
+2. Commit both together, then merge the branch into `main` as one unit. Docs and
+   code become true on `main` at the same instant.
+3. Do NOT edit `AGENTS.md` directly in the `main` checkout, and do NOT commit a
+   docs-only "I'll land the code next" change. There is no "next".
+4. If the code is dropped, deferred, or stashed, the doc describing it does not
+   land either. Landing half is what creates an orphan.
+
+**This is not hypothetical — it is the most expensive failure this repo has had:**
+- `f1f3e94` (docs-only, 5 AGENTS.md, **zero** .swift, committed straight onto
+  `main`) documented `appRouteTargets` / `redirectOutputIDs()` / `reapplyRouting()`
+  / `routedAppNames(for:)`. The code was stashed and never landed, so `main`
+  described a feature that existed in zero .swift files for a day, while agents
+  read it as truth. Recovering it took a full session (landed 2026-07-17, `432aa7d`).
+- `d033466` shows the OTHER half of the rule: it shipped code and docs together,
+  but the doc named three methods — setAppRoute, setAppVolume, removeAppRoute
+  (deliberately un-backticked here: none has ever existed in any .swift file, and
+  this sentence should not read as a reference to real API) — while the code in
+  that very commit declared `addRoute` / `setDestination` / `setVolume` /
+  `removeRoute`. Same-commit is necessary but NOT sufficient — **re-read the code
+  you just wrote and confirm every symbol you name in a doc actually exists.**
+  Nobody did, for months, and agents kept propagating the fiction.
+
+Corollary for readers: docs orient, code decides. If an `AGENTS.md` names a symbol
+you cannot find in source, believe the source and fix the doc — do not assume you
+are looking in the wrong place. `git grep '<symbol>' -- '*.swift'` settles it.
+
 ## UI / Design Conventions (all targets)
 
 This app should look and feel like a native macOS citizen, not a cross-platform

@@ -93,6 +93,56 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.selectedDeviceIDs, ["office"], "local dropped, AirPlay added")
     }
 
+    /// REVERSE auto-swap (Alec, live session 2026-07-17b): removing the LAST
+    /// AirPlay device must restore the local passthrough default, not leave the
+    /// set empty — an empty set renders as a zeroed Main Out master and gives the
+    /// volume keys nothing to visibly drive.
+    func testReverseAutoSwapRestoresLocalWhenLastAirPlayRemoved() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // {local}
+        _ = controller.setDeviceSelected("office", true)          // auto-swap: {office}
+        let r = controller.setDeviceSelected("office", false)
+        XCTAssertTrue(r.autoSwappedCurrentDevice, "the restore is surfaced like the forward swap")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"], "back to the passthrough default")
+        XCTAssertTrue(controller.isPassthrough)
+    }
+
+    func testReverseAutoSwapDoesNotFireWhileAnotherAirPlayRemains() async throws {
+        let (controller, _) = try await makeController()
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("homepod-bed", true)
+        let r = controller.setDeviceSelected("office", false)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["homepod-bed"], "the remaining speaker keeps the set")
+    }
+
+    /// Toggling the LOCAL device itself off is a deliberate act on that row, not a
+    /// disconnect — the restore must not fire (it would make the toggle a no-op).
+    func testDeselectingLocalItselfDoesNotSelfRestore() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // {local}
+        let r = controller.setDeviceSelected("local-mac", false)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertTrue(controller.selectedDeviceIDs.isEmpty)
+    }
+
+    /// THE SYMPTOM: the Main Out master must track the Mac's own volume after the
+    /// last AirPlay device disconnects — not slam to 0 (the empty-set average).
+    func testMainOutMasterTracksLocalAfterLastAirPlayRemoved() async throws {
+        let (controller, _) = try await makeController(fleet: [
+            Device(id: "local-mac", name: "MacBook Pro Speakers", kind: .localMac,
+                   supportsAirPlay2: false, volume: 65, isLocalDevice: true),
+            Device(id: "office", name: "Office", kind: .sonos, volume: 40),
+        ])
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)          // streaming: master = 40
+        XCTAssertEqual(controller.mainOutMasterVolume, 40)
+
+        _ = controller.setDeviceSelected("office", false)         // disconnect
+        XCTAssertEqual(controller.mainOutMasterVolume, 65,
+                       "the master shows the Mac (what is actually playing), not a zeroed empty set")
+    }
+
     func testAutoSwapDoesNotFireWhenLocalNotSoleMember() async throws {
         let (controller, _) = try await makeController()
         _ = controller.setDeviceSelected("office", true)          // no local at all
@@ -656,6 +706,13 @@ final class GroupControllerTests: XCTestCase {
         ]
     }
 
+    /// `mirrorFleet` plus a fourth AirPlay device used only as a redirect target
+    /// (never in `selectedDeviceIDs`) — at 40, a clean 2:1 against `loud`'s 80, for
+    /// the redirect-mirror tests below.
+    private var mirrorFleetWithRedirectTarget: [Device] {
+        mirrorFleet + [Device(id: "homepod-bed", name: "Bedroom HomePod", kind: .sonos, volume: 40)]
+    }
+
     /// A controller over a write-recording backend, already streaming to both AirPlay
     /// speakers (selecting the first auto-swaps the local device out, exactly as
     /// toggling a speaker in the popover does).
@@ -897,6 +954,54 @@ final class GroupControllerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertTrue(spy.volumeWrites.isEmpty)
+    }
+
+    /// THE BUG (Alec, live session 2026-07-17): "if nothing is connected to the
+    /// audio out and I hit the volume buttons, the audio out volume doesn't
+    /// change." A per-app redirect can open an AirPlay session — muting the Mac —
+    /// even while Selected Devices is exactly {local} (`isPassthrough == true`);
+    /// the old `!isPassthrough` guard blocked the mirror entirely in that state,
+    /// leaving the redirected device's volume stuck. `mirrorMemberIDs` now unions
+    /// redirect targets in regardless of what Selected Devices reports.
+    func testSystemVolumeMirrorDrivesRedirectOnlyTargetInPassthrough() async throws {
+        let mock = try await makeBackend(mirrorFleetWithRedirectTarget)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        controller.appRouteTargets = { ["homepod-bed"] }
+        controller.ensureDefaultSelection()                     // {local} — passthrough
+        controller.reapplyRouting()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(controller.isPassthrough, "precondition: Selected Devices is still just {local}")
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(25)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(spy.volume(of: "homepod-bed"), 25,
+                       "the redirect-only device follows the volume keys even though Selected Devices is passthrough")
+        XCTAssertEqual(spy.volume(of: "local-mac"), 65, "the mirror still never writes the local device")
+    }
+
+    /// The same union applies while genuinely streaming: a redirect target playing
+    /// alongside a Selected Device is scaled proportionally right along with it.
+    func testSystemVolumeMirrorDrivesRedirectTargetAlongsideSelectedDevice() async throws {
+        let mock = try await makeBackend(mirrorFleetWithRedirectTarget)
+        let spy = WriteCountingBackend(mock)
+        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        controller.appRouteTargets = { ["homepod-bed"] }
+        _ = controller.setDeviceSelected("loud", true)          // loud=80, homepod-bed=40 → avg 60, a clean 2:1
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        spy.reset()
+
+        controller.mirrorSystemVolumeToMainOut(30)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(spy.volume(of: "loud"), 40, "80 scaled by 30/60")
+        XCTAssertEqual(spy.volume(of: "homepod-bed"), 20,
+                       "the redirect-only device is scaled proportionally alongside the Selected Device — 40 scaled by 30/60")
     }
 }
 

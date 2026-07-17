@@ -22,153 +22,59 @@
 // is passed. Without it, the CLI parses args, prints the plan for however many
 // devices were given, and exits 0 — which is all `swift build` / CI ever
 // exercise. NEVER add a default that opens a socket.
+//
+// ARG PARSING lives in the EngineProbeParsing library target (unit-tested by
+// Tests/AirPlayEngineTests/EngineProbeParsingTests.swift) after the first
+// gated multi-room run (2026-07-17) was burned by an untested parser footgun
+// — see the header of Sources/EngineProbeParsing/ProbeArgParsing.swift. A
+// malformed argv (a device committed without its --device-id, trailing
+// per-device flags, an unknown flag) prints the plan PLUS the problems and
+// exits 2 without opening a socket — dry-run included, so the exact command
+// line for a gated session can (and should) be validated un-gated first.
 
 import Foundation
 import AirPlayEngine
-
-// MARK: - Per-device args
-
-/// One `--address`/`--device-id` (plus the other per-device flags that
-/// preceded it) describes one output. Flags are consumed in the order given
-/// on the command line: each `--address` starts a new device slot, and any
-/// per-device flag before the first `--address` seeds the defaults for
-/// devices that don't override it.
-struct ProbeDevice {
-    var deviceName: String = "Test Speaker"
-    var address: String = ""
-    var port: Int = 7000
-    var deviceID: String = ""              // colon-hex MAC, e.g. AA:BB:CC:DD:EE:FF
-    var features: String = "0x445F8A00,0x1C340"
-    var model: String = "AudioAccessory5,1"
-    var ipv6: Bool = false
-    var password: String?
-}
-
-struct ProbeArgs {
-    var devices: [ProbeDevice] = []
-    var pcmPath: String = ""               // interleaved S16LE 44100/2 raw PCM, shared by all outputs
-    var gated: Bool = false                // the explicit live-run flag
-}
-
-func usage() -> String {
-    """
-    engine-probe — gated multi-device AirPlay session probe
-
-    USAGE (single device):
-      engine-probe --address <ip> --device-id <AA:BB:..> --pcm <file.raw> [options] \\
-                   --i-have-a-receiver-and-owntone-is-stopped
-
-    USAGE (multi-room — repeat the per-device flags before each --address):
-      engine-probe --pcm <file.raw> \\
-                   --name "Kitchen" --address <ip1> --device-id <hex1> \\
-                   --name "Living Room" --address <ip2> --device-id <hex2> \\
-                   --i-have-a-receiver-and-owntone-is-stopped
-
-    REQUIRED (for a live run):
-      --address <ip>          Resolved receiver IP (v4 unless --ipv6). Repeatable:
-                               each occurrence starts a new output device.
-      --device-id <hex>       Colon-hex device id from the TXT record, for the
-                               device slot most recently opened by --address.
-      --pcm <path>            Raw interleaved S16LE PCM, 44100 Hz, 2ch. Shared
-                               by every output — one source, fanned out.
-
-    PER-DEVICE OPTIONS (apply to the device slot they precede/follow; set
-    before the first --address to change the default for all devices):
-      --name <str>            mDNS instance name          (default "Test Speaker")
-      --port <n>              RTSP port                   (default 7000)
-      --features <str>        TXT features string         (default AP2 audio)
-      --model <str>           TXT model                   (default HomePod-like)
-      --ipv6                  Treat this device's --address as IPv6
-      --password <str>        RTSP password, if required
-
-    GATE (required to actually open a session):
-      --i-have-a-receiver-and-owntone-is-stopped
-                              Confirms real receiver(s) are present AND OwnTone/any
-                              PTP daemon is stopped (UDP 319/320 free) AND a human
-                              is watching. Without this flag the probe only prints
-                              its plan and exits — it opens NO sockets.
-
-    This CLI is built green by `swift build` but is NEVER run as part of
-    T-API-1 / T-ENG-MULTIROOM-CLI-1.
-    """
-}
-
-func parseArgs(_ argv: [String]) -> ProbeArgs {
-    var a = ProbeArgs()
-    var current = ProbeDevice()
-    var haveDevice = false
-    var i = 0
-    func next() -> String { i += 1; return i < argv.count ? argv[i] : "" }
-    // Once the in-progress slot already has an address, ANY per-device flag
-    // (--name/--port/--features/--model/--ipv6/--password) that arrives
-    // before the NEXT --address is describing a new device, not amending the
-    // one just committed by its own --device-id — so it must commit the
-    // in-progress slot first. This keeps
-    //   --name Kitchen --address ip1 --device-id id1 \
-    //   --name "Living Room" --address ip2 --device-id id2
-    // from clobbering Kitchen's name in place before it's committed.
-    func commitIfStartingNewDevice() {
-        if haveDevice && !current.address.isEmpty {
-            a.devices.append(current)
-            current = ProbeDevice()
-            haveDevice = false
-        }
-    }
-    while i < argv.count {
-        switch argv[i] {
-        case "--name":
-            commitIfStartingNewDevice()
-            current.deviceName = next()
-        case "--address":
-            // A bare second --address with no intervening per-device flag
-            // also starts a fresh device slot.
-            commitIfStartingNewDevice()
-            current.address = next()
-            haveDevice = true
-        case "--port":
-            commitIfStartingNewDevice()
-            current.port = Int(next()) ?? current.port
-        case "--device-id": current.deviceID = next()
-        case "--features":
-            commitIfStartingNewDevice()
-            current.features = next()
-        case "--model":
-            commitIfStartingNewDevice()
-            current.model = next()
-        case "--ipv6":
-            commitIfStartingNewDevice()
-            current.ipv6 = true
-        case "--pcm": a.pcmPath = next()
-        case "--password":
-            commitIfStartingNewDevice()
-            current.password = next()
-        case "--i-have-a-receiver-and-owntone-is-stopped": a.gated = true
-        case "-h", "--help": print(usage()); exit(0)
-        default: FileHandle.standardError.write(Data("Unknown arg: \(argv[i])\n".utf8))
-        }
-        i += 1
-    }
-    if haveDevice {
-        a.devices.append(current)
-    }
-    return a
-}
+import EngineProbeParsing
 
 // MARK: - Main
 
-let args = parseArgs(Array(CommandLine.arguments.dropFirst()))
+let args = parseProbeArgs(Array(CommandLine.arguments.dropFirst()))
+
+if args.wantsHelp {
+    print(usage())
+    exit(0)
+}
 
 print("engine-probe plan: \(args.devices.count) device(s)")
 if args.devices.isEmpty {
     print("  <no devices specified — pass --address/--device-id at least once>")
 } else {
     for (idx, d) in args.devices.enumerated() {
-        print("  [\(idx)] \(d.deviceName) @ \(d.address):\(d.port) (\(d.ipv6 ? "IPv6" : "IPv4"))")
-        print("       deviceid : \(d.deviceID.isEmpty ? "<missing>" : d.deviceID)")
+        let addr = d.address.isEmpty ? "<MISSING --address>" : d.address
+        print("  [\(idx)] \(d.deviceName) @ \(addr):\(d.port) (\(d.ipv6 ? "IPv6" : "IPv4"))")
+        print("       deviceid : \(d.deviceID.isEmpty ? "<MISSING --device-id>" : d.deviceID)")
     }
 }
 print("  pcm      : \(args.pcmPath.isEmpty ? "<missing>" : args.pcmPath)")
 print("  gated    : \(args.gated)")
+
+// Parse problems are fatal in EVERY mode, dry-run included: the whole point
+// of the un-gated dry run is to validate the exact command line a later
+// gated session will spend real receivers on. (2026-07-17: a silently
+// misparsed plan split one device into two and burned the first gated
+// multi-room run.)
+if !args.problems.isEmpty {
+    fflush(stdout)  // keep the plan above the problems when both hit a terminal
+    let report = args.problems.map { "  ! \($0)" }.joined(separator: "\n")
+    FileHandle.standardError.write(Data("""
+
+    engine-probe: the argument list does not describe an unambiguous plan:
+    \(report)
+    No session was opened. See --help for how flags group into devices.
+
+    """.utf8))
+    exit(2)
+}
 
 guard args.gated else {
     print("""
@@ -183,16 +89,12 @@ guard args.gated else {
 
 // ---- Beyond this point ONLY runs in a real gated session (flag present). ----
 // This block is intentionally the ONLY code that opens a real network session.
+// Per-device completeness (--address + --device-id on every device) is already
+// guaranteed: an incomplete device is a parse problem, which exited 2 above.
 
 guard !args.devices.isEmpty else {
     FileHandle.standardError.write(Data("Gated run needs at least one --address/--device-id pair.\n".utf8))
     exit(2)
-}
-for d in args.devices {
-    guard !d.address.isEmpty, !d.deviceID.isEmpty else {
-        FileHandle.standardError.write(Data("Gated run needs --address and --device-id for every device.\n".utf8))
-        exit(2)
-    }
 }
 guard !args.pcmPath.isEmpty else {
     FileHandle.standardError.write(Data("Gated run needs --pcm.\n".utf8))

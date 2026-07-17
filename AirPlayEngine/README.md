@@ -129,11 +129,21 @@ explicit flag is passed:
 ```
 swift run engine-probe \
   --address 192.168.1.50 --port 7000 \
-  --device-id AA:BB:CC:DD:EE:FF \
   --features "0x445F8A00,0x1C340" --model AudioAccessory5,1 \
+  --device-id AA:BB:CC:DD:EE:FF \
   --pcm /path/to/audio-s16le-44100-2ch.raw \
   --i-have-a-receiver-and-owntone-is-stopped
 ```
+
+Flag grouping (multi-room): per-device flags **amend the device being
+described — in any order — until it has both `--address` and `--device-id`**;
+the next per-device flag after that starts the next device. Anything ambiguous
+(a device without its `--device-id`, trailing per-device flags) prints the plan
+plus the problems and **exits 2 without opening a socket** — so dry-run the
+exact command line (without the gate flag) before a gated session. The grammar
+lives in `Sources/EngineProbeParsing/` (unit-tested; see
+`EngineProbeParsingTests`), split out after the first gated multi-room run
+(2026-07-17) was burned by an argv misparse.
 
 Without `--i-have-a-receiver-and-owntone-is-stopped` it just prints its plan and
 exits 0 (what build/CI exercise). A **live** run requires ALL of:

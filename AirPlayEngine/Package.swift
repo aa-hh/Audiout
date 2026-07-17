@@ -230,6 +230,17 @@ let package = Package(
             ]
         ),
 
+        // The probe CLI's argument grammar, split out of the executable so
+        // the test target can import and unit-test it. Motivated by the
+        // first gated multi-room run (2026-07-17), which was burned by an
+        // untested parser footgun that silently split one device into two —
+        // see Sources/EngineProbeParsing/ProbeArgParsing.swift. Pure Swift,
+        // no C/engine dependency.
+        .target(
+            name: "EngineProbeParsing",
+            path: "Sources/EngineProbeParsing"
+        ),
+
         // The gated probe CLI (T-API-1). WOULD drive a one-device session
         // (parse device ip/port/name + a PCM file, start the engine, addOutput,
         // pump PCM), but is guarded behind an explicit
@@ -238,13 +249,13 @@ let package = Package(
         // OwnTone stopped for PTP 319/320, human present). See README.md.
         .executableTarget(
             name: "engine-probe",
-            dependencies: ["AirPlayEngine"],
+            dependencies: ["AirPlayEngine", "EngineProbeParsing"],
             path: "Sources/engine-probe"
         ),
 
         .testTarget(
             name: "AirPlayEngineTests",
-            dependencies: ["AirPlayEngine"],
+            dependencies: ["AirPlayEngine", "EngineProbeParsing"],
             path: "Tests/AirPlayEngineTests"
         ),
     ]

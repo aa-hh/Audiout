@@ -46,3 +46,38 @@ new layer.
 - **The core package knows nothing about AppKit.** `AirPlayControllerCore` is pure
   logic (`Foundation` only); UI code, when it exists, will be a separate target that
   depends on it — not the other way around.
+
+## UI / Design Conventions (all targets)
+
+This app should look and feel like a native macOS citizen, not a cross-platform
+port. When building or reviewing ANY UI code in `AirPlayControllerPopoverUI`,
+`AirPlayControllerWindowUI`, `AirPlayControllerSharedUI`, or `AirPlayControllerApp`:
+
+- **Prefer stock AppKit components over custom-drawn ones.** Reach for
+  `NSSwitch`, `NSSlider`, `NSPopUpButton`, `NSStackView`, `NSTextField`,
+  `NSButton` (bezel styles), `NSVisualEffectView`, `NSSplitViewController`,
+  toolbar items, etc. before writing a custom `NSView` subclass with manual
+  `draw(_:)`. Custom drawing is justified only when no system control expresses
+  the design (e.g. `StatusDotView`'s on-icon badge, `CardView`'s Control-Center
+  chrome) — and even then, compose system chrome (`NSVisualEffectView`,
+  system colors/materials) rather than hand-rolling colors.
+- **Use SF Symbols for every glyph.** Any icon/glyph should be
+  `NSImage(systemSymbolName:accessibilityDescription:)`, template-rendered so it
+  tracks appearance/tint automatically (see `StatusItemController`'s
+  `speaker.wave.3.fill` with `variableValue`). Don't ship custom icon assets for
+  something SF Symbols already covers.
+- **Use system colors and materials, not hardcoded hex/RGB.** `.labelColor`,
+  `.secondaryLabelColor`, `.controlAccentColor`, `.windowBackgroundColor`,
+  semantic materials (`.sidebar`, `.headerView`, `.hudWindow`) — so Dark Mode,
+  accent color, and accessibility contrast settings all work for free.
+- **Respect system-level user settings.** Reduce Motion (see
+  `StatusDotView`'s static fallback), Increase Contrast, Reduce Transparency,
+  and Dynamic Type-equivalent text scaling should all be checked, not assumed
+  off.
+- **When in doubt, match Control Center / System Settings**, since this app's
+  design brief (SPEC.md §9) is explicitly modeled on them — not a bespoke
+  design language.
+- Deviating from any of the above (a genuinely custom control, a one-off
+  color) is fine when the system has no equivalent, but note *why* in the
+  nearest AGENTS.md so the next agent doesn't "fix" it back to a system control
+  that doesn't actually fit.

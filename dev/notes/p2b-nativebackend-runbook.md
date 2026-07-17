@@ -103,30 +103,44 @@ re-prompted.
    the AirPlay 2 PTP clock needs those ports exclusively (see
    `AirPlayEngine/docs/first-light-report.md`'s operational gotchas and §5
    below).
-2. `AIRPLAY_BACKEND=native scripts/make-app.sh && open "./build/AirPlay Controller.app"`
-   — or set the env var in the launched process's environment however your
-   shell/launch method does that (a bare `open` does not forward shell env
-   vars into the app; use `launchctl setenv AIRPLAY_BACKEND native` first, or
-   temporarily hardcode `.native` in the resolver for a manual test run, or
-   run the underlying binary directly from the built bundle with the env var
-   set: `AIRPLAY_BACKEND=native "./build/AirPlay Controller.app/Contents/MacOS/AirPlayControllerApp"`).
+2. **Launch via `open` — NEVER by running the binary directly from a shell.**
+   TCC attributes the system-audio grant to the RESPONSIBLE PROCESS: a binary
+   exec'd from a terminal (or an agent's shell tool) inherits the terminal's
+   TCC identity, the app never appears in System Settings at all, and whether
+   capture works silently depends on the terminal's own grant (2026-07-17b
+   live session: an hour lost to exactly this). Since `open` does not forward
+   shell env vars, set them session-wide first:
+   `launchctl setenv AIRPLAY_BACKEND native`, then
+   `open "./build/AirPlay Controller.app"` (add
+   `--stderr /path/to/log` to keep capturing the app's stderr log).
+   Unset with `launchctl unsetenv` when done.
 3. On first Core Audio tap creation, macOS prompts for the system-audio
-   recording permission. Grant it. If you miss the prompt or need to
-   re-check: **System Settings ▸ Privacy & Security ▸ Screen & System Audio
-   Recording** (or Local Network privacy for discovery, in the network
-   permissions section) — the bundle should appear there once it has
-   attempted a tap.
+   recording permission — grant it. The app then appears in **System
+   Settings ▸ Privacy & Security ▸ Screen & System Audio Recording**, in the
+   **"System Audio Recording Only"** section at the bottom (the process tap is
+   the audio-only TCC class; the app is NOT listed among the full
+   screen-recording apps above it). Local Network privacy governs discovery
+   separately.
 4. Confirm the firewall allowlists the binary **before** it binds any socket
    — verdicts stick to already-bound sockets (Phase 0 + first-light lesson,
    `first-light-report.md` "Operational gotchas"). Use
    `socketfilterfw --add` + `--unblockapp` against the `.app`'s executable
    path if macOS doesn't auto-prompt.
 
-If capture fails with a TCC-shaped error (`NativeCaptureError` — see
+**A stale/denied grant does NOT error.** A TCC-denied tap returns `noErr` and
+delivers all-zero buffers: the session connects, PTP syncs, the popover looks
+perfect, and the speaker plays silence. Every rebuild re-signs the ad-hoc
+bundle and can silently stale the grant — after any rebuild, expect a fresh
+prompt (or toggle the app off/on in the TCC pane). To tell "capturing audio"
+from "capturing zeros" in one look, launch with `AIRPLAY_DEBUG_LEVELS=1`:
+`AppDelegate` then logs the capture RMS ~1/s (`level: <id> rms 0.18…` = real
+audio; a flat `rms 0.0` under playing audio = denied tap).
+
+If capture fails with an ACTUAL error (`NativeCaptureError` — see
 `NativeCaptureCoordinator.swift`'s doc comments on `tapCreationFailed`), the
-permission either wasn't granted or was granted to a *different* signed
-identity than the one currently running — rebuild via `scripts/make-app.sh`
-(same path, same identity) rather than a fresh `swift run`.
+permission was likely granted to a *different* signed identity than the one
+currently running — rebuild via `scripts/make-app.sh` (same path, same
+identity) rather than a fresh `swift run`.
 
 ## 4. What NativeBackend actually does (quick orientation)
 

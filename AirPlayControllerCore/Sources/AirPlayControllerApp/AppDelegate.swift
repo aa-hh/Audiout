@@ -7,6 +7,17 @@ import AirPlayControllerPopoverUI
 import AirPlayControllerWindowUI
 import AirPlayControllerSettingsUI
 
+/// Resolve a bundle ID to the pid of a running instance, or nil if it isn't
+/// running (T7). This is the real per-app-capture resolver the native backend
+/// needs: Core can't import AppKit (`NSRunningApplication`), so the AppKit layer
+/// supplies it via `makeBackend(resolvePID:)`. A free `@Sendable` closure (not an
+/// instance method) so it can be used in `AppDelegate`'s `backend` property
+/// initializer, which runs before `self` exists.
+private let resolveRunningAppPID: @Sendable (String) -> pid_t? = { bundleID in
+    NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        .first?.processIdentifier
+}
+
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
 ///
@@ -19,7 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.mock`.
     /// Everything downstream holds an `OutputBackend`, never a concrete type.
-    private let backend: OutputBackend = makeBackend()
+    /// `resolvePID` threads the real `NSRunningApplication`-backed resolver into
+    /// the native backend's per-app capture path (T7).
+    private let backend: OutputBackend = makeBackend(resolvePID: resolveRunningAppPID)
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -100,18 +113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Construct the production AppRoutingController explicitly (T-11), using
         // the default store directory so app routes persist to Application Support.
         appRouting = AppRoutingController(store: AppRouteStore())
-        // Redirect targets feed GroupController's connect union (an AirPlay session
-        // opens the moment an app is redirected). Union of every app route's
-        // .device(id:) target — non-local by construction. Assigned AFTER appRouting
-        // exists (groupController was built at :98, before appRouting) — the var is
-        // publicly assignable precisely to avoid this init-order cycle.
-        groupController.appRouteTargets = { [weak appRouting] in
-            guard let appRouting else { return [] }
-            return Set(appRouting.appRoutes.compactMap { route in
-                if case .device(let id) = route.destination { return id }
-                return nil
-            })
-        }
+        // T7: whenever the routing table changes, push it into the backend's per-app
+        // capture path (`AppRouteConfiguring.updateAppRoutes`). This is what actually
+        // streams a routed app's audio to its own device — replacing the old
+        // whole-system-output-set union, which sent the ENTIRE mix to the target and
+        // muted the Mac. `AppRoutingController` fires this on the change edge only, so
+        // no-op mutations never reach the backend. Fired synchronously from a UI
+        // mutation (no lock held) → no deadlock with the backend's internal queues.
+        appRouting.onRoutesDidChange = { [weak self] in self?.pushAppRoutesToBackend() }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
@@ -124,6 +133,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
+        // Seed the backend with the persisted route table + excluded set (T7). A
+        // prune above would already have pushed via `onRoutesDidChange`, but that
+        // fires only when something changed — this unconditional push syncs the
+        // loaded routes even when nothing was pruned.
+        pushAppRoutesToBackend()
+
+        // T8 (edge case 1): a routed app can quit mid-stream without its route
+        // ever changing (the route is left in place so relaunching the app
+        // resumes it — see `NativeBackend.handleAppTerminated`'s doc comment), so
+        // `onRoutesDidChange` never fires for this. Core can't observe AppKit
+        // notifications itself, so this is the one place that forwards the quit
+        // across the boundary. Never explicitly removed: this observer's lifetime
+        // is the app's own (AppDelegate is never deallocated before termination).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication,
+                let bundleID = app.bundleIdentifier
+            else { return }
+            (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
+        }
 
         // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
         // burst the backend emits as it enumerates what's already there.
@@ -198,7 +232,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func handleExcludedAppsChanged() {
         pruneRoutesForExcludedApps()
+        // The excluded SET feeds the backend's whole-system tap exclusion (T4/T7),
+        // so re-push even when no route was pruned: excluding an app that has no
+        // route still changes what the tap must exclude.
+        pushAppRoutesToBackend()
         popoverController.update(devices: Array(devicesByID.values))
+    }
+
+    /// Push the current app-routing table + excluded set into the backend's per-app
+    /// capture path (T7). No-ops on backends without per-app routing
+    /// (`MockBackend` / `OwnToneBackend` don't conform to `AppRouteConfiguring`).
+    /// Called from `onRoutesDidChange`, the excluded-apps handler, and once at
+    /// launch. Never invoked from inside a backend lock/queue (T6's deadlock
+    /// warning) — every caller is a plain MainActor path.
+    @MainActor
+    private func pushAppRoutesToBackend() {
+        (backend as? AppRouteConfiguring)?.updateAppRoutes(
+            appRouting.appRoutes,
+            excludedBundleIDs: excludedApps.excludedBundleIDs)
     }
 
     /// Remove any per-app route whose app is currently excluded (an excluded app
@@ -275,6 +326,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Falls through to the repaint below. The mirror's own `setVolume` calls
             // echo back as `deviceUpdated`s and repaint again with the settled values;
             // this pass just keeps the master readout honest in the meantime.
+        case .routedApps(let deviceID, let appNames):
+            // The live "which app streams here now" map (T6). T9: store it on the
+            // popover so the device row's routing sublabel can prefer this
+            // CONFIRMED signal over the intent-based one (see
+            // `PopoverController.applyRoutedApps` / `DeviceRowView.apply`'s
+            // `liveAppNames` doc). Falls through to the shared repaint below like
+            // every other event — this call only updates state, it doesn't repaint
+            // itself.
+            popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+            log("event: \(describe(event))")
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -303,6 +364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "level(\(id), \(rms))"
         case .systemVolumeChanged(let volume):
             return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
+        case .routedApps(let deviceID, let appNames):
+            return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         }
     }
 

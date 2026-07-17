@@ -47,16 +47,28 @@ public final class AppRowView: NSView {
         func appRow(_ row: AppRowView, didRequestSelect appID: String)
     }
 
-    /// One entry in the destination popup (either the local "Current Device"
-    /// row or an AirPlay device). Plain values only (T-6 isolation requirement
-    /// — no `AppRoute`/`AppRouteStore` dependency).
+    /// One entry in the destination popup: the standalone "No Redirect" entry,
+    /// a local "Current Device" row, or an AirPlay device. Plain values only
+    /// (T-6 isolation requirement — no `AppRoute`/`AppRouteStore` dependency).
     public struct Destination {
         public let id: String
         public let title: String
+        /// True for BOTH the standalone "No Redirect" entry and the "Current
+        /// Device" entry — anything meaning "plays locally," which is what
+        /// drives the volume slider's dim/disable state. `false` only for an
+        /// AirPlay device entry.
         public let isLocal: Bool
         public let symbolName: String?
-        public init(id: String, title: String, isLocal: Bool, symbolName: String? = nil) {
+        /// True ONLY for the single "No Redirect" entry — rendered first, with
+        /// no section header, above the "Current Device"/"AirPlay Devices"
+        /// sections (the new default/neutral choice, visually distinct from
+        /// both named sections). Every other entry (including "Current
+        /// Device") leaves this `false`.
+        public let isStandalone: Bool
+        public init(id: String, title: String, isLocal: Bool, symbolName: String? = nil,
+                   isStandalone: Bool = false) {
             self.id = id; self.title = title; self.isLocal = isLocal; self.symbolName = symbolName
+            self.isStandalone = isStandalone
         }
     }
 
@@ -90,9 +102,10 @@ public final class AppRowView: NSView {
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
     private var destinations: [Destination] = []
-    /// True iff the selected destination is a local ("Current Device") entry —
-    /// LOCKED DECISION 3: the slider stays visible but dims/disables in this
-    /// state (the app isn't being redirected anywhere).
+    /// True iff the selected destination is a local entry — either "No
+    /// Redirect" (the default/unset state) or "Current Device" (an explicit
+    /// pick) — LOCKED DECISION 3: the slider stays visible but dims/disables
+    /// in this state (the app isn't being redirected anywhere).
     private var isLocal: Bool = true
 
     private let iconView = NSImageView()
@@ -182,10 +195,15 @@ public final class AppRowView: NSView {
     }
 
     /// Shared builder behind both the trailing destination popup and the
-    /// context menu's "Route to" submenu (T5) — same two sections (LOCKED
-    /// DECISION 4 — no Groups), same entries, same checkmark, just a
-    /// caller-supplied action selector so each host can route the pick back
-    /// through `destinationChanged(_:)`.
+    /// context menu's "Route to" submenu (T5) — same structure, same entries,
+    /// same checkmark, just a caller-supplied action selector so each host can
+    /// route the pick back through `destinationChanged(_:)`.
+    ///
+    /// Structure: the standalone "No Redirect" entry FIRST, with no header
+    /// (the new default/neutral choice, visually distinct from every named
+    /// section), then a separator, then the same two sections as before
+    /// (LOCKED DECISION 4 — no Groups): "Current Device", then "AirPlay
+    /// Devices".
     private func buildDestinationMenu(
         selecting selectedID: String, action: Selector
     ) -> (menu: NSMenu, currentItem: NSMenuItem?) {
@@ -204,27 +222,32 @@ public final class AppRowView: NSView {
             menu.addItem(item)
         }
 
-        // Two sections only (LOCKED DECISION 4 — no Groups): local entries under
-        // "Current Device", then AirPlay devices under "AirPlay Devices". Headers
-        // are disabled section titles styled like `MainOutRowView`'s.
-        let localEntries = destinations.filter(\.isLocal)
-        let deviceEntries = destinations.filter { !$0.isLocal }
-
-        if !localEntries.isEmpty {
-            addHeader("Current Device")
-            for entry in localEntries {
+        func addEntries(_ entries: [Destination]) {
+            for entry in entries {
                 let item = menuItem(for: entry, isCurrent: entry.id == selectedID, action: action)
                 menu.addItem(item)
                 if entry.id == selectedID { currentItem = item }
             }
         }
+
+        // The standalone "No Redirect" entry sits above every section, with no
+        // header of its own — it's the neutral default, not a member of
+        // either named group.
+        let standaloneEntries = destinations.filter(\.isStandalone)
+        let localEntries = destinations.filter { $0.isLocal && !$0.isStandalone }
+        let deviceEntries = destinations.filter { !$0.isLocal }
+
+        addEntries(standaloneEntries)
+        if !standaloneEntries.isEmpty, !localEntries.isEmpty || !deviceEntries.isEmpty {
+            menu.addItem(.separator())
+        }
+        if !localEntries.isEmpty {
+            addHeader("Current Device")
+            addEntries(localEntries)
+        }
         if !deviceEntries.isEmpty {
             addHeader("AirPlay Devices")
-            for entry in deviceEntries {
-                let item = menuItem(for: entry, isCurrent: entry.id == selectedID, action: action)
-                menu.addItem(item)
-                if entry.id == selectedID { currentItem = item }
-            }
+            addEntries(deviceEntries)
         }
 
         return (menu, currentItem)
@@ -570,10 +593,11 @@ public final class AppRowView: NSView {
     /// The currently displayed volume (structural assertions).
     public var test_volume: Int { slider.integerValue }
     /// Whether the volume slider is currently dimmed/disabled (LOCKED DECISION 3
-    /// — true iff the destination is "Current device"/local).
+    /// — true iff the destination is local: "No Redirect" or "Current Device").
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
-    /// The full ordered list of titles in the destination menu, including the
-    /// two disabled section headers ("CURRENT DEVICE" / "AIRPLAY DEVICES").
+    /// The full ordered list of titles in the destination menu: the standalone
+    /// "No Redirect" entry, a separator (empty title), then the two disabled
+    /// section headers ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.
     public var test_menuTitles: [String] { destinationPopUp.menu?.items.map(\.title) ?? [] }
     /// The currently checkmarked destination id.
     public var test_selectedDestinationID: String? {

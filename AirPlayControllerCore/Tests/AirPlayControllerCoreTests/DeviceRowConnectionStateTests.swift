@@ -136,6 +136,56 @@ final class DeviceRowConnectionStateTests: XCTestCase {
                        "the view doesn't re-sort — it renders routedAppNames in the given order")
     }
 
+    // MARK: Live-streaming precedence (T9 — `liveAppNames` vs `routedAppNames`)
+    //
+    // `liveAppNames` (CONFIRMED currently streaming, `BackendEvent.routedApps`)
+    // takes precedence over `routedAppNames` (routing INTENT/config) in the
+    // routing line whenever it's non-empty; an empty `liveAppNames` falls back
+    // to the intent-based label so a pending redirect isn't left blank.
+
+    func testLiveAppNamesTakePrecedenceOverRoutedAppNamesWhenNonEmpty() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: false,
+                  routedAppNames: ["Spotify"], liveAppNames: ["Music"])
+        XCTAssertEqual(row.test_statusText, "Music",
+                       "the confirmed live set wins over the merely-configured intent set")
+    }
+
+    func testEmptyLiveAppNamesFallsBackToRoutedAppNames() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: false,
+                  routedAppNames: ["Spotify"], liveAppNames: [])
+        XCTAssertEqual(row.test_statusText, "Spotify",
+                       "nothing confirmed streaming yet: falls back to the intent-based label")
+    }
+
+    func testLiveAppNamesStillLeadWithSystemTokenWhenSelected() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: true,
+                  routedAppNames: ["Spotify"], liveAppNames: ["Music", "Safari"])
+        XCTAssertEqual(row.test_statusText, "System · Music · Safari",
+                       "'System' still leads off `selected`; the live set replaces the app tokens")
+    }
+
+    func testClearingLiveAppNamesOnReapplyRevertsToRoutedAppNames() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"], liveAppNames: ["Music"])
+        XCTAssertEqual(row.test_statusText, "Music")
+
+        // The live mapping cleared (e.g. capture stopped) — a repeated apply with
+        // an empty liveAppNames must revert to the intent-based label, not go
+        // blank or keep showing the stale confirmed name.
+        row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"], liveAppNames: [])
+        XCTAssertEqual(row.test_statusText, "Spotify")
+    }
+
+    func test_sourceTextHookReportsLivePrecedence() {
+        let row = DeviceRowView(device: makeDevice())
+        XCTAssertEqual(row.test_sourceText(routedAppNames: ["Spotify"], liveAppNames: ["Music"]), "Music")
+        XCTAssertEqual(row.test_sourceText(routedAppNames: ["Spotify"]), "Spotify",
+                       "liveAppNames defaults to empty for back-compat callers")
+    }
+
     // MARK: Name-click toggles the checkbox (same delegate path)
 
     private final class RecordingDelegate: DeviceRowView.Delegate {

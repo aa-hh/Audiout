@@ -87,6 +87,32 @@ final class NativeBackendTests: XCTestCase {
             }
         }
 
+        /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
+        /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
+        private(set) var streamAdds: [(OutputID, UInt32)] = []
+        func addOutput(_ id: OutputID, streamId: UInt32) async throws {
+            try await runOp(id) {
+                self.lock.withLock {
+                    self.streamAdds.append((id, streamId))
+                    self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                }
+                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+            }
+        }
+
+        /// Per-app mixed-buffer writes (T6), tagged with stream id + byte count.
+        private(set) var writes: [(streamId: UInt32, byteCount: Int)] = []
+        /// Same writes, but with the FULL pcm payload retained (not just its
+        /// count) — lets a cross-stream-leakage test assert on actual byte
+        /// CONTENT, not just size/streamId bookkeeping (T10).
+        private(set) var rawWrites: [(streamId: UInt32, pcm: Data)] = []
+        func write(pcm: Data, streamId: UInt32, pts: timespec) {
+            lock.withLock {
+                writes.append((streamId, pcm.count))
+                rawWrites.append((streamId, pcm))
+            }
+        }
+
         /// Run a device op, tracking concurrent-in-flight-per-device (to catch
         /// overlapping ops) and applying the artificial latency.
         private func runOp(_ id: OutputID, _ body: () throws -> Void) async throws {
@@ -129,6 +155,9 @@ final class NativeBackendTests: XCTestCase {
         var ops: [String] { lock.withLock { opLog } }
         var didStart: Bool { lock.withLock { started } }
         var maxConcurrent: Int { lock.withLock { maxConcurrentPerDevice } }
+        var streamAddCalls: [(OutputID, UInt32)] { lock.withLock { streamAdds } }
+        var writeCalls: [(streamId: UInt32, byteCount: Int)] { lock.withLock { writes } }
+        var rawWriteCalls: [(streamId: UInt32, pcm: Data)] { lock.withLock { rawWrites } }
     }
 
     /// Feeds `DiscoveryEvent`s to the backend synchronously.
@@ -246,11 +275,154 @@ final class NativeBackendTests: XCTestCase {
     /// matters). Tests that need to script a readback or fire
     /// `onExternalChange` construct their own `FakeSystemVolume` and pass it
     /// explicitly to get a handle on it.
-    private func makeBackend(systemVolume: SystemVolumeControlling = FakeSystemVolume()) -> (NativeBackend, SpyEngine, FakeDiscovery) {
+    private func makeBackend(
+        systemVolume: SystemVolumeControlling = FakeSystemVolume(),
+        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+    ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
-        let backend = NativeBackend(engineControl: engine, discoverySource: discovery, systemVolume: systemVolume)
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery,
+            systemVolume: systemVolume, resolvePID: resolvePID,
+            injectedPerAppCapture: injectedPerAppCapture)
         return (backend, engine, discovery)
+    }
+
+    /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
+    /// throws, so a coordinator built over it takes every bundle ID all the way
+    /// to `.capturing` — unlike the default `resolvePID`-returns-nil setup
+    /// (`PIDRecorder`), which fails fast at `.appNotRunning` by design and is
+    /// what most of this file uses to exercise routing TOPOLOGY independent of
+    /// real capture. Tests that need `.routedApps`/the mixer to reflect an app
+    /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
+    /// "dead" — construct a coordinator with this tap instead.
+    private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        }
+        func teardown() {}
+    }
+
+    /// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
+    /// `.capturing` (T8) — pass as `injectedPerAppCapture:` to `makeBackend`.
+    private func workingPerAppCapture() -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+    }
+
+    /// Thread-safe recorder for the bundle IDs a per-app capture asked to resolve —
+    /// proof that `updateAppRoutes` spun up (`start(bundleID:)`) the right capture.
+    /// Always returns `nil` (no pid), so no real Core Audio tap is ever created:
+    /// the routing TOPOLOGY (`addOutput(_:streamId:)` + `.routedApps`) still runs.
+    private final class PIDRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _asked: [String] = []
+        var asked: [String] { lock.withLock { _asked } }
+        func resolve(_ bundleID: String) -> pid_t? {
+            lock.withLock { _asked.append(bundleID) }
+            return nil
+        }
+    }
+
+    /// A `.device(id:)` route fixture.
+    private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
+        AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
+    }
+
+    // MARK: T10 cross-component doubles
+    //
+    // The fakes below back the T10 full-chain tests: they let a test push
+    // ACTUAL captured buffers through the real per-app pipeline (PerAppCaptureCoordinator
+    // -> AppRouteMixer -> engine.write) and exercise the real NativeCaptureCoordinator's
+    // T4 exclusion logic through NativeBackend.updateAppRoutes, rather than only
+    // asserting on topology (streamAddCalls) as the existing T6/T7 tests do.
+
+    /// A `ProcessAudioTap` that always succeeds, self-registers with an external
+    /// registry keyed by the bundle ID it was started for (so a test can grab a
+    /// handle to THIS app's specific tap instance and `push(_:)` content into
+    /// it directly), and uses the engine's exact output format (44100/16-bit
+    /// interleaved S16) so buffers round-trip through the real `AVFormatConverter`
+    /// essentially unchanged — letting a test assert on exact byte content.
+    private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onRegister: (@Sendable (String) -> Void)?
+        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            onRegister?(bundleID)
+            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        }
+        func teardown() {}
+        func push(_ buffer: CapturedBuffer) { onBuffer?(buffer) }
+    }
+
+    /// Thread-safe bundleID -> tap registry, populated by ``BundleTaggingTap/onRegister``.
+    private final class TapRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byBundleID: [String: BundleTaggingTap] = [:]
+        func register(_ bundleID: String, _ tap: BundleTaggingTap) { lock.withLock { byBundleID[bundleID] = tap } }
+        func tap(for bundleID: String) -> BundleTaggingTap? { lock.withLock { byBundleID[bundleID] } }
+    }
+
+    /// A single-second, fixed-fill-byte, interleaved-S16-stereo `CapturedBuffer` —
+    /// every byte is `fill`, so a downstream write can be checked for cross-app
+    /// contamination with a trivial byte scan (0xAA never appears in app B's
+    /// stream, 0xBB never appears in app A's).
+    private func fingerprintedBuffer(fill: UInt8, frames: Int, atSecond sec: Int) -> CapturedBuffer {
+        let data = Data(repeating: fill, count: frames * 2 /* ch */ * 2 /* bytes/sample */)
+        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
+    }
+
+    /// A `SystemAudioTap` (the WHOLE-SYSTEM tap seam, not the per-app one) that
+    /// records the `excludedPIDs` it was last created with — lets a test drive
+    /// the REAL ``NativeCaptureCoordinator`` (not a direct call to its
+    /// `updateRouting`) through `NativeBackend.updateAppRoutes` and observe T4's
+    /// exclusion list end to end.
+    private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        private let lock = NSLock()
+        private var _excludedPIDs: Set<pid_t> = []
+        private var _createCount = 0
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+            lock.withLock { _excludedPIDs = excludedPIDs; _createCount += 1 }
+            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        }
+        func teardown() {}
+        var excludedPIDs: Set<pid_t> { lock.withLock { _excludedPIDs } }
+        var createCount: Int { lock.withLock { _createCount } }
+    }
+
+    private final class NoOpSink: PCMSink {
+        func write(pcm: Data, pts: timespec) {}
+    }
+
+    private struct PassthroughConverter: PCMConverting {
+        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? { buffer.channelData.first }
+    }
+
+    /// A `ProcessAudioTap` whose `createAndStart` throws `.processNotYetAudible`
+    /// for the first `failuresBeforeSuccess` attempts, then succeeds — scripts
+    /// T8's bounded-retry recovery path (`NativeBackend.scheduleProcessNotYetAudibleRetry`)
+    /// deterministically.
+    private final class FlakyThenSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        private let lock = NSLock()
+        private var attempts = 0
+        let failuresBeforeSuccess: Int
+        init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
+        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            let n = lock.withLock { attempts += 1; return attempts }
+            if n <= failuresBeforeSuccess {
+                throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
+            }
+            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        }
+        func teardown() {}
+        var attemptsMade: Int { lock.withLock { attempts } }
     }
 
     /// Collect non-level events until `predicate` holds or timeout.
@@ -1762,6 +1934,561 @@ final class NativeBackendTests: XCTestCase {
         /// Whether the tap is running right now — i.e. exactly when the real
         /// `.mutedWhenTapped` tap has the Mac's speakers muted.
         var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+    }
+
+    // MARK: Per-app routing (T6)
+
+    /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`
+    /// is populated and a route can bind to it).
+    private func startAndDiscover(
+        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+        _ device: DiscoveredDevice
+    ) async {
+        backend.start()
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        await pollUntil { engine.fedIDs.contains(device.outputID) }
+    }
+
+    /// A `.device(id:)` route spins up that app's per-app capture (the resolver is
+    /// asked for its pid) and binds the destination device to a NON-ZERO stream id
+    /// via the engine's per-app `addOutput(_:streamId:)`.
+    func testAppRouteBindsDeviceToNonZeroStream() async {
+        let pids = PIDRecorder()
+        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        // The per-app capture spun up for the routed bundle ID.
+        await pollUntil { pids.asked.contains("com.foo.player") }
+        XCTAssertTrue(pids.asked.contains("com.foo.player"),
+                      "the routed app's per-app capture must be started (pid resolved)")
+
+        // The destination device was bound to a non-zero per-app stream.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 } }
+        let binds = engine.streamAddCalls.filter { $0.0 == device.outputID }
+        XCTAssertEqual(binds.count, 1, "device should be bound exactly once")
+        XCTAssertGreaterThanOrEqual(binds.first?.1 ?? 0, 1,
+                                    "per-app stream id must be >= 1 (0 is the legacy whole-system path)")
+    }
+
+    /// A route reverting to `.currentDevice` tears the capture bookkeeping down and
+    /// releases the device's stream binding (a `removeOutput`), and no per-app stream
+    /// remains bound.
+    func testRouteRevertReleasesStreamBinding() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Revert the app to local playback (no device route).
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo.player", displayName: "Foo", destination: .currentDevice)
+        ])
+
+        // The device's per-app session was torn down (stop → nothing re-added).
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        XCTAssertTrue(engine.removedIDs.contains(device.outputID),
+                      "reverting to .currentDevice must release the device's stream binding")
+        // Exactly one bind ever happened; it wasn't re-added after the release.
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, 1,
+                       "no new stream bind after the revert")
+    }
+
+    /// A route reverting to `.noRedirect` (the new default/unset state) tears
+    /// the capture bookkeeping down identically to reverting to `.currentDevice`
+    /// — same `removeOutput`, no new stream bind.
+    func testRouteRevertToNoRedirectReleasesStreamBindingJustLikeCurrentDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Revert the app to local playback via the NEW default state.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo.player", displayName: "Foo", destination: .noRedirect)
+        ])
+
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        XCTAssertTrue(engine.removedIDs.contains(device.outputID),
+                      "reverting to .noRedirect must release the device's stream binding")
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, 1,
+                       "no new stream bind after the revert")
+    }
+
+    /// Two different apps routed to two different devices get two DISTINCT non-zero
+    /// stream ids, each bound to its own device.
+    func testTwoAppsTwoDevicesDistinctStreams() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let devA = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Speaker A")
+        let devB = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Speaker B")
+        await startAndDiscover(backend, engine, discovery, devA)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == devB.id } else { return false } }
+        } after: { discovery.fire(.appeared(devB)) }
+        await pollUntil { engine.fedIDs.contains(devB.outputID) }
+
+        backend.updateAppRoutes([
+            route("com.foo", name: "Foo", toDevice: devA.id),
+            route("com.bar", name: "Bar", toDevice: devB.id),
+        ])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == devA.outputID }
+                && engine.streamAddCalls.contains { $0.0 == devB.outputID }
+        }
+        let sA = engine.streamAddCalls.first { $0.0 == devA.outputID }?.1
+        let sB = engine.streamAddCalls.first { $0.0 == devB.outputID }?.1
+        XCTAssertNotNil(sA); XCTAssertNotNil(sB)
+        XCTAssertGreaterThanOrEqual(sA ?? 0, 1)
+        XCTAssertGreaterThanOrEqual(sB ?? 0, 1)
+        XCTAssertNotEqual(sA, sB, "distinct app-sets on distinct devices must get distinct stream ids")
+    }
+
+    /// `.routedApps` fires with the destination device + the routed app's display
+    /// name on a route change, and fires AGAIN with the updated app list when a
+    /// second app is added to the same device.
+    ///
+    /// Uses `workingPerAppCapture()` (T8), not the default `resolvePID`-returns-nil
+    /// setup: `.routedApps` now reflects apps that are ACTUALLY capturing, not just
+    /// routed intent (T8 excludes a `.failed` bundle ID — e.g. `.appNotRunning`,
+    /// which the default setup always hits immediately — from the mixer topology so
+    /// a silent app is never claimed as streaming). This test verifies the
+    /// event-firing/topology logic under the condition it's meant to hold for: the
+    /// capture actually succeeds.
+    func testRoutedAppsEventFiresAndUpdates() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // First route: one app → the device.
+        let first = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
+                return false
+            }
+        } after: { backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)]) }
+        XCTAssertTrue(first.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
+            return false
+        }, "routedApps must carry the device id and the routed app's display name")
+
+        // Add a second app to the SAME device → the map updates (sorted names).
+        let second = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar", "Foo"] }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([
+                self.route("com.foo", name: "Foo", toDevice: device.id),
+                self.route("com.bar", name: "Bar", toDevice: device.id),
+            ])
+        }
+        XCTAssertTrue(second.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar", "Foo"] }
+            return false
+        }, "routedApps must re-fire with the updated, sorted app list when the mapping changes")
+    }
+
+    /// Per-app routing is ADDITIVE: an app route neither issues a legacy
+    /// (stream_id 0) `addOutput` nor touches the whole-system Selected Devices set —
+    /// only the per-app `addOutput(_:streamId:)` path runs.
+    func testAppRouteDoesNotTouchLegacyOutputSet() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // The legacy stream_id-0 path was never invoked for this device.
+        XCTAssertFalse(engine.addedIDs.contains(device.outputID),
+                       "an app route must NOT go through the legacy addOutput(_:) path (that's T7's union, out of scope for T6)")
+        // And the device is not reported selected (redirect targets stay out of the
+        // Selected Devices set — AGENTS.md invariant).
+        XCTAssertFalse(backend.devices.first { $0.id == device.id }?.isSelected ?? true,
+                       "a redirect target must not be marked isSelected by the per-app path")
+    }
+
+    // MARK: T10 cross-component gap coverage
+    //
+    // The T6/T7 tests above prove routing TOPOLOGY (which streamId a device is
+    // bound to) at the NativeBackend level, and AppRouteMixerTests/
+    // MultiStreamWriteRoutingTests separately prove sample-accurate mixing and
+    // C-level write isolation in ISOLATION. Nothing previously pushed real
+    // captured buffers through the FULL NativeBackend chain (PerAppCaptureCoordinator
+    // -> AppRouteMixer -> engine.write) or exercised the real NativeCaptureCoordinator
+    // through NativeBackend.updateAppRoutes (as opposed to calling
+    // NativeCaptureCoordinator.updateRouting directly, which NativeCaptureCoordinatorTests
+    // already does at that single-component level).
+
+    /// Headline invariant 1, at the FULL NativeBackend level: two apps routed to
+    /// two different devices get two independent streams, and pushing distinctly
+    /// FINGERPRINTED content into each app's own tap proves the content that
+    /// reaches `engine.write` for one stream never contains so much as a byte of
+    /// the other stream's content. Exercises the real wiring
+    /// (`perAppCapture.onBuffer` -> `routeMixer.handleBuffer` -> `onMixedBuffer`
+    /// -> `engine.write(pcm:streamId:pts:)`), including the real production
+    /// `AppRouteMixer` (real `AVFormatConverter`, not the mixer unit tests'
+    /// injected identity converter).
+    func testCrossStreamNoLeakageThroughFullBackendPipeline() async {
+        let registry = TapRegistry()
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: {
+                let tap = BundleTaggingTap()
+                tap.onRegister = { bundleID in registry.register(bundleID, tap) }
+                return tap
+            },
+            resolvePID: { _ in 4242 },
+            muteBehavior: .mutedWhenTapped)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+
+        let devA = ap2Device(id: "AA:BB:CC:DD:EE:60", name: "Speaker A")
+        let devB = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "Speaker B")
+        await startAndDiscover(backend, engine, discovery, devA)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == devB.id } else { return false } }
+        } after: { discovery.fire(.appeared(devB)) }
+        await pollUntil { engine.fedIDs.contains(devB.outputID) }
+
+        backend.updateAppRoutes([
+            route("com.a", name: "A", toDevice: devA.id),
+            route("com.b", name: "B", toDevice: devB.id),
+        ])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == devA.outputID }
+                && engine.streamAddCalls.contains { $0.0 == devB.outputID }
+        }
+        let streamA = engine.streamAddCalls.first { $0.0 == devA.outputID }!.1
+        let streamB = engine.streamAddCalls.first { $0.0 == devB.outputID }!.1
+        XCTAssertNotEqual(streamA, streamB)
+
+        // Wait for BOTH per-app taps to actually be capturing before pushing —
+        // the mixer only learns a converter (and can accept buffers) on the
+        // `.capturing` transition.
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.a"),
+               case .capturing = perAppCapture.state(for: "com.b") { return true }
+            return false
+        }
+        guard let tapA = registry.tap(for: "com.a"), let tapB = registry.tap(for: "com.b") else {
+            return XCTFail("both per-app taps must have registered themselves by the time capture started")
+        }
+
+        // Distinct fingerprinted content, well over the mixer's 441-frame hold
+        // window so most of each buffer auto-drains without an explicit flush.
+        tapA.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        tapB.push(fingerprintedBuffer(fill: 0xBB, frames: 1000, atSecond: 1))
+
+        await pollUntil {
+            engine.rawWriteCalls.contains { $0.streamId == streamA }
+                && engine.rawWriteCalls.contains { $0.streamId == streamB }
+        }
+
+        let writesToA = engine.rawWriteCalls.filter { $0.streamId == streamA }
+        let writesToB = engine.rawWriteCalls.filter { $0.streamId == streamB }
+        XCTAssertFalse(writesToA.isEmpty, "app A's stream must have received mixed audio")
+        XCTAssertFalse(writesToB.isEmpty, "app B's stream must have received mixed audio")
+        XCTAssertTrue(writesToA.allSatisfy { !$0.pcm.contains(0xBB) },
+                      "app B's content (0xBB) must NEVER appear in app A's stream write")
+        XCTAssertTrue(writesToB.allSatisfy { !$0.pcm.contains(0xAA) },
+                      "app A's content (0xAA) must NEVER appear in app B's stream write")
+    }
+
+    /// Headline invariant 2, through the FULL `updateAppRoutes` call (not a
+    /// direct `NativeCaptureCoordinator.updateRouting` call, which
+    /// `NativeCaptureCoordinatorTests.testDeviceRoutedAppPIDNeverLeaksIntoSystemMix`
+    /// already covers at that single-component level). Also the composite
+    /// scenario the plan calls out: a "Selected Devices" whole-system capture is
+    /// ALREADY ACTIVE when an app gets individually routed to its own device —
+    /// both streams must coexist, and the routed app's pid must drop out of the
+    /// whole-system tap's exclusion-blind spot without disturbing the
+    /// whole-system stream's own device.
+    func testUpdateAppRoutesExcludesRoutedAppFromSystemMixWhileSelectedDevicesActive() async {
+        let pids: [String: pid_t] = ["com.routed": 111, "com.other": 222]
+        let resolvePID: @Sendable (String) -> pid_t? = { pids[$0] }
+        let (backend, engine, discovery) = makeBackend(resolvePID: resolvePID)
+        let tap = RecordingSystemTap()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
+            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+        backend.captureCoordinator = coordinator
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let systemDevice = ap2Device(id: "AA:BB:CC:DD:EE:62", name: "Whole System Speaker")
+        await startAndDiscover(backend, engine, discovery, systemDevice)
+
+        // Selected Devices active BEFORE any per-app route: the whole-system tap
+        // starts capturing with nobody excluded.
+        backend.setOutputSet([systemDevice.id])
+        await pollUntil { tap.createCount >= 1 }
+        XCTAssertEqual(tap.excludedPIDs, [], "nothing routed yet -> the system mix must include every app")
+
+        // NOW route one app to its OWN device while Selected Devices stays active.
+        let routedDevice = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Per-App Target")
+        await startAndDiscover(backend, engine, discovery, routedDevice)
+        backend.updateAppRoutes([route("com.routed", name: "Routed App", toDevice: routedDevice.id)])
+
+        await pollUntil { tap.excludedPIDs.contains(111) }
+        XCTAssertEqual(tap.excludedPIDs, [111],
+                       "the individually-routed app's pid must be excluded from the whole-system tap — " +
+                       "through the FULL updateAppRoutes call, not a direct coordinator call — " +
+                       "while an unrouted app's pid stays included")
+
+        // Both streams coexist: the per-app path bound its own dedicated stream…
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == routedDevice.outputID } }
+        XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == routedDevice.outputID })
+        // …and the whole-system stream (stream_id 0) is still streaming to ITS
+        // device throughout — the routed app's exclusion never touched it.
+        XCTAssertTrue(engine.addedIDs.contains(systemDevice.outputID),
+                      "the whole-system stream must keep streaming to its own device the whole time")
+    }
+
+    /// Plan item: 3+ apps across 2+ devices, with two devices sharing an
+    /// IDENTICAL app-set (so they must be bound to the SAME non-zero stream_id —
+    /// `AppRouteMixer.DestinationSet.deviceIDs` fanning out to more than one
+    /// device), a third device with a distinct app-set (its own stream), and a
+    /// `.noRedirect` app in the same table. `AppRouteMixerTests.
+    /// testDevicesWithIdenticalMembershipShareOneStream` proves the TOPOLOGY math
+    /// for shared membership in isolation; nothing previously proved
+    /// `NativeBackend` actually issues `addOutput(_:streamId:)` with the SAME
+    /// stream_id to BOTH devices of a shared set (`testTwoAppsTwoDevicesDistinctStreams`
+    /// only covers the DISTINCT-streams shape) — this closes that.
+    ///
+    /// (Two devices sharing an app-set requires the same bundle ID to appear
+    /// twice with two different `.device` destinations — `AppRoutingController`
+    /// never produces that shape itself, since it holds one route per bundle ID,
+    /// but `NativeBackend.updateAppRoutes` doesn't require or enforce that
+    /// invariant on its input, so this is still a real robustness property of
+    /// the seam, exercised the same way `AppRouteMixerTests` exercises it.)
+    func testMultiAppMultiDeviceSharedStreamAndNoRedirectCoexist() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+
+        let devA = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "Kitchen")
+        let devB = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Kitchen Extra")
+        let devC = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Office")
+        await startAndDiscover(backend, engine, discovery, devA)
+        for dev in [devB, devC] {
+            _ = await collect(from: backend) { events in
+                events.contains { if case .deviceAdded(let d) = $0 { return d.id == dev.id } else { return false } }
+            } after: { discovery.fire(.appeared(dev)) }
+        }
+        await pollUntil { engine.fedIDs.contains(devB.outputID) && engine.fedIDs.contains(devC.outputID) }
+
+        // Foo + Bar -> BOTH devA and devB (identical app-set => shared stream).
+        // Baz -> devC alone (distinct app-set => its own stream).
+        // Zoom stays .noRedirect (the tri-state default) — must never bind or appear.
+        backend.updateAppRoutes([
+            route("com.foo", name: "Foo", toDevice: devA.id),
+            route("com.bar", name: "Bar", toDevice: devA.id),
+            route("com.foo", name: "Foo", toDevice: devB.id),
+            route("com.bar", name: "Bar", toDevice: devB.id),
+            route("com.baz", name: "Baz", toDevice: devC.id),
+            AppRoute(bundleID: "us.zoom.xos", displayName: "Zoom", destination: .noRedirect),
+        ])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == devA.outputID }
+                && engine.streamAddCalls.contains { $0.0 == devB.outputID }
+                && engine.streamAddCalls.contains { $0.0 == devC.outputID }
+        }
+        let streamA = engine.streamAddCalls.first { $0.0 == devA.outputID }!.1
+        let streamB = engine.streamAddCalls.first { $0.0 == devB.outputID }!.1
+        let streamC = engine.streamAddCalls.first { $0.0 == devC.outputID }!.1
+        XCTAssertEqual(streamA, streamB,
+                       "two devices with the identical routed app-set must share ONE stream_id")
+        XCTAssertNotEqual(streamA, streamC, "a distinct app-set must get a distinct stream_id")
+
+        // Zoom (.noRedirect) never gets a stream binding of its own — the only
+        // stream ids ever bound are the two above.
+        let allStreams = Set(engine.streamAddCalls.map(\.1))
+        XCTAssertEqual(allStreams, [streamA, streamC])
+    }
+
+    /// T8 lifecycle edge case, MULTI-APP scenario (the existing T8 coverage only
+    /// exercises this with a single routed app): two apps share a device (one
+    /// stream); one app's process quits mid-stream. The device must REBIND
+    /// (stop -> re-add) to a fresh stream containing only the surviving app —
+    /// not simply unbind — and `.routedApps` must drop the terminated app's name
+    /// while keeping the survivor's.
+    func testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:80", name: "Shared Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar", "Foo"] }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([
+                self.route("com.foo", name: "Foo", toDevice: device.id),
+                self.route("com.bar", name: "Bar", toDevice: device.id),
+            ])
+        }
+        let firstStream = engine.streamAddCalls.first { $0.0 == device.outputID }!.1
+
+        // Foo's process quits mid-stream.
+        let afterTermination = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar"] }
+                return false
+            }
+        } after: { backend.handleAppTerminated(bundleID: "com.foo") }
+
+        XCTAssertTrue(afterTermination.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar"] }
+            return false
+        }, "the terminated app must drop out of .routedApps while the surviving sibling stays")
+
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= 2 }
+        let binds = engine.streamAddCalls.filter { $0.0 == device.outputID }
+        XCTAssertEqual(binds.count, 2, "a membership change rebinds the device: stop, then re-add")
+        XCTAssertNotEqual(binds.last?.1, firstStream,
+                          "the surviving-only app-set is a different signature and must get a fresh stream id")
+        XCTAssertTrue(engine.removedIDs.contains(device.outputID),
+                      "the old (two-app) session must be torn down before the rebind")
+    }
+
+    /// T8 lifecycle edge case, cross-device isolation: an app routed to device A
+    /// quits mid-stream while a sibling app is independently routed to device B.
+    /// The unrelated device's binding must be completely undisturbed.
+    func testAppTerminatedOnOneDeviceDoesNotAffectSiblingAppOnAnotherDevice() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+        let devA = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Speaker A")
+        let devB = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Speaker B")
+        await startAndDiscover(backend, engine, discovery, devA)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == devB.id } else { return false } }
+        } after: { discovery.fire(.appeared(devB)) }
+        await pollUntil { engine.fedIDs.contains(devB.outputID) }
+
+        backend.updateAppRoutes([
+            route("com.foo", name: "Foo", toDevice: devA.id),
+            route("com.bar", name: "Bar", toDevice: devB.id),
+        ])
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == devA.outputID }
+                && engine.streamAddCalls.contains { $0.0 == devB.outputID }
+        }
+
+        backend.handleAppTerminated(bundleID: "com.foo")
+        await pollUntil { engine.removedIDs.contains(devA.outputID) }
+
+        // devB's binding must be completely untouched: exactly one bind, no removal.
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == devB.outputID }.count, 1,
+                       "an unrelated app's termination must not perturb a sibling device's binding")
+        XCTAssertFalse(engine.removedIDs.contains(devB.outputID),
+                       "device B must never be torn down by device A's app terminating")
+    }
+
+    /// T8 lifecycle edge case: `.processNotYetAudible` bounded retry, previously
+    /// only exercised at the `PerAppCaptureCoordinator` level
+    /// (`testProcessNotYetAudibleSurfacesErrorAndTearsDown`). This proves
+    /// `NativeBackend`'s OWN retry scheduling (`scheduleProcessNotYetAudibleRetry`,
+    /// `deadBundleIDs`) actually drives a failed capture all the way to a
+    /// successful retry and rejoins the live mixer topology (the device gets
+    /// bound to the app's stream) — with no further user action after the
+    /// original route.
+    ///
+    /// Polls on side effects (`tap.attemptsMade`, `engine.streamAddCalls`)
+    /// rather than an event-stream race: the FIRST `.routedApps` fire for this
+    /// route is the OPTIMISTIC one `updateAppRoutes` publishes from route-table
+    /// membership alone, before the capture has even attempted once — it does
+    /// not by itself prove the retry mechanism ran.
+    func testProcessNotYetAudibleBoundedRetryRecoversAndRejoinsMixerTopology() async {
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 2)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxRetries: 5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // The scripted tap fails twice (processNotYetAudible) before succeeding —
+        // the bounded retry must chase it down to a 3rd, successful attempt with
+        // NO further updateAppRoutes call.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 3 }
+        XCTAssertGreaterThanOrEqual(tap.attemptsMade, 3,
+                                    "2 scripted failures + at least 1 successful retry, all self-driven")
+
+        // Once recovered, the app rejoins the live mixer topology: the device
+        // gets bound to a per-app stream — which only happens for a bundle ID
+        // NOT excluded as dead.
+        await pollUntil(timeout: 5) { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                      "after the bounded retry recovers the capture, the device must be bound to the app's stream")
+    }
+
+    /// T8 edge case 2 (device disappears while routed), driven through the REAL
+    /// cross-controller chain rather than a direct `updateAppRoutes` call: a
+    /// stale doc comment in `NativeBackend.swift` (`MARK: Per-app routing edge
+    /// cases (T8)`, case 2) names a test —
+    /// `testDeviceUnavailableTearsDownBackendCaptureViaAppRoutingController` —
+    /// that does not actually exist anywhere in the suite (only
+    /// `AppRoutingController`-only-level coverage exists:
+    /// `testHandleDeviceUnavailableResetsMatchingRoutesAndPersists`). This is
+    /// that missing test: `AppRoutingController.handleDeviceUnavailable` must
+    /// reach all the way through `onRoutesDidChange` into a REAL
+    /// `NativeBackend.updateAppRoutes` and tear down the per-app stream binding
+    /// — not just reset the persisted route in isolation.
+    func testDeviceUnavailableTearsDownBackendCaptureViaAppRoutingController() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:84", name: "Vanishing Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.onRoutesDidChange = {
+            backend.updateAppRoutes(controller.appRoutes, excludedBundleIDs: [])
+        }
+        controller.addRoute(bundleID: "com.foo.player", displayName: "Foo")
+        controller.setDestination(.device(id: device.id), for: "com.foo.player")
+
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // The device the route targets disappears. In production this is
+        // `PopoverController.update(devices:)` calling `handleDeviceUnavailable`
+        // (PLAN decision 7); here we call it directly, exactly as that boundary
+        // does, to prove the layers beneath it stay in sync.
+        controller.handleDeviceUnavailable(id: device.id)
+
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        XCTAssertTrue(engine.removedIDs.contains(device.outputID),
+                      "a device disappearing while routed must tear down its per-app stream binding, " +
+                      "driven through the REAL AppRoutingController -> NativeBackend chain, not a direct call")
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.foo.player" }?.destination, .noRedirect,
+                       "the persisted route must fall back to .noRedirect")
     }
 
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {

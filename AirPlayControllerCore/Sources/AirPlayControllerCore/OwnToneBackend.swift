@@ -821,7 +821,15 @@ public enum BackendKind {
 /// Pass `nil` (the default) to resolve the backend via
 /// ``BackendKind/resolved(explicit:environment:)`` — explicit arg → the
 /// `AIRPLAY_BACKEND` env var → `.mock`.
-public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
+/// - Parameter resolvePID: bundle ID → running app's pid, for per-app capture
+///   (T6/T7). Core can't import AppKit (`NSRunningApplication`), so this is
+///   threaded in from the AppKit layer (`AppDelegate`). Defaults to "nothing
+///   resolves", which keeps the per-app path inert (no pid ⇒ no tap) for callers
+///   that don't supply it — every non-native backend ignores it entirely.
+public func makeBackend(
+    _ kind: BackendKind? = nil,
+    resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+) -> OutputBackend {
     switch BackendKind.resolved(explicit: kind) {
     case .mock:
         // Scenario scripts (connection-status brief §5): with
@@ -861,9 +869,15 @@ public func makeBackend(_ kind: BackendKind? = nil) -> OutputBackend {
         let startBufferMs = nativeStartBufferMs()
         let engine = AirPlayEngine(
             config: EngineConfig(startBufferMs: startBufferMs))
-        let nativeBackend = NativeBackend(engine: engine)
+        // Bundle ID → running pid, supplied by the caller (T7: `AppDelegate` passes
+        // an `NSRunningApplication`-backed resolver; other callers get the "nothing
+        // resolves" default). Shared by BOTH the per-app capture (owned by
+        // NativeBackend) and the whole-system tap so their exclusion/capture views
+        // agree.
+        let nativeBackend = NativeBackend(engine: engine, resolvePID: resolvePID)
         nativeBackend.seedStartBufferMs(startBufferMs)
-        nativeBackend.captureCoordinator = NativeCaptureCoordinator(engine: engine)
+        nativeBackend.captureCoordinator = NativeCaptureCoordinator(
+            engine: engine, resolvePID: resolvePID)
         return nativeBackend
     }
 }

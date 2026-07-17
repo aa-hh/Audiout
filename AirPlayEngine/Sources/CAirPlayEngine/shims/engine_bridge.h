@@ -93,6 +93,36 @@ int
 airplayengine_feed_device(const char *name, const char *hostname, int family,
                           const char *address, int port, struct keyval *txt);
 
+/* [AirPlayEngine vendored change 2026-07-17] P2b TEST/DIAGNOSTIC SEAM. These
+ * accessors (defined in sender/airplay.c) expose the otherwise-static
+ * master-session cache so the headless multi-stream test can prove that distinct
+ * stream_ids bind to distinct master sessions. NOT part of the shipping session
+ * API — do not call these from production code.
+ *
+ *   _make  : build (or reuse) a master session for (stream_id, quality, use_ptp),
+ *            returning an opaque pointer to it (the real master_session_make).
+ *   _stream_id : read a master session's stream_id back off that opaque pointer.
+ *   _count : number of live master sessions.
+ *   _reset : tear every master session down (between test cases).
+ *
+ * MUST be called on the engine thread (or, in a headless test, with no engine
+ * thread running and no sessions attached). */
+void *
+airplay_test_master_session_make(uint32_t stream_id, struct media_quality *quality, bool use_ptp);
+uint32_t
+airplay_test_master_session_stream_id(const void *ams);
+/* [AirPlayEngine vendored change 2026-07-17] P2b/T2: sample count accumulated
+ * in this master session's input_buffer by airplay_write's fan-out — lets a
+ * headless test prove distinct stream_ids never cross-pollute each other's
+ * buffer when driven through the real AirPlayEngine.write(pcm:streamId:pts:)
+ * API. See airplay.c for the full rationale. */
+uint32_t
+airplay_test_master_session_input_buffer_samples(const void *ams);
+int
+airplay_test_master_session_count(void);
+void
+airplay_test_master_sessions_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

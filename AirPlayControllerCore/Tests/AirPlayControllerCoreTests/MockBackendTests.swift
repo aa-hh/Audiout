@@ -283,6 +283,74 @@ final class MockBackendTests: XCTestCase {
         }
         XCTAssertEqual(fallbackAfter, 0.8)
     }
+
+    // MARK: T9 — offline `.routedApps` fixture
+    //
+    // `MockBackend` has no per-app capture of its own (only `NativeBackend`
+    // emits `.routedApps` organically); `test_emitRoutedApps` is the offline
+    // escape hatch T9 gives `popover-harness`/`popover-snapshot`/tests for
+    // exercising the live per-device streaming indicator without a real
+    // per-app-routing backend.
+
+    /// The fixture's event reaches a subscriber through the real
+    /// `makeEventStream()` channel, carrying the exact deviceID + appNames
+    /// given — same channel every other `BackendEvent` travels.
+    func testEmitRoutedAppsFixtureFiresThroughTheEventStream() async throws {
+        let backend = makeBackend()
+        _ = try await collect(demoFleet.count, from: backend)   // drain discovery
+
+        let stream = backend.makeEventStream()
+        let expectation = expectation(description: "routedApps event received")
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                if case .routedApps = event {
+                    _ = await box.append(event)
+                    expectation.fulfill()
+                    break
+                }
+            }
+        }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music", "Safari"])
+        await fulfillment(of: [expectation], timeout: 2)
+        task.cancel()
+
+        guard case .routedApps(let deviceID, let appNames) = await box.events.first else {
+            return XCTFail("expected a .routedApps event")
+        }
+        XCTAssertEqual(deviceID, "office")
+        XCTAssertEqual(appNames, ["Music", "Safari"])
+    }
+
+    /// An empty `appNames` fixture is the "mapping cleared" case (matches
+    /// `NativeBackend`'s real emission when a redirect leaves a device) — the
+    /// fixture can produce it too, not just the non-empty case.
+    func testEmitRoutedAppsFixtureCanEmitAnEmptyMapping() async throws {
+        let backend = makeBackend()
+        _ = try await collect(demoFleet.count, from: backend)
+
+        let stream = backend.makeEventStream()
+        let expectation = expectation(description: "empty routedApps event received")
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                if case .routedApps = event {
+                    _ = await box.append(event)
+                    expectation.fulfill()
+                    break
+                }
+            }
+        }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: [])
+        await fulfillment(of: [expectation], timeout: 2)
+        task.cancel()
+
+        guard case .routedApps(let deviceID, let appNames) = await box.events.first else {
+            return XCTFail("expected a .routedApps event")
+        }
+        XCTAssertEqual(deviceID, "office")
+        XCTAssertEqual(appNames, [])
+    }
 }
 
 private extension MockBackendTests {

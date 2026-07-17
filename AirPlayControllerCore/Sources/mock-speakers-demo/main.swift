@@ -41,6 +41,10 @@ func describe(_ event: BackendEvent) -> String? {
         // under `mock` — this driver's default — it never fires. Handled anyway so
         // the switch stays exhaustive and `AIRPLAY_BACKEND=native` prints it.
         return "♪ system vol  \(volume) (changed outside the app)"
+    case .routedApps(let deviceID, let appNames):
+        // Only `NativeBackend` emits this (T6 per-app routing); under `mock` it
+        // never fires. Handled so the switch stays exhaustive.
+        return "♪ routed apps \(deviceID) ← [\(appNames.joined(separator: ", "))]"
     }
 }
 

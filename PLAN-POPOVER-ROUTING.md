@@ -24,6 +24,15 @@ shrinks with expansion state.
    `OutputBackend` changes. Redirects persist and render but move no audio until
    the native engine supports per-app streams (per-process taps already proven
    in `dev/audiocap`; `CaptureCoordinator` is single-global-tap today).
+
+   > **RESOLVED 2026-07-17** by the separate per-app-routing-engine effort
+   > (`dev/notes/p2b-multistream-brief.md`): the vendored sender gained a
+   > `stream_id` dimension (`AirPlayEngine/docs/VENDORED-DIFFS.md` Entry 2), a
+   > new `PerAppCaptureCoordinator` taps each routed app individually, a new
+   > `AppRouteMixer` combines those taps into per-destination mixed streams
+   > with real per-app volume applied, and `NativeBackend.updateAppRoutes(_:excludedBundleIDs:)`
+   > wires it all together. Redirects now move real audio — see
+   > `AirPlayControllerCore/AGENTS.md`.
 2. **Ownership: new `AppRoutingController`** (sibling of `GroupController`, NOT
    folded into it), backed by a new versioned-JSON `AppRouteStore` mirroring
    `RoutingStore`.
@@ -149,6 +158,7 @@ Hot file: `PopoverController.swift` (T-3, T-5, T-7, T-8, T-10) — serialize.
 3. **623 pt width (T-6):** if app names over-truncate, flag to Alec — do not
    widen the panel.
 4. **Engine-honesty:** out of scope here (handled separately by Alec).
+   **RESOLVED 2026-07-17** — see the annotation on decision #1 above.
 
 ## F. Verification
 

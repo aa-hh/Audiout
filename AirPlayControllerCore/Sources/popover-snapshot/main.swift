@@ -231,6 +231,78 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
     window.contentView = NSView()
 }
 
+/// Render the T9 `live-routing` scenario: the device-row precedence between
+/// the CONFIRMED live streaming signal (`BackendEvent.routedApps`, fired here
+/// via `MockBackend.test_emitRoutedApps` — the offline fixture, since
+/// `MockBackend` has no real per-app streaming) and the intent-based routing
+/// label. Two app routes are seeded so the two rungs are visible side by
+/// side in one panel:
+///   - "office": redirected to Music AND given a live `.routedApps` event ⇒
+///     its row shows the CONFIRMED label ("Music").
+///   - "homepod-bed": redirected to Safari but given NO live event ⇒ its row
+///     falls back to the INTENT-based label ("Safari"), demonstrating the
+///     "routed but not yet confirmed streaming" fallback case.
+@MainActor
+func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let musicBundleID = "com.apple.Music"
+    let safariBundleID = "com.apple.Safari"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+    appRouting.addRoute(bundleID: safariBundleID, displayName: "Safari")
+    appRouting.setDestination(.device(id: "homepod-bed"), for: safariBundleID)
+
+    let runningApps = [
+        RunningAppInfo(bundleID: musicBundleID, displayName: "Music", icon: nil),
+        RunningAppInfo(bundleID: safariBundleID, displayName: "Safari", icon: nil),
+    ]
+    let popover = PopoverController(appRouting: appRouting, runningAppsProvider: { runningApps })
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    // "office" gets a CONFIRMED live signal via the T9 MockBackend fixture;
+    // "homepod-bed" deliberately does NOT, so its row stays on the
+    // intent-based fallback label for comparison in the same panel.
+    popover.applyRoutedApps(deviceID: "office", appNames: ["Music"])
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()   // reopen-style rebuild so the Applications card expands
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame,
+                          styleMask: [.borderless],
+                          backing: .buffered,
+                          defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-live-routing-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 @MainActor
 func run() -> Int32 {
     let app = NSApplication.shared
@@ -260,6 +332,12 @@ func run() -> Int32 {
     if mode == "connection-states" {
         snapshotConnectionStates(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotConnectionStates(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "live-routing" {
+        snapshotLiveRouting(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotLiveRouting(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

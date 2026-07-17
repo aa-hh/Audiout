@@ -45,6 +45,36 @@ final class AppRowViewTests: XCTestCase {
         ]
     }
 
+    /// Destinations INCLUDING the standalone "No Redirect" entry — the new
+    /// three-state shape a real host (`PopoverController`) actually builds.
+    private func makeThreeStateDestinations() -> [AppRowView.Destination] {
+        [
+            AppRowView.Destination(id: "no-redirect", title: "No Redirect", isLocal: true,
+                                   symbolName: nil, isStandalone: true),
+            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+                                   symbolName: "laptopcomputer"),
+            AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
+                                   symbolName: "airplayaudio"),
+            AppRowView.Destination(id: "device-2", title: "Kitchen", isLocal: false,
+                                   symbolName: "airplayaudio"),
+        ]
+    }
+
+    private func makeRowWithThreeStates(selected: String) -> (AppRowView, RecordingDelegate) {
+        let row = AppRowView()
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app",
+            name: "Example App",
+            icon: nil,
+            volume: 42,
+            selectedDestinationID: selected,
+            destinations: makeThreeStateDestinations()
+        ))
+        return (row, delegate)
+    }
+
     private func makeRow(selected: String = "local") -> (AppRowView, RecordingDelegate) {
         let row = AppRowView()
         let delegate = RecordingDelegate()
@@ -88,6 +118,32 @@ final class AppRowViewTests: XCTestCase {
         XCTAssertEqual(row.test_selectedDestinationID, "device-1")
     }
 
+    // MARK: Three-state menu structure (No Redirect / Current Device / AirPlay Devices)
+
+    /// The standalone "No Redirect" entry is first, with no header of its own,
+    /// followed by the "Current Device" section, then "AirPlay Devices" — in
+    /// that order.
+    func testNoRedirectEntryLeadsMenuAheadOfBothSections() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        let titles = row.test_menuTitles
+        XCTAssertEqual(titles.first, "No Redirect",
+                       "the standalone No Redirect entry must be the very first item")
+        let noRedirectIndex = titles.firstIndex(of: "No Redirect")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
+        let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
+        XCTAssertNotNil(currentDeviceHeaderIndex)
+        XCTAssertNotNil(airplayHeaderIndex)
+        XCTAssertLessThan(noRedirectIndex!, currentDeviceHeaderIndex!)
+        XCTAssertLessThan(currentDeviceHeaderIndex!, airplayHeaderIndex!)
+        // No Redirect must not itself land inside either section.
+        XCTAssertFalse(titles[(currentDeviceHeaderIndex! + 1)...].contains("No Redirect"))
+    }
+
+    func testNoRedirectEntrySelectionIsCheckmarked() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        XCTAssertEqual(row.test_selectedDestinationID, "no-redirect")
+    }
+
     // MARK: Delegate firing
 
     func testSelectingDestinationFiresDelegate() {
@@ -120,6 +176,25 @@ final class AppRowViewTests: XCTestCase {
 
     func testSliderNotDimmedWhenRedirected() {
         let (row, _) = makeRow(selected: "device-1")
+        XCTAssertFalse(row.test_isSliderDimmed, "slider must be enabled once redirected to an AirPlay device")
+    }
+
+    /// LOCKED DECISION 3, extended: the slider dims for BOTH local states —
+    /// "No Redirect" (the new default) AND "Current Device" (an explicit
+    /// pick) — since both mean "plays locally, not redirected."
+    func testSliderDimmedWhenDestinationIsNoRedirect() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        XCTAssertTrue(row.test_isSliderDimmed, "slider must dim while destination is No Redirect")
+    }
+
+    func testSliderDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
+        let (row, _) = makeRowWithThreeStates(selected: "local")
+        XCTAssertTrue(row.test_isSliderDimmed,
+                     "slider must dim while destination is Current Device even with No Redirect present")
+    }
+
+    func testSliderNotDimmedWhenRedirectedAmongThreeStates() {
+        let (row, _) = makeRowWithThreeStates(selected: "device-1")
         XCTAssertFalse(row.test_isSliderDimmed, "slider must be enabled once redirected to an AirPlay device")
     }
 

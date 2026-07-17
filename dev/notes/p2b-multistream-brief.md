@@ -1,5 +1,13 @@
 # P2b — Multi-stream sender feasibility & per-app-routing architecture (T-R2b)
 
+**IMPLEMENTED 2026-07-17.** The recommended option-(b) surgery (§4) was built
+as specified: `stream_id` added to the vendored sender
+(`AirPlayEngine/docs/VENDORED-DIFFS.md` Entry 2), the Swift mix stage landed
+as `PerAppCaptureCoordinator` + `AppRouteMixer`, and `NativeBackend.updateAppRoutes(_:excludedBundleIDs:)`
+wires the two together — see `AirPlayControllerCore/AGENTS.md`. The
+verdicts, walls, and open questions below are the design record this was
+built from; not updated post-implementation.
+
 Research brief for the architectural unknown behind **per-app routing** (SPEC §3
 v2, §9 "Applications routing view"): *route Spotify→Kitchen while Zoom stays
 local; overlapping routes MIX per speaker — every speaker receives exactly one

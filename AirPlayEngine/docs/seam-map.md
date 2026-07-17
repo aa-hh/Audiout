@@ -1,5 +1,16 @@
 # AirPlay 2 sender — seam-cutting map (T-SEAM-1)
 
+**Post-extraction note (2026-07-17):** this document records the ONE-TIME
+extraction from OwnTone tag 29.2 and is not maintained after that point.
+The shim `outputs.h` types in §2.3 (`struct output_device`, `struct
+output_data`) have since gained a `uint32_t stream_id` field, and the
+vendored `sender/airplay.c` gained a matching `stream_id` dimension for
+per-app-routing multi-stream support — a real, intentional exception to this
+document's "otherwise byte-identical" extraction. See
+`docs/VENDORED-DIFFS.md` Entry 2 for the rationale and exact hunk; this file's
+line numbers and shim inventory below are otherwise still the tag-29.2
+baseline they describe.
+
 **Source:** `dev/owntone-src` — OwnTone pinned at tag **29.2**.
 **Goal:** extract the AirPlay 2 *sender* cluster into the SwiftPM package
 `AirPlayEngine/` (target `CAirPlayEngine`), replacing all OwnTone plumbing with

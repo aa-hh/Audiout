@@ -201,9 +201,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // needs a full rebuild — but a rebuild here must NOT reset this open's
         // transient collapse state (it's a mid-open repaint, not a reopen), which
         // a plain `rebuild()` guarantees (only `rebuildForOpen()` clears it).
+        //
+        // A device being added or removed also restructures the device rows —
+        // `refreshDeviceRows()` only repaints EXISTING rows, so a device set
+        // change (not just a route change) must force the same full rebuild path.
+        let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if popover.isShown {
-            if routesChanged {
+            if routesChanged || deviceSetChanged {
                 rebuild()
+                panel.panelContentDidChangeHeight(animated: true)
             } else {
                 refreshDeviceRows()
                 refreshMainOutRow()

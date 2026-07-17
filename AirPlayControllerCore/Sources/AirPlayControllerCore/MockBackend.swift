@@ -27,6 +27,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     private let staggerDiscovery: Bool
     private let emitsLevels: Bool
     private let simulatesDropouts: Bool
+    private let outputObserver: DefaultOutputObserver?
 
     /// - Parameters:
     ///   - fleet: the devices to fabricate. Defaults to ``Array/demoFleet``.
@@ -35,16 +36,22 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     ///   - emitsLevels: push fake RMS samples for the level meters.
     ///   - simulatesDropouts: periodically drop a device and bring it back, to
     ///     exercise the unavailable/reconnect UI. Off by default (nondeterministic).
+    ///   - outputObserver: when provided, tracks the macOS default audio output
+    ///     device and renames the local device (`local-mac`) to match reality
+    ///     instead of the hardcoded "MacBook Pro Speakers". `nil` by default so
+    ///     existing call sites (mainly tests) are unaffected.
     public init(
         fleet: [Device] = .demoFleet,
         staggerDiscovery: Bool = true,
         emitsLevels: Bool = true,
-        simulatesDropouts: Bool = false
+        simulatesDropouts: Bool = false,
+        outputObserver: DefaultOutputObserver? = nil
     ) {
         self.fleet = fleet
         self.staggerDiscovery = staggerDiscovery
         self.emitsLevels = emitsLevels
         self.simulatesDropouts = simulatesDropouts
+        self.outputObserver = outputObserver
     }
 
     // MARK: OutputBackend
@@ -80,6 +87,15 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
             if self.emitsLevels { self.startLevelTimer() }
             if self.simulatesDropouts { self.startDropoutTimer() }
+
+            if let observer = self.outputObserver {
+                observer.onChange = { [weak self] name in
+                    guard let self else { return }
+                    self.queue.async { self.updateLocalDeviceName(name) }
+                }
+                observer.start()
+                self.updateLocalDeviceName(observer.currentDeviceName)
+            }
         }
     }
 
@@ -92,6 +108,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             self.live.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
+        outputObserver?.stop()
     }
 
     public func setVolume(_ volume: Int, for id: String) {
@@ -133,6 +150,17 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
     private func emit(_ event: BackendEvent) {         // must be on `queue`
         for continuation in continuations.values { continuation.yield(event) }
+    }
+
+    /// Rename the local device (`isLocalDevice == true`) to match the real
+    /// macOS default output device. No-op if the local device hasn't been
+    /// discovered yet or the name hasn't changed. Must be called on `queue`.
+    private func updateLocalDeviceName(_ name: String) {
+        guard var device = live.values.first(where: { $0.isLocalDevice }) else { return }
+        guard device.name != name else { return }
+        device.name = name
+        live[device.id] = device
+        emit(.deviceUpdated(device))
     }
 
     private func startLevelTimer() {

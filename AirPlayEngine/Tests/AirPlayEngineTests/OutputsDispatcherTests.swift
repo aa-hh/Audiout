@@ -132,6 +132,62 @@ final class OutputsDispatcherTests: XCTestCase {
         XCTAssertEqual(completionCalls.count, 1, "id must fire exactly once")
     }
 
+    // MARK: - REAL AP2 device_start terminal is CONNECTED (2026-07-16 first-light).
+    //
+    // Against a real AirPlay 2 buffered receiver (Sonos Move), the vendored sender
+    // reports device_start's single completion as OUTPUT_STATE_CONNECTED (state=2)
+    // — AIRPLAY_SEQ_START_PLAYBACK.on_success == session_connected (airplay.c:3620,
+    // 1338). This is the exact callback observed on hardware. Assert it flows
+    // through the engine hook once, carrying CONNECTED, so the async waiter can
+    // resolve. (The Swift-side terminal classification of .connected is covered in
+    // AirPlayEngineAPITests.testOutputStateTerminalClassification.)
+    func testAirPlay2StartReportsConnected() {
+        let deviceId: UInt64 = 0x542A1B79089E // the real Sonos Move device id
+        // A live device_start has an attached session; keep it advertised so the
+        // drain doesn't drop it (the CONNECTED report is NOT a teardown).
+        makeDevice(id: deviceId, advertised: true, session: true)
+        let dev = outputs_device_get(deviceId)!
+        let cbId = outputs_callback_add(dev, recordingStatusCb)
+
+        // The single completion the RTSP state machine fires at end of
+        // START_PLAYBACK (session_connected -> session_status -> outputs_cb).
+        outputs_cb(cbId, deviceId, OUTPUT_STATE_CONNECTED)
+        outputs_cb_deferred_run()
+
+        XCTAssertEqual(completionCalls.count, 1, "CONNECTED is device_start's sole terminal — must fire once")
+        XCTAssertEqual(completionCalls.first?.callbackId, cbId)
+        XCTAssertEqual(completionCalls.first?.deviceId, deviceId)
+        XCTAssertEqual(completionCalls.first?.state, OUTPUT_STATE_CONNECTED.rawValue)
+        // device->state advanced to CONNECTED; device survives (session live).
+        XCTAssertEqual(outputs_device_get(deviceId)?.pointee.state.rawValue,
+                       OUTPUT_STATE_CONNECTED.rawValue)
+    }
+
+    // MARK: - Failure-after-connect: once CONNECTED spent the id (session_status
+    // set callback_id=-1), the later RTSP-close failure fires outputs_cb(-1,…),
+    // which is a defensive no-op. This is the OTHER half of the first-light hang:
+    // if the CONNECTED completion is dropped upstream, the failure CANNOT recover
+    // the waiter. Assert the -1 report delivers nothing (the waiter must be
+    // released by the CONNECTED report, not this one).
+    func testFailureAfterConnectIsNoOpOnSpentId() {
+        let deviceId: UInt64 = 0x542A1B79089E
+        makeDevice(id: deviceId, advertised: true, session: true)
+        let dev = outputs_device_get(deviceId)!
+        let cbId = outputs_callback_add(dev, recordingStatusCb)
+
+        // 1) CONNECTED fires and is delivered — the id is now spent.
+        outputs_cb(cbId, deviceId, OUTPUT_STATE_CONNECTED)
+        outputs_cb_deferred_run()
+        XCTAssertEqual(completionCalls.count, 1)
+
+        // 2) The receiver later closes RTSP; session_status runs with callback_id
+        //    already -1 (spent). outputs_cb(-1,…) must be ignored — no second
+        //    completion, no crash.
+        outputs_cb(-1, deviceId, OUTPUT_STATE_FAILED)
+        outputs_cb_deferred_run()
+        XCTAssertEqual(completionCalls.count, 1, "spent id (-1) must not deliver a second completion")
+    }
+
     // MARK: - Error path: FAILED still unblocks (never hangs).
 
     func testErrorPathFailedStillCompletes() {

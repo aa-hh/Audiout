@@ -56,10 +56,19 @@ final class EngineThread: @unchecked Sendable {
         return base != nil
     }
 
+    /// libevent threading support, enabled once process-wide BEFORE any
+    /// event_base exists. REQUIRED: `event_base_once()` from another thread
+    /// only wakes a loop blocked in kevent() when the base was created with
+    /// evthread support — otherwise the scheduled work sits until the next
+    /// timer fires (up to the 1h keep-alive). The engine's first real
+    /// `start()` deadlocked exactly this way (gated first-light, 2026-07-16);
+    /// headless tests never hit it because they bypass the real init path.
+    private static let evthreadEnabled: Bool = evthread_use_pthreads() == 0
+
     private func threadMain() {
         thread_setname("com.airplayengine.engine")
 
-        guard let b = event_base_new() else {
+        guard EngineThread.evthreadEnabled, let b = event_base_new() else {
             base = nil
             startSem.signal()
             return

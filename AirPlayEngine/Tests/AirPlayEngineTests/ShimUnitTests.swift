@@ -6,6 +6,7 @@
 // at init.
 
 import XCTest
+import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
 
@@ -118,5 +119,89 @@ final class ShimUnitTests: XCTestCase {
         // Restore.
         conffile_set_ports(0, 0)
         conffile_set_libhash(originalHash)
+    }
+
+    // MARK: - ALAC transcode shim (the encode seam)
+    //
+    // Regression for first-light forensics (2026-07-17): drive the REAL ffmpeg-
+    // backed transcode.c shim exactly like airplay.c's alac_encode()/packets_send()
+    // — 352-sample interleaved-S16 frames at 44100/16/2 into an evbuffer — and
+    // assert the produced ALAC bitstream is well-formed. A companion out-of-tree
+    // decode (libavcodec ALAC decode with the SETUP-advertised magic cookie)
+    // confirmed the recovered PCM is a clean 440 Hz tone (Goertzel spike ~400x
+    // over neighbouring bins); this in-suite test guards the shim's frame layout
+    // and output shape so a future refactor can't silently break the encoder while
+    // the session still looks healthy.
+    func testAlacTranscodeShimProducesValidFrames() {
+        let sampleRate: Int32 = 44100
+        let channels: Int32 = 2
+        let bits: Int32 = 16
+        let samplesPerPacket = 352
+        let bytesPerFrame = Int(channels) * Int(bits) / 8   // 4
+        let rawbufSize = samplesPerPacket * bytesPerFrame     // 1408
+
+        var quality = media_quality(sample_rate: sampleRate, bits_per_sample: bits, channels: channels, bit_rate: 0)
+
+        // Set up the encoder the way master_session_make() does.
+        let src = transcode_decode_setup_raw(XCODE_PCM16, &quality)
+        XCTAssertNotNil(src, "transcode_decode_setup_raw returned NULL")
+        var args = transcode_encode_setup_args()
+        args.profile = XCODE_ALAC
+        args.quality = withUnsafeMutablePointer(to: &quality) { $0 }
+        args.src_ctx = src
+        guard let ectx = transcode_encode_setup(args) else {
+            transcode_decode_cleanup(&args.src_ctx)
+            return XCTFail("transcode_encode_setup returned NULL (ffmpeg ALAC encoder unavailable?)")
+        }
+        transcode_decode_cleanup(&args.src_ctx)
+        defer { var e: OpaquePointer? = ectx; transcode_encode_cleanup(&e) }
+
+        // Synthesize a 440 Hz interleaved S16LE stereo tone, encode 200 frames.
+        let evbuf = evbuffer_new()
+        defer { evbuffer_free(evbuf) }
+        var rawbuf = [UInt8](repeating: 0, count: rawbufSize)
+
+        let frameCount = 200
+        var sampleIndex = 0
+        var packets = 0
+        var firstFrameByte: UInt8 = 0xFF
+        for _ in 0..<frameCount {
+            for i in 0..<samplesPerPacket {
+                let t = Double(sampleIndex) / Double(sampleRate)
+                let v = Int16(16000.0 * sin(2.0 * Double.pi * 440.0 * t))
+                let lo = UInt8(truncatingIfNeeded: Int(v))
+                let hi = UInt8(truncatingIfNeeded: Int(v) >> 8)
+                let base = i * bytesPerFrame
+                rawbuf[base + 0] = lo; rawbuf[base + 1] = hi   // left
+                rawbuf[base + 2] = lo; rawbuf[base + 3] = hi   // right
+                sampleIndex += 1
+            }
+
+            let len: Int = rawbuf.withUnsafeMutableBytes { rb -> Int in
+                guard let frame = transcode_frame_new(rb.baseAddress, rawbufSize, Int32(samplesPerPacket), &quality) else { return -1 }
+                defer { transcode_frame_free(frame) }
+                return Int(transcode_encode(evbuf, ectx, frame, 0))
+            }
+            XCTAssertGreaterThan(len, 0, "transcode_encode produced no ALAC bytes for a full frame")
+
+            // Pull this packet's bytes out (as packets_send does) and sanity-check.
+            var pkt = [UInt8](repeating: 0, count: max(len, 1))
+            let got = pkt.withUnsafeMutableBytes { evbuffer_remove(evbuf, $0.baseAddress, len) }
+            XCTAssertEqual(Int(got), len)
+            if packets == 0 { firstFrameByte = pkt[0] }
+            // ALAC/44100/16/2 raw frames are well under the uncompressed ceiling
+            // (352*4 = 1408 bytes + header); a full-size frame that large would
+            // mean the "352 spf" hack failed and the encoder emitted its native
+            // 4096-sample block.
+            XCTAssertLessThan(len, rawbufSize + 32, "ALAC packet unexpectedly large — frame_size=352 hack may have failed")
+            packets += 1
+        }
+
+        XCTAssertEqual(packets, frameCount, "one ALAC packet per 352-sample frame expected")
+        // The ALAC element bitstream starts with a channel-element tag; for the
+        // stereo tone the first byte is 0x20 (verified against the libavcodec
+        // round-trip). Pin it so a planar/interleaved or channel-count regression
+        // in the shim is caught.
+        XCTAssertEqual(firstFrameByte, 0x20, "unexpected ALAC element header — channel layout / frame shape changed")
     }
 }

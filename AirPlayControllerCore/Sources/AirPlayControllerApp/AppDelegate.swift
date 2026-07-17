@@ -26,7 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
-    private let popoverController = PopoverController()
+    /// Wired with an explicit production `AppRoutingController` so app routes
+    /// persist to Application Support (T-11).
+    private var popoverController: PopoverController!
 
     /// UI-agnostic mixer model (groups, proportional master, mute) shared
     /// by the menu and the mixer window (T-U4). Built lazily in
@@ -68,6 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
+
+        // Construct the production AppRoutingController explicitly (T-11), using
+        // the default store directory so app routes persist to Application Support.
+        let appRouting = AppRoutingController(store: AppRouteStore())
+        popoverController = PopoverController(appRouting: appRouting)
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
 

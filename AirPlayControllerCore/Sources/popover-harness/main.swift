@@ -11,8 +11,13 @@
 // group routes (backend output set = members); toggles compose the Selected
 // Devices set without routing when the target is a group; selecting Selected
 // Devices applies the toggled set; the local-device auto-swap + mix block; the
-// Main Out master = the current target's master. Prints PASS/FAIL; exits nonzero
-// on failure so it can gate CI alongside `swift test`.
+// Main Out master = the current target's master; and (T-9) the Applications
+// card: present and rendered LAST, collapsed-by-default with zero routes,
+// expanded after seeding a route + a reopen-style rebuild, correct row
+// count/config, the destination popup's exact two sections, the "+ Add
+// application…" row present last, adding an app via the picker hook mounts a
+// row, and removing it resets the card back to empty. Prints PASS/FAIL; exits
+// nonzero on failure so it can gate CI alongside `swift test`.
 
 import AppKit
 import AirPlayControllerCore
@@ -45,6 +50,50 @@ func drain(_ interval: TimeInterval = 0.2) {
     RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(interval))
 }
 
+// MARK: - Card-order introspection (T-9)
+//
+// `PopoverController` exposes the assembled panel view via `test_panelView`
+// but no direct "list of card titles in order" hook. The cards live in the
+// panel's top-level vertical `NSStackView`; each card's own header row carries
+// an `NSTextField` whose `stringValue` is the section title (e.g.
+// "Applications"). Walking the view tree this way stays entirely within the
+// already-public `test_panelView` surface — no PopoverController/panel
+// changes needed for T-9.
+
+/// Every label-ish string found anywhere under `view` (depth-first, in
+/// visual/subview order) — `NSTextField.stringValue` (card/section titles) and
+/// `NSButton.title` (the borderless "Add application…" row, which is a
+/// titled button rather than a text field).
+func allLabelStrings(under view: NSView) -> [String] {
+    var result: [String] = []
+    if let field = view as? NSTextField { result.append(field.stringValue) }
+    if let button = view as? NSButton, !button.title.isEmpty { result.append(button.title) }
+    for sub in view.subviews { result.append(contentsOf: allLabelStrings(under: sub)) }
+    return result
+}
+
+/// The top-level card containers directly under `panelView`: the outermost
+/// `NSStackView`'s arranged subviews (one per `beginCard` call), in the order
+/// they were added — i.e. rendering top-to-bottom.
+func topLevelCards(panelView: NSView) -> [NSView] {
+    func firstStackView(under view: NSView) -> NSStackView? {
+        if let stack = view as? NSStackView { return stack }
+        for sub in view.subviews {
+            if let found = firstStackView(under: sub) { return found }
+        }
+        return nil
+    }
+    guard let stack = firstStackView(under: panelView) else { return [] }
+    return stack.arrangedSubviews
+}
+
+/// The index of the card whose header title is `title` among `topLevelCards`,
+/// found by checking each card's own labels for an exact match — `nil` if no
+/// card carries that title.
+func cardIndex(titled title: String, in cards: [NSView]) -> Int? {
+    cards.firstIndex { allLabelStrings(under: $0).contains(title) }
+}
+
 @MainActor
 func run() -> Int32 {
     let app = NSApplication.shared
@@ -56,7 +105,11 @@ func run() -> Int32 {
     let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
                                      routingStore: RoutingStore(directory: tempDir()),
                                      loadPersisted: false)
-    let popover = PopoverController()
+    // Construct PopoverController with AppRoutingController backed by a temp-directory
+    // AppRouteStore (T-11), so the harness never touches real Application Support.
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
 
     backend.start()
     guard waitForFleet(backend, count: 7) else {
@@ -200,10 +253,87 @@ func run() -> Int32 {
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown to the group name")
 
-    // --- 14. Connection-status flow (brief §7.3), on a scripted MockBackend:
+    // --- 14. Applications card: present, last, collapsed with zero routes.
+    print("\n[14] Applications card — present + last + collapsed by default")
+    checks.expect(popover.test_isCardCollapsed(title: "Applications") != nil,
+                  "Applications card exists")
+    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
+                       "Applications card is collapsed with zero routes")
+    checks.expectEqual(popover.test_appRowCount, 0, "no app rows with zero routes")
+    let cardsBeforeRoute = topLevelCards(panelView: popover.test_panelView)
+    checks.expectEqual(cardIndex(titled: "Applications", in: cardsBeforeRoute),
+                       cardsBeforeRoute.count - 1,
+                       "Applications card renders LAST")
+
+    // --- 15. Seeding a route + reopen-style rebuild expands the card.
+    print("\n[15] Seeding a route expands the card on reopen")
+    let musicBundleID = "com.apple.Music"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+    popover.test_simulateOpen()   // reopen-style rebuild (T-5 recomputes defaults)
+    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), false,
+                       "Applications card is expanded once a route is redirected")
+    checks.expectEqual(popover.test_appRowCount, 1, "one app row mounted for the seeded route")
+
+    // --- 16. The app row's config: destination + slider state.
+    print("\n[16] Seeded app row config")
+    checks.expectEqual(popover.test_appRowBundleIDs(), [musicBundleID],
+                       "row order matches appRoutes order")
+    checks.expectEqual(popover.test_appRowSelectedDestinationID(for: musicBundleID), "office",
+                       "row shows the redirected destination")
+    checks.expectEqual(popover.test_appRowSliderDimmed(for: musicBundleID), false,
+                       "slider is live (not dimmed) while redirected to an AirPlay device")
+    if let row = popover.test_appRow(for: musicBundleID) {
+        checks.expectEqual(row.test_volume, 100, "seeded route's default volume is 100")
+    } else {
+        checks.expect(false, "the seeded app row exists")
+    }
+
+    // --- 17. Destination menu has exactly the two sections.
+    print("\n[17] Destination menu sections")
+    if let titles = popover.test_appRowDestinationTitles(for: musicBundleID) {
+        checks.expect(titles.contains("CURRENT DEVICE"), "menu has a Current Device section")
+        checks.expect(titles.contains("AIRPLAY DEVICES"), "menu has an AirPlay Devices section")
+        let unexpectedSections = titles.filter { $0 == $0.uppercased() && $0.count > 1 }
+            .filter { $0 != "CURRENT DEVICE" && $0 != "AIRPLAY DEVICES" }
+        checks.expect(unexpectedSections.isEmpty,
+                      "no extra section headers (e.g. a Groups section) leaked in")
+    } else {
+        checks.expect(false, "the seeded app row's destination menu exists")
+    }
+
+    // --- 18. Add row present last; picking an app via the picker hook adds a row.
+    print("\n[18] Add-application row is last; picker hook adds a row")
+    let cardsAfterSeed = topLevelCards(panelView: popover.test_panelView)
+    checks.expect(allLabelStrings(under: cardsAfterSeed[cardsAfterSeed.count - 1])
+                    .contains(where: { $0.contains("Add application") }),
+                  "the Applications card body ends with the Add-application row")
+    let safariBundleID = "com.apple.Safari"
+    let runningApps = [RunningAppInfo(bundleID: safariBundleID, displayName: "Safari", icon: nil)]
+    let pickerPopover = PopoverController(appRouting: appRouting, runningAppsProvider: { runningApps })
+    pickerPopover.configure(groupController: controller)
+    pickerPopover.update(devices: backend.devices)
+    pickerPopover.test_pickApp(bundleID: safariBundleID)
+    checks.expectEqual(pickerPopover.test_appRowCount, 2, "picking an app mounts a second row")
+    checks.expect(pickerPopover.test_appRow(for: safariBundleID) != nil,
+                  "the picked app's row is mounted under its bundle id")
+
+    // --- 19. Removing a route resets the card.
+    print("\n[19] Removing a route resets the card")
+    if let safariRow = pickerPopover.test_appRow(for: safariBundleID) {
+        safariRow.test_remove()
+    }
+    checks.expectEqual(pickerPopover.test_appRowCount, 1, "removing Safari leaves just Music")
+    appRouting.removeRoute(bundleID: musicBundleID)
+    popover.test_simulateOpen()
+    checks.expectEqual(popover.test_appRowCount, 0, "removing the last route empties the card")
+    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
+                       "the card collapses again once no app is redirected")
+
+    // --- 20. Connection-status flow (brief §7.3), on a scripted MockBackend:
     // fail → toggle bounced + warning + auto-expanded panel; sticky warning
     // survives the cleanup setOutputSet; "Try again" → connected + panel gone.
-    print("\n[14] Connection-status flow (scripted MockBackend)")
+    print("\n[20] Connection-status flow (scripted MockBackend)")
     runConnectionStatusChecks(checks)
 
     print("\n----------------------------------------")

@@ -625,3 +625,19 @@ shairport-sync AP2 receiver (docs/receiver-harness-guide.md is ready — machine
 identity/OS still unconfirmed; must be Linux/Pi, a second Mac cannot do it),
 (3) speakers returning. NOTE: the fake AP1 shairport receiver is NOT valid for
 the engine (we vendored only the AP2 sender path).
+
+## GATED LIVE ENGINE TEST ✅ PASSED (2026-07-17) — FIRST LIGHT
+
+Speakers returned 2026-07-16. The probe played the full test tone audibly on
+the real Sonos Move over AirPlay 2 with PTP timing, human-confirmed (option 3
+from the re-deferral above). Six hosting-layer bugs were found and fixed en
+route — every one an application duty OwnTone's main()/player performed that
+our hosting didn't; the vendored sender files stayed byte-identical to
+OwnTone. Full ledger, forensic evidence, operational gotchas, and the ranked
+follow-up backlog: **AirPlayEngine/docs/first-light-report.md**. Runtime
+unknowns validated: R-A (single CONNECTED terminal callback, real retry path
+exercised), R-B (engine-thread write cadence held for a 25 s stream), R-C
+(ALAC accepted — round-trip-verified against the reference decoder), PTP
+(we win BMCA, Sonos slaves to us). NEXT: multi-room sync checkpoint (probe
+extension to 2+ outputs), then T-BACKEND-1 (NativeBackend — see
+dev/notes/p2b-nativebackend-seam-brief.md).

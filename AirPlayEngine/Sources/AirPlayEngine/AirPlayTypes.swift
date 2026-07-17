@@ -90,12 +90,32 @@ public enum OutputState: Sendable, Equatable {
     /// The receiver requires a password/PIN we don't have.
     case passwordRequired
 
-    /// Terminal states an async op (`addOutput`) can resolve to. `startup`/
-    /// `connected` are intermediate progress reports.
+    /// Terminal states an async op (`addOutput`/`removeOutput`/`setVolume`) can
+    /// resolve to — i.e. the states the vendored sender reports via a *single*
+    /// `outputs_cb` that spends its `callback_id` (sets it to -1).
+    ///
+    /// CRITICAL (2026-07-16 first-light fix): `.connected` IS terminal. For an
+    /// AirPlay 2 buffered receiver (Sonos/HomePod/…), the `device_start` success
+    /// callback is `OUTPUT_STATE_CONNECTED`, NOT `OUTPUT_STATE_STREAMING`. The
+    /// sequence table wires `AIRPLAY_SEQ_START_PLAYBACK.on_success =
+    /// session_connected` (airplay.c:3620), which sets state CONNECTED and fires
+    /// `session_status()` exactly once, clearing `callback_id` to -1
+    /// (airplay.c:1338-1343, 1094-1095). STREAMING is reached later *internally*
+    /// by `airplay_write()` (airplay.c:4278, comment `// Make a cb?` — it does
+    /// NOT), so no STREAMING callback ever arrives for `device_start`. Treating
+    /// `.connected` as non-terminal dropped that sole completion and hung the
+    /// `addOutput` waiter forever (and, once the id was spent, the later failure's
+    /// `outputs_cb(-1,…)` no-op could not recover it). This matches OwnTone's
+    /// player semantics (device_start's callback == "startup finished/failed") and
+    /// docs/outputs-dispatcher-contract.md §6, which lists CONNECTED as terminal.
+    ///
+    /// Only `.startup` (the genuine INFO…RECORD progress state) stays
+    /// non-terminal — but in this cluster `device_start` never reports it, since
+    /// `session_status` is only called at sequence success/failure, never mid-way.
     var isTerminal: Bool {
         switch self {
-        case .streaming, .stopped, .failed, .passwordRequired: return true
-        case .startup, .connected: return false
+        case .streaming, .connected, .stopped, .failed, .passwordRequired: return true
+        case .startup: return false
         }
     }
 }

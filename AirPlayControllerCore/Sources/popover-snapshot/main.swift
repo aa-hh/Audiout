@@ -9,6 +9,14 @@
 // `bitmapImageRepForCachingDisplay(in:)` + `cacheDisplay(in:)`, writing PNGs to
 // `dev/notes/popover-snapshots/` in BOTH light and dark appearances.
 //
+// T-9: the AppRoutingController is seeded with two routes BEFORE the panel is
+// built, so the committed PNGs show the EXPANDED Applications card (PLAN §B —
+// expanded iff >=1 app is redirected): "Music" redirected to the "office"
+// AirPlay device (an active, non-dimmed slider) and "Safari" left on Current
+// Device (a dimmed slider) — Safari isn't in the injected `runningAppsProvider`
+// list, so its icon resolves to the generic placeholder (T-8 "not currently
+// running" path).
+//
 // Run: `swift run popover-snapshot [output-dir]`.
 //
 // Set `AIRPLAY_SNAPSHOT_MODE=connection-states` to render a second scenario
@@ -75,7 +83,25 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
                                      store: GroupStore(directory: tempDir()),
                                      routingStore: RoutingStore(directory: tempDir()),
                                      loadPersisted: false)
-    let popover = PopoverController()
+    // Construct PopoverController with AppRoutingController backed by a temp-directory
+    // AppRouteStore (T-11), so the snapshot tool never touches real Application Support.
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    // T-9: seed the Applications card with two routes BEFORE the panel is built —
+    // "Music" redirected to the "office" AirPlay device (active, non-dimmed
+    // slider) and "Safari" left on Current Device (dimmed slider). Only "Music"
+    // is in the injected runningAppsProvider list, so Safari's icon resolves to
+    // the generic placeholder (T-8 "not currently running" path).
+    let musicBundleID = "com.apple.Music"
+    let safariBundleID = "com.apple.Safari"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+    appRouting.setVolume(70, for: musicBundleID)
+    appRouting.addRoute(bundleID: safariBundleID, displayName: "Safari")
+    // Safari stays on Current Device (the default destination) at volume 100.
+
+    let runningApps = [RunningAppInfo(bundleID: musicBundleID, displayName: "Music", icon: nil)]
+    let popover = PopoverController(appRouting: appRouting, runningAppsProvider: { runningApps })
     backend.start()
     guard waitForFleet(backend, count: 7) else {
         print("  SETUP FAIL: fleet did not fully discover"); return
@@ -90,6 +116,7 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
     _ = popover.test_toggleDeviceEnabled(deviceID: "sonos-move", on: true)
     popover.update(devices: backend.devices)
+    popover.test_simulateOpen()   // reopen-style rebuild so the Applications card expands
 
     // Host the assembled panel in an offscreen window so the card materials /
     // vibrancy render, under the requested appearance.

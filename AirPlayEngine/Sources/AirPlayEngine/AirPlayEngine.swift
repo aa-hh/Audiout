@@ -181,6 +181,30 @@ public actor AirPlayEngine {
         self.config = config
         self.engineThread = EngineThread()
         self.latencyProbe = WriteLatencyProbe(startBufferMs: config.startBufferMs)
+        self.currentStartBufferMs = config.startBufferMs
+    }
+
+    /// The start buffer currently in force (config value until
+    /// ``setStartBufferMs(_:)`` changes it). `applyConfigOnEngineThread` reads
+    /// this — not `config.startBufferMs` — so a pre-`start()` set isn't
+    /// clobbered when `start()` applies the config.
+    private var currentStartBufferMs: Int
+
+    /// Change the sender-side start buffer (ms). Takes effect for the NEXT
+    /// stream session: the vendored `master_session_make` reads the value when
+    /// a session is created and caches the derived sample count, so live
+    /// sessions keep their old buffer until torn down and re-established —
+    /// that re-establish dance is `NativeBackend.applyStartBuffer`'s job, not
+    /// this method's. The shim clamps to its own 300...5000 range. Also updates
+    /// the latency probe so its logged "sender lead" tracks the new value.
+    public func setStartBufferMs(_ ms: Int) async {
+        currentStartBufferMs = ms
+        latencyProbe.updateStartBufferMs(ms)
+        // Not started yet (or headless): applyConfigOnEngineThread / the inline
+        // test path will serve the stored value at start(); nothing to do now.
+        guard started || issueOverride != nil else { return }
+        let apply: () -> Void = { outputs_set_buffer_duration_ms(UInt64(max(0, ms))) }
+        if issueOverride != nil { apply() } else { await engineThread.run(apply) }
     }
 
     // MARK: Backward-compatible scaffold probe (kept so T-BUILD-1 tests pass)
@@ -357,7 +381,9 @@ public actor AirPlayEngine {
         // Sender-side start buffer (scheduling lead + receiver jitter buffer).
         // Must land before airplay_init: master_session_make caches the derived
         // output_buffer_samples per master session. The shim clamps to 300...5000.
-        outputs_set_buffer_duration_ms(UInt64(max(0, config.startBufferMs)))
+        // `currentStartBufferMs`, not `config.startBufferMs`: a caller may have
+        // set a new value before start() (setStartBufferMs).
+        outputs_set_buffer_duration_ms(UInt64(max(0, currentStartBufferMs)))
         // Derive libhash from client name + per-install seed (device id / PTP
         // clock-id seed) so two installs advertising the same clientName on
         // one LAN don't collide (first-light backlog #5.1).
@@ -1079,7 +1105,9 @@ public struct WriteLatencySnapshot: Sendable, Equatable {
 final class WriteLatencyProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.airplayengine", category: "latency")
-    private let startBufferMs: Int
+    /// Guarded by `lock` — mutable so `AirPlayEngine.setStartBufferMs` keeps the
+    /// logged "sender lead" honest after a runtime change.
+    private var startBufferMs: Int
     private let enabled: Bool
     private let logInterval: Double
 
@@ -1102,6 +1130,14 @@ final class WriteLatencyProbe: @unchecked Sendable {
         self.startBufferMs = startBufferMs
         self.enabled = enabled
         self.logInterval = logInterval
+    }
+
+    /// Track a runtime start-buffer change so the logged sender lead stays
+    /// accurate. Thread-safe; cheap enough to call from any context.
+    func updateStartBufferMs(_ ms: Int) {
+        lock.lock()
+        startBufferMs = ms
+        lock.unlock()
     }
 
     /// Record one write's pts against CLOCK_MONOTONIC now. No-op when disabled.

@@ -84,6 +84,9 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// superseded attempt become no-ops instead of clobbering newer state.
     private var generations: [String: UInt64] = [:]
 
+    /// Fake start buffer for the `LatencyConfigurable` conformance (on `queue`).
+    private var fakeStartBufferMs: Int = AppSettings.defaultStartBufferMs
+
     /// - Parameters:
     ///   - fleet: the devices to fabricate. Defaults to ``Array/demoFleet``.
     ///   - staggerDiscovery: reveal devices over ~2s instead of all at once,
@@ -477,5 +480,28 @@ public extension Array where Element == Device {
             Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,
                    supportsAirPlay2: false, volume: 20),
         ]
+    }
+}
+
+// MARK: - LatencyConfigurable (fake — UI development without hardware)
+
+/// A FAKE conformance (PLAN-LATENCY-SETTING.md §3, included by design): the
+/// mock has no sender, so "apply" just records the value — plus a ~1 s pause
+/// when anything is "streaming" so the Settings pane's reconnecting state is
+/// visible/exercisable in the default `AIRPLAY_BACKEND=mock` run. No device
+/// events are emitted; the real teardown/re-add choreography belongs to
+/// `NativeBackend.applyStartBuffer` and is tested there.
+extension MockBackend: LatencyConfigurable {
+
+    public var startBufferMs: Int {
+        queue.sync { fakeStartBufferMs }
+    }
+
+    public func applyStartBuffer(ms: Int) async {
+        let streaming = queue.sync { !expectedSelected.isEmpty }
+        if streaming {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        queue.sync { fakeStartBufferMs = ms }
     }
 }

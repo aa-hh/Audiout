@@ -1,10 +1,12 @@
-# PLAN: User-facing latency setting (Settings › Audio › Advanced) — PROPOSED
+# PLAN: User-facing latency setting (Settings › Audio › Advanced) — IMPLEMENTED
 
-Status: **proposed 2026-07-17, awaiting Alec's go-ahead.** Companion to the
-latency work in `AirPlayEngine/docs/latency-analysis.md` (commit 5313cc1 on
-`claude/lucid-cori-044f0e`): the sender start buffer is now configurable
-(engine knob + `AIRPLAY_START_BUFFER_MS` env). This plan makes it a **user**
-setting with a safe floor and an explicit apply step.
+Status: **implemented 2026-07-17 on `claude/lucid-cori-044f0e`** (Alec
+approved 2026-07-17: "makes sense to me"). Companion to the latency work in
+`AirPlayEngine/docs/latency-analysis.md` (commit 5313cc1): the sender start
+buffer is now configurable (engine knob + `AIRPLAY_START_BUFFER_MS` env) AND
+a user setting with a safe floor and an explicit apply step. Remaining:
+the gated by-ear checklist (latency-analysis.md, step 4 — the Settings
+apply-flow round trip) needs Alec + the real fleet.
 
 **Relation to the earlier "no latency slider" decision (2026-07-17, settings
 window pass):** SoundSource's *Audio Processing latency slider* was explicitly

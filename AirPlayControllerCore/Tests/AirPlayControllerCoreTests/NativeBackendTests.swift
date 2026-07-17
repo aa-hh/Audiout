@@ -24,6 +24,12 @@ final class NativeBackendTests: XCTestCase {
         private(set) var added: [OutputID] = []
         private(set) var removed: [OutputID] = []
         private(set) var volumes: [(OutputID, Double)] = []
+        private(set) var bufferSets: [Int] = []
+        /// Interleaved op order (`remove:N` / `setBuffer:N` / `add:N` /
+        /// `volume:N`) — the applyStartBuffer invariant is about ORDER across
+        /// op kinds (all removes, then the buffer set, then re-adds), which the
+        /// per-kind arrays above can't express.
+        private(set) var opLog: [String] = []
 
         /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
         var addFailures: Set<UInt64> = []
@@ -45,15 +51,18 @@ final class NativeBackendTests: XCTestCase {
             lock.withLock { discoveryRemoved.append(descriptor.name) }
         }
         func addOutput(_ id: OutputID) async throws {
-            lock.withLock { added.append(id) }
+            lock.withLock { added.append(id); opLog.append("add:\(id.rawValue)") }
             if addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
         }
         func removeOutput(_ id: OutputID) async throws {
-            lock.withLock { removed.append(id) }
+            lock.withLock { removed.append(id); opLog.append("remove:\(id.rawValue)") }
             if removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
         }
         func setVolume(_ id: OutputID, _ volume: Double) async throws {
-            lock.withLock { volumes.append((id, volume)) }
+            lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
+        }
+        func setStartBufferMs(_ ms: Int) async {
+            lock.withLock { bufferSets.append(ms); opLog.append("setBuffer:\(ms)") }
         }
         func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
             AsyncStream { continuation in
@@ -72,6 +81,8 @@ final class NativeBackendTests: XCTestCase {
         var fedIDs: [OutputID] { lock.withLock { discoveryFed } }
         var discoveryRemovedNames: [String] { lock.withLock { discoveryRemoved } }
         var volumeCalls: [(OutputID, Double)] { lock.withLock { volumes } }
+        var bufferSetCalls: [Int] { lock.withLock { bufferSets } }
+        var ops: [String] { lock.withLock { opLog } }
         var didStart: Bool { lock.withLock { started } }
     }
 
@@ -254,6 +265,119 @@ final class NativeBackendTests: XCTestCase {
         }
         let devs = backend.devices
         XCTAssertEqual(devs.first { $0.id == ok.id }?.isSelected, true)
+        XCTAssertEqual(devs.first { $0.id == bad.id }?.isSelected, false)
+        XCTAssertEqual(devs.first { $0.id == bad.id }?.isAvailable, false)
+    }
+
+    /// applyStartBuffer's core invariant (PLAN-LATENCY-SETTING.md §2): ALL
+    /// streaming outputs are removed BEFORE the engine buffer set, which
+    /// precedes every re-add — otherwise a surviving session keeps the shared
+    /// master session (and its old buffer) alive and the re-adds silently join
+    /// it. Also: volumes re-pushed after re-add, model re-selected, and the
+    /// stored `startBufferMs` reflects the new value.
+    func testApplyStartBufferRemovesAllThenSetsThenReadds() async {
+        let (backend, engine, discovery) = makeBackend()
+        let d1 = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        let d2 = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Lounge")
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.filter { if case .deviceAdded = $0 { return true } else { return false } }.count >= 2
+        } after: {
+            discovery.fire(.appeared(d1))
+            discovery.fire(.appeared(d2))
+        }
+
+        backend.setOutputSet([d1.id, d2.id])
+        await pollUntil {
+            let devs = backend.devices
+            return devs.first { $0.id == d1.id }?.isSelected == true
+                && devs.first { $0.id == d2.id }?.isSelected == true
+        }
+
+        // Baseline AFTER the initial converge — its add/volume ops are not part
+        // of the apply sequence under test.
+        let baseline = engine.ops.count
+        await backend.applyStartBuffer(ms: 1500)
+
+        XCTAssertEqual(backend.startBufferMs, 1500)
+        XCTAssertEqual(engine.bufferSetCalls, [1500])
+
+        let ops = Array(engine.ops.dropFirst(baseline))
+        guard let setIndex = ops.firstIndex(of: "setBuffer:1500") else {
+            return XCTFail("engine never saw the buffer set; ops: \(ops)")
+        }
+        let before = ops[..<setIndex]
+        let after = ops[setIndex...]
+        XCTAssertTrue(before.contains("remove:\(d1.outputID.rawValue)")
+                   && before.contains("remove:\(d2.outputID.rawValue)"),
+                      "ALL removals must precede the buffer set; ops: \(ops)")
+        XCTAssertFalse(before.contains { $0.hasPrefix("add:") },
+                       "no re-add may precede the buffer set; ops: \(ops)")
+        XCTAssertTrue(after.contains("add:\(d1.outputID.rawValue)")
+                   && after.contains("add:\(d2.outputID.rawValue)"),
+                      "both devices must be re-added after the buffer set; ops: \(ops)")
+        XCTAssertTrue(after.contains("volume:\(d1.outputID.rawValue)")
+                   && after.contains("volume:\(d2.outputID.rawValue)"),
+                      "volumes must be re-pushed after re-add; ops: \(ops)")
+
+        // Model converged back: both selected again.
+        let devs = backend.devices
+        XCTAssertEqual(devs.first { $0.id == d1.id }?.isSelected, true)
+        XCTAssertEqual(devs.first { $0.id == d2.id }?.isSelected, true)
+    }
+
+    /// With nothing streaming, applyStartBuffer reduces to the engine set —
+    /// no removals, no re-adds (the silent/instant idle path the CTA relies on).
+    func testApplyStartBufferWhileIdleOnlySetsBuffer() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        await backend.applyStartBuffer(ms: 2250)
+
+        XCTAssertEqual(backend.startBufferMs, 2250)
+        XCTAssertEqual(engine.bufferSetCalls, [2250])
+        XCTAssertTrue(engine.removedIDs.isEmpty, "idle apply must not tear anything down")
+        XCTAssertTrue(engine.addedIDs.isEmpty, "idle apply must not add anything")
+    }
+
+    /// A device that fails its re-add follows D4 best-effort: it ends
+    /// unavailable + deselected, the other device comes back streaming.
+    func testApplyStartBufferReaddFailureIsBestEffort() async {
+        let (backend, engine, discovery) = makeBackend()
+        let ok = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Good")
+        let bad = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Bad")
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.filter { if case .deviceAdded = $0 { return true } else { return false } }.count >= 2
+        } after: {
+            discovery.fire(.appeared(ok))
+            discovery.fire(.appeared(bad))
+        }
+
+        backend.setOutputSet([ok.id, bad.id])
+        await pollUntil {
+            let devs = backend.devices
+            return devs.first { $0.id == ok.id }?.isSelected == true
+                && devs.first { $0.id == bad.id }?.isSelected == true
+        }
+
+        // Fail only the RE-add (the initial converge above succeeded).
+        engine.addFailures = [bad.outputID.rawValue]
+        await backend.applyStartBuffer(ms: 1500)
+
+        let devs = backend.devices
+        XCTAssertEqual(devs.first { $0.id == ok.id }?.isSelected, true,
+                       "the succeeding re-add must not be affected (D4)")
         XCTAssertEqual(devs.first { $0.id == bad.id }?.isSelected, false)
         XCTAssertEqual(devs.first { $0.id == bad.id }?.isAvailable, false)
     }

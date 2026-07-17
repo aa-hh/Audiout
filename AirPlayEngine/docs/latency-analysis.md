@@ -91,20 +91,46 @@ should match).
    Sonos rooms, stand between them — no echo/flanging; walk test. Then have a
    device JOIN mid-stream (enable a second speaker while playing): it must come
    in synced (the join path uses the same lead via the init sync packet).
-4. **Stress the floor (optional, finds the safe minimum):**
-   `AIRPLAY_START_BUFFER_MS=750`, then `500`, then `300`. At each: 10 min music,
-   multi-room walk test, note first sign of dropouts. One step back from the
-   first failure = the fleet's floor; consider it for the product default if
-   comfortably below 1000.
-5. **Volume smoke (do-not-touch confirmation):** volume slider still smooth
+4. **Settings › Audio › Advanced apply flow (PLAN-LATENCY-SETTING.md, shipped
+   2026-07-17):** with the app streaming to ≥ 2 rooms, open Settings, change
+   "Audio buffer" to a different offered value, click **Apply & Reconnect**.
+   Confirm: a brief silence (≤ ~5 s), both rooms resume **in sync** (not just
+   individually — this exercises `NativeBackend.applyStartBuffer`'s
+   remove-all-then-readd invariant, not just a single-device reconnect),
+   volumes/mutes are unchanged after resume, and the popover shows the normal
+   connecting → connected transitions with no stuck/failed rows. Then repeat
+   once while idle (no devices selected) — should apply silently/instantly,
+   no "Reconnecting" state.
+5. **Below-the-shipped-floor reconnaissance (optional — informs a FUTURE
+   lower option, does not gate this ship):** the offered floor is 1000 ms
+   (Alec, 2026-07-17: the receiver's cushion at 1000 ms is 750 ms, which
+   comfortably absorbs ordinary Wi-Fi disturbances — see the risk note below).
+   To scout whether a lower option would ever be worth adding, use the env
+   knob (still 300–5000, independent of the UI's 3 options):
+   `AIRPLAY_START_BUFFER_MS=750`, then `500`, then `300`. At each: 10 min
+   music, multi-room walk test, note first sign of dropouts.
+6. **Volume smoke (do-not-touch confirmation):** volume slider still smooth
    0→100 on one device; mute/unmute restores level. (Mapping was not modified —
    this is a regression tripwire only.)
-6. **Stop/teardown:** disable all speakers → app returns to idle without
+7. **Stop/teardown:** disable all speakers → app returns to idle without
    SIGPIPE/zombie sessions (same as first-light close-out behavior).
 
-Pass = steps 2, 3, 5, 6 clean at the chosen default. Record the numbers from
-steps 1–2 back into this doc (receiver-applied latency is fleet-specific data
-we don't have yet).
+Pass = steps 2, 3, 4, 6, 7 clean at the shipped default. Record the numbers
+from steps 1–2 back into this doc (receiver-applied latency is fleet-specific
+data we don't have yet); record step 5's findings only if it's ever worth
+adding a lower option later.
+
+### Why 1000 ms is a safe floor (not just a default)
+
+The receiver's entire protection against network trouble is
+`start_buffer − 250 ms` of buffered audio — 750 ms at 1000 ms. Ordinary Wi-Fi
+disturbances (channel scans, interference bursts, contention with other
+traffic) stall delivery for roughly 100–500 ms; 750 ms absorbs that AND
+leaves room for retransmit round-trips when a packet is lost outright. The
+genuinely risky territory starts below ~500 ms, where a single bad Wi-Fi
+moment can outrun the cushion — which is why the UI never offers anything
+under 1000 and the gated sweep below it (step 5) is reconnaissance, not a
+shipping gate.
 
 ## File map (for the next reader)
 

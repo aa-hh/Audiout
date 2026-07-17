@@ -40,25 +40,51 @@ final class BackendKindResolutionTests: XCTestCase {
         XCTAssertEqual(resolved, .native)
     }
 
-    // MARK: - AIRPLAY_START_BUFFER_MS (native path's sender start buffer)
+    // MARK: - AIRPLAY_START_BUFFER_MS resolution (env → setting → default)
 
-    func testStartBufferDefaultsTo1000WithNoEnv() {
-        XCTAssertEqual(nativeStartBufferMs(environment: [:]), 1000)
+    /// A throwaway defaults suite so these tests never read `.standard`.
+    private func throwawaySettings(startBufferMs: Int? = nil) -> AppSettings {
+        let suite = "AudioControlTests.resolution.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let settings = AppSettings(defaults: defaults)
+        if let ms = startBufferMs { settings.startBufferMs = ms }
+        return settings
     }
 
-    func testStartBufferReadsEnvWithinRange() {
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "2250"]), 2250)
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "300"]), 300)
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "5000"]), 5000)
+    func testStartBufferDefaultsWithNoEnvAndNoSetting() {
+        XCTAssertEqual(nativeStartBufferMs(environment: [:], settings: throwawaySettings()),
+                       AppSettings.defaultStartBufferMs)
     }
 
-    func testStartBufferRejectsOutOfRangeAndGarbage() {
-        // Out of range or non-numeric → the product default, not a clamp: this
-        // is a dev knob, and a typo should behave like "unset" (same policy as
-        // AIRPLAY_BACKEND's unknown-value fallback).
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "250"]), 1000)
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "60000"]), 1000)
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "fast"]), 1000)
-        XCTAssertEqual(nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": ""]), 1000)
+    func testStartBufferUsesPersistedSettingWithNoEnv() {
+        XCTAssertEqual(
+            nativeStartBufferMs(environment: [:], settings: throwawaySettings(startBufferMs: 2250)),
+            2250)
+    }
+
+    func testStartBufferEnvBeatsSetting() {
+        // The env var is a deliberate per-launch dev override — it wins even
+        // over an explicit user setting, and may take values the UI doesn't
+        // offer (e.g. 500 for the gated floor sweep).
+        XCTAssertEqual(
+            nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "500"],
+                                settings: throwawaySettings(startBufferMs: 2250)),
+            500)
+        XCTAssertEqual(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": "500"]), 500)
+    }
+
+    func testStartBufferInvalidEnvFallsThroughToSetting() {
+        // Out of range or non-numeric behaves like UNSET (one stderr warning):
+        // the persisted setting still applies — same dev-knob-not-config
+        // policy as AIRPLAY_BACKEND's unknown-value fallback.
+        for bad in ["250", "60000", "fast", ""] {
+            XCTAssertEqual(
+                nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": bad],
+                                    settings: throwawaySettings(startBufferMs: 1500)),
+                1500, "env \"\(bad)\" should be ignored")
+            XCTAssertNil(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": bad]))
+        }
+        XCTAssertNil(nativeStartBufferEnvOverrideMs(environment: [:]))
     }
 }

@@ -36,7 +36,7 @@ import AirPlayEngine
 /// `isAvailable = false`, and are **NEVER** `addOutput`-ed (the engine is an
 /// AP2-only sender). The future raop (AP1) sender slots in behind
 /// ``AirPlay1Sending`` — see the seam comment at the bottom of this file.
-public final class NativeBackend: OutputBackend, @unchecked Sendable {
+public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked Sendable {
 
     // MARK: Injected dependencies (protocols so tests are hermetic)
 
@@ -332,6 +332,87 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
                 stateQueue.sync {
                     self.added.remove(id)
                     self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+                }
+            }
+        }
+    }
+
+    // MARK: LatencyConfigurable (PLAN-LATENCY-SETTING.md)
+
+    /// The sender start buffer currently in force (ms). Seeded by
+    /// `makeBackend` from the resolved launch value (env → setting → default);
+    /// updated by ``applyStartBuffer(ms:)``. Confined to `stateQueue`.
+    private var _startBufferMs: Int = 1000
+
+    public var startBufferMs: Int {
+        stateQueue.sync { _startBufferMs }
+    }
+
+    /// Seed the initial value without triggering an apply (`makeBackend` only —
+    /// the engine was just constructed with this same value in its config).
+    func seedStartBufferMs(_ ms: Int) {
+        stateQueue.sync { _startBufferMs = ms }
+    }
+
+    /// Apply a new start buffer at runtime. The vendored sender reads the value
+    /// at STREAM-SESSION creation and caches it in the (shared) master session,
+    /// so the sequence below is an invariant, not a style choice:
+    ///
+    /// 1. Remove ALL currently-streaming outputs and AWAIT each removal — if
+    ///    even one stays attached, the old master session (old buffer) survives
+    ///    and step 3's re-adds would join it, silently keeping the old latency.
+    /// 2. Set the new value on the engine (next master session reads it).
+    /// 3. Re-add the same set, re-feeding each descriptor first (same
+    ///    finding-7 guard as `converge`) and re-pushing each device's effective
+    ///    volume (mute = stashed-0, same shim as everywhere else).
+    ///
+    /// Failures follow D4 best-effort: a device that won't come back is marked
+    /// unavailable + deselected and the rest proceed. A concurrent
+    /// `setOutputSet` during the gap converges on `expectedSelected` as usual —
+    /// worst case the user's newer intent wins, which is the right outcome.
+    /// With nothing streaming this reduces to step 2 and is silent/instant.
+    public func applyStartBuffer(ms: Int) async {
+        // Snapshot the streaming set + per-device control state under the lock.
+        let snapshot: [(id: String, outputID: OutputID, descriptor: DeviceDescriptor?,
+                        volume: Int, isMuted: Bool)] = stateQueue.sync {
+            self._startBufferMs = ms
+            return self.added.compactMap { id in
+                guard let outputID = self.outputIDs[id] else { return nil }
+                let device = self.known[id]
+                let stashed = self.stashedVolume[id]
+                return (id, outputID, self.lastDescriptors[id],
+                        stashed ?? device?.volume ?? 50, self.muted.contains(id))
+            }
+        }
+
+        // 1. Remove ALL streaming outputs, awaited (see invariant above). A
+        // failed removal is treated as removed — the session is torn down on
+        // the next engine op either way, and re-adding below re-establishes it.
+        for item in snapshot {
+            try? await engine.removeOutput(item.outputID)
+            stateQueue.sync { self.added.remove(item.id) }
+        }
+
+        // 2. New buffer value; the next master session picks it up.
+        await engine.setStartBufferMs(ms)
+
+        // 3. Re-add the same set (best-effort, D4), restoring volume/mute.
+        for item in snapshot {
+            do {
+                if let descriptor = item.descriptor {
+                    try await engine.updateDiscovery(descriptor)
+                }
+                try await engine.addOutput(item.outputID)
+                stateQueue.sync {
+                    self.added.insert(item.id)
+                    self.applyLocal(item.id) { $0.isSelected = true; $0.isAvailable = true }
+                }
+                let effective = item.isMuted ? 0 : item.volume
+                try? await engine.setVolume(item.outputID, Self.engineVolume(effective))
+            } catch {
+                stateQueue.sync {
+                    self.added.remove(item.id)
+                    self.applyLocal(item.id) { $0.isSelected = false; $0.isAvailable = false }
                 }
             }
         }
@@ -652,6 +733,7 @@ protocol EngineControlling: Sendable {
     func addOutput(_ id: OutputID) async throws
     func removeOutput(_ id: OutputID) async throws
     func setVolume(_ id: OutputID, _ volume: Double) async throws
+    func setStartBufferMs(_ ms: Int) async
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
 }
 
@@ -671,6 +753,7 @@ struct EngineAdapter: EngineControlling {
     func addOutput(_ id: OutputID) async throws { try await engine.addOutput(id) }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
+    func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { engine.makeStateStream() }
 }
 

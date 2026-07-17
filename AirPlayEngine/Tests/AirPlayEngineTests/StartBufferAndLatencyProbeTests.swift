@@ -52,6 +52,22 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
         XCTAssertEqual(EngineConfig().startBufferMs, 2250)
     }
 
+    /// `setStartBufferMs` reaches the C shim (headless mode applies inline, no
+    /// engine thread) — the primitive `NativeBackend.applyStartBuffer` builds on.
+    func testSetStartBufferMsReachesShim() async {
+        await withRestoredStartBufferAsync {
+            let engine = AirPlayEngine(config: EngineConfig(startBufferMs: 1000))
+            await engine.enterHeadlessTestMode()
+            await engine.setStartBufferMs(1500)
+            XCTAssertEqual(outputs_buffer_duration_ms_get(), 1500)
+        }
+    }
+
+    private func withRestoredStartBufferAsync(_ body: () async -> Void) async {
+        defer { outputs_set_buffer_duration_ms(UInt64(OUTPUTS_START_BUFFER_MS_DEFAULT)) }
+        await body()
+    }
+
     // MARK: - WriteLatencyProbe (pts→now age)
 
     func testDisabledProbeRecordsNothing() {

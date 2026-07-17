@@ -148,13 +148,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = settingsWindowController {
             controller = existing
         } else {
-            controller = SettingsWindowController(settings: settings, excludedApps: excludedApps)
+            controller = SettingsWindowController(settings: settings,
+                                                  excludedApps: excludedApps,
+                                                  latency: makeLatencySettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
             settingsWindowController = controller
         }
         controller.showWindow()
         log("Open Settings (window shown)")
+    }
+
+    /// The Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md), or nil when
+    /// the resolved backend can't honor the control (the section then never
+    /// renders). The apply closure persists FIRST, then reconnects — a partial
+    /// reconnect failure must not lose the chosen setting for the next launch.
+    @MainActor
+    private func makeLatencySettingModel() -> LatencySettingModel? {
+        guard let configurable = backend as? LatencyConfigurable else { return nil }
+        return LatencySettingModel(
+            optionsMs: AppSettings.startBufferOptionsMs,
+            initialMs: configurable.startBufferMs,
+            envOverrideMs: nativeStartBufferEnvOverrideMs(),
+            isStreaming: { [weak self] in
+                self?.devicesByID.values.contains { $0.isSelected } ?? false
+            },
+            apply: { [weak self] ms in
+                self?.settings.startBufferMs = ms
+                await configurable.applyStartBuffer(ms: ms)
+            }
+        )
     }
 
     /// The excluded-apps list changed (Settings › Audio). Enforce the "excluded ⇒

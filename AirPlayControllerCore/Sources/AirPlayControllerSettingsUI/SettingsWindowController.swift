@@ -65,13 +65,19 @@ public final class SettingsWindowController: NSWindowController {
     ///   - runningAppsProvider: candidate list for the Audio "Add application…"
     ///     picker; defaults to the real running apps, injected as a fixed list in
     ///     tests.
+    ///   - latency: the Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md);
+    ///     nil (the default) when the backend isn't `LatencyConfigurable`, in
+    ///     which case the Audio section renders no Advanced sub-section at all.
     public init(settings: AppSettings,
                 loginItem: LoginItemManaging = SMAppServiceLoginItem(),
                 excludedApps: ExcludedAppsController = ExcludedAppsController(),
-                runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps) {
+                runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
+                latency: LatencySettingModel? = nil) {
         generalVC = GeneralSettingsViewController(loginItem: loginItem)
         appearanceVC = AppearanceSettingsViewController(settings: settings)
-        audioVC = AudioSettingsViewController(excluded: excludedApps, runningAppsProvider: runningAppsProvider)
+        audioVC = AudioSettingsViewController(excluded: excludedApps,
+                                              runningAppsProvider: runningAppsProvider,
+                                              latency: latency)
         rootVC = SettingsRootViewController(sections: [
             ("General", generalVC),
             ("Appearance", appearanceVC),

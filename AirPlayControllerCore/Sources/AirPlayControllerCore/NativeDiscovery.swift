@@ -612,6 +612,33 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
 
     // MARK: Resolve one browse result → address + TXT (on `queue`)
 
+    /// Probe an endpoint for its resolved address, preferring — and, for now,
+    /// requiring — IPv4.
+    ///
+    /// A single racy `NWConnection` probe over unconstrained `.tcp` params will
+    /// happily settle on whatever address the OS establishes first — for a
+    /// dual-stack device (AirPlay 2 speakers commonly are) that can be an IPv6
+    /// **link-local** address (`fe80::...%en0`). Worse: the vendored engine
+    /// currently runs with its `ipv6` conffile option OFF (`conffile.c`:
+    /// `.ipv6 = 0`, set during first-light hardening to match OwnTone's
+    /// default), so it cannot use ANY IPv6 address, global or link-local, right
+    /// now — RTSP control may still connect (the receiver's LED goes green)
+    /// while audio silently never flows. See AGENTS/engine first-light notes.
+    ///
+    /// Fix: probe once with `NWProtocolIP.Options.version` forced to `.v4` so
+    /// `currentPath` resolves over IPv4 whenever the device has an IPv4 address
+    /// at all. If that IPv4-forced probe fails outright (the device really is
+    /// IPv6-only), fall back to an unconstrained probe purely to detect and
+    /// loudly surface the IPv6-only device — `resolvedAddress`/`isAcceptable`
+    /// still reject the address itself (never hand the engine an address it
+    /// can't use), so the device is discovered/visible but not driven, the
+    /// same spirit as AP1-only receivers.
+    ///
+    /// Deferred enhancement: native IPv6 support is gated on (a) turning the
+    /// engine's `ipv6` config back on via `conffile_set_ipv6(true)` and (b) a
+    /// real-hardware PTP-over-IPv6 gated test proving the media/PTP path
+    /// actually works over IPv6. Until both land, IPv6 stays filtered out here
+    /// rather than passed through.
     private func resolve(_ result: NWBrowser.Result, serviceType: ResolvedService.ServiceType) {
         guard case let .service(name, type, domain, _) = result.endpoint else { return }
         let txt = Self.txtDictionary(result.metadata)
@@ -619,10 +646,24 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         let resultKey = "\(serviceType.rawValue)|\(name)|\(type)|\(domain)"
         resultTXT[resultKey] = (name: name, deviceID: deviceID)
 
-        // Probe the endpoint with a short-lived connection to learn the resolved
-        // IP + port, then tear it down. We never send data — this is resolution
-        // only.
-        let connection = NWConnection(to: result.endpoint, using: .tcp)
+        probeIPv4First(endpoint: result.endpoint, resultKey: resultKey, name: name, serviceType: serviceType, txt: txt)
+    }
+
+    /// First attempt: force IPv4 on the probe's `NWParameters`. Never sends
+    /// data — resolution only.
+    private func probeIPv4First(
+        endpoint: NWEndpoint,
+        resultKey: String,
+        name: String,
+        serviceType: ResolvedService.ServiceType,
+        txt: [String: String]
+    ) {
+        let params = NWParameters.tcp
+        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ipOptions.version = .v4
+        }
+
+        let connection = NWConnection(to: endpoint, using: params)
         probes[resultKey] = connection
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -639,6 +680,67 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
                             port: port,
                             txtRecord: txt
                         ))
+                    } else {
+                        Self.logIPv6Only(connection: connection, name: name)
+                    }
+                    connection.cancel()
+                    self.probes[resultKey] = nil
+                }
+            case .failed, .cancelled:
+                self.queue.async {
+                    self.probes[resultKey] = nil
+                    // The IPv4-forced probe couldn't establish at all — the
+                    // device may be IPv6-only. Fall back to an unconstrained
+                    // probe purely to detect that case and log it loudly;
+                    // `resolvedAddress` still rejects the resulting IPv6
+                    // address (link-local OR global — see the deferred-IPv6
+                    // note above), so we never emit an address the engine
+                    // can't use.
+                    self.probeUnconstrainedFallback(endpoint: endpoint, resultKey: resultKey, name: name, serviceType: serviceType, txt: txt)
+                }
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    /// Fallback attempt when the IPv4-forced probe fails outright (no IPv4
+    /// route at all). Unconstrained by IP version, but `resolvedAddress` still
+    /// rejects IPv6 across the board (see the deferred-IPv6 note on
+    /// ``probeIPv4First``) — this fallback exists only so an IPv6-only device
+    /// is detected and logged loudly rather than the probe just silently
+    /// timing out with no explanation.
+    private func probeUnconstrainedFallback(
+        endpoint: NWEndpoint,
+        resultKey: String,
+        name: String,
+        serviceType: ResolvedService.ServiceType,
+        txt: [String: String]
+    ) {
+        // Don't retry if the result was already removed while the first probe
+        // was failing.
+        guard resultTXT[resultKey] != nil else { return }
+
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        probes[resultKey] = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.queue.async {
+                    if let (address, family, port) = Self.resolvedAddress(connection) {
+                        self.onResolve?(ResolvedService(
+                            serviceType: serviceType,
+                            name: name,
+                            hostname: name,
+                            address: address,
+                            family: family,
+                            port: port,
+                            txtRecord: txt
+                        ))
+                    } else {
+                        Self.logIPv6Only(connection: connection, name: name)
                     }
                     connection.cancel()
                     self.probes[resultKey] = nil
@@ -650,6 +752,25 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
             }
         }
         connection.start(queue: queue)
+    }
+
+    /// Loud diagnostic when a probe's resolved address is rejected because
+    /// it's IPv6 (the address existed, just wasn't usable) — makes the
+    /// otherwise-silent "device is IPv6-only, not surfaced with a usable
+    /// address" outcome visible instead of looking like a probe that simply
+    /// never resolved. Not gated on link-local specifically: with the engine's
+    /// `ipv6` config off, a global IPv6-only address is just as unusable.
+    private static func logIPv6Only(connection: NWConnection, name: String) {
+        guard case let .hostPort(host, _) = connection.currentPath?.remoteEndpoint,
+              case let .ipv6(addr) = host
+        else { return }
+        let rejected = addressString(addr)
+        let kind = isLinkLocalIPv6String(rejected) ? "link-local" : "global"
+        let message = "[AirPlayController] NativeDiscovery: \"\(name)\" resolved ONLY to an " +
+            "IPv6 (\(kind)) address (\(rejected)) — rejecting rather than surfacing it as the " +
+            "device's address (native IPv6 is a deferred enhancement: the engine's `ipv6` " +
+            "conffile option is currently OFF, so it cannot use ANY IPv6 address yet)\n"
+        FileHandle.standardError.write(Data(message.utf8))
     }
 
     private func remove(_ result: NWBrowser.Result, serviceType: ResolvedService.ServiceType) {
@@ -671,15 +792,26 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
     }
 
     /// Read the resolved numeric address + port + family off a ready connection.
+    ///
+    /// Applies the address-acceptance policy (``isAcceptable(address:family:)``):
+    /// an IPv6 result — link-local OR global — is never returned here, even
+    /// though the connection itself is `.ready` — the caller
+    /// (``resolve(_:serviceType:)``) treats a `nil` as "no usable address" and
+    /// the device is surfaced (if at all) without a descriptor the engine can
+    /// act on, rather than one that produces a green-LED-no-audio connection.
     private static func resolvedAddress(_ connection: NWConnection) -> (address: String, family: AddressFamily, port: Int)? {
         guard let endpoint = connection.currentPath?.remoteEndpoint else { return nil }
         switch endpoint {
         case let .hostPort(host, port):
             switch host {
             case let .ipv4(addr):
-                return (addressString(addr), .ipv4, Int(port.rawValue))
+                let address = addressString(addr)
+                guard isAcceptable(address: address, family: .ipv4) else { return nil }
+                return (address, .ipv4, Int(port.rawValue))
             case let .ipv6(addr):
-                return (addressString(addr), .ipv6, Int(port.rawValue))
+                let address = addressString(addr)
+                guard isAcceptable(address: address, family: .ipv6) else { return nil }
+                return (address, .ipv6, Int(port.rawValue))
             case let .name(name, _):
                 return (name, .ipv4, Int(port.rawValue))
             @unknown default:
@@ -688,6 +820,51 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         default:
             return nil
         }
+    }
+
+    /// The address-selection policy, factored out as a pure/static predicate so
+    /// it's unit-testable without a live `NWConnection`.
+    ///
+    /// Policy: reject IPv6 **entirely**, link-local (`fe80::/10`, commonly
+    /// carrying a `%<zone>` scope suffix like `%en0`) or global — only IPv4 is
+    /// acceptable. This is stricter than "just reject link-local" because the
+    /// vendored engine currently runs with its `ipv6` conffile option OFF
+    /// (`conffile.c`: `.ipv6 = 0`), so it cannot use ANY IPv6 address yet, not
+    /// just link-local ones. A dual-stack device therefore never gets pinned to
+    /// an IPv6 address just because that's what a single racy probe happened to
+    /// establish over; combined with the IPv4-forced first probe in
+    /// ``probeIPv4First``, a dual-stack device's emitted address is always
+    /// IPv4, and an IPv6-only device (global or link-local, no IPv4 at all)
+    /// resolves to no usable address (logged loudly, never silently emitted).
+    ///
+    /// Deferred enhancement: once the engine's `ipv6` config is turned back on
+    /// (`conffile_set_ipv6(true)`) and a real-hardware PTP-over-IPv6 gated test
+    /// proves the media/PTP path works over IPv6, this policy should relax to
+    /// accept IPv6 **global** addresses (still never link-local).
+    static func isAcceptable(address: String, family: AddressFamily) -> Bool {
+        _ = address // kept in the signature: policy is address-family-based today, but
+                     // stays here (rather than taking just `family`) so a future relax to
+                     // "IPv4 or global-IPv6" can inspect the literal without a signature change.
+        return family == .ipv4
+    }
+
+    /// True iff `address` is an IPv6 link-local literal (`fe80::/10`), with or
+    /// without a `%<zone>` scope suffix (e.g. `fe80::562a:1bff:fe79:89e%en0`).
+    /// Case-insensitive; matches the `fe80`–`febf` first-hextet range that
+    /// makes up the `fe80::/10` block.
+    static func isLinkLocalIPv6String(_ address: String) -> Bool {
+        let unscoped = address.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        let firstHextet = unscoped.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0].lowercased()
+        guard firstHextet.count == 4, let value = UInt16(firstHextet, radix: 16) else {
+            // Shorthand forms like "fe80::1" still have a 4-char first hextet
+            // ("fe80"); anything that doesn't parse as one isn't a link-local
+            // literal we recognize (e.g. a bare IPv4 string never reaches
+            // here because `isAcceptable` only applies this check for `.ipv6`).
+            return false
+        }
+        // fe80::/10 spans first hextets 0xFE80...0xFEBF (top 10 bits fixed to
+        // 1111 1110 10). Equivalent to `(value & 0xFFC0) == 0xFE80`.
+        return (value & 0xFFC0) == 0xFE80
     }
 
     private static func addressString(_ addr: IPv4Address) -> String {

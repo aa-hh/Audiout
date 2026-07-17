@@ -716,6 +716,81 @@ final class NativeDiscoveryTests: XCTestCase {
 
         discovery.stop()
     }
+
+    // MARK: Address-selection policy (NetworkFrameworkBrowser)
+
+    /// The real NWConnection probe race is not unit-testable (needs a live
+    /// socket), so the address-acceptance policy is factored into pure statics
+    /// on `NetworkFrameworkBrowser` and covered directly here. Root cause this
+    /// guards: a probe that raced onto a dual-stack device's IPv6 link-local
+    /// address (`fe80::...%en0`) used to be accepted at face value — RTSP
+    /// control connects (receiver's LED goes green) but the vendored engine
+    /// currently runs with its `ipv6` conffile option OFF, so it can't use
+    /// ANY IPv6 address yet (global or link-local) — audio silently never
+    /// flows. Policy today: IPv4 only. (Deferred: relax to also accept IPv6
+    /// *global* addresses once the engine's ipv6 config is re-enabled and a
+    /// real-hardware PTP-over-IPv6 test proves the media/PTP path works.)
+
+    /// IPv4 is the only acceptable family today.
+    func testIPv4Accepted() {
+        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: "192.168.4.50", family: .ipv4))
+        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: "169.254.1.1", family: .ipv4))
+    }
+
+    /// Bare link-local IPv6, no zone suffix — rejected (both by the general
+    /// IPv6 ban and by the link-local-specific classifier used for logging).
+    func testLinkLocalIPv6Rejected() {
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe80::1"))
+        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: "fe80::1", family: .ipv6))
+    }
+
+    /// The exact address from the live-gated bug report, with a `%en0` zone.
+    func testLinkLocalIPv6WithZoneRejected() {
+        let address = "fe80::562a:1bff:fe79:89e%en0"
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String(address))
+        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: address, family: .ipv6))
+    }
+
+    /// Uppercase / mixed-case link-local literals are still recognized by the
+    /// classifier (used only for the loud "link-local vs global" log message).
+    func testLinkLocalIPv6CaseInsensitive() {
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("FE80::1"))
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("Fe80::562A:1BFF:Fe79:89E%en0"))
+    }
+
+    /// The full fe80::/10 block (first hextet 0xFE80...0xFEBF), not just the
+    /// literal "fe80" prefix — e.g. "febf::1" is still inside the /10 block.
+    func testLinkLocalIPv6FullTenBitBlock() {
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("febf::1"))
+        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe90::1"))
+        // Just outside the /10 block on either side.
+        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("fec0::1"))  // site-local (deprecated), not link-local
+        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe7f::1"))
+    }
+
+    /// A global IPv6 address is NOT classified link-local by the classifier...
+    func testGlobalIPv6IsNotLinkLocal() {
+        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("2001:db8::1"))
+    }
+
+    /// ...but the overall acceptance policy still rejects it: the engine can't
+    /// use ANY IPv6 yet (its `ipv6` conffile option is off), so "global, not
+    /// link-local" isn't enough to be acceptable today.
+    func testGlobalIPv6RejectedByPolicyUntilEngineIPv6Enabled() {
+        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: "2001:db8::1", family: .ipv6))
+    }
+
+    /// Dual-stack device scenario: given a link-local IPv6 candidate and an
+    /// IPv4 candidate for the same device, the policy must accept IPv4 and
+    /// reject the link-local candidate — this is the exact shape of the live
+    /// bug (Sonos Move resolved to `fe80::562a:1bff:fe79:89e%en0` while an
+    /// IPv4 address, `192.168.4.x`, was available and required for audio).
+    func testDualStackPrefersIPv4OverLinkLocalIPv6() {
+        let ipv4 = "192.168.4.23"
+        let linkLocalV6 = "fe80::562a:1bff:fe79:89e%en0"
+        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: ipv4, family: .ipv4))
+        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: linkLocalV6, family: .ipv6))
+    }
 }
 
 // MARK: - EventCollector

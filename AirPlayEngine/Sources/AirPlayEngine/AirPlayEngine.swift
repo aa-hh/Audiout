@@ -151,6 +151,14 @@ public actor AirPlayEngine {
     // Tests/.../AirPlayEngineAPITests.swift.
     private var issueOverride: ((UnsafeMutablePointer<output_device>, Int32) -> Int32)?
 
+    // Per-op completion timeout handed to CompletionRegistry.arm. An armed op
+    // whose deferred completion never arrives within this window is resolved by
+    // THROWING `.opTimedOut` (see CompletionRegistry.defaultOpTimeout) instead of
+    // leaking its continuation forever (toggle-spam session 2026-07-17). Injectable
+    // so headless tests can drive the timeout path fast; production uses the
+    // default.
+    private var opTimeout: TimeInterval = CompletionRegistry.defaultOpTimeout
+
     // True between `enterHeadlessTestMode()` and a subsequent `stop()`. Lets
     // `stop()` run its dispatcher/completion teardown INLINE (no engine thread,
     // which headless mode never starts) so a teardown-with-op-in-flight test can
@@ -743,9 +751,24 @@ public actor AirPlayEngine {
                 // `…throwing .engineNotRunning` if `stop()`/uninstall tears the
                 // engine down with this op still in flight (no leaked
                 // continuation, no hung quit — toggle-spam session 2026-07-17).
+                // Arm with THREE resolvers: normal delivery, teardown cancel, and
+                // a bounded timeout. The registry invokes exactly one of them
+                // (each removes the waiter under the same lock), so the
+                // continuation resumes exactly once:
+                //   - `state in …returning`             on a real completion,
+                //   - `…throwing .engineNotRunning`     if stop()/uninstall tears
+                //     the engine down with this op in flight, or
+                //   - `…throwing .opTimedOut`           if the receiver's media/PTP
+                //     path stalls mid-op so the promised completion never fires
+                //     (toggle-spam session 2026-07-17: 177 leaked continuations
+                //     during NORMAL running, which the teardown-only cancel missed).
+                // NativeBackend maps the thrown failure onto its normal op-failure
+                // / recovery path — a timeout is not special-cased there.
                 completions.arm(
                     callbackId: cbId,
-                    onCancel: { cont.resume(throwing: AirPlayEngineError.engineNotRunning) }
+                    timeout: opTimeout,
+                    onCancel: { cont.resume(throwing: AirPlayEngineError.engineNotRunning) },
+                    onTimeout: { cont.resume(throwing: AirPlayEngineError.opTimedOut) }
                 ) { state in
                     cont.resume(returning: state)
                 }
@@ -796,9 +819,11 @@ public actor AirPlayEngine {
     /// dispatcher, resuming the awaiting continuation via the genuine completion
     /// hook — proving the arm -> dispatch -> resume bridge without hardware.
     func enterHeadlessTestMode(
-        issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32 = { _, _ in 1 }
+        issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32 = { _, _ in 1 },
+        opTimeout: TimeInterval = CompletionRegistry.defaultOpTimeout
     ) {
         issueOverride = issue
+        self.opTimeout = opTimeout
         headlessMode = true
         completions.install() // wire the C completion hook (start() isn't called)
         stateHub.install()    // wire the C device-state hook (T-ENG-STATESTREAM-1)
@@ -818,6 +843,14 @@ public actor AirPlayEngine {
 
     /// The known state of an output (test/inspection).
     func stateOf(_ id: OutputID) -> OutputState? { knownOutputs[id] }
+
+    /// Test-only: whether the completion registry has a waiter armed for
+    /// `callbackId`. A headless test fires its synthetic completion only after
+    /// this is true, so it can't deliver into the arm-window before the waiter
+    /// exists (which would be dropped and hang/time-out the op).
+    func hasArmedWaiterForTest(callbackId: Int32) -> Bool {
+        completions.hasWaiter(callbackId: callbackId)
+    }
 
     /// Test-only: map C descriptor -> keyval feed WITHOUT the engine thread, so a
     /// headless test can assert descriptor->registry mapping. Returns the id the

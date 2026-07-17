@@ -34,20 +34,52 @@ final class CompletionRegistry: @unchecked Sendable {
     /// The single active registry the C hook reads. Set by `install()`.
     static private(set) var shared: CompletionRegistry?
 
+    /// Default per-op timeout. An armed op whose deferred completion doesn't
+    /// arrive within this window is resolved by THROWING ``AirPlayEngineError/opTimedOut``
+    /// (and removed from the table) instead of leaking its continuation forever.
+    ///
+    /// RATIONALE: this is a backstop for a receiver whose media/PTP path stalls
+    /// mid-op (e.g. a bad IPv6 link-local address in the descriptor, or any
+    /// mid-op drop) so the completion the dispatcher promised never fires. It must
+    /// be comfortably LONGER than a slow-but-real RTSP SETUP + PTP handshake so it
+    /// never false-trips a legitimately-slow-but-succeeding session — a real AP2
+    /// pair+setup against a cold receiver is on the order of a few seconds — but
+    /// short enough that a stalled op surfaces (and NativeBackend parks + recovers
+    /// the device) well before a user notices a wedged toggle. 12 s balances both.
+    static let defaultOpTimeout: TimeInterval = 12.0
+
     /// One armed waiter. `deliver` is invoked (once) with the terminal state when
     /// the dispatcher completes normally; `cancel` is invoked (once) instead when
-    /// the engine tears down with the op still in flight, so the awaiting
-    /// continuation is RESUMED (throwing) rather than leaked — a leaked
-    /// `withCheckedThrowingContinuation` both trips "CONTINUATION MISUSE" and
-    /// hangs `stop()`/app-quit forever (first-light backlog, toggle-spam session
-    /// 2026-07-17).
+    /// the engine tears down with the op still in flight; `timeout` is invoked
+    /// (once) instead when the bounded timeout elapses with no completion. EXACTLY
+    /// ONE of the three ever fires (each removes the waiter under `lock` before
+    /// resolving), so the awaiting continuation is RESUMED exactly once rather
+    /// than leaked — a leaked `withCheckedThrowingContinuation` both trips
+    /// "CONTINUATION MISUSE" and hangs `stop()`/app-quit forever (first-light
+    /// backlog, toggle-spam session 2026-07-17: 177 such leaks when a stalled op
+    /// never completed during NORMAL running, which `uninstall()`'s stop-only
+    /// cancellation did not cover).
+    ///
+    /// `timer` is the DispatchSource backing this op's timeout; whichever of the
+    /// three paths fires cancels it so the timeout can't fire after a real
+    /// delivery (and the timer's own handler is a no-op if the waiter is already
+    /// gone — the removal-under-lock is the single source of truth).
     private struct Waiter {
         let deliver: (OutputState) -> Void
         let cancel: () -> Void
+        let timeout: () -> Void
+        let timer: DispatchSourceTimer?
     }
 
     private var waiters: [Int32: Waiter] = [:]
     private let lock = NSLock()
+
+    /// Serial queue the per-op timeout timers fire on. Off the engine thread on
+    /// purpose (the engine thread may itself be wedged inside a stalled op), so a
+    /// timeout can always fire; the resolution it triggers only touches the
+    /// lock-guarded `waiters` table and resumes a continuation — never the C
+    /// cluster — so it needs no engine-thread affinity.
+    private let timerQueue = DispatchQueue(label: "com.airplayengine.completion-timeout")
 
     /// Install this registry as the process-wide target and wire the C hook.
     /// Called once, on the engine thread, right after `evbase_player` is set.
@@ -69,27 +101,85 @@ final class CompletionRegistry: @unchecked Sendable {
         let cancelled = waiters
         waiters.removeAll()
         lock.unlock()
-        for (_, waiter) in cancelled { waiter.cancel() }
+        for (_, waiter) in cancelled {
+            // Cancel the timeout timer first so it can't race after we resume the
+            // continuation here (its handler no-ops anyway once the waiter is gone).
+            waiter.timer?.cancel()
+            waiter.cancel()
+        }
         if CompletionRegistry.shared === self { CompletionRegistry.shared = nil }
     }
 
     /// Arm a waiter for `callbackId`. `completion` is invoked once with the
     /// terminal state on normal delivery; `onCancel` is invoked once instead if
-    /// the registry is torn down (uninstall) with this waiter still armed. Must be
-    /// called on the engine thread (same thread the hook fires on) so the
-    /// arm-then-report ordering can't race.
+    /// the registry is torn down (uninstall) with this waiter still armed;
+    /// `onTimeout` is invoked once instead if no completion arrives within
+    /// `timeout` (a mid-op receiver stall — the completion the dispatcher promised
+    /// never fires). EXACTLY ONE of the three fires (each removes the waiter under
+    /// `lock`). Must be called on the engine thread (same thread the hook fires
+    /// on) so the arm-then-report ordering can't race.
+    ///
+    /// A non-positive `timeout` disables the timer (used by tests that only
+    /// exercise the deliver/cancel paths); production always passes a positive
+    /// interval so a stalled op can never leak its continuation.
     func arm(
         callbackId: Int32,
+        timeout: TimeInterval,
         onCancel: @escaping () -> Void,
+        onTimeout: @escaping () -> Void,
         _ completion: @escaping (OutputState) -> Void
     ) {
-        lock.lock(); waiters[callbackId] = Waiter(deliver: completion, cancel: onCancel); lock.unlock()
+        var timer: DispatchSourceTimer?
+        if timeout > 0 {
+            let t = DispatchSource.makeTimerSource(queue: timerQueue)
+            t.schedule(deadline: .now() + timeout, repeating: .never)
+            t.setEventHandler { [weak self] in
+                self?.fireTimeout(callbackId: callbackId)
+            }
+            timer = t
+        }
+        lock.lock()
+        waiters[callbackId] = Waiter(
+            deliver: completion, cancel: onCancel, timeout: onTimeout, timer: timer
+        )
+        lock.unlock()
+        // Activate only after the waiter is in the table, so the handler (which
+        // resolves by looking the waiter up under the lock) can never observe a
+        // half-armed state.
+        timer?.activate()
     }
 
-    /// Drop a waiter without delivering or cancelling (used if arming an op is
-    /// aborted before the backend was invoked — the caller resolves it directly).
+    /// Test-only: whether a waiter is currently armed for `callbackId`. Lets a
+    /// headless test fire its synthetic completion only AFTER the registry waiter
+    /// exists (not merely after `outputs_callback_add` returned), closing the
+    /// arm-window race where a too-early completion is delivered to an absent
+    /// waiter and silently dropped.
+    func hasWaiter(callbackId: Int32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return waiters[callbackId] != nil
+    }
+
+    /// Drop a waiter without delivering, cancelling, or timing out (used if arming
+    /// an op is aborted before the backend was invoked — the caller resolves it
+    /// directly). Cancels the timeout timer so it can't fire for a spent id.
     func disarm(callbackId: Int32) {
-        lock.lock(); waiters.removeValue(forKey: callbackId); lock.unlock()
+        lock.lock()
+        let waiter = waiters.removeValue(forKey: callbackId)
+        lock.unlock()
+        waiter?.timer?.cancel()
+    }
+
+    /// The DispatchSource timeout handler. Removes the waiter under the SAME lock
+    /// the deliver/cancel paths use so at most one of {deliver, cancel, timeout}
+    /// ever resolves — if a real completion (or uninstall) already removed the
+    /// waiter, this finds nothing and is a no-op (the timer may have already been
+    /// in flight when the completion cancelled it). Otherwise it resumes the
+    /// awaiting continuation by throwing (via the stored `timeout` closure).
+    private func fireTimeout(callbackId: Int32) {
+        lock.lock()
+        let waiter = waiters.removeValue(forKey: callbackId)
+        lock.unlock()
+        waiter?.timeout()
     }
 
     /// Called by the C hook on the engine thread. Resolves the state enum and
@@ -103,6 +193,11 @@ final class CompletionRegistry: @unchecked Sendable {
         lock.lock()
         let waiter = waiters.removeValue(forKey: callbackId)
         lock.unlock()
+        // Cancel the timeout first: removing the waiter under the lock is what
+        // guarantees single-resolution, but cancelling stops the timer from
+        // needlessly firing (and its handler would no-op anyway — the waiter is
+        // gone). The real completion won the race.
+        waiter?.timer?.cancel()
         waiter?.deliver(mapped)
     }
 }

@@ -139,6 +139,14 @@ public enum AirPlayEngineError: Error, Sendable, Equatable {
     case invalidDescriptor
     /// The engine thread's event base could not be created / dispatcher wiring failed.
     case engineThreadFailed
+    /// An armed op's deferred completion never arrived within the bounded
+    /// timeout window (the receiver's media/PTP path stalled mid-op). Surfaced as
+    /// a normal thrown op failure so the awaiting continuation is resumed exactly
+    /// once instead of leaking forever (toggle-spam session 2026-07-17: 177
+    /// leaked `startOp` continuations when a receiver stalled during NORMAL
+    /// running). `NativeBackend`'s existing failure/recovery path handles it like
+    /// any other op failure.
+    case opTimedOut
 }
 
 /// Audio format the engine's `write(pcm:)` expects: interleaved signed 16-bit

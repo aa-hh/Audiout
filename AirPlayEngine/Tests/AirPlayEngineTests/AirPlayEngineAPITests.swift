@@ -75,7 +75,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         // Drive addOutput and, concurrently, fire the completion once the waiter
         // is armed. The dispatcher uses slot 0 for the first armed callback.
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
         try await op
 
         let state = await engine.stateOf(id)
@@ -102,7 +102,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id)
 
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
         try await op // must NOT hang: CONNECTED is the terminal for AP2 device_start
 
         let state = await engine.stateOf(id)
@@ -137,7 +137,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id)
 
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_FAILED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_FAILED, engine: engine)
 
         do {
             try await op
@@ -157,7 +157,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id)
 
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_PASSWORD)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_PASSWORD, engine: engine)
 
         do {
             try await op
@@ -186,7 +186,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id)
 
         async let op: Void = engine.setVolume(id, 0.5)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
         try await op
     }
 
@@ -219,7 +219,7 @@ final class AirPlayEngineAPITests: XCTestCase {
             await engine.registerKnownOutputForTest(id)
 
             async let op: Void = engine.setVolume(id, normalized)
-            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
             try await op
         }
     }
@@ -234,7 +234,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id, state: .streaming)
 
         async let op: Void = engine.removeOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STOPPED, engine: engine)
         try await op
 
         let state = await engine.stateOf(id)
@@ -427,7 +427,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id, state: .connected) // stale cache
 
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
         try await op
 
         XCTAssertTrue(reissued, "a live-FAILED session must re-issue device_start despite a stale .connected cache")
@@ -468,7 +468,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id, state: .connected) // stale cache
 
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
         try await op
 
         XCTAssertTrue(reissued, "an out-of-band FAILED must let a recovery addOutput re-issue device_start")
@@ -500,7 +500,7 @@ final class AirPlayEngineAPITests: XCTestCase {
         await engine.registerKnownOutputForTest(id, state: .streaming)
 
         async let op: Void = engine.removeOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STOPPED, engine: engine)
         try await op
 
         XCTAssertTrue(issued, "device_stop must be issued for an active output")
@@ -600,22 +600,109 @@ final class AirPlayEngineAPITests: XCTestCase {
         }
     }
 
+    // MARK: - Op stalls mid-run: the timeout resumes the continuation (throwing),
+    // it does NOT leak.
+    //
+    // REGRESSION (toggle-spam session 2026-07-17): /tmp/app-native.log showed 177
+    // "SWIFT TASK CONTINUATION MISUSE: startOp(id:issue:) leaked its continuation!"
+    // When a receiver's media/PTP path stalled mid-op (a bad IPv6 link-local
+    // address in that session, but ANY mid-op drop does it) the promised deferred
+    // completion never fired, so the awaiting continuation leaked forever — and
+    // the earlier stop()-only cancellation (testStopResumesInFlightOpContinuation)
+    // does NOT cover a stall during NORMAL running (the app keeps running; the op
+    // just leaks). This drives exactly that: arm a real waiter, NEVER deliver its
+    // completion, and assert the awaited call returns by THROWING `.opTimedOut`
+    // within the (short, injected) timeout — and that no residual waiter is left.
+    func testStalledOpTimesOutInsteadOfLeaking() async throws {
+        let id = OutputID(rawValue: 0xDEAD_0002)
+        makeRegistryDevice(id: id.rawValue)
+
+        let engine = AirPlayEngine()
+        // N=1 arms a real waiter; a short injected timeout keeps the test fast.
+        // We deliberately NEVER fire a completion — only the timeout can resolve it.
+        await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.2)
+        await engine.registerKnownOutputForTest(id)
+
+        let start = Date()
+        do {
+            try await engine.addOutput(id)
+            XCTFail("a stalled op must throw opTimedOut, not resolve or leak")
+        } catch AirPlayEngineError.opTimedOut {
+            // expected: the continuation was resumed (throwing), not leaked.
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+        // Sanity: it resolved via the timeout window, not instantly.
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.15,
+                                    "should resolve at the timeout, not immediately")
+
+        // No residual waiter: the timeout removed it from the registry under the
+        // same lock deliver/cancel use, so exactly one of {deliver, cancel,
+        // timeout} resolved this op. `knownOutputs` is unchanged because the throw
+        // happened before addOutput's `knownOutputs[id] = terminal` assignment —
+        // i.e. the op never resolved a state, it threw.
+        let state = await engine.stateOf(id)
+        XCTAssertEqual(state, .stopped, "a timed-out addOutput throws before recording any terminal state")
+
+        // Tear down cleanly so the (removed) waiter and the process-wide registry
+        // don't leak into the next test.
+        await engine.stop()
+    }
+
+    // MARK: - Normal completion BEFORE the timeout still succeeds and does NOT
+    // later double-resume when the (now-cancelled) timeout deadline passes.
+    //
+    // The complement to the leak test: a real completion arriving inside the
+    // timeout window wins the race, cancels the timer, and resolves normally. We
+    // then wait PAST the original deadline to prove the cancelled timer never
+    // fires a second (double) resume.
+    func testCompletionBeforeTimeoutSucceedsAndDoesNotDoubleResume() async throws {
+        let id = OutputID(rawValue: 0xDEAD_0003)
+        makeRegistryDevice(id: id.rawValue)
+
+        let engine = AirPlayEngine()
+        await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.3)
+        await engine.registerKnownOutputForTest(id)
+
+        // Fire the real completion well within the 0.3s window: it must win.
+        async let op: Void = engine.addOutput(id)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+        try await op // resolves normally (no throw)
+
+        let state = await engine.stateOf(id)
+        XCTAssertEqual(state, .streaming)
+
+        // Wait past the ORIGINAL timeout deadline. If the timer weren't cancelled
+        // on delivery it would fire now against an already-resumed continuation
+        // and trap the process. Reaching the assertion means it stayed cancelled.
+        try await Task.sleep(nanoseconds: 400_000_000) // 0.4s > 0.3s deadline
+        let stillStreaming = await engine.stateOf(id)
+        XCTAssertEqual(stillStreaming, .streaming,
+                       "a delivered op must not be disturbed by the (cancelled) timeout")
+    }
+
     // MARK: - internal helper: fire the synthetic completion once the waiter is
     // armed. The wrapper arms synchronously inside startOp's continuation body
     // (headless mode runs inline), so the slot exists by the time the awaiting
     // op has suspended. We poll the registry briefly for the armed slot to avoid
     // depending on scheduling order.
 
-    private func fireWhenArmed(id: UInt64, state: output_device_state) async throws {
-        // Find the armed callback slot for this device by scanning: the wrapper
-        // uses outputs_callback_add which fills the first free slot. We identify
-        // it by the device having a registered callback. Since there is exactly
-        // one op in flight per test, slot search by "has cb" is unambiguous.
+    private func fireWhenArmed(
+        id: UInt64,
+        state: output_device_state,
+        engine: AirPlayEngine
+    ) async throws {
+        // Fire only once the REGISTRY waiter is armed, not merely once the C
+        // callback slot is filled. `startOp` does `outputs_callback_add` (which
+        // makes `outputs_callback_get` non-nil) BEFORE `completions.arm`, so a
+        // helper that gated on the C callback alone could fire into that window —
+        // the completion would drain to `CompletionRegistry.deliver` with no
+        // waiter, be dropped (and the slot cleared), and the op would then hang
+        // until its timeout (a flaky 12s `opTimedOut` before this fix). The
+        // wrapper always uses the lowest free slot (0 for a single op after
+        // reset), so we wait for waiter 0 then fire slot 0.
         for _ in 0..<200 {
-            if let dev = outputs_device_get(id), outputs_callback_get(dev) != nil {
-                // Slot index isn't directly exposed; re-derive by firing each
-                // in-range id until one is ready. But the wrapper always uses the
-                // lowest free slot (0 for a single op after reset), so fire 0.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 fireCompletion(id: id, cbIdSlot: 0, state: state)
                 return
             }

@@ -156,7 +156,7 @@ final class StateStreamTests: XCTestCase {
 
         // 1) addOutput resolves via the armed CONNECTED completion (id now spent).
         async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
         try await op
         let resolved = await engine.stateOf(id)
         XCTAssertEqual(resolved, .connected)
@@ -182,9 +182,18 @@ final class StateStreamTests: XCTestCase {
     /// Fire a synthetic completion once the waiter is armed (same pattern as
     /// AirPlayEngineAPITests). The wrapper uses the lowest free slot (0 after a
     /// reset) for a single in-flight op.
-    private func fireWhenArmed(id: UInt64, state: output_device_state) async throws {
+    private func fireWhenArmed(
+        id: UInt64,
+        state: output_device_state,
+        engine: AirPlayEngine
+    ) async throws {
+        // Gate on the REGISTRY waiter, not just the C callback slot: `startOp`
+        // arms `outputs_callback_add` before `completions.arm`, so firing on the
+        // C callback alone can hit the window before the waiter exists — the
+        // completion is then dropped and the op hangs until its timeout. See the
+        // twin helper in AirPlayEngineAPITests for the full rationale.
         for _ in 0..<200 {
-            if let dev = outputs_device_get(id), outputs_callback_get(dev) != nil {
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 outputs_cb(0, id, state)
                 outputs_cb_deferred_run()
                 return

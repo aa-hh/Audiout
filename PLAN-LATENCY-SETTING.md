@@ -22,31 +22,39 @@ Audio section is built by `AudioSettingsViewController`):
 
 ```
 Advanced ────────────────────────────────────────────────
-Audio delay          [ Balanced (about 2 seconds) ▾ ]
-  Shorter delay reacts faster to play/pause; longer delay
-  is more resistant to Wi-Fi hiccups and dropouts.
+Audio buffer                             [ 1000 ms ▾ ]
+  A smaller buffer reacts faster to play and pause. A
+  larger buffer resists Wi-Fi hiccups and dropouts.
 
                               [ Apply & Reconnect ]
 ```
 
-- **Presets, not a free-form number** (small support surface, each value
-  tested):
+- **Numeric options, not named presets (Alec, 2026-07-17 mockup review —
+  LOCALIZATION):** dropdown items are bare millisecond values ("1000 ms",
+  via `NumberFormatter` for locale digit grouping) — named presets with
+  embedded delay descriptions ("Balanced (about 2 seconds)") don't survive
+  translation length-wise. The one localizable sentence is the caption.
+  The row is titled **"Audio buffer"**, not "Audio delay": the number IS the
+  buffer size, and total perceived delay is larger (receiver adds its own
+  share) — labeling it "delay: 1000 ms" would promise a 1 s delay the user
+  doesn't get.
 
-  | Preset | start buffer | expected click-to-sound* |
-  |---|---|---|
-  | Responsive | 500 ms | ~1.7 s |
-  | Balanced (default) | 1000 ms | ~2.2 s |
-  | Reliable | 2250 ms | ~3.5 s (old behavior) |
+  | Option | expected click-to-sound* |
+  |---|---|
+  | 1000 ms (default, lowest) | ~2.2 s |
+  | 1500 ms | ~2.7 s |
+  | 2250 ms | ~3.5 s (old behavior) |
 
-  *Assumes the receiver-applied share measured in the gated run; the copy in
-  the UI shows approximate seconds, not milliseconds. **Preset values are
-  PROVISIONAL** until the gated floor sweep (latency-analysis.md checklist
-  step 4) confirms 500 ms is clean on the real fleet. Values live as named
-  constants in one place.
+  *Assumes the receiver-applied share measured in the gated run. Values live
+  as named constants in one place.
 
-- **User floor = 500 ms** (UI offers nothing lower). The engine shim keeps its
-  own hard clamp at 300 ms (below ~250 the vendored sender rejects every
-  session), so even a corrupted default can't produce a non-working value.
+- **User floor = 1000 ms** (Alec, 2026-07-17: dropped the 500 ms option).
+  1000 ms leaves receivers a 750 ms jitter buffer — comfortably safe on
+  ordinary Wi-Fi (see risk note in §6). The gated floor sweep (via the env
+  knob, which still accepts 300–5000) can justify ADDING a lower option
+  later; it no longer gates shipping. The engine shim keeps its own hard
+  clamp at 300 ms (below ~250 the vendored sender rejects every session), so
+  even a corrupted default can't produce a non-working value.
 
 - **Explicit CTA applies the change** (Alec, this thread): changing the popup
   arms the button; nothing changes until it's clicked.
@@ -105,7 +113,7 @@ and the engine thread are untouched.
 |---|------|-------|
 | 1 | `AirPlayEngine.setStartBufferMs(_:)` (actor method, engine-thread marshal; also updates the latency probe's logged lead, which is currently fixed at init) | `AirPlayEngine.swift` |
 | 2 | `NativeBackend.applyStartBuffer(ms:)` — snapshot selected set + volumes/mutes → awaited remove-all → engine set → re-add via existing converge → re-push volumes/mutes; per-device failures keep D4 best-effort semantics (marked unavailable) | `NativeBackend.swift` |
-| 3 | `AppSettings.startBufferMs` + preset enum with named constants | `AppSettings.swift` |
+| 3 | `AppSettings.startBufferMs` + the option list as named constants (values only — no user-facing preset names) | `AppSettings.swift` |
 | 4 | `nativeStartBufferMs` resolution: env → setting → default | `OwnToneBackend.swift` (makeBackend) |
 | 5 | Audio pane Advanced section: popup + CTA + reconnecting state + env-override note; hidden unless backend is `LatencyConfigurable` | `AudioSettingsViewController.swift`, `SettingsForm.swift` |
 | 6 | App wiring: pane → backend capability, main-actor plumbing | `AppDelegate.swift` / settings window controller |
@@ -125,10 +133,23 @@ and the engine thread are untouched.
 - Pane logic: section hidden for non-conforming backend; CTA arms on change,
   disables while applying; env override renders disabled state.
 
-## 6. Gated (user present, real fleet)
+## 6. Gated (user present, real fleet) + the 1000 ms risk assessment
 
-- Floor sweep from latency-analysis.md step 4 **finalizes the Responsive
-  preset value** (500 ms provisional; one step above first dropout).
+**Why 1000 ms as the lowest option is safe (Alec asked, 2026-07-17):** the
+receiver's protection against network trouble is `start_buffer − 250 ms` of
+buffered audio — 750 ms at the 1000 ms option. Ordinary Wi-Fi disturbances
+(channel scans, interference bursts, contention with other traffic) stall
+delivery for ~100–500 ms; 750 ms absorbs those AND leaves room for the
+sender's retransmit round-trips (lost-packet recovery via the control
+channel needs a few RTTs before the deadline). The genuinely risky territory
+starts below ~500 ms, where a single bad Wi-Fi moment can outrun the
+cushion. 1000 ms was this plan's *default* all along — making it the floor
+removes the one risky option rather than adding risk. Residual risk to
+verify by ear only: many-room fleets on congested 2.4 GHz.
+
+- Gated checks: 10 min dropout-free music at 1000 ms on ≥ 2 rooms
+  (latency-analysis.md steps 2–3); the optional env-knob sweep below 1000
+  (750/500) is now purely reconnaissance for a possible FUTURE lower option.
 - Apply-flow by ear: while streaming to 2 rooms, click Apply & Reconnect →
   ≤ ~5 s silence → both rooms resume **in sync** at the new latency; popover
   states transition cleanly; volumes/mutes preserved.

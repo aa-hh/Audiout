@@ -1,0 +1,21 @@
+#!/bin/sh
+# Warn-only. NEVER blocks a commit — every path here exits 0.
+#
+# See .githooks/agents-md-symbol-check.py for what it checks and, importantly,
+# what it checks AGAINST (the commit being created — not main, not the working
+# tree). Root AGENTS.md carries the rule this backs up: docs never reach main
+# ahead of their code.
+#
+# Enable with:  git config core.hooksPath .githooks
+# Disable with: git config --unset core.hooksPath
+
+hook_dir=$(dirname "$0")
+checker="$hook_dir/agents-md-symbol-check.py"
+
+# Missing checker or no python3 => silently do nothing. A hook that errors out
+# on an unrelated machine is worse than a hook that isn't there.
+[ -f "$checker" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+
+python3 "$checker" || true
+exit 0

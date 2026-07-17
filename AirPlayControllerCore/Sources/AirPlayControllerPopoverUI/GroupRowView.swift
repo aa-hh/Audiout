@@ -50,7 +50,7 @@ public final class GroupRowView: NSView {
     private let nameLabel = NSTextField(labelWithString: "")
     private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
-    private let masterSlider = ControlCenterSlider()
+    private let masterSlider = NSSlider()
     private var isDraggingMaster = false
     private var isHovered = false
 

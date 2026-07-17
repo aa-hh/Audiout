@@ -8,8 +8,8 @@ import AirPlayControllerSharedUI
 /// The single **"Main Out"** row in the popover's System card — styled after
 /// macOS Control Center's **Sound module** (SPEC §9, T-U9b). Laid out against the
 /// shared popover column grid (task B). Left to right: a leading speaker icon ·
-/// name-less flexible zone · a Control-Center pill `ControlCenterSlider` (the
-/// master volume) · a `%` readout · a **named destination dropdown**
+/// name-less flexible zone · a horizontal `NSSlider` (the master volume, stock
+/// macOS styling) · a `%` readout · a **named destination dropdown**
 /// (`NSPopUpButton`, `pullsDown = false`) as the trailing control.
 ///
 /// (T-U10 briefly moved the glyph into the slider's track to match a full-height
@@ -64,7 +64,7 @@ public final class MainOutRowView: NSView {
     /// "Output" row and filling the shared name column so it aligns with the
     /// device/group rows below.
     private let nameLabel = NSTextField(labelWithString: "Audio Out")
-    private let slider = ControlCenterSlider()
+    private let slider = NSSlider()
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()
@@ -144,13 +144,24 @@ public final class MainOutRowView: NSView {
         // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
         // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
         // visible fallback (Alec's choice).
+        // Match the device rows' glyph sizing (2026-07-17): size the symbol to
+        // fill the shared 26pt icon box so the Main Out icon reads at the same
+        // scale as the device icons below it (without a config it renders at the
+        // small default size and floats in a big box).
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                                     weight: .regular)
+        iconView.imageScaling = .scaleProportionallyDown
         for name in ["hifispeaker.arrow.forward.fill", "hifispeaker.fill"] {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out") {
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out")?
+                .withSymbolConfiguration(iconConfig) {
                 iconView.image = image
                 break
             }
         }
-        iconView.contentTintColor = .controlAccentColor
+        // Match device row icon styling (2026-07-17): neutral gray, not accent.
+        // Consistency across System and Devices sections — all icons are identity
+        // only, connection status lives on the icon as a corner badge.
+        iconView.contentTintColor = .secondaryLabelColor
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false

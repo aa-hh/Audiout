@@ -44,10 +44,11 @@ public final class MixerWindowController: NSWindowController {
     /// mixer pane and the group-editor pane as the sidebar selection changes.
     private let contentSplitItem: NSSplitViewItem
 
-    public init(groupController: GroupController) {
+    public init(groupController: GroupController,
+               appRouting: AppRoutingController = AppRoutingController(loadPersisted: false)) {
         self.groupController = groupController
         self.sidebarViewController = SidebarViewController()
-        self.mixerViewController = MixerViewController(groupController: groupController)
+        self.mixerViewController = MixerViewController(groupController: groupController, appRouting: appRouting)
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.toolbarController = ToolbarController()
 

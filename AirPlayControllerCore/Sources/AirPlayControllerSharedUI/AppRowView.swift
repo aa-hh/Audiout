@@ -5,7 +5,7 @@ import AppKit
 
 /// A single row of the popover's future **Applications** card
 /// (PLAN-POPOVER-ROUTING.md §A/§C task T-6): app icon · truncating name ·
-/// always-visible `ControlCenterSlider` (dimmed while the app plays on the
+/// always-visible `NSSlider` (dimmed while the app plays on the
 /// current device, decision 3) · `%` readout · a trailing "redirect audio to…"
 /// `NSPopUpButton` sectioned **Current Device** / **AirPlay Devices** (decision
 /// 4 — no Groups section) · a hover-revealed remove (✕) affordance.
@@ -23,7 +23,7 @@ import AppKit
 public final class AppRowView: NSView {
 
     /// Callbacks for the row's controls. The host maps these onto
-    /// `AppRoutingController.setAppVolume`/`setAppRoute`/`removeAppRoute`.
+    /// `AppRoutingController.setVolume(_:for:)`/`setDestination(_:for:)`/`removeRoute(bundleID:)`.
     public protocol Delegate: AnyObject {
         func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String)
         /// The user picked a redirect destination from the trailing popup.
@@ -85,7 +85,7 @@ public final class AppRowView: NSView {
 
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private let slider = ControlCenterSlider()
+    private let slider = NSSlider()
     private let readoutLabel = NSTextField(labelWithString: "")
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// Hover-revealed remove affordance (HoverActionButton idiom — a borderless

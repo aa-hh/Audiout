@@ -13,7 +13,9 @@
 // + ptpd.c + the net helpers read):
 //   general.user_agent            str   "AirPlayEngine/0.1.0"
 //   general.bind_address          str   NULL   (PTP bind addr; "::"->any)
-//   general.ipv6                  bool  true    (attempt v6; needed for PTP v6 peers)
+//   general.ipv6                  bool  false   (OwnTone's default; the Swift
+//                                                EngineConfig re-enables it via
+//                                                conffile_set_ipv6 before init)
 //   library.name                  str   "My Music on %h"
 //   airplay_shared.timing_port    int   0       (ephemeral bind)
 //   airplay_shared.control_port   int   0       (ephemeral bind)
@@ -31,9 +33,42 @@
 // stable and unique per install. conffile_set_libhash() is provided for that.
 
 #include "conffile.h"
+#include "logger.h"
 
+#include <assert.h>
 #include <stddef.h>
 #include <string.h>
+
+/* Unknown-key policy (first-light hardening #5). Historically every cfg_get*
+ * accessor fell through to a silent `return 0/NULL` for a key it doesn't serve,
+ * so a typo in a vendored call site (or a new upstream key the shim forgot to
+ * add) would masquerade as "value is 0/empty" — a silent wrong default that is
+ * exactly the class of bug the first-light audit flagged. Make the miss LOUD:
+ * log at E_WARN so it shows up in Console/stderr, and assert() in debug builds
+ * so a test/dev run trips immediately at the offending lookup. Release builds
+ * (NDEBUG) still return the safe default after logging, so a stray lookup can
+ * never crash a shipped session. */
+
+/* Test/diagnostic counters (definitions for the extern decls in conffile.h). A
+ * hermetic test flips conffile_unknown_key_assert to false so it can exercise
+ * the log+default path deterministically WITHOUT the assert aborting the test
+ * process, and reads conffile_unknown_key_count to confirm the miss fired. In
+ * normal (non-test) operation the flag stays true and the assert bites in debug
+ * builds. */
+bool conffile_unknown_key_assert = true;
+unsigned long conffile_unknown_key_count = 0;
+
+static void
+conffile_unknown_key(const char *accessor, const char *name)
+{
+  conffile_unknown_key_count++;
+  DPRINTF(E_WARN, L_CONF,
+          "conffile shim: %s asked for unknown key \"%s\" — returning default "
+          "(add it to the shim if the vendored cluster needs it)\n",
+          accessor, name ? name : "(null)");
+  if (conffile_unknown_key_assert)
+    assert(0 && "conffile shim: unknown config key requested (see log)");
+}
 
 /* The one real backing struct. Global keys only (per-device is app-owned). */
 struct conffile_config
@@ -51,7 +86,11 @@ static struct conffile_config config = {
   .user_agent   = "AirPlayEngine/0.1.0", /* neutralized product name (SPEC §4) */
   .library_name = "My Music on %h",
   .bind_address = NULL,                  /* NULL => bind to any; ptpd maps "::"->NULL */
-  .ipv6         = 1,                     /* attempt IPv6 (PTP peers may be link-local v6) */
+  .ipv6         = 0,                     /* OFF by default, matching OwnTone's own
+                                          * general.ipv6=false (first-light hardening
+                                          * #5). The Swift EngineConfig re-enables it
+                                          * (default enableIPv6=true) via
+                                          * conffile_set_ipv6() before airplay_init. */
   .timing_port  = 0,                     /* 0 => ephemeral bind */
   .control_port = 0,                     /* 0 => ephemeral bind */
   .max_volume   = 11,
@@ -149,6 +188,10 @@ cfg_getstr(cfg_t *sec, const char *name)
   if (strcmp(name, "bind_address") == 0)  // general.bind_address (PTP + net_bind)
     return (char *)config.bind_address;
 
+  // Per-device str keys (nickname/password) only reach here via a non-NULL
+  // devcfg, which cfg_gettsec never returns — so any name we get here is an
+  // unserved global key. Make the miss loud instead of silently returning NULL.
+  conffile_unknown_key("cfg_getstr", name);
   return NULL;
 }
 
@@ -166,6 +209,7 @@ cfg_getint(cfg_t *sec, const char *name)
   if (strcmp(name, "max_volume") == 0)    // per-device; default 11
     return config.max_volume;
 
+  conffile_unknown_key("cfg_getint", name);
   return 0;
 }
 
@@ -179,7 +223,13 @@ cfg_getbool(cfg_t *sec, const char *name)
   if (strcmp(name, "ipv6") == 0)
     return config.ipv6;
 
-  // All per-device bool keys default to false/off (seam-map §3.1).
+  // All per-device bool keys (exclude/permanent/exclusive/airplay2_disable/
+  // ptp_disable) are only read behind a `devcfg && ...` guard in airplay.c, and
+  // cfg_gettsec never hands back a non-NULL devcfg — so those never reach here.
+  // The only global bool the vendored cluster reads is "ipv6" (misc.c net
+  // helpers). Anything else is a genuine unserved key: make it loud rather than
+  // masquerading as a false/off default.
+  conffile_unknown_key("cfg_getbool", name);
   return 0;
 }
 

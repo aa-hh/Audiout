@@ -1,9 +1,21 @@
 // swift-tools-version:5.10
 import PackageDescription
 
+// Platform floor: raised from .v13 to .v14 for T-NB-PKGDEP-1. AirPlayEngine
+// (../AirPlayEngine/Package.swift) is .macOS(.v14) — its Core Audio process
+// tap capture (T-NB-CAPTURE-1) needs the tap API, which is 14.4+ (Alec runs
+// 14.4.1) — and a SwiftPM package's platform floor cannot be lower than any
+// local dependency it links (Xcode/SwiftPM enforces the dependency's
+// deployment target as a floor on any target that depends on it, and will
+// fail to build/resolve otherwise). Rather than fighting per-symbol
+// `@available` annotations to keep .v13 alive for code paths that never run
+// on 13 anyway (NativeBackend is opt-in via AIRPLAY_BACKEND=native), we take
+// the whole package to .v14. The mock/OwnTone-backed paths are unaffected —
+// they don't reference anything gated above .v13; this only tightens the
+// deployment target the app links for and installs on.
 let package = Package(
     name: "AirPlayControllerCore",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [
         // The core library the AppKit app links against. It knows nothing about
         // AppKit — it's the seam between "the UI" and "wherever audio actually goes."
@@ -34,13 +46,29 @@ let package = Package(
         // `cacheDisplay` and writes PNGs (light + dark) to
         // `dev/notes/popover-snapshots/`. Run: `swift run popover-snapshot`.
         .executable(name: "popover-snapshot", targets: ["popover-snapshot"]),
+        // Offscreen PNG renderer for the Settings window (single-screen General/
+        // Appearance/Audio layout, T-2026-07-17 sizing-bug fix + tile-picker
+        // redesign) — see the product comment in settings-snapshot/main.swift.
+        .executable(name: "settings-snapshot", targets: ["settings-snapshot"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
         .executable(name: "AirPlayControllerApp", targets: ["AirPlayControllerApp"]),
     ],
+    dependencies: [
+        // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
+        // Local path dependency, sibling package — NativeBackend
+        // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
+        // the consumers; the Mock/OwnTone backends do not import it.
+        .package(path: "../AirPlayEngine"),
+    ],
     targets: [
-        .target(name: "AirPlayControllerCore"),
+        .target(
+            name: "AirPlayControllerCore",
+            dependencies: [
+                .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+            ]
+        ),
         .executableTarget(
             name: "mock-speakers-demo",
             dependencies: ["AirPlayControllerCore"]
@@ -77,15 +105,28 @@ let package = Package(
             name: "AirPlayControllerWindowUI",
             dependencies: ["AirPlayControllerCore", "AirPlayControllerSharedUI"]
         ),
+        // The pure-AppKit Settings window (the header gear's destination): a
+        // `SettingsWindowController` hosting a `.toolbar`-style
+        // `NSTabViewController`, one pane per tab (General, Appearance, …). A
+        // *library* so the app AND tests can link it and assert the built window
+        // structure, exactly like the popover/mixer UI libs. Only needs Core (the
+        // `AppSettings` scalar store + appearance/density enums) — no shared rows
+        // yet.
+        .target(
+            name: "AirPlayControllerSettingsUI",
+            dependencies: ["AirPlayControllerCore"]
+        ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
         // lifecycle); the popover dropdown lives in AirPlayControllerPopoverUI,
-        // the mixer window in AirPlayControllerWindowUI.
+        // the mixer window in AirPlayControllerWindowUI, the Settings window in
+        // AirPlayControllerSettingsUI.
         .executableTarget(
             name: "AirPlayControllerApp",
             dependencies: [
                 "AirPlayControllerCore",
                 "AirPlayControllerPopoverUI",
                 "AirPlayControllerWindowUI",
+                "AirPlayControllerSettingsUI",
             ]
         ),
         // Programmatic popover-structure verification for T-U6 (the popover isn't
@@ -106,6 +147,12 @@ let package = Package(
             name: "popover-snapshot",
             dependencies: ["AirPlayControllerCore", "AirPlayControllerPopoverUI", "AirPlayControllerSharedUI"]
         ),
+        // Offscreen PNG renderer for the Settings window — see the product
+        // comment above.
+        .executableTarget(
+            name: "settings-snapshot",
+            dependencies: ["AirPlayControllerCore", "AirPlayControllerSettingsUI"]
+        ),
         .testTarget(
             name: "AirPlayControllerCoreTests",
             dependencies: [
@@ -113,6 +160,7 @@ let package = Package(
                 "AirPlayControllerSharedUI",
                 "AirPlayControllerPopoverUI",
                 "AirPlayControllerWindowUI",
+                "AirPlayControllerSettingsUI",
             ]
         ),
     ]

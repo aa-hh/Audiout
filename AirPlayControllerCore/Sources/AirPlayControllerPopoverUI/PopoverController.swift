@@ -96,9 +96,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// otherwise wants the mixer window shown.
     public var onOpenMixer: (() -> Void)?
 
-    /// Called when the user taps the header's Settings button (task A). Stubbed —
-    /// no settings surface exists yet (`// TODO: settings`).
+    /// Called when the user taps the header's Settings button (task A). The app
+    /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
+
+    /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
+    /// captured")? An excluded app is un-routable — dropped from the "+ Add
+    /// application…" picker and its route row skipped in `rebuild` (defensive; the
+    /// app also prunes the persisted route when an app is excluded). Wired by the
+    /// app; defaults to "never excluded" so existing call sites/tests are
+    /// unaffected.
+    public var isAppExcluded: (String) -> Bool = { _ in false }
 
     private let panel = PopoverPanelViewController()
 
@@ -106,6 +114,32 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private let mainOutRow = MainOutRowView()
 
     private var deviceRowsByID: [String: DeviceRowView] = [:]
+
+    /// The transient "AirPlay 1 support is coming soon" explanation popover
+    /// (T-UI-AP1-1). Held so a second click can close/reopen it rather than
+    /// leaking a stray `NSPopover`; entirely separate from `popover` (the main
+    /// dropdown), which stays exactly content-sized and is never touched here.
+    private var unsupportedExplanationPopover: NSPopover?
+
+    /// Each device's connection state as of the LAST `update(devices:)`, so the
+    /// next update can detect transitions (connection-status brief §7.3). The
+    /// backend owns the state machine; the popover only reacts to edges —
+    /// `→ .failed` (honest-toggle cleanup + auto-expand) and `→ .connected` /
+    /// `→ .off` (panel teardown).
+    private var lastConnectionStates: [String: ConnectionState] = [:]
+
+    /// Ids whose diagnosis panel should currently be OPEN. This is the
+    /// persistent intent — it survives `rebuild()` (which recreates the panel
+    /// views). Seeded automatically on a `→ .failed` transition (auto-expand ONCE
+    /// per failure episode) and cleared when the device leaves `.failed`
+    /// (`→ .connected` / `→ .off`). The manual warning-button toggle was retired
+    /// with the right-side status slot (2026-07-17); the panel is now purely
+    /// auto-driven off the connection-state transitions.
+    private var openDiagnosisIDs: Set<String> = []
+
+    /// The mounted `ConnectionDiagnosisView` per device id — the view-layer
+    /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
+    private var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
     /// The Applications card's `AppRowView`s, keyed by bundle id (stable identity —
     /// `AppRoute.bundleID`). Populated by `rebuild()` in `appRoutes` order (T-8,
@@ -178,6 +212,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (defensive under a group target) and repaints mounted rows in place.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        handleConnectionTransitions(devices)
         groupController?.syncActiveGroupToSelection()
 
         // Device-lifecycle → per-app routes (T-8, PLAN decision 7 — silent
@@ -213,6 +248,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             } else {
                 refreshDeviceRows()
                 refreshMainOutRow()
+                reconcileDiagnosisPanels(animated: true)
             }
         } else {
             rebuild()
@@ -278,6 +314,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     public func rebuild() {
         deviceRowsByID.removeAll()
+        // The mounted panel views die with their rows; the open-panel INTENT
+        // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
+        // "rebuild() restores open panels").
+        diagnosisPanelsByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
 
@@ -302,13 +342,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         if !locals.isEmpty || !airplay.isEmpty {
-            // Combined header row (change 1): "Selected Devices" title on the
-            // left, "VOLUME" over the slider and "ENABLED" over the membership
-            // toggle on the right.
-            panel.beginCard(header: "Selected Devices", volumeTitle: "Volume", trailingTitle: "Enabled",
+            // Combined header row (change 1): "Devices" title on the left,
+            // "VOLUME" over the slider and "Selected" over the membership
+            // checkbox on the right. Collapsible (main merge) — the collapse key
+            // must equal the display header, since cards are looked up by header
+            // title.
+            panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Selected",
                             collapsible: true,
-                            collapsed: collapsedState(for: "Selected Devices", default: false),
-                            onToggle: { [weak self] in self?.toggleCard("Selected Devices") })
+                            collapsed: collapsedState(for: "Devices", default: false),
+                            onToggle: { [weak self] in self?.toggleCard("Devices") })
             if !locals.isEmpty {
                 panel.addSubsectionHeader("Current Device")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
@@ -334,7 +376,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
-        for route in appRouting.appRoutes {
+        for route in appRouting.appRoutes where !isAppExcluded(route.bundleID) {
             panel.addRow(makeAppRow(route, devices: allDevices))
         }
         panel.addRow(makeAddApplicationRow())
@@ -345,6 +387,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
         // Footer removed (2026-07-14): Open Mixer → header Groups button;
         // Save-as-group → Groups "+"; Quit → header Quit button.
+
+        // Restore any open diagnosis panels under their (freshly created) rows
+        // (brief §7.3 — a failure that arrived while the popover was closed goes
+        // through this path). Un-animated: the whole panel is being (re)built.
+        reconcileDiagnosisPanels(animated: false)
     }
 
     private func orderedDevices() -> [Device] {
@@ -394,7 +441,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else { return }
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Enabled Devices", target: .selectedDevices),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))
@@ -423,16 +470,29 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         return view
     }
 
+    /// Whether an app route currently redirects to this device — the canonical
+    /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
+    private func isRedirectTarget(_ id: String) -> Bool {
+        !appRouting.routedAppNames(for: id).isEmpty
+    }
+
     /// Push the current membership + local-block state into a device row.
     private func applySelectionState(to row: DeviceRowView, device: Device) {
-        guard let controller = groupController else { row.apply(device, selected: false); return }
+        guard let controller = groupController else {
+            // No controller ⇒ nothing routable ⇒ not controllable.
+            row.apply(device, selected: false, controllable: false,
+                      routedAppNames: appRouting.routedAppNames(for: device.id))
+            return
+        }
         let selected = controller.isSpeakerSelected(device.id)
         // Block only the local device when it can't currently be turned ON.
         let blocked = device.isLocalDevice && !selected && !controller.canSelectLocalSpeaker(device.id)
         row.apply(device,
                   selected: selected,
+                  controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
                   blocked: blocked,
-                  blockReason: blocked ? GroupController.localMixRefusalReason : nil)
+                  blockReason: blocked ? GroupController.localMixRefusalReason : nil,
+                  routedAppNames: appRouting.routedAppNames(for: device.id))
     }
 
     private func refreshDeviceRows() {
@@ -440,6 +500,107 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
         }
+    }
+
+    // MARK: Connection failures + diagnosis panels (brief §7.3)
+    //
+    // The backend owns the connection state machine; the popover reacts to its
+    // TRANSITIONS. On `→ .failed` it (a) removes the device from the Selected
+    // Devices set — the honest toggle animates back OFF via ordinary membership
+    // repaint, and the backend keeps `.failed` sticky through the resulting
+    // cleanup `setOutputSet` (§1) so the warning survives — and (b) auto-expands
+    // the diagnosis panel ONCE for that failure episode. On `→ .connected` /
+    // `→ .off` any panel for the id is torn down. "Try again" re-adds membership
+    // (the toggle-on path IS the retry path). The panel is purely auto-driven off
+    // these transitions — the manual warning-button toggle was retired 2026-07-17.
+
+    /// Diff the new snapshot's connection states against the last one and run
+    /// the edge-triggered reactions above. Also prunes state for devices that
+    /// vanished from the snapshot entirely (`deviceRemoved` — `.failed → .off`
+    /// per §1, so the panel goes too).
+    private func handleConnectionTransitions(_ devices: [Device]) {
+        for device in devices {
+            let previous = lastConnectionStates[device.id] ?? .off
+            let current = device.connectionState
+            lastConnectionStates[device.id] = current
+
+            switch current {
+            case .failed:
+                // Edge-triggered on ENTERING failed: a later in-episode update
+                // (the diagnosis replacing the backend's first guess is still
+                // `.failed`, just with a better cause) must not re-run the
+                // cleanup or force a closed panel back open.
+                guard !previous.isFailedState else { break }
+                if groupController?.isSpeakerSelected(device.id) == true {
+                    groupController?.setDeviceSelected(device.id, false)
+                }
+                openDiagnosisIDs.insert(device.id)
+            case .connected, .off:
+                openDiagnosisIDs.remove(device.id)
+            case .connecting, .reconnecting:
+                // In-flight: leave any open panel alone (a retry keeps its
+                // context on screen until the attempt resolves).
+                break
+            }
+        }
+
+        // Devices gone from the snapshot: drop their tracking + panel.
+        let liveIDs = Set(devices.map(\.id))
+        for id in lastConnectionStates.keys where !liveIDs.contains(id) {
+            lastConnectionStates.removeValue(forKey: id)
+            openDiagnosisIDs.remove(id)
+        }
+    }
+
+    /// Make the mounted panel views match `openDiagnosisIDs`: tear down panels
+    /// that should be closed (or whose device/row vanished), refresh the failure
+    /// copy on ones staying up (the diagnosis-replacement path), and mount
+    /// missing ones under their device row.
+    private func reconcileDiagnosisPanels(animated: Bool) {
+        for (id, view) in diagnosisPanelsByID where !openDiagnosisIDs.contains(id) {
+            diagnosisPanelsByID.removeValue(forKey: id)
+            panel.removeRow(view, animated: animated)
+        }
+        for id in openDiagnosisIDs {
+            guard let device = devicesByID[id],
+                  case .failed(let failure) = device.connectionState else { continue }
+            if let view = diagnosisPanelsByID[id] {
+                view.apply(failure: failure, deviceName: device.name)
+            } else {
+                mountDiagnosisPanel(for: id, failure: failure, device: device, animated: animated)
+            }
+        }
+    }
+
+    /// Create a `ConnectionDiagnosisView` for `id` and insert it directly under
+    /// the device's row.
+    private func mountDiagnosisPanel(for id: String, failure: ConnectionFailure,
+                                     device: Device, animated: Bool) {
+        guard let row = deviceRowsByID[id] else { return }
+        let view = ConnectionDiagnosisView(failure: failure, deviceName: device.name)
+        view.onRetry = { [weak self] in self?.retryConnection(for: id) }
+        view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
+        diagnosisPanelsByID[id] = view
+        panel.insertRow(view, after: row, animated: animated)
+    }
+
+    /// "Try again": re-adding the id to the Selected Devices set IS the retry
+    /// path (§1 — a `.failed` id re-appearing in `setOutputSet` → `.connecting`).
+    private func retryConnection(for id: String) {
+        let result = groupController?.setDeviceSelected(id, true) ?? .ok
+        handleSelection(result, deviceID: id)
+    }
+
+    /// "Copy details": the raw evidence when the diagnosis captured any, else
+    /// the user-facing copy. The HOST owns the pasteboard write (§7.1 — the
+    /// panel view never touches `NSPasteboard`).
+    private func copyDiagnosisDetails(for id: String) {
+        guard let device = devicesByID[id],
+              case .failed(let failure) = device.connectionState else { return }
+        let text = failure.detail ?? "\(failure.headline). \(failure.suggestion)"
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     // MARK: Applications card rows (T-8, PLAN §C decisions 3/4/6/8)
@@ -589,7 +750,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// duplicate, but filtering here keeps the menu from offering a dead choice).
     private func availableAppsForPicker() -> [RunningAppInfo] {
         let routed = Set(appRouting.appRoutes.map(\.bundleID))
-        return runningAppsProvider().filter { !routed.contains($0.bundleID) }
+        // Also drop excluded apps (Settings › Audio, "never captured") — routing
+        // an app the user has excluded would contradict the exclusion.
+        return runningAppsProvider().filter { !routed.contains($0.bundleID) && !isAppExcluded($0.bundleID) }
     }
 
     /// Add a route for `bundleID`/`displayName` (defaults to `.currentDevice` —
@@ -651,10 +814,63 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         FileHandle.standardError.write(Data("[AirPlayController] \(reason)\n".utf8))
     }
 
+    // MARK: AP1-only "coming soon" explanation (T-UI-AP1-1, PLAN-PHASE-2B D6)
+
+    /// Present the small transient content-sized explanation popover anchored
+    /// to `row`. Closes any previous instance first (repeat clicks reposition
+    /// rather than stack popovers). No-ops off-screen (`row.window == nil`,
+    /// e.g. a headless test harness that never attaches the panel to a real
+    /// window) — `test_lastUnsupportedExplanationDeviceID` is the headless
+    /// assertion surface instead of a real `NSPopover.show`.
+    private func presentUnsupportedExplanation(anchoredTo row: DeviceRowView) {
+        unsupportedExplanationPopover?.performClose(nil)
+
+        let explanationController = NSViewController()
+        let label = NSTextField(wrappingLabelWithString: DeviceRowView.unsupportedExplanation)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = .labelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 20))
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            content.widthAnchor.constraint(equalToConstant: 220),
+        ])
+        explanationController.view = content
+
+        let explanationPopover = NSPopover()
+        explanationPopover.behavior = .transient   // dismisses on outside click/Esc
+        explanationPopover.contentViewController = explanationController
+        explanationPopover.contentSize = content.fittingSize
+        unsupportedExplanationPopover = explanationPopover
+
+        test_lastUnsupportedExplanationDeviceID = row.device.id
+        // A headless harness/test never attaches the panel to a real
+        // `NSWindow`; guard so this stays crash-free there while still
+        // recording the intent above for `test_` assertions.
+        guard row.window != nil else { return }
+        explanationPopover.show(relativeTo: row.bounds, of: row, preferredEdge: .maxY)
+    }
+
     // MARK: Test-support hooks
 
     public func test_deviceRow(for id: String) -> DeviceRowView? {
         deviceRowsByID[id]
+    }
+
+    /// The device id of the row a "coming soon" explanation was last shown for
+    /// (T-UI-AP1-1), `nil` until one has fired. The headless assertion surface
+    /// for `presentUnsupportedExplanation` — no real `NSWindow` is required.
+    public private(set) var test_lastUnsupportedExplanationDeviceID: String?
+
+    /// Simulate clicking `id`'s row (drives the real `mouseDown:` path via
+    /// `DeviceRowView.test_simulateClick`). No-op if the row is missing or
+    /// isn't currently rendered as unsupported.
+    public func test_clickDeviceRow(id: String) {
+        deviceRowsByID[id]?.test_simulateClick()
     }
 
     /// Simulate the popover being opened (T-5): recomputes collapse defaults and
@@ -803,6 +1019,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         groupController?.setMuted(muted, for: deviceID)
     }
 
+    /// The mounted diagnosis panel for a device, or `nil` when closed/absent
+    /// (brief §7.3 test hook).
+    public func test_diagnosisPanel(for id: String) -> ConnectionDiagnosisView? {
+        diagnosisPanelsByID[id]
+    }
+
+    /// Simulate clicking "Try again" in the device's open diagnosis panel.
+    public func test_tapRetry(for id: String) {
+        diagnosisPanelsByID[id]?.test_tapRetry()
+    }
+
     public func test_dragMainOutMaster(to value: Int) {
         groupController?.beginMainOutMasterDrag()
         groupController?.setMainOutMasterVolume(value)
@@ -843,6 +1070,26 @@ extension PopoverController: DeviceRowView.Delegate {
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         handleSelection(result, deviceID: id)
+    }
+
+    /// T-UI-AP1-1 (PLAN-PHASE-2B D6): an AP1-only row was clicked. Present a
+    /// SMALL TRANSIENT content-sized `NSPopover` anchored to `row` with the
+    /// "coming soon" explanation — independent of the main popover (which
+    /// stays exactly content-sized and never gets a scrollbar).
+    public func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView) {
+        presentUnsupportedExplanation(anchoredTo: row)
+    }
+}
+
+// MARK: - ConnectionState helpers
+
+private extension ConnectionState {
+    /// Whether this is `.failed` regardless of the attached failure — the edge
+    /// detector must treat a diagnosis REPLACEMENT (`.failed(guess)` →
+    /// `.failed(diagnosed)`, unequal under `Equatable`) as the same episode.
+    var isFailedState: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }
 

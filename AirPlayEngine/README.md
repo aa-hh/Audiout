@@ -1,5 +1,23 @@
 # AirPlayEngine
 
+## Status (2026-07-17): first light PASSED, Phase 2b hardening complete
+
+The engine has been streamed audibly to a real Sonos speaker over AirPlay 2
+with PTP timing (`docs/first-light-report.md`), and every follow-up item
+from that gated session — teardown SIGABRT, SIGPIPE, the post-CONNECTED
+device-state gap, write-cadence diagnostics, the libhash per-install-seed
+collision, and the remaining hosting-hardening backlog — is fixed
+(`PLAN-PHASE-2B.md` D3, tracked in `docs/first-light-report.md`'s "Known
+follow-ups" section). All fixes stayed inside `shims/`/`Sources/AirPlayEngine/`;
+no new vendored-C diffs were needed (`docs/VENDORED-DIFFS.md`). The engine now
+exposes an async device-state stream (`makeStateStream()`) that
+`AirPlayControllerCore`'s `NativeBackend` consumes — see
+`../dev/notes/p2b-nativebackend-runbook.md` for how to run the native backend
+end-to-end. The sections below (build status, shim inventory, package layout)
+describe the extraction/bring-up work that got the engine to first light;
+they're kept for historical/onboarding context and are still accurate for
+the vendored-C layer, which hasn't changed since.
+
 A standalone SwiftPM package that extracts OwnTone's AirPlay 2 sender
 (`airplay.c` + `airplay_events.c` + `rtp_common.c` + `pair_ap` + `evrtsp` +
 `libairptp`) into an engine this project owns, names neutrally, and wraps in
@@ -32,11 +50,17 @@ As of **T-API-1**, the neutral Swift wrapper (`Sources/AirPlayEngine/`) is
 implemented over the vendored+shimmed C cluster: an owned engine thread + libevent
 base, the C async-completion dispatcher bridged to `async/await`, discovery-in,
 the session lifecycle (`addOutput`/`removeOutput`/`setVolume`/`write`/`stop`), and
-a `localOutput` placeholder. `swift build` is green and **29 tests pass** (17
-pre-existing + 12 new headless T-API-1 tests). A real network/PTP session is a
-**separate gated step** — see "Running a live session (gated)" below.
+a `localOutput` placeholder. A real network/PTP session is a **separate gated
+step** — see "Running a live session (gated)" below.
 
-### Swift API surface (T-API-1)
+**Phase 2b (2026-07-17) added:** an async device-state stream
+(`makeStateStream`), write-cadence diagnostics (`writeCadenceSnapshot`), a
+per-install libhash seed (`EngineConfig.installSeed`), and the
+`flushOutput(_:)` no-op seam — see "Swift API surface" below and
+`docs/first-light-report.md`'s "Known follow-ups" for what each one fixes.
+`swift build` is green and **61 tests pass** (`swift test`, 2026-07-17).
+
+### Swift API surface
 
 ```swift
 public actor AirPlayEngine {
@@ -47,10 +71,18 @@ public actor AirPlayEngine {
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID
     func removeDiscovery(_ descriptor: DeviceDescriptor) async
     // session lifecycle:
-    func addOutput(_ id: OutputID) async throws
-    func removeOutput(_ id: OutputID) async throws
+    func addOutput(_ id: OutputID) async throws       // idempotent (T-ENG-HARDEN-1)
+    func removeOutput(_ id: OutputID) async throws    // idempotent (T-ENG-HARDEN-1)
     func setVolume(_ id: OutputID, _ volume: Double) async throws
+    func flushOutput(_ id: OutputID) async throws     // NO-OP SEAM (T-ENG-HARDEN-1) — future pause/seek
     nonisolated func write(pcm: Data, pts: timespec)   // hot path, fire-and-forget
+    // Phase 2b (T-ENG-STATESTREAM-1): every device-state transition, incl.
+    // out-of-band ones after an op's callback_id is already spent. Each call
+    // returns an independent AsyncStream (mirrors OutputBackend.makeEventStream()).
+    nonisolated func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
+    // Phase 2b (T-ENG-CADENCE-1): diagnostic write-cadence deficit/overrun,
+    // never gates a write.
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot
     // SPEC §8.1 synced local Core Audio sink — placeholder surface only:
     var localOutput: LocalOutputSink { get }
     func setLocalOutputEnabled(_ enabled: Bool)
@@ -97,11 +129,21 @@ explicit flag is passed:
 ```
 swift run engine-probe \
   --address 192.168.1.50 --port 7000 \
-  --device-id AA:BB:CC:DD:EE:FF \
   --features "0x445F8A00,0x1C340" --model AudioAccessory5,1 \
+  --device-id AA:BB:CC:DD:EE:FF \
   --pcm /path/to/audio-s16le-44100-2ch.raw \
   --i-have-a-receiver-and-owntone-is-stopped
 ```
+
+Flag grouping (multi-room): per-device flags **amend the device being
+described — in any order — until it has both `--address` and `--device-id`**;
+the next per-device flag after that starts the next device. Anything ambiguous
+(a device without its `--device-id`, trailing per-device flags) prints the plan
+plus the problems and **exits 2 without opening a socket** — so dry-run the
+exact command line (without the gate flag) before a gated session. The grammar
+lives in `Sources/EngineProbeParsing/` (unit-tested; see
+`EngineProbeParsingTests`), split out after the first gated multi-room run
+(2026-07-17) was burned by an argv misparse.
 
 Without `--i-have-a-receiver-and-owntone-is-stopped` it just prints its plan and
 exits 0 (what build/CI exercise). A **live** run requires ALL of:
@@ -292,6 +334,9 @@ in `docs/`) will link only the MIT `libairptp` cluster — not the GPL sender
 
 ## Where the next tasks pick up
 
+This section is now historical (kept for onboarding — it traces how the
+engine got built from scratch). All items below are DONE.
+
 - **T-BUILD-1** (compile + link the extracted C cluster): **DONE.** The cluster
   compiles and links; `swift build`/`--build-tests`/`swift test` all pass.
   See [`docs/build-notes.md`](docs/build-notes.md) for every macOS-porting fix
@@ -317,3 +362,22 @@ in `docs/`) will link only the MIT `libairptp` cluster — not the GPL sender
   CAirPlayEngine` works. T-API-1 sets `evbase_player` (defined in
   `shims/outputs.c`) to the engine thread's event_base and builds the async
   bridge over the libevent loop (seam-map §8).
+- **Gated first light** (`docs/first-light-report.md`): **DONE, PASSED,
+  2026-07-16/17.** Audible, human-confirmed session against a real Sonos
+  Move over AirPlay 2 with PTP timing. Six hosting-layer bugs found and
+  fixed; zero vendored-protocol-code bugs.
+- **Phase 2b hardening** (`PLAN-PHASE-2B.md` D3, `docs/first-light-report.md`
+  "Known follow-ups"): **DONE.** Teardown SIGABRT, SIGPIPE, post-CONNECTED
+  device-state stream, write-cadence diagnostics, libhash per-install seed,
+  and the remaining hosting-hardening backlog are all fixed.
+- **Phase 2b native backend** (`AirPlayControllerCore`'s `NativeBackend`,
+  `NativeDiscovery`, `NativeCaptureCoordinator`, `AIRPLAY_BACKEND=native`):
+  **DONE.** This engine package doesn't own that code — see
+  `../dev/notes/p2b-nativebackend-runbook.md` and
+  `../AirPlayControllerCore/AGENTS.md` for how to run it.
+- **What's actually next**: the D7 gated live-verification session (multi-room
+  2-output sync, native end-to-end on a real speaker, volume A/B, real-fleet
+  discovery watch, teardown stress — checklist in
+  `dev/notes/p2b-nativebackend-runbook.md`), then the deferred items listed in
+  `docs/first-light-report.md`'s "What's next" (AP1/`raop.c` sender,
+  multistream, synced local output, helper productionization).

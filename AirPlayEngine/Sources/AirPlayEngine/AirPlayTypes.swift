@@ -90,12 +90,32 @@ public enum OutputState: Sendable, Equatable {
     /// The receiver requires a password/PIN we don't have.
     case passwordRequired
 
-    /// Terminal states an async op (`addOutput`) can resolve to. `startup`/
-    /// `connected` are intermediate progress reports.
+    /// Terminal states an async op (`addOutput`/`removeOutput`/`setVolume`) can
+    /// resolve to — i.e. the states the vendored sender reports via a *single*
+    /// `outputs_cb` that spends its `callback_id` (sets it to -1).
+    ///
+    /// CRITICAL (2026-07-16 first-light fix): `.connected` IS terminal. For an
+    /// AirPlay 2 buffered receiver (Sonos/HomePod/…), the `device_start` success
+    /// callback is `OUTPUT_STATE_CONNECTED`, NOT `OUTPUT_STATE_STREAMING`. The
+    /// sequence table wires `AIRPLAY_SEQ_START_PLAYBACK.on_success =
+    /// session_connected` (airplay.c:3620), which sets state CONNECTED and fires
+    /// `session_status()` exactly once, clearing `callback_id` to -1
+    /// (airplay.c:1338-1343, 1094-1095). STREAMING is reached later *internally*
+    /// by `airplay_write()` (airplay.c:4278, comment `// Make a cb?` — it does
+    /// NOT), so no STREAMING callback ever arrives for `device_start`. Treating
+    /// `.connected` as non-terminal dropped that sole completion and hung the
+    /// `addOutput` waiter forever (and, once the id was spent, the later failure's
+    /// `outputs_cb(-1,…)` no-op could not recover it). This matches OwnTone's
+    /// player semantics (device_start's callback == "startup finished/failed") and
+    /// docs/outputs-dispatcher-contract.md §6, which lists CONNECTED as terminal.
+    ///
+    /// Only `.startup` (the genuine INFO…RECORD progress state) stays
+    /// non-terminal — but in this cluster `device_start` never reports it, since
+    /// `session_status` is only called at sequence success/failure, never mid-way.
     var isTerminal: Bool {
         switch self {
-        case .streaming, .stopped, .failed, .passwordRequired: return true
-        case .startup, .connected: return false
+        case .streaming, .connected, .stopped, .failed, .passwordRequired: return true
+        case .startup: return false
         }
     }
 }
@@ -119,6 +139,14 @@ public enum AirPlayEngineError: Error, Sendable, Equatable {
     case invalidDescriptor
     /// The engine thread's event base could not be created / dispatcher wiring failed.
     case engineThreadFailed
+    /// An armed op's deferred completion never arrived within the bounded
+    /// timeout window (the receiver's media/PTP path stalled mid-op). Surfaced as
+    /// a normal thrown op failure so the awaiting continuation is resumed exactly
+    /// once instead of leaking forever (toggle-spam session 2026-07-17: 177
+    /// leaked `startOp` continuations when a receiver stalled during NORMAL
+    /// running). `NativeBackend`'s existing failure/recovery path handles it like
+    /// any other op failure.
+    case opTimedOut
 }
 
 /// Audio format the engine's `write(pcm:)` expects: interleaved signed 16-bit
@@ -132,4 +160,47 @@ public struct PCMFormat: Sendable, Equatable {
 
     /// The one format the AirPlay 2 sender accepts (S16LE / 44100 / stereo).
     public static let airplay = PCMFormat(sampleRate: 44100, bitsPerSample: 16, channels: 2)
+}
+
+/// A diagnostic snapshot of the write-cadence tracker (T-ENG-CADENCE-1).
+///
+/// Models OwnTone's `player.c` `pb_write_deficit_max` bookkeeping: every write
+/// on the hot path carries a fixed amount of "audio time" (`samples / rate`);
+/// the tracker compares that against the WALL-CLOCK time actually elapsed
+/// between writes and accumulates the running gap. A caller that writes slower
+/// than real-time (capture underfeeding the engine — buffer starvation, a
+/// stalled tap, GC/scheduling hiccups) falls BEHIND, growing `deficitSeconds`.
+/// A caller that bursts writes faster than real-time (e.g. catching up after a
+/// stall, or a buggy producer) runs AHEAD, growing `overrunSeconds`.
+///
+/// This is diagnostic-only: nothing here gates, throttles, or drops a write.
+/// The tracker only counts and logs; playback timing itself is entirely the
+/// vendored sender's (via the `pts` passed to `write`).
+public struct WriteCadenceSnapshot: Sendable, Equatable {
+    /// Total writes observed since the tracker was created/reset.
+    public var writeCount: UInt64
+    /// Cumulative wall-clock time the write cadence has run BEHIND the audio
+    /// time it was claiming to deliver (seconds). Monotonically non-decreasing
+    /// except across a `reset()`.
+    public var deficitSeconds: Double
+    /// Cumulative wall-clock time the write cadence has run AHEAD of the audio
+    /// time it was claiming to deliver (seconds, i.e. bursty/overrunning
+    /// writes). Monotonically non-decreasing except across a `reset()`.
+    public var overrunSeconds: Double
+    /// The gap (wall-clock elapsed minus audio-time delivered, seconds) as of
+    /// the most recent write. Positive = currently behind (deficit), negative
+    /// = currently ahead (overrun). Zero at/near steady state.
+    public var lastGapSeconds: Double
+
+    public init(
+        writeCount: UInt64 = 0,
+        deficitSeconds: Double = 0,
+        overrunSeconds: Double = 0,
+        lastGapSeconds: Double = 0
+    ) {
+        self.writeCount = writeCount
+        self.deficitSeconds = deficitSeconds
+        self.overrunSeconds = overrunSeconds
+        self.lastGapSeconds = lastGapSeconds
+    }
 }

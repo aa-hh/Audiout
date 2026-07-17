@@ -36,8 +36,15 @@ SOFTWARE.
 #include "daemon.h"
 
 // Debugging
+// [AirPlayEngine vendored change 2026-07-16] #ifndef-guarded so the build can
+// enable per-packet logging via -DAIRPTP_LOG_SENT=1 etc. (Package.swift);
+// upstream hard-coded 0 which silently clobbered the build flag.
+#ifndef AIRPTP_LOG_RECEIVED
 #define AIRPTP_LOG_RECEIVED 0
+#endif
+#ifndef AIRPTP_LOG_SENT
 #define AIRPTP_LOG_SENT 0
+#endif
 
 // Forward tlv handlers
 static int tlv_handle_org_subtype_generic(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);

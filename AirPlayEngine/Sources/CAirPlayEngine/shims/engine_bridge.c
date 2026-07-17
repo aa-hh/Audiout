@@ -6,9 +6,55 @@
 #include "engine_bridge.h"
 #include "mdns.h"
 
+#include <gcrypt.h>
+#include <signal.h>
+#include <sodium.h>
+
 /* Defined in shims/mdns.c: the captured airplay_device_cb (set when
  * airplay_init calls mdns_browse). NULL until init has run. */
 extern mdns_browse_cb airplayengine_device_cb;
+
+void
+engine_mask_sigpipe(void)
+{
+  // OwnTone's main() masks SIGPIPE process-wide before spawning any
+  // threads (main.c:718-732) so a write() to a peer that has closed its
+  // end of an RTSP/data socket returns EPIPE instead of killing the
+  // process. Our hosting never ran that step (first-light backlog #2) —
+  // do it here, on the engine thread, before airplay_init opens any
+  // sockets. SIG_IGN disposition is process-wide (not per-thread), so
+  // one call covers every thread/socket the engine creates.
+  signal(SIGPIPE, SIG_IGN);
+}
+
+/* Minimum libgcrypt version. gcry_check_version(NULL) accepts ANY installed
+ * libgcrypt, defeating the whole point of the call (it exists to REFUSE a
+ * runtime library too old for the ABI/features the app was built against).
+ * pair_ap and the sender cluster use the modern AEAD/ECC surface; 1.8.0
+ * (2017) is the conservative floor OwnTone-era builds already assumed and is
+ * comfortably below any libgcrypt this decade. Passing a real string also runs
+ * libgcrypt's mandatory "must be called before any other function" init side
+ * effect, same as NULL did. (first-light hardening #5) */
+#define ENGINE_GCRYPT_MIN_VERSION "1.8.0"
+
+int
+engine_crypto_init(void)
+{
+  // The app-side libgcrypt init pair_ap's is_initialized() checks for
+  // (engine_bridge.h has the full story). Mirrors OwnTone's main():
+  // version floor enforced (returns NULL if the runtime libgcrypt is older
+  // than ENGINE_GCRYPT_MIN_VERSION), no secure memory (we hold no long-lived
+  // secrets), then mark initialization finished.
+  if (!gcry_check_version(ENGINE_GCRYPT_MIN_VERSION))
+    return -1;
+  gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
+  gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+
+  if (sodium_init() == -1)
+    return -1;
+
+  return 0;
+}
 
 bool
 airplayengine_discovery_ready(void)

@@ -46,9 +46,10 @@ in order: an explicit argument → the `AIRPLAY_BACKEND` env var → default `mo
 ```bash
 AIRPLAY_BACKEND=mock    swift run mock-speakers-demo   # default, same as unset
 AIRPLAY_BACKEND=owntone swift run mock-speakers-demo   # see caveat below
+AIRPLAY_BACKEND=native  swift run mock-speakers-demo   # see "Layer 3" below
 ```
 
-- Values are case-insensitive: `mock` | `owntone`.
+- Values are case-insensitive: `mock` | `owntone` | `native`.
 - An unrecognized value (or anything else unexpected) prints one warning to
   stderr and falls back to `mock` rather than crashing.
 - **Caveat:** `owntone` currently traps. `OwnToneBackend` is still a stub whose
@@ -56,6 +57,33 @@ AIRPLAY_BACKEND=owntone swift run mock-speakers-demo   # see caveat below
   work (see `PLAN-0e-0f.md`, T-TOGGLE-1). Use `mock` for all offline work today.
 - This maps onto a future hidden Developer setting in the app — the app will
   always hold an `OutputBackend`, never a concrete type (SPEC.md §4 seam).
+
+---
+
+## Layer 3 — `native` backend (Phase 2b, real AirPlay 2 sender, in-process)
+
+`AIRPLAY_BACKEND=native` selects `NativeBackend`: an in-process
+`AirPlayEngine` (the vendored+shimmed AirPlay 2 sender, see
+`../AirPlayEngine/README.md`) driven by app-owned `NativeDiscovery`
+(Bonjour, both `_airplay._tcp` and `_raop._tcp`) and
+`NativeCaptureCoordinator` (an in-process Core Audio process tap — no
+external process, no IPC, unlike the `audiocap` subprocess). **Unlike
+`mock`/`owntone`, this is a real sender** — it opens real sockets, binds real
+PTP ports, and needs a real AirPlay 2 receiver on the LAN and the macOS
+system-audio-recording TCC permission granted to the app.
+
+- Headless build/test is still fully offline and hermetic (spy engine /
+  injected discovery / injected tap — see `NativeBackendTests`,
+  `NativeDiscoveryTests`, `NativeCaptureCoordinatorTests`).
+- Running it **live** — the in-app TCC grant flow via the stable
+  `scripts/make-app.sh` bundle path, and the full gated-session checklist —
+  is documented in **`notes/p2b-nativebackend-runbook.md`**. Read that before
+  attempting a live `native` run; don't wing it with a bare `swift run`, the
+  TCC grant won't reliably stick to an unstable binary identity.
+- AP1-only devices (this repo's `fake-speakers.sh` receiver included) are
+  discovered and shown by `NativeDiscovery`/`NativeBackend` but never driven
+  as an output yet — the AirPlay 1 sender is deferred (PLAN-PHASE-2B.md D6).
+  The popover renders them dimmed with a "coming soon" explanation.
 
 ---
 

@@ -10,8 +10,9 @@ import AirPlayControllerCore
 /// PLAN-PHASE-1 §D call for — one implementation, one test surface, identical
 /// behaviour in both hosts.
 ///
-/// The row's PRIMARY control is a "send audio here" ON/OFF `NSSwitch` (SPEC §9
-/// routing model); volume and a small secondary mute button follow.
+/// The row's PRIMARY control is a "Selected Devices" membership `NSButton`
+/// checkbox (SPEC §9 routing model); volume and a small secondary mute button
+/// follow.
 ///
 /// It lives in `AirPlayControllerSharedUI` (not the popover target) so the
 /// window target can link it without pulling in the whole dropdown; both
@@ -55,15 +56,40 @@ public final class DeviceRowView: NSView {
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String)
         /// The user flipped the row's primary "send audio here" ON/OFF switch.
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String)
+        /// The user clicked an AP1-only (``Device/supportsAirPlay2`` == false,
+        /// non-local) row — T-UI-AP1-1 (PLAN-PHASE-2B D6). The host presents the
+        /// small transient "AirPlay 1 support is coming soon" explanation
+        /// popover anchored to `row`. Default no-op so existing conformers still
+        /// compile.
+        func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
-    /// icon, name, CC slider and mute button with breathing room in a card
-    /// (CC rows read ~34–40pt; 38 lands in that band).
-    public static let rowHeight: CGFloat = 38
+    /// icon, a two-line name/status stack, CC slider and mute button with
+    /// breathing room in a card (CC rows read ~34–40pt; 38 landed in that band
+    /// before the status sublabel — brief §6 sanctions bumping this constant
+    /// once a second text line needs the room, which it does: two 10pt lines
+    /// plus their line gap don't fit 38pt without crowding the slider/switch).
+    public static let rowHeight: CGFloat = 42
 
     // (See `DeviceRowView.Delegate` extension at file end for the
     // `didToggleEnabled` default no-op.)
+
+    /// Which on-icon status dot the row is currently showing — a structural test
+    /// hook (`test_statusKind`) so tests can assert the right badge is visible
+    /// without reaching into the private badge subview. Redefined for the
+    /// 2026-07-17 on-icon redesign: the four states map directly off
+    /// `Device.connectionState`.
+    public enum StatusKind: Equatable {
+        /// `.off` — the badge is hidden.
+        case none
+        /// `.connecting` / `.reconnecting` — the breathing neutral dot.
+        case connecting
+        /// `.connected` — the solid green dot.
+        case connected
+        /// `.failed` — the solid amber dot.
+        case failed
+    }
 
     public weak var delegate: Delegate?
     public private(set) var device: Device
@@ -76,7 +102,7 @@ public final class DeviceRowView: NSView {
     public private(set) var isSelectedInSet: Bool = false
 
     /// True when this row's toggle is disabled by the Phase-1 local-mix block
-    /// (the Mac can't join a mixed set) — the switch is greyed with a tooltip.
+    /// (the Mac can't join a mixed set) — the checkbox is greyed with a tooltip.
     private var isToggleBlocked: Bool = false
 
     /// Transient pointer-hover state (menu-less hosts). Kept SEPARATE from the
@@ -85,13 +111,26 @@ public final class DeviceRowView: NSView {
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
     private var isHovered: Bool = false
 
-    /// The PRIMARY "Selected Devices" membership `NSSwitch` (SPEC §9b device-row
-    /// toggle — Alec prefers toggles, not checkmarks; `NSSwitch`, mini size — HIG
-    /// sanctions a mini switch for a single-row per-device setting). Leads the row.
-    private let enableSwitch = NSSwitch()
+    /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
+    /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
+    /// under the "Selected" column header. `.state` is `.on`/`.off`, identical
+    /// semantics to the mini switch it replaced — membership in the Selected
+    /// Devices set. Named `enableCheckbox`; centered on the trailing-control
+    /// column via the shared grid.
+    private let enableCheckbox = NSButton()
     private let iconView = NSImageView()
+    /// The on-icon connection-status badge (2026-07-17): a small corner dot
+    /// overlapping the icon's bottom-right, driven off `device.connectionState`.
+    /// Replaced the retired right-side status slot. See ``StatusDotView``.
+    private let statusDotView = StatusDotView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private let slider = ControlCenterSlider()
+    /// The single sublabel line under the name, driven by a precedence ladder in
+    /// ``resolveSublabel(routedAppNames:)``: `.failed` → "Couldn't connect"
+    /// (`.systemOrange`); unavailable → "Unavailable" (greyed); else a non-empty
+    /// routing set → the routing line ("System · <apps>"); else hidden (the row is
+    /// single-line, name centered). All three sublabel kinds reuse this one label.
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let slider = NSSlider()
     /// Small right-aligned `%` readout sitting immediately right of the slider
     /// (change 4 — a device row now shows its volume number too, tight against
     /// the slider like the Main Out row, on the same shared column).
@@ -135,6 +174,14 @@ public final class DeviceRowView: NSView {
     /// instance is correct wherever it's parented.
     private var isInMenu: Bool { enclosingMenuItem != nil }
 
+    /// True for an AP1-only receiver (T-UI-AP1-1, PLAN-PHASE-2B D6): AirPlay-2
+    /// discovery found it but `NativeBackend` never `addOutput`s it (no perfect
+    /// sync). The local device is EXCLUDED even though it also carries
+    /// `supportsAirPlay2 == false` — it's not an AirPlay receiver at all, it's
+    /// the Mac's own passthrough output, and its toggle is disabled/enabled by
+    /// the separate local-mix-block path, not this one.
+    private var isUnsupported: Bool { !device.isLocalDevice && !device.supportsAirPlay2 }
+
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
                paintsSelectionBackground: Bool = true) {
         self.device = device
@@ -162,13 +209,25 @@ public final class DeviceRowView: NSView {
     ///
     /// - Parameters:
     ///   - selected: whether this device is in the Selected Devices set.
+    ///   - controllable: enables the volume slider + mute independently of set
+    ///     membership (a redirect-only device is controllable but not selected).
+    ///     Defaults to `false` — the caller must pass `selected || isRedirectTarget`
+    ///     to keep a plain selected device's slider/mute enabled; the default is a
+    ///     back-compat footgun for callers that omit it entirely.
     ///   - blocked: whether the membership toggle should be disabled (Phase-1
     ///     local-mix block) — greyed with `blockReason` as a tooltip.
     ///   - blockReason: tooltip text shown when `blocked` is true.
+    ///   - routedAppNames: the bypassed-app display names routed to THIS device
+    ///     (the routing set's app tokens only, in stable route order). Does NOT
+    ///     include the "System" token — the view synthesizes "System" itself from
+    ///     `selected`. Drives the routing sublabel (see the precedence ladder in
+    ///     ``resolveSublabel(routedAppNames:)``).
     public func apply(_ device: Device,
                       selected: Bool,
+                      controllable: Bool = false,
                       blocked: Bool = false,
-                      blockReason: String? = nil) {
+                      blockReason: String? = nil,
+                      routedAppNames: [String] = []) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -179,19 +238,40 @@ public final class DeviceRowView: NSView {
 
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
-        // hide the toggle entirely (task C) — membership there is fixed.
-        enableSwitch.state = selected ? .on : .off
-        enableSwitch.isEnabled = showsToggle && device.isAvailable && !blocked
-        enableSwitch.toolTip = (showsToggle && blocked) ? blockReason : nil
+        // hide the toggle entirely (task C) — membership there is fixed. An
+        // AP1-only receiver's toggle is always disabled (T-UI-AP1-1) — the
+        // backend never `addOutput`s it, so there's nothing to route.
+        enableCheckbox.state = selected ? .on : .off
+        enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked && !isUnsupported
+        enableCheckbox.toolTip = isUnsupported
+            ? Self.unsupportedExplanation
+            : ((showsToggle && blocked) ? blockReason : nil)
 
         iconView.image = NSImage(
             systemSymbolName: device.kind.symbolName,
             accessibilityDescription: device.name
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                        weight: .regular)
         )
-        // Icon tinted (accent) when the device is in the Selected Devices set.
-        iconView.contentTintColor = selected ? .controlAccentColor : .secondaryLabelColor
+        // The icon is ALWAYS neutral now (2026-07-17): identity only, no
+        // accent-when-selected fill. Selection reads from the switch state; the
+        // on-icon corner dot carries the connection status instead. (This also
+        // covers unsupported/AP1 rows — no accent regardless of stale selection.)
+        iconView.contentTintColor = .secondaryLabelColor
         nameLabel.stringValue = device.name
         nameLabel.textColor = rowTextColor
+        // The whole row reads dimmed for an unsupported device (T-UI-AP1-1) —
+        // matches the existing `!isAvailable` dimming so "can't be used right
+        // now" and "can never be used (yet)" look consistently de-emphasized.
+        alphaValue = isUnsupported ? 0.5 : 1.0
+
+        // On-icon status badge is idempotent and always driven off the state.
+        statusDotView.apply(device.connectionState)
+        // Single sublabel precedence ladder (failed → unavailable → routing →
+        // none), evaluated here after `device`/`isSelectedInSet` are set so the
+        // precedence is unambiguous.
+        resolveSublabel(routedAppNames: routedAppNames)
 
         // Don't fight a live drag: only push the model value into the slider
         // when the user isn't dragging it. (The readout is kept live during a
@@ -200,19 +280,96 @@ public final class DeviceRowView: NSView {
             slider.integerValue = device.volume
             readoutLabel.stringValue = "\(device.volume)%"
         }
-        // The volume slider + mute are usable whenever the device is a selected,
-        // available member (its level composes the Main Out master).
-        slider.isEnabled = device.isAvailable && selected && !device.isMuted
-        muteButton.isEnabled = device.isAvailable && selected
+        // The volume slider + mute are usable whenever the device is available
+        // and controllable (selected member OR an app-redirect target) — kept
+        // SEPARATE from `selected` so the "System" routing token stays keyed off
+        // set membership only. Never for an unsupported (AP1-only) device: the
+        // backend never `addOutput`s it, so it's never actually an output — that
+        // veto outranks `controllable` (a stale app route can name an AP1-only
+        // device, which would otherwise hand it a live-looking slider).
+        slider.isEnabled = device.isAvailable && controllable && !device.isMuted && !isUnsupported
+        muteButton.isEnabled = device.isAvailable && controllable && !isUnsupported
         muteButton.state = device.isMuted ? .on : .off
 
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
 
+    /// The "coming soon" explanation text (T-UI-AP1-1, PLAN-PHASE-2B D6) — used
+    /// both as the disabled-toggle tooltip and as the transient popover's body.
+    public static let unsupportedExplanation = "AirPlay 1 support is coming soon."
+
+    /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
+    private static let routingTokenSeparator = " · "
+
+    // MERGE NOTE (2026-07-17, phase2b ← main): the old `applyConnectionStatus(_:)`
+    // (badge + failed-only sublabel) is gone — not dropped, SUPERSEDED. `apply`
+    // now drives `StatusDotView.apply(_:)` directly (same idempotent reset, so a
+    // repeated `apply` still can't leave a stale breathing animation running) and
+    // routes every sublabel through `resolveSublabel(routedAppNames:)`'s ladder,
+    // which subsumes the failed-only case as its highest rung.
+
+    /// Decide the single sublabel line via one precedence ladder (highest first;
+    /// exactly one line, or none), then show/hide `statusLabel` and center the
+    /// name accordingly. Reuses the single `statusLabel` for all three sublabel
+    /// kinds so `test_statusText` reports whichever is showing.
+    ///
+    /// 1. `.failed` connection → "Couldn't connect" (`.systemOrange`). Highest.
+    /// 2. else device unavailable → "Unavailable" (`.tertiaryLabelColor`, greyed).
+    /// 3. else routing set non-empty → the routing line (`.secondaryLabelColor`).
+    ///    The routing set is non-empty iff selected OR `routedAppNames` non-empty.
+    ///    Tokens: "System" first when selected, then each app name in order,
+    ///    joined by `routingTokenSeparator`. This is ASSIGNMENT/ROUTING (config),
+    ///    NOT a claim about playback — no "playing"/"active" language.
+    /// 4. else → no sublabel; single-line row (name centered).
+    private func resolveSublabel(routedAppNames: [String]) {
+        if case .failed = device.connectionState {
+            showSublabel("Couldn't connect", color: .systemOrange)
+        } else if !device.isAvailable {
+            showSublabel("Unavailable", color: .tertiaryLabelColor)
+        } else if let routing = routingLine(routedAppNames: routedAppNames) {
+            showSublabel(routing, color: .secondaryLabelColor)
+        } else {
+            hideSublabel()
+        }
+    }
+
+    /// The routing line for the current selection + routed apps, or `nil` when
+    /// the routing set is empty (not selected AND no routed apps). "System" leads
+    /// when selected, then the app names in the given order.
+    private func routingLine(routedAppNames: [String]) -> String? {
+        var tokens: [String] = []
+        if isSelectedInSet { tokens.append("System") }
+        tokens.append(contentsOf: routedAppNames)
+        guard !tokens.isEmpty else { return nil }
+        return tokens.joined(separator: Self.routingTokenSeparator)
+    }
+
+    /// Show `statusLabel` with `text`/`color` and raise the name so the name +
+    /// sublabel pair is centered as a group on the icon.
+    private func showSublabel(_ text: String, color: NSColor) {
+        statusLabel.isHidden = false
+        statusLabel.stringValue = text
+        statusLabel.textColor = color
+        applyNameStackLayout(twoLine: true)
+    }
+
+    /// Hide `statusLabel` and single-line-center the name.
+    private func hideSublabel() {
+        statusLabel.isHidden = true
+        statusLabel.stringValue = ""
+        applyNameStackLayout(twoLine: false)
+    }
+
     /// Backward-compatible one-arg update (selection derived from the backend
     /// `isSelected` flag). Retained for callers/tests not yet passing explicit
-    /// membership; new hosts should use ``apply(_:selected:blocked:blockReason:)``.
+    /// membership; new hosts should use
+    /// ``apply(_:selected:controllable:blocked:blockReason:routedAppNames:)``.
+    ///
+    /// NOTE: this path leaves `controllable` at its `false` default, so the
+    /// slider/mute come up DISABLED regardless of `selected` — see that
+    /// parameter's doc. Both real hosts (popover + mixer) pass `controllable`
+    /// explicitly and never rely on this shim for a live row.
     public func apply(_ device: Device) {
         apply(device, selected: device.isSelected)
     }
@@ -220,6 +377,17 @@ public final class DeviceRowView: NSView {
     // MARK: Build
 
     private var isDraggingSlider = false
+
+    /// The name label's vertical offset off row center. Flipped live by
+    /// ``applyNameStackLayout(twoLine:)``: 0 when the row is single-line (name
+    /// centered), and a half-line rise when ANY sublabel (failed / unavailable /
+    /// routing) is shown so the name + sublabel PAIR is centered instead.
+    private var nameCenterYConstraint: NSLayoutConstraint!
+
+    /// Half-line offset used to center the two-line name/sublabel pair whenever a
+    /// sublabel is shown. Kept at the value the two-line stack used before the
+    /// redesign.
+    private static let sublabelNameRise: CGFloat = 7.5
 
     private func buildSubviews() {
         wantsLayer = true
@@ -229,24 +397,43 @@ public final class DeviceRowView: NSView {
         let leading: CGFloat = indented ? PopoverColumnGrid.indentedLeadingInset
                                         : PopoverColumnGrid.leadingInset
 
-        enableSwitch.translatesAutoresizingMaskIntoConstraints = false
-        enableSwitch.controlSize = .mini            // SPEC §9: mini switch per HIG
-        enableSwitch.target = self
-        enableSwitch.action = #selector(enableToggled(_:))
-        enableSwitch.setContentHuggingPriority(.required, for: .horizontal)
+        enableCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        enableCheckbox.setButtonType(.switch)       // AppKit checkbox
+        enableCheckbox.title = ""                    // no inline title
+        enableCheckbox.controlSize = .regular
+        enableCheckbox.target = self
+        enableCheckbox.action = #selector(enableToggled(_:))
+        enableCheckbox.setContentHuggingPriority(.required, for: .horizontal)
         // Group-member rows hide the toggle (task C). Its leading slot is not
         // reused — the row already indents, keeping the icon column aligned.
-        enableSwitch.isHidden = !showsToggle
+        enableCheckbox.isHidden = !showsToggle
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
         iconView.setContentHuggingPriority(.required, for: .horizontal)
+
+        // On-icon status badge: overlaps the icon's bottom-right corner. Not
+        // clipped by the icon (added as a row subview, positioned on the icon's
+        // corner) so the punch-out border shows around it.
+        statusDotView.translatesAutoresizingMaskIntoConstraints = false
+        statusDotView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = .menuFont(ofSize: 0)
         nameLabel.lineBreakMode = .byTruncatingTail   // task B: "…" tail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Status sublabel (2026-07-17): one line driven by the precedence ladder
+        // (failed / unavailable / routing). Small and secondary; `resolveSublabel`
+        // shows/hides it and `applyNameStackLayout` centers the name accordingly.
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .systemFont(ofSize: 10)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusLabel.isHidden = true   // single-line by default until the first `apply`
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.minValue = 0
@@ -266,19 +453,37 @@ public final class DeviceRowView: NSView {
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
                                   action: #selector(muteToggled(_:)))
 
-        addSubview(enableSwitch)
+        // Name click toggles the ENABLED checkbox (2026-07-17 convenience — the
+        // name is spatially separate on the left, so a gesture scoped to it can't
+        // interfere with the slider/mute/%/toggle on the right). The checkbox stays
+        // the authoritative accessibility control; this is a mouse convenience.
+        // A `.failed` device re-enables (retries) on click — intended.
+        let nameClick = NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:)))
+        nameLabel.addGestureRecognizer(nameClick)
+
+        addSubview(enableCheckbox)
         addSubview(iconView)
+        addSubview(statusDotView)          // over the icon's corner
         addSubview(nameLabel)
+        addSubview(statusLabel)
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
 
         // The icon now LEADS the row (task B grid): at `leading` for top-level
         // rows, `indentedLeadingInset` for members — the toggle no longer leads.
-        // The mute glyph, slider and trailing "Enabled" control are anchored off
+        // The mute glyph, slider and trailing "Selected" checkbox are anchored off
         // the TRAILING edge via the shared grid so they line up with every other
         // row type; the `%` readout hangs off the slider's trailing edge (change
         // 4) so the number is tight to the slider on every slider row.
+        //
+        // The name is SINGLE-LINE and centered by default (2026-07-17); when ANY
+        // sublabel (failed / unavailable / routing) is shown, `applyNameStackLayout`
+        // raises the name by a half-line so the pair is centered. The right-side
+        // status slot was retired — connection status is the on-icon corner dot.
+        let nameCenterY = nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        nameCenterYConstraint = nameCenterY
+
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
@@ -287,12 +492,31 @@ public final class DeviceRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
+            // On-icon status badge: sized to the badge diameter, its center
+            // pulled IN from the icon's bottom-right corner by `statusDotInset`
+            // so it rides the (now box-filling) glyph's corner with a slight
+            // overhang, reading as a distinct badge over the symbol rather than
+            // floating in the box padding below it.
+            statusDotView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
+            statusDotView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
+            statusDotView.centerXAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
+            statusDotView.centerYAnchor.constraint(equalTo: iconView.bottomAnchor,
+                                                   constant: -PopoverColumnGrid.statusDotInset),
+
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                constant: PopoverColumnGrid.iconToName),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameCenterY,
             // Name yields to the MUTE glyph now (it sits between name and slider):
             // the name's trailing is a `<=` and the name truncates.
             nameLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: muteButton.leadingAnchor,
+                constant: -PopoverColumnGrid.iconToName),
+
+            // Sublabel (any kind) sits a half-line under the (raised) name.
+            statusLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
+            statusLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
+            statusLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: muteButton.leadingAnchor,
                 constant: -PopoverColumnGrid.iconToName),
 
@@ -313,14 +537,23 @@ public final class DeviceRowView: NSView {
             readoutLabel.leadingAnchor.constraint(
                 equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
 
-            // Primary "Selected Devices" toggle: centered UNDER its "ENABLED"
-            // header (change 3) — its centerX sits on the trailing-control column
-            // center, not the column's trailing edge.
-            enableSwitch.centerXAnchor.constraint(
+            // Primary "Selected Devices" checkbox: centered UNDER its "Selected"
+            // header — its centerX sits on the trailing-control column center,
+            // not the column's trailing edge. The `.switch` NSButton with an
+            // empty title is ~18pt square; centerX/centerY handle it (no width
+            // constraint needed).
+            enableCheckbox.centerXAnchor.constraint(
                 equalTo: trailingAnchor,
                 constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
-            enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor),
+            enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+    }
+
+    /// Center the name for a single-line row, or raise it a half-line when ANY
+    /// sublabel (failed / unavailable / routing) is showing so the name +
+    /// sublabel pair is centered as a group on the icon.
+    private func applyNameStackLayout(twoLine: Bool) {
+        nameCenterYConstraint.constant = twoLine ? -Self.sublabelNameRise : 0
     }
 
     private func configureAccessoryButton(_ button: NSButton, symbol: String,
@@ -361,8 +594,20 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleMute: sender.state == .on, for: device.id)
     }
 
-    @objc private func enableToggled(_ sender: NSSwitch) {
+    @objc private func enableToggled(_ sender: NSButton) {
         delegate?.deviceRow(self, didToggleEnabled: sender.state == .on, for: device.id)
+    }
+
+    /// Clicking the device NAME toggles the ENABLED checkbox (2026-07-17), firing
+    /// the SAME delegate path as the checkbox itself. A no-op when the checkbox is
+    /// disabled (Phase-1 local-mix block, or an unavailable device) — checks the
+    /// same conditions `enableCheckbox.isEnabled` uses. For a `.failed` device this
+    /// re-enables it (= retry), which is intended.
+    @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
+        guard enableCheckbox.isEnabled else { return }
+        let flipped = enableCheckbox.state != .on
+        enableCheckbox.state = flipped ? .on : .off
+        delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
     }
 
     /// The name/label colour for the current state: menu highlight wins, then a
@@ -396,16 +641,70 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: on, for: device.id)
     }
 
-    /// The primary ON/OFF switch's current state (for structural assertions).
-    public var test_isEnabledOn: Bool { enableSwitch.state == .on }
+    /// Simulate the user clicking the device NAME (toggles the ENABLED checkbox,
+    /// same delegate path). A no-op when the checkbox is disabled, mirroring the
+    /// real gesture handler.
+    public func test_clickName() {
+        guard enableCheckbox.isEnabled else { return }
+        let flipped = enableCheckbox.state != .on
+        enableCheckbox.state = flipped ? .on : .off
+        delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
+    }
+
+    /// Which on-icon status dot the row is currently showing — derived from
+    /// `device.connectionState` (the single source the badge renders from), so it
+    /// can never drift from what's actually on screen.
+    public var test_statusKind: StatusKind {
+        switch device.connectionState {
+        case .off:                        return .none
+        case .connecting, .reconnecting:  return .connecting
+        case .connected:                  return .connected
+        case .failed:                     return .failed
+        }
+    }
+
+    /// The current sublabel's text, or `nil` when hidden. Reports whichever of the
+    /// three sublabel kinds is showing (failed "Couldn't connect" / "Unavailable"
+    /// / the routing line), since all three flow through the single `statusLabel`.
+    public var test_statusText: String? {
+        statusLabel.isHidden ? nil : statusLabel.stringValue
+    }
+
+    /// The composed routing sublabel string ("System …" joined by " · "), or
+    /// `nil` when the routing set is empty — for asserting the routing line in
+    /// isolation from the failed/unavailable precedence. Test hook.
+    public func test_sourceText(routedAppNames: [String]) -> String? {
+        routingLine(routedAppNames: routedAppNames)
+    }
+
+    /// Whether the connecting/reconnecting badge's breathing pulse is installed
+    /// (on screen + Reduce Motion off). Lets tests assert the animation hook.
+    public var test_dotIsPulsing: Bool { statusDotView.test_isBreathing }
+
+    /// The primary ON/OFF checkbox's current state (for structural assertions).
+    public var test_isEnabledOn: Bool { enableCheckbox.state == .on }
 
     /// Whether the primary membership toggle is shown. Group-member rows hide it
     /// (task C); Selected-Devices rows show it.
-    public var test_showsToggle: Bool { !enableSwitch.isHidden }
+    public var test_showsToggle: Bool { !enableCheckbox.isHidden }
 
-    /// The row's icon tint (accent when selected, secondary otherwise) — a
-    /// selection visual asserted by the T-U8 deselect-reset test.
+    /// The row's icon tint. Always `.secondaryLabelColor` now (2026-07-17 — the
+    /// icon is neutral identity-only; selection reads from the switch, status
+    /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
+
+    /// Whether this row is currently rendered as an unsupported AP1-only
+    /// receiver (T-UI-AP1-1): dimmed, toggle disabled, click asks for the
+    /// "coming soon" explanation.
+    public var test_isUnsupported: Bool { isUnsupported }
+
+    /// Simulate a click on the row body (T-UI-AP1-1) — drives the same path a
+    /// real `mouseDown:` on an unsupported row takes. No-op (like the real
+    /// handler) when the row is supported.
+    public func test_simulateClick() {
+        guard isUnsupported else { return }
+        delegate?.deviceRowDidRequestUnsupportedExplanation(self)
+    }
 
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
@@ -421,6 +720,15 @@ public final class DeviceRowView: NSView {
 
     public override func mouseEntered(with event: NSEvent) { setHovered(true) }
     public override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// A click anywhere on an unsupported (AP1-only) row asks the host to
+    /// present the "coming soon" explanation (T-UI-AP1-1). Supported rows fall
+    /// through to the normal subview control handling (slider drag, switch,
+    /// mute button all sit above and consume their own mouse events first).
+    public override func mouseDown(with event: NSEvent) {
+        guard isUnsupported else { super.mouseDown(with: event); return }
+        delegate?.deviceRowDidRequestUnsupportedExplanation(self)
+    }
 
     /// Set the transient hover flag and repaint only when it actually changes.
     private func setHovered(_ hovered: Bool) {
@@ -537,15 +845,47 @@ public final class DeviceRowView: NSView {
         setAccessibilityElement(true)
         // A menu row is a `.menuItem`; a mixer-window row is a plain grouping.
         setAccessibilityRole(isInMenu ? .menuItem : .group)
-        let membership = isSelectedInSet ? "selected" : "not selected"
-        setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent")
+        if isUnsupported {
+            // T-UI-AP1-1: explicitly call out AirPlay 1 rather than the usual
+            // "selected/volume" phrasing — there's no membership or volume to
+            // report on a device that's never actually routed to (and never a
+            // connection state to append — an unsupported row stays `.off`).
+            setAccessibilityLabel("\(device.name), AirPlay 1 only, not yet supported")
+        } else {
+            let membership = isSelectedInSet ? "selected" : "not selected"
+            // Connection state reads as a trailing clause (brief §6) — omitted
+            // entirely for `.off` so an unrouted row's label is unchanged.
+            let state = accessibilityStateSuffix
+            let stateClause = state.map { ", \($0)" } ?? ""
+            setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
+        }
 
-        enableSwitch.setAccessibilityLabel(
-            isSelectedInSet ? "Remove \(device.name) from Selected Devices"
-                            : "Add \(device.name) to Selected Devices")
+        enableCheckbox.setAccessibilityLabel(
+            isUnsupported
+                ? "\(device.name) requires AirPlay 1, not yet supported"
+                : (isSelectedInSet ? "Remove \(device.name) from Selected Devices"
+                                   : "Add \(device.name) to Selected Devices"))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
+        // The name-click is a mouse convenience; the switch stays the
+        // authoritative accessibility control. A hint on the name label documents
+        // the click for VoiceOver users who land on it.
+        nameLabel.setAccessibilityHelp(
+            isSelectedInSet ? "Click to remove from Selected Devices"
+                            : "Click to add to Selected Devices")
+    }
+
+    /// The accessibility-label clause for the current connection state
+    /// (brief §6), or `nil` for `.off` — enriches the row label for VoiceOver.
+    private var accessibilityStateSuffix: String? {
+        switch device.connectionState {
+        case .off:           return nil
+        case .connecting:    return "connecting"
+        case .reconnecting:  return "reconnecting"
+        case .connected:     return "connected"
+        case .failed:        return "couldn't connect"
+        }
     }
 }
 
@@ -557,4 +897,8 @@ public extension DeviceRowView.Delegate {
     /// The real hosts (popover + mixer window) override this to call
     /// `GroupController.setDeviceEnabled`.
     func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {}
+
+    /// Default no-op (T-UI-AP1-1) so conformers that predate the AP1
+    /// "coming soon" affordance still compile.
+    func deviceRowDidRequestUnsupportedExplanation(_ row: DeviceRowView) {}
 }

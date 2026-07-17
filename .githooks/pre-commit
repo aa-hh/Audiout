@@ -1,21 +1,69 @@
 #!/bin/sh
-# Warn-only. NEVER blocks a commit — every path here exits 0.
-#
-# See .githooks/agents-md-symbol-check.py for what it checks and, importantly,
-# what it checks AGAINST (the commit being created — not main, not the working
-# tree). Root AGENTS.md carries the rule this backs up: docs never reach main
-# ahead of their code.
+# Two guards, in order of how much they matter.
 #
 # Enable with:  git config core.hooksPath .githooks
 # Disable with: git config --unset core.hooksPath
+# Override once: git commit --no-verify
 
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
 hook_dir=$(dirname "$0")
-checker="$hook_dir/agents-md-symbol-check.py"
 
-# Missing checker or no python3 => silently do nothing. A hook that errors out
-# on an unrelated machine is worse than a hook that isn't there.
+# ---------------------------------------------------------------------------
+# GUARD 1 (BLOCKING): no direct commits onto main.
+#
+# This is the one that would have prevented this repo's worst failure. f1f3e94
+# put a whole feature's docs on main with none of its code — and NOT because
+# anyone decided to. Someone had been editing AGENTS.md directly in the main
+# checkout; those loose edits then BLOCKED an unrelated agent's merge, and that
+# agent committed the mess it found in order to unblock itself. It had no idea
+# the matching code was sitting in a third session's worktree, about to be
+# stashed and forgotten. Loose edits in a shared checkout are a trap for the
+# next agent through, and the trap is that committing them looks helpful.
+#
+# So: don't work in the main checkout. Work in a worktree, where docs and code
+# have to travel together as one merge.
+#
+# Merges are deliberately exempt, and this is verified behaviour, not a guess:
+#   - a clean `git merge` never invokes pre-commit at all
+#   - a conflict-resolution merge commit DOES invoke it, but has MERGE_HEAD
+# So merging a branch into main — the correct way to land anything — is
+# untouched. Only typing `git commit` while standing on main is refused.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ "$branch" = "main" ] && [ ! -f "$git_dir/MERGE_HEAD" ]; then
+    echo "" >&2
+    echo "  REFUSED: direct commit to main." >&2
+    echo "" >&2
+    echo "  Work in a worktree and merge it in — that is how docs and code stay" >&2
+    echo "  together. Committing straight to main is how f1f3e94 shipped a" >&2
+    echo "  feature's docs with none of its code, and cost a whole session to" >&2
+    echo "  recover. See the hard rule in AGENTS.md." >&2
+    echo "" >&2
+    echo "  Merging a branch into main is NOT affected by this — only a bare" >&2
+    echo "  'git commit' on main is." >&2
+    echo "" >&2
+    echo "  If these are someone else's uncommitted edits and they are in your" >&2
+    echo "  way: STOP and ask. Do not commit work you did not write — that is" >&2
+    echo "  precisely the mistake that caused the incident." >&2
+    echo "" >&2
+    echo "  Really meant it?  git commit --no-verify" >&2
+    echo "" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 2 (WARN-ONLY): AGENTS.md must not name symbols this commit lacks.
+#
+# Catches what Guard 1 cannot: a name that was wrong the moment it was written
+# (d033466 documented setAppRoute/setAppVolume/removeAppRoute in the very same
+# commit whose code declared addRoute/setDestination/setVolume/removeRoute), and
+# a doc left stale after code was deleted. Neither is a save-order mistake, so
+# no amount of branch discipline touches them.
+#
+# Missing checker or no python3 => silently skip. A hook that errors out on an
+# unrelated machine is worse than a hook that isn't there.
+checker="$hook_dir/agents-md-symbol-check.py"
 [ -f "$checker" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
-
 python3 "$checker" || true
+
 exit 0

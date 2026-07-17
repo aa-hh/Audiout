@@ -79,20 +79,42 @@ help them; it actively sends them looking for symbols that do not exist, and the
 will not think to doubt it. Docs ahead of code are worse than no docs.
 
 **How to work (Alec, 2026-07-17):**
-1. Edit `AGENTS.md` in YOUR OWN worktree, alongside the code it describes.
-2. Commit both together, then merge the branch into `main` as one unit. Docs and
+1. **Do not work in the `main` checkout at all.** Use a worktree. This is the
+   root fix, not an aesthetic preference — see the incident below.
+2. Edit `AGENTS.md` in YOUR OWN worktree, alongside the code it describes.
+3. Commit both together, then merge the branch into `main` as one unit. Docs and
    code become true on `main` at the same instant.
-3. Do NOT edit `AGENTS.md` directly in the `main` checkout, and do NOT commit a
-   docs-only "I'll land the code next" change. There is no "next".
-4. If the code is dropped, deferred, or stashed, the doc describing it does not
+4. Never commit a docs-only "I'll land the code next" change. There is no "next".
+5. If the code is dropped, deferred, or stashed, the doc describing it does not
    land either. Landing half is what creates an orphan.
+6. **If you find uncommitted edits in the `main` checkout that are in your way:
+   STOP AND ASK. Do not commit them to unblock yourself, and never
+   `git reset --hard` / `checkout --` / `stash` them away.** They belong to
+   another session, they are unrecoverable once discarded (unstaged work was
+   never hashed), and committing them is exactly what caused the incident below.
 
-**This is not hypothetical — it is the most expensive failure this repo has had:**
-- `f1f3e94` (docs-only, 5 AGENTS.md, **zero** .swift, committed straight onto
-  `main`) documented `appRouteTargets` / `redirectOutputIDs()` / `reapplyRouting()`
-  / `routedAppNames(for:)`. The code was stashed and never landed, so `main`
-  described a feature that existed in zero .swift files for a day, while agents
-  read it as truth. Recovering it took a full session (landed 2026-07-17, `432aa7d`).
+**This is not hypothetical — it is the most expensive failure this repo has had,
+and NOBODY DECIDED TO DO IT.** Understanding the actual sequence is the point:
+- Someone edited AGENTS.md **directly in the `main` checkout**, describing a
+  feature whose code lived in a different session's worktree. Those edits then
+  sat there, loose, for hours.
+- A completely unrelated agent (`musing-wescoff`, in its own worktree, doing its
+  own job correctly) went to merge its branch and **couldn't — the loose edits in
+  `main` were in the way.** So it did the tidy-looking thing: it committed the
+  mess it found, then merged. That commit is `f1f3e94` (5 AGENTS.md, **zero**
+  .swift). It had no idea the matching code was in a third session's worktree,
+  twelve minutes from being stashed and forgotten.
+- Result: `main` documented `appRouteTargets` / `redirectOutputIDs()` /
+  `reapplyRouting()` / `routedAppNames(for:)` — a feature present in zero .swift
+  files — and every agent that read `main` believed it. Recovering it took a full
+  session (landed 2026-07-17, `432aa7d`; the code had survived only as a stash
+  under tag `recovered-stash`).
+- **The lesson: loose edits in a shared checkout are a trap for the next agent
+  through, and the trap is that committing them looks like helpfulness.** The
+  half-save was the SHAPE of the accident, not anyone's intent. That is why rule
+  1 is "don't work in the main checkout" and why Guard 1 below blocks the commit
+  outright rather than warning — a warning is exactly what an agent trying to
+  unblock itself will read and reason past.
 - `d033466` shows the OTHER half of the rule: it shipped code and docs together,
   but the doc named three methods — setAppRoute, setAppVolume, removeAppRoute
   (deliberately un-backticked here: none has ever existed in any .swift file, and
@@ -106,16 +128,25 @@ Corollary for readers: docs orient, code decides. If an `AGENTS.md` names a symb
 you cannot find in source, believe the source and fix the doc — do not assume you
 are looking in the wrong place. `git grep '<symbol>' -- '*.swift'` settles it.
 
-**Backed by a warn-only pre-commit hook** (`.githooks/`, enable once per clone with
-`git config core.hooksPath .githooks`). It flags symbols an AGENTS.md change names
-that exist nowhere in the commit's own source. It compares against **the commit you
-are creating** — deliberately NOT against `main` (which would falsely accuse every
-worktree whose work hasn't merged yet) and NOT against the working tree (which would
-have let f1f3e94 through, since its code was unstaged at commit time and stashed
-after). It never blocks. Backtested over this repo's whole AGENTS.md history: it
-fires on f1f3e94 and d033466, and stays quiet on honest docs+code commits. Known
-false positives: an AppKit type named as design guidance but used nowhere (e.g.
-hudWindow) — ignore those.
+**Enforced by two pre-commit guards** (`.githooks/`, enable once per clone with
+`git config core.hooksPath .githooks`; override once with `git commit --no-verify`):
+
+- **Guard 1 — BLOCKS a direct `git commit` on `main`.** Merging a branch into
+  `main` is deliberately unaffected (verified: a clean merge never invokes
+  pre-commit, and a conflict-resolution merge commit is allowed via `MERGE_HEAD`).
+  Only standing in the main checkout and committing is refused. Costs nothing in a
+  worktree — it never fires there.
+- **Guard 2 — WARNS (never blocks)** when an AGENTS.md change names a symbol that
+  exists nowhere in the commit's own source. This catches what Guard 1 can't: a
+  name wrong from birth (d033466) or a doc left stale after code was deleted. It
+  compares against **the commit you are creating** — deliberately NOT against
+  `main` (which would falsely accuse every worktree whose work hasn't merged yet;
+  truth in an unmerged worktree is TRUE) and NOT against the working tree (which
+  would have let f1f3e94 through, since its code was unstaged at commit time).
+  Backtested over this repo's whole AGENTS.md history: fires on f1f3e94 and
+  d033466, quiet on every honest docs+code commit. ~0.08s. Known false positives:
+  an AppKit type named as design guidance but used nowhere (hudWindow,
+  NSLevelIndicator) — ignore those.
 
 ## UI / Design Conventions (all targets)
 

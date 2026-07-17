@@ -66,6 +66,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// placeholder master-volume value the status symbol tracks.
     private var devicesByID: [String: Device] = [:]
 
+    /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
+    private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
+    private var lastLevelLog = Date.distantPast
+
     /// The task consuming the backend event stream. Cancelled on teardown so the
     /// stream finishes cleanly and we don't leak it past app exit.
     private var eventTask: Task<Void, Never>?
@@ -256,8 +260,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .deviceRemoved(let id):
             devicesByID.removeValue(forKey: id)
             log("event: deviceRemoved(\(id))")
-        case .level:
+        case .level(let id, let rms):
             // Meters are SKIPPED in Phase 1 (RESOLVED Q8) — ignore for now.
+            // AIRPLAY_DEBUG_LEVELS=1: log capture RMS ~1/sec. The one observable
+            // that splits "tap delivers audio" from "tap delivers TCC-denied
+            // zeros" (a denied tap returns noErr + all-zero buffers — it cannot
+            // self-report, so this is the only place the silence is visible).
+            if debugLevels, Date().timeIntervalSince(lastLevelLog) >= 1 {
+                lastLevelLog = Date()
+                log("level: \(id) rms \(rms)")
+            }
             return
         case .systemVolumeChanged(let volume):
             // The volume keys move the system output = the local "Current Device",

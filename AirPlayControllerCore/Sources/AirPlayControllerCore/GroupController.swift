@@ -229,7 +229,23 @@ public final class GroupController {
     /// - **Local-mix block:** turning ON the local device into a set that already
     ///   holds an AirPlay device is REFUSED with a reason (pre-engine sync limit).
     ///
-    /// Removing is always allowed. No-op (`.ok`) if unknown / already in state.
+    /// Removing is always allowed, with the auto-swap's mirror image:
+    /// - **Reverse auto-swap:** removing the LAST AirPlay device restores the
+    ///   local passthrough default ({local}) instead of leaving the set empty.
+    ///   Physically the audio moves back to the Mac either way (an empty output
+    ///   set IS passthrough at the backend), so an empty set is a fiction the UI
+    ///   then renders as nonsense: the Main Out master averages an empty member
+    ///   set to 0 — the slider slams to zero on disconnect — and the volume keys
+    ///   have no member to visibly drive (Alec, live session 2026-07-17b: "when I
+    ///   disconnect an airplay device, system audio out just goes straight down
+    ///   to zero … when nothing is selected … only current device changes").
+    ///   With {local} restored, the master tracks the Mac's own volume — which is
+    ///   what is actually playing — and the keys move it via the two-way sync.
+    ///   Fires only when the REMOVED device was an AirPlay one: toggling the
+    ///   local device itself off is a deliberate act on that row, not a
+    ///   disconnect, and re-adding it would make its toggle a no-op.
+    ///
+    /// No-op (`.ok`) if unknown / already in state.
     @discardableResult
     public func setDeviceSelected(_ id: String, _ selected: Bool) -> SelectionResult {
         guard let d = device(id) else { return .ok }
@@ -257,9 +273,18 @@ public final class GroupController {
         } else {
             guard selectedDeviceIDs.contains(id) else { return .ok }
             selectedDeviceIDs.remove(id)
+
+            // Reverse auto-swap (see the doc comment above): the last AirPlay
+            // device leaving the set restores the local passthrough default.
+            var autoSwapped = false
+            if !d.isLocalDevice, selectedDeviceIDs.isEmpty, let local = localDeviceID {
+                selectedDeviceIDs.insert(local)
+                autoSwapped = true
+            }
+
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
-            return .ok
+            return autoSwapped ? .okAutoSwap : .ok
         }
     }
 
@@ -615,22 +640,31 @@ public final class GroupController {
 
     /// The Main Out master volume: the average of the target's members' volumes
     /// (0 when the target is empty).
-    public var mainOutMasterVolume: Int {
-        let members = mainOutMemberIDs.compactMap(device)
+    public var mainOutMasterVolume: Int { averageVolume(of: mainOutMemberIDs) }
+
+    /// The average volume of `ids` (0 when empty). Shared by the Main Out master
+    /// (over `mainOutMemberIDs`) and the volume-key mirror (over
+    /// ``mirrorMemberIDs``, which additionally includes redirect targets).
+    private func averageVolume(of ids: [String]) -> Int {
+        let members = ids.compactMap(device)
         guard !members.isEmpty else { return 0 }
         let sum = members.reduce(0) { $0 + $1.volume }
         return Int((Double(sum) / Double(members.count)).rounded())
     }
 
-    private func mainOutRatios() -> [String: Double] {
-        let master = mainOutMasterVolume
+    /// Each id's volume as a ratio of the average over `ids` (1.0 fallback when
+    /// the average is 0). Shared by `mainOutRatios()` and the mirror.
+    private func proportionalRatios(of ids: [String]) -> [String: Double] {
+        let master = averageVolume(of: ids)
         var ratios: [String: Double] = [:]
-        for id in mainOutMemberIDs {
+        for id in ids {
             guard let device = device(id) else { continue }
             ratios[id] = master > 0 ? Double(device.volume) / Double(master) : 1.0
         }
         return ratios
     }
+
+    private func mainOutRatios() -> [String: Double] { proportionalRatios(of: mainOutMemberIDs) }
 
     /// Snapshot proportional ratios for a Main Out master drag. Pair with
     /// ``endMainOutMasterDrag()``.
@@ -644,23 +678,28 @@ public final class GroupController {
         scaleMainOutMembers(to: target, ratios: dragRatios ?? mainOutRatios())
     }
 
-    /// Write `target × ratio` to every Main Out member, clamped. The shared body of
-    /// the slider path above and the volume-key mirror below — which differ ONLY in
-    /// where their ratios come from.
+    /// Write `target × ratio` to every id in `ids`, clamped. The shared body of the
+    /// slider path (over `mainOutMemberIDs`) and the volume-key mirror below (over
+    /// ``mirrorMemberIDs``) — which differ ONLY in which ids and ratios they pass.
     ///
     /// - Returns: the exact volume commanded per member. The mirror keeps this as the
     ///   evidence behind its ratio snapshot; ``setMainOutMasterVolume(_:)`` discards it.
     @discardableResult
-    private func scaleMainOutMembers(to target: Int, ratios: [String: Double]) -> [String: Int] {
+    private func scaleMembers(_ ids: [String], to target: Int, ratios: [String: Double]) -> [String: Int] {
         let target = target.clampedToVolume
         var commanded: [String: Int] = [:]
-        for id in mainOutMemberIDs {
+        for id in ids {
             guard let ratio = ratios[id] else { continue }
             let scaled = Int((Double(target) * ratio).rounded()).clampedToVolume
             backend.setVolume(scaled, for: id)
             commanded[id] = scaled
         }
         return commanded
+    }
+
+    @discardableResult
+    private func scaleMainOutMembers(to target: Int, ratios: [String: Double]) -> [String: Int] {
+        scaleMembers(mainOutMemberIDs, to: target, ratios: ratios)
     }
 
     // MARK: System-volume mirror — the volume keys drive what's actually playing
@@ -673,9 +712,11 @@ public final class GroupController {
     // the keys diligently adjusted a device the user could not hear while the
     // speakers actually playing ignored them.
     //
-    // THE FIX: on an external system-volume change outside passthrough, mirror the
-    // new volume onto the Main Out master, so the keys drive whatever Main Out
-    // actually points at.
+    // THE FIX: on an external system-volume change, mirror the new volume onto
+    // whatever ``mirrorMemberIDs`` names — Main Out's own target plus any per-app
+    // redirect target — so the keys drive whatever is actually playing, not just
+    // what Selected Devices happens to say (a redirect can be streaming to an
+    // AirPlay speaker, muting the Mac, while Selected Devices reports passthrough).
     //
     // NOT via CGEventTap/media-key interception — that needs an Accessibility grant.
     // The `SystemOutputVolume` listener already exists and already reports only
@@ -691,6 +732,44 @@ public final class GroupController {
     /// master. The two snapshots answer different questions and get different fields.
     private var mirrorRatios: (ratios: [String: Double], commanded: [String: Int])?
 
+    /// The ids the volume-key mirror actually drives — Main Out's own target PLUS
+    /// any per-app redirect target, always excluding the local Mac.
+    ///
+    /// Deliberately NOT `mainOutMemberIDs`: that set (and the Main Out master slider
+    /// built on it, incl. ``testMainOutMasterExcludesRedirectOnlyTarget``) represents
+    /// only the Selected Devices/group target (SPEC §9b, Q5) and must keep excluding
+    /// redirect-only devices. But `applyRouting()`/`activateGroup(id:)` union
+    /// `redirectOutputIDs()` into the REAL backend output set (see the MERGE NOTE on
+    /// ``isPassthrough`` above), so a per-app redirect can open an AirPlay session —
+    /// and mute the Mac via the capture tap — even while Selected Devices is empty
+    /// (`isPassthrough == true`). Before this, a volume key in exactly that state hit
+    /// `mirrorSystemVolumeToMainOut`'s old `!isPassthrough` guard and did nothing,
+    /// leaving the redirected device's volume stuck while the Mac played silence
+    /// (Alec, live session 2026-07-17: "if nothing is connected to the audio out and
+    /// I hit the volume buttons, the audio out volume doesn't change").
+    ///
+    /// For `.selectedDevices`, the local Mac is filtered out unconditionally (its
+    /// presence there is the normal shape of passthrough, not a reason to block a
+    /// redirect elsewhere) and redirect targets are unioned in. For `.group`, a
+    /// member set that already includes the local Mac is returned AS-IS — the mixed-
+    /// group trap (``testSystemVolumeMirrorRefusesGroupMixingLocalDeviceWithAirPlay``)
+    /// is unrelated to redirects and must still block the whole mirror via the
+    /// local-member guard in ``mirrorSystemVolumeToMainOut(_:)``, not silently drop
+    /// the Mac and mirror to the AirPlay member anyway.
+    private var mirrorMemberIDs: [String] {
+        switch mainOut {
+        case .selectedDevices:
+            let nonLocal = selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
+            return Array(Set(nonLocal).union(redirectOutputIDs()))
+        case .group(let id):
+            let members = groups.first { $0.id == id }?.memberIDs ?? []
+            guard !members.contains(where: { device($0)?.isLocalDevice == true }) else {
+                return members
+            }
+            return Array(Set(members).union(redirectOutputIDs()))
+        }
+    }
+
     /// Mirror an EXTERNAL system-output-volume change onto the Main Out master, so
     /// the macOS volume keys drive whatever is actually playing rather than the
     /// tap-muted local output.
@@ -705,21 +784,21 @@ public final class GroupController {
     /// ## Why this cannot feed back
     ///
     /// The mirror never writes to the local device, because it refuses to run at all
-    /// when the local device is a Main Out member. `backend.setVolume` reaches
+    /// when the local device is among ``mirrorMemberIDs``. `backend.setVolume` reaches
     /// `SystemVolumeControlling` — and thus the listener that called us — for exactly
     /// one id, the local one (`NativeBackend.setVolume`'s `isLocalDevice` branch);
     /// every other id goes to the engine and can never come back around. No write to
     /// that id, no loop: the property is structural, not a race we happen to win.
     ///
     /// The two guards that establish it:
-    /// - `!isPassthrough` — the agreed condition. In passthrough the local device is
-    ///   the SOLE member, so mirroring would be circular *and* pointless: the keys
-    ///   already moved the only thing Main Out names.
-    /// - no local member — covers what `isPassthrough` does NOT. `isPassthrough` is
-    ///   false for EVERY `.group` target, but a group's members can absolutely include
-    ///   the Mac: `saveCurrentSetupAsGroup(name:id:)` while in passthrough saves
-    ///   exactly such a group, and pointing Main Out at it afterwards is a normal
-    ///   thing to do. Without this guard a volume key in that state would scale the
+    /// - empty ``mirrorMemberIDs`` — covers plain passthrough (nothing selected, no
+    ///   redirect) and, per member, pointless: there is nothing to mirror to.
+    /// - no local member — covers what an empty-check does NOT: a `.group` target
+    ///   whose members include the Mac. `saveCurrentSetupAsGroup(name:id:)` while in
+    ///   passthrough saves exactly such a group, and pointing Main Out at it
+    ///   afterwards is a normal thing to do. `mirrorMemberIDs` deliberately returns
+    ///   such a group's member set UNCHANGED (redirects unioned or not) so this guard
+    ///   still catches it — without it, a volume key in that state would scale the
     ///   Mac by its own ratio and yank the system volume somewhere the user didn't
     ///   ask for. (`SystemOutputVolume`'s echo suppression would stop it *spinning* —
     ///   but no-loop should be a property of this method, not a behavior inherited
@@ -757,8 +836,7 @@ public final class GroupController {
     /// keep in sync: a future path that moves a member gets this right by default
     /// instead of by remembering to.
     public func mirrorSystemVolumeToMainOut(_ volume: Int) {
-        guard !isPassthrough else { mirrorRatios = nil; return }
-        let members = mainOutMemberIDs
+        let members = mirrorMemberIDs
         guard !members.isEmpty else { mirrorRatios = nil; return }
         guard !members.contains(where: { device($0)?.isLocalDevice == true }) else {
             mirrorRatios = nil
@@ -768,11 +846,11 @@ public final class GroupController {
         let current = currentMemberVolumes(members)
         let ratios: [String: Double]
         if let held = mirrorRatios, held.commanded == current {
-            ratios = held.ratios        // still the same burst — hold the snapshot
+            ratios = held.ratios                    // still the same burst — hold the snapshot
         } else {
-            ratios = mainOutRatios()    // fresh burst, or something else moved a member
+            ratios = proportionalRatios(of: members) // fresh burst, or something else moved a member
         }
-        mirrorRatios = (ratios, scaleMainOutMembers(to: volume, ratios: ratios))
+        mirrorRatios = (ratios, scaleMembers(members, to: volume, ratios: ratios))
     }
 
     /// Each member's current backend volume, skipping ids with no device. The key set

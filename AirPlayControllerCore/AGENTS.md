@@ -16,8 +16,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   while in nobody's Selected Devices set. Row/menu state must come from
   `GroupController.isSpeakerSelected(_:)`, never `device.isSelected`. Redirect
   targets stay excluded from `selectedDeviceIDs`/`mainOutMemberIDs` so a
-  redirect can't move the Main Out master or pollute group identity — group
-  matching keys off `mainOutMemberIDs`, never the live output set.
+  redirect can't move the Main Out master SLIDER or pollute group identity —
+  group matching keys off `mainOutMemberIDs`, never the live output set. The
+  volume-key mirror is the deliberate exception: `mirrorMemberIDs` unions
+  redirect targets in (matching what `applyRouting` actually streams to), because
+  a redirect-only session mutes the Mac exactly like a selected one — narrowing
+  the mirror to `mainOutMemberIDs` leaves the keys dead in that state.
 - **An AirPlay session opens the moment an app is redirected, even with no
   device selected.** Per-app capture doesn't exist yet, so the capture tap
   (gated on `expectedSelected` inside the backend, not `isPassthrough` or the

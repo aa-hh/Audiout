@@ -26,7 +26,7 @@ import AppKit
 public final class AppRowView: NSView {
 
     /// Callbacks for the row's controls. The host maps these onto
-    /// `AppRoutingController.setAppVolume`/`setAppRoute`/`removeAppRoute`.
+    /// `AppRoutingController.setVolume(_:for:)`/`setDestination(_:for:)`/`removeRoute(bundleID:)`.
     public protocol Delegate: AnyObject {
         func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String)
         /// The user picked a redirect destination from the trailing popup.

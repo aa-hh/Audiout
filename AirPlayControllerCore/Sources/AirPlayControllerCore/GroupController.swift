@@ -330,15 +330,17 @@ public final class GroupController {
         return groups.first { Set($0.memberIDs) == memberSet }
     }
 
-    /// The saved group whose members equal the current output set (the devices
-    /// the backend reports as `isSelected`), or nil for an ad-hoc selection that
-    /// matches no group. This is the derived notion behind
-    /// ``syncActiveGroupToSelection()``.
+    /// The saved group whose members equal the current Main Out target's
+    /// membership, or nil for an ad-hoc selection that matches no group. This is
+    /// the derived notion behind ``syncActiveGroupToSelection()``.
     public var groupMatchingCurrentSelection: Group? {
-        // Keyed off the membership set (selectedDeviceIDs), NOT the live output
-        // set (`Device.isSelected`): redirect targets now enter the output set,
-        // so matching on it would spuriously pollute group identity (Q3).
-        return group(matchingMemberSet: selectedDeviceIDs)
+        // Keyed off the MEMBERSHIP the Main Out target names (`mainOutMemberIDs`
+        // — selectedDeviceIDs when targeting Selected Devices, the group's own
+        // members when targeting a group), NOT the live output set
+        // (`Device.isSelected`): redirect targets now enter the output set, so
+        // matching on it would spuriously pollute group identity (Q3).
+        // `mainOutMemberIDs` is exactly the redirect-free membership set.
+        return group(matchingMemberSet: mainOutMemberIDs)
     }
 
     /// Reconcile ``activeGroupID`` with the live output set: if the current

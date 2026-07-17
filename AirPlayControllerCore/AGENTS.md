@@ -24,6 +24,35 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   UI) is a whole-system mixdown: redirecting ONE app streams the WHOLE system
   mix to that device and mutes the Mac. Known limitation — don't narrow the
   gate to fix it; the fix is per-app capture streams.
+- **Every real (re)connect must reseed the engine volume from the Mac's current
+  system level** (0% when unreadable): the engine's volume field is
+  zero-initialized and 0 maps to ≈ −30 dB (silent), so a connect that pushes no
+  volume streams INAUDIBLY until the first slider touch — the −30 dB trap. The one
+  exception is `applyStartBuffer`'s internal teardown/re-add (a buffer-size change,
+  *not* a reconnect), which preserves the in-session level instead. That is why the
+  seed is gated on `bufferReAdding`, not fired unconditionally in the shared add
+  path — remove the gate and a plain buffer change resets the user's level to the
+  system volume. The seed (`connectVolumeSeed`) is reachable from TWO independent
+  add-success sites — `convergeDevice`'s post-`addOutput` write (ordinary
+  user-initiated connects) and `applyEngineState`'s `.connected`/`.streaming`
+  branch (out-of-band auto-recovery reconnects that never go through
+  `convergeDevice`) — and the vendored dispatcher always mirrors an armed
+  `addOutput` completion onto the engine's state stream too, so an ORDINARY
+  connect reaches both sites, racing which one gets to `stateQueue` first. The
+  seed fires ONLY on the `added` false→true edge each site observes: whichever
+  flips `added` first (both under `stateQueue`) seeds, the other sees `added`
+  already true and skips — one push per connect, with NO separate seeded-set to
+  clear. (An earlier `volumeSeeded: Set` hand-cleared at every teardown regressed
+  live — a second disconnect→reconnect kept the first reconnect's stale level when
+  a clear was missed/reordered; `added` is the connection ground truth already
+  removed at every teardown, so keying on it makes that drift impossible and every
+  genuine reconnect reseeds.) `pushVolume` additionally serializes per output id
+  (`volumeInFlight`/`volumePending`, latest-wins) so no caller can ever have two
+  `engine.setVolume` calls in flight for the same output concurrently — the
+  vendored C dispatcher's "one pending callback per device" `outputs_callback_add`
+  contract turns a second concurrent call into a clobbered/leaked waiter for the
+  first, which is what caused a live regression (leaked `startOp` continuations,
+  eventual disconnect) before this guard existed.
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
   Saved groups still persist and re-apply.

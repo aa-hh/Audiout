@@ -151,6 +151,13 @@ public actor AirPlayEngine {
     // Tests/.../AirPlayEngineAPITests.swift.
     private var issueOverride: ((UnsafeMutablePointer<output_device>, Int32) -> Int32)?
 
+    // True between `enterHeadlessTestMode()` and a subsequent `stop()`. Lets
+    // `stop()` run its dispatcher/completion teardown INLINE (no engine thread,
+    // which headless mode never starts) so a teardown-with-op-in-flight test can
+    // assert the in-flight continuation is resumed (cancelled) — the same
+    // cancellation `uninstall()` performs in production.
+    private var headlessMode = false
+
     // MARK: Init
 
     public init(config: EngineConfig = EngineConfig()) {
@@ -294,6 +301,23 @@ public actor AirPlayEngine {
     /// Stop the engine: tear down all sessions (`airplay_deinit`), unwire the
     /// dispatcher, break the loop, join the thread. Idempotent.
     public func stop() async {
+        // Headless test mode never starts the engine thread, but it DOES install
+        // the completion/state hooks and can have an op in flight (a waiter armed
+        // in `CompletionRegistry`). Tear those down inline so `uninstall()` still
+        // cancels the in-flight continuation — the leaked-continuation / hung-quit
+        // path from the 2026-07-17 toggle-spam session is exactly this teardown.
+        if headlessMode {
+            headlessMode = false
+            issueOverride = nil
+            startedFlag.store(false)
+            stateReconcileTask?.cancel()
+            stateReconcileTask = nil
+            completions.uninstall()   // resumes (cancels) every in-flight op continuation
+            stateHub.uninstall()
+            knownOutputs.removeAll()
+            return
+        }
+
         guard started else { return }
         started = false
         startedFlag.store(false)
@@ -712,7 +736,17 @@ public actor AirPlayEngine {
                 guard cbId >= 0 else {
                     cont.resume(throwing: AirPlayEngineError.operationRejected); return
                 }
-                completions.arm(callbackId: cbId) { state in
+                // Arm with BOTH a normal-delivery resumer and a cancellation
+                // resumer. The registry invokes exactly one of them (both remove
+                // the waiter under the same lock), so the continuation resumes
+                // exactly once: `state in …returning` on a real completion, or
+                // `…throwing .engineNotRunning` if `stop()`/uninstall tears the
+                // engine down with this op still in flight (no leaked
+                // continuation, no hung quit — toggle-spam session 2026-07-17).
+                completions.arm(
+                    callbackId: cbId,
+                    onCancel: { cont.resume(throwing: AirPlayEngineError.engineNotRunning) }
+                ) { state in
                     cont.resume(returning: state)
                 }
                 let n = effectiveIssue(device, cbId)
@@ -765,6 +799,7 @@ public actor AirPlayEngine {
         issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32 = { _, _ in 1 }
     ) {
         issueOverride = issue
+        headlessMode = true
         completions.install() // wire the C completion hook (start() isn't called)
         stateHub.install()    // wire the C device-state hook (T-ENG-STATESTREAM-1)
         // So the hot `write(pcm:pts:)` path's started-guard passes in headless

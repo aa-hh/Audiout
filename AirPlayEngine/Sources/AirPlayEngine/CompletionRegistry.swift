@@ -34,7 +34,19 @@ final class CompletionRegistry: @unchecked Sendable {
     /// The single active registry the C hook reads. Set by `install()`.
     static private(set) var shared: CompletionRegistry?
 
-    private var waiters: [Int32: (OutputState) -> Void] = [:]
+    /// One armed waiter. `deliver` is invoked (once) with the terminal state when
+    /// the dispatcher completes normally; `cancel` is invoked (once) instead when
+    /// the engine tears down with the op still in flight, so the awaiting
+    /// continuation is RESUMED (throwing) rather than leaked — a leaked
+    /// `withCheckedThrowingContinuation` both trips "CONTINUATION MISUSE" and
+    /// hangs `stop()`/app-quit forever (first-light backlog, toggle-spam session
+    /// 2026-07-17).
+    private struct Waiter {
+        let deliver: (OutputState) -> Void
+        let cancel: () -> Void
+    }
+
+    private var waiters: [Int32: Waiter] = [:]
     private let lock = NSLock()
 
     /// Install this registry as the process-wide target and wire the C hook.
@@ -46,23 +58,36 @@ final class CompletionRegistry: @unchecked Sendable {
         }, nil)
     }
 
-    /// Tear down the hook (on stop).
+    /// Tear down the hook (on stop). CANCELS every still-armed waiter so no
+    /// in-flight `startOp` continuation is dropped: each is resumed (throwing
+    /// ``AirPlayEngineError/engineNotRunning``) before the table is cleared, so
+    /// `engine.stop()` / app-quit can never hang awaiting a completion the
+    /// dispatcher will now never deliver (the C hook is unset first).
     func uninstall() {
         outputs_engine_completion_set(nil, nil)
-        lock.lock(); waiters.removeAll(); lock.unlock()
+        lock.lock()
+        let cancelled = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for (_, waiter) in cancelled { waiter.cancel() }
         if CompletionRegistry.shared === self { CompletionRegistry.shared = nil }
     }
 
-    /// Arm a waiter for `callbackId`. The completion closure is invoked once,
-    /// with the terminal state, when the dispatcher delivers. Must be called on
-    /// the engine thread (same thread the hook fires on) so the arm-then-report
-    /// ordering can't race.
-    func arm(callbackId: Int32, _ completion: @escaping (OutputState) -> Void) {
-        lock.lock(); waiters[callbackId] = completion; lock.unlock()
+    /// Arm a waiter for `callbackId`. `completion` is invoked once with the
+    /// terminal state on normal delivery; `onCancel` is invoked once instead if
+    /// the registry is torn down (uninstall) with this waiter still armed. Must be
+    /// called on the engine thread (same thread the hook fires on) so the
+    /// arm-then-report ordering can't race.
+    func arm(
+        callbackId: Int32,
+        onCancel: @escaping () -> Void,
+        _ completion: @escaping (OutputState) -> Void
+    ) {
+        lock.lock(); waiters[callbackId] = Waiter(deliver: completion, cancel: onCancel); lock.unlock()
     }
 
-    /// Drop a waiter without delivering (used if arming an op is aborted before
-    /// the backend was invoked).
+    /// Drop a waiter without delivering or cancelling (used if arming an op is
+    /// aborted before the backend was invoked — the caller resolves it directly).
     func disarm(callbackId: Int32) {
         lock.lock(); waiters.removeValue(forKey: callbackId); lock.unlock()
     }
@@ -78,7 +103,7 @@ final class CompletionRegistry: @unchecked Sendable {
         lock.lock()
         let waiter = waiters.removeValue(forKey: callbackId)
         lock.unlock()
-        waiter?(mapped)
+        waiter?.deliver(mapped)
     }
 }
 

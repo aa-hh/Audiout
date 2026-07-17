@@ -544,6 +544,62 @@ final class AirPlayEngineAPITests: XCTestCase {
         }
     }
 
+    // MARK: - Teardown with an op in flight: stop() resumes the continuation.
+    //
+    // REGRESSION (toggle-spam session 2026-07-17): on app quit with an op still in
+    // flight the process logged "SWIFT TASK CONTINUATION MISUSE: startOp(id:issue:)
+    // leaked its continuation!" and then HUNG — teardown awaited a completion the
+    // dispatcher would never deliver (the hook was already unset), because
+    // uninstall() dropped the armed waiter instead of resuming it. The fix: stop()'s
+    // completion-registry uninstall CANCELS every armed waiter, resuming its
+    // continuation (throwing) so nothing leaks and stop() returns promptly.
+    func testStopResumesInFlightOpContinuation() async throws {
+        let id = OutputID(rawValue: 0xDEAD_0001)
+        makeRegistryDevice(id: id.rawValue)
+
+        let engine = AirPlayEngine()
+        // N=1: the op arms a real waiter and suspends awaiting a completion we
+        // deliberately NEVER fire — only stop() can resolve it.
+        await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+        await engine.registerKnownOutputForTest(id)
+
+        // Launch addOutput; it will arm a waiter and suspend.
+        let opTask = Task { () -> Error? in
+            do { try await engine.addOutput(id); return nil }
+            catch { return error }
+        }
+
+        // Wait until the waiter is armed (the op has suspended), WITHOUT firing a
+        // completion.
+        for _ in 0..<200 {
+            if let dev = outputs_device_get(id.rawValue), outputs_callback_get(dev) != nil { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        // Tear down with the op in flight. This must resume the awaiting
+        // continuation (throwing) — not leak it — and complete promptly.
+        let stopDone = Task { await engine.stop() }
+        let stopResult = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await stopDone.value; return true }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s watchdog
+                return false
+            }
+            let first = await group.next()!
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(stopResult, "stop() must not hang when an op is in flight")
+
+        // The in-flight op resumed by THROWING (cancellation), not by leaking.
+        let opError = await opTask.value
+        XCTAssertNotNil(opError, "the in-flight op continuation must be resumed (throwing) on teardown, not leaked")
+        if let opError {
+            XCTAssertEqual(opError as? AirPlayEngineError, .engineNotRunning,
+                           "teardown resumes the in-flight op with a cancellation-style error")
+        }
+    }
+
     // MARK: - internal helper: fire the synthetic completion once the waiter is
     // armed. The wrapper arms synchronously inside startOp's continuation body
     // (headless mode runs inline), so the slot exists by the time the awaiting

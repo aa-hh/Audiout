@@ -461,9 +461,107 @@ final class NativeDiscoveryTests: XCTestCase {
         XCTAssertEqual(device.id, "6B:2E:52:B7:37:17")
         XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
         XCTAssertFalse(device.isAirPlay2Supported, "a raop-only device must classify AP1-only")
-        // The human-readable name (after the "@") stays the descriptor name.
-        XCTAssertEqual(device.descriptor.name, "6B2E52B73717@Dev Speaker")
+        // The descriptor name is the human-facing display name — the MAC prefix
+        // used to derive the id is stripped for display; the id itself (asserted
+        // above) still carries the full MAC.
+        XCTAssertEqual(device.descriptor.name, "Dev Speaker")
         XCTAssertEqual(device.descriptor.address, "192.168.1.42")
+
+        discovery.stop()
+    }
+
+    /// A raop-only instance name that already lacks the MAC@ prefix (no `deviceid`
+    /// TXT, so it's dropped by identity — but `strippedRaopDisplayName` itself
+    /// must be a no-op on such names) is returned unchanged.
+    func testStrippedRaopDisplayNameLeavesNameWithoutPrefixUnchanged() {
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("Living Room"), "Living Room")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("Kitchen Speaker"), "Kitchen Speaker")
+    }
+
+    /// Direct unit coverage: the MAC@ prefix is stripped only when it is exactly
+    /// 12 hex digits followed by "@"; near-miss shapes (too few/many hex digits,
+    /// non-hex characters, no "@" at all) pass through unchanged.
+    func testStrippedRaopDisplayNameEdgeCases() {
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717@Dev Speaker"), "Dev Speaker")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6b2e52b73717@lowercase"), "lowercase")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B7371@Eleven"), "6B2E52B7371@Eleven")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717AA@Thirteen"), "6B2E52B73717AA@Thirteen")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("ZZZZ52B73717@NonHex"), "ZZZZ52B73717@NonHex")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717"), "6B2E52B73717")
+    }
+
+    /// A raop-only device's `.appeared` display name has the MAC@ prefix stripped
+    /// ("6B2E52B73717@Dev Speaker" -> "Dev Speaker") while the derived id keeps the
+    /// full MAC in canonical colon-hex form — the fallback id derivation is
+    /// unaffected by the display-name strip.
+    func testRaopOnlyDisplayNameStripsMACPrefix() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Dev Speaker"))
+
+        guard case .appeared(let device)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertEqual(device.descriptor.name, "Dev Speaker", "the MAC@ prefix must be stripped for display")
+        XCTAssertEqual(device.id, "6B:2E:52:B7:37:17", "id derivation must still use the full raw name")
+        XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
+
+        discovery.stop()
+    }
+
+    /// A raop-only device whose instance name has NO MAC@ prefix at all (already
+    /// human-readable) is left unchanged — nothing to strip.
+    func testRaopOnlyDisplayNameWithoutPrefixUnchanged() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        // No deviceid TXT and no MAC prefix in the name -> dropped by identity,
+        // not surfaced. Use the deviceid-TXT raop fixture instead so the device
+        // IS surfaced, with a plain (unprefixed) name.
+        browser.resolve(raopService(name: "Old Express"))
+
+        guard case .appeared(let device)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertEqual(device.descriptor.name, "Old Express", "a name with no MAC@ prefix must be unchanged")
+
+        discovery.stop()
+    }
+
+    /// A device advertising BOTH `_raop._tcp` (MAC-prefixed name) and
+    /// `_airplay._tcp` (plain name, deviceid TXT) keeps the `_airplay._tcp` name
+    /// verbatim — the airplay name wins and is never subject to the raop strip,
+    /// confirmed regardless of which service resolves first.
+    func testDualAdvertisedKeepsAirplayNameOverRaopPrefixedName() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "6B:2E:52:B7:37:17"
+        // raop first, with a MAC-prefixed name (as real dual-advertising gear does).
+        browser.resolve(raopService(id: id, name: "6B2E52B73717@Raop Name"))
+        guard case .appeared(let first)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertEqual(first.descriptor.name, "Raop Name", "raop-only so far, so the MAC prefix is already stripped for display")
+
+        // Now the airplay advert resolves with a clean name -- it must win.
+        browser.resolve(airplayService(id: id, name: "Airplay Name", features: ap2Features))
+        guard case .updated(let merged)? = events.wait(count: 2).last else {
+            return XCTFail("expected .updated")
+        }
+        XCTAssertEqual(merged.descriptor.name, "Airplay Name", "the airplay name must win over the raop name once both are present")
+        XCTAssertTrue(merged.isAirPlay2Supported)
+        XCTAssertEqual(discovery.devices.count, 1)
 
         discovery.stop()
     }

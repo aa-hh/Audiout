@@ -369,12 +369,42 @@ public final class NativeDiscovery: @unchecked Sendable {
         // to raop so AP1-only devices still carry an address/port.
         let source = entry.airplay ?? entry.raop!
         let isAP2 = classify(airplay: entry.airplay)
+        var built = descriptor(from: source)
+        // When the descriptor comes from `_raop._tcp` (no `_airplay._tcp`
+        // advertisement to prefer instead), the instance name is often MAC-
+        // decorated by the receiver's stack ("6B2E52B73717@Dev Speaker" — see
+        // `deriveIDFromInstanceName`'s doc comment). That raw form is only
+        // needed for id derivation (which reads `service.name` directly, not
+        // this descriptor) and — for AP2 devices — for the engine's own
+        // name-keyed device tracking (`AirPlayEngine.feedDescriptor`). A
+        // raop-only source is AP1-only by construction (`classify` above) and
+        // is therefore NEVER handed to `updateDiscovery`/`removeDiscovery`
+        // (`NativeBackend` gates both on `isAirPlay2Supported`), so stripping
+        // the prefix here only affects the human-facing name shown in the UI.
+        // `_airplay._tcp`-sourced names are untouched.
+        if entry.airplay == nil {
+            built.name = strippedRaopDisplayName(built.name)
+        }
         return DiscoveredDevice(
             id: id,
-            descriptor: descriptor(from: source),
+            descriptor: built,
             outputID: outputID,
             isAirPlay2Supported: isAP2
         )
+    }
+
+    /// Strip a leading "<12 hex digits>@" MAC prefix from a `_raop._tcp`
+    /// instance name for display, e.g. "6B2E52B73717@Dev Speaker" → "Dev
+    /// Speaker". Names without that exact prefix shape (including bare human
+    /// names with no "@" at all) are returned unchanged.
+    static func strippedRaopDisplayName(_ name: String) -> String {
+        let parts = name.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return name }
+        let prefix = parts[0]
+        guard prefix.count == 12 else { return name }
+        let hexChars = "0123456789abcdefABCDEF"
+        guard prefix.allSatisfy({ hexChars.contains($0) }) else { return name }
+        return String(parts[1])
     }
 
     /// Classify AP2-capable vs AP1-only. Mirrors the vendored sender's own gate

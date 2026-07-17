@@ -77,9 +77,40 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     /// decide which `addOutput`/`removeOutput` calls to issue.
     private var added: Set<String> = []
 
-    /// The set of ids the app most recently *asked* to be selected (via
-    /// `setOutputSet`). The convergence target; `added` chases it best-effort (D4).
+    /// The raw set of ids the app most recently *asked* to be selected (via
+    /// `setOutputSet`), kept for diagnostics/inspection. The actual per-device
+    /// convergence target is `desiredOn` (below), which coalesces rapid flips; this
+    /// is just the last whole-set request.
     private var expectedSelected: Set<String> = []
+
+    // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
+    //
+    // The 2026-07-17 gated session wedged a device with rapid enable/disable spam:
+    // every `setOutputSet` spawned a fresh detached converge Task that diffed
+    // against `added` (which only reflects COMPLETED ops), so N overlapping tasks
+    // each re-issued add/removeOutput for the same device — a storm of duplicate
+    // "Adding AirPlay device" re-adds racing slow op completions, ending with the
+    // UI locked unavailable while a session kept streaming. The fix: coalesce to
+    // the LATEST desired state per device and run at most ONE op in flight per
+    // device, issuing the next only after the previous completes.
+
+    /// The LATEST desired on/off state per addable device id (coalescing target).
+    /// `setOutputSet` overwrites this; a per-device converge loop chases it. Rapid
+    /// intermediate flips are dropped — only the final value is ever acted on.
+    private var desiredOn: [String: Bool] = [:]
+
+    /// Device ids with a converge op currently in flight. At most one op per id;
+    /// a `setOutputSet` for an id already converging just updates `desiredOn` and
+    /// lets the running loop pick up the new target when its current op completes.
+    private var converging: Set<String> = []
+
+    /// Device ids parked in a terminal-failure state (the engine NACKed / the add
+    /// threw). While parked, converge does NOT keep issuing new sessions for the id
+    /// (root cause 5: "converge kept issuing sessions post-failure"). The park is
+    /// cleared — making the device re-enableable — on the next discovery update or
+    /// engine state-stream transition for the id, or by an explicit user re-toggle
+    /// to `on` after the in-flight op settled (root cause 4: no permanent wedge).
+    private var failedGate: Set<String> = []
 
     /// App-side mute (Q4): the engine has no mute field, so mute is realized as
     /// volume 0 with the prior value stashed. Same shim as
@@ -204,6 +235,10 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
             self.outputIDs.removeAll()
             self.added.removeAll()
             self.expectedSelected.removeAll()
+            self.desiredOn.removeAll()
+            self.converging.removeAll()
+            self.failedGate.removeAll()
+            self.fedDescriptors.removeAll()
             self.muted.removeAll()
             self.stashedVolume.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
@@ -246,94 +281,188 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     }
 
     public func setOutputSet(_ ids: Set<String>) {
-        // Snapshot the target + the engine handles / AP2-eligibility under the
-        // state lock, then converge off-queue via the engine's async ops.
-        let plan: (toAdd: [(String, OutputID, DeviceDescriptor?)], toRemove: [(String, OutputID)]) = stateQueue.sync {
+        // Record the intent and update the per-device coalescing target under the
+        // state lock, then kick a per-device converge loop for anything whose
+        // desired state actually changed. Rapid toggle spam collapses here: N
+        // flips for one device overwrite `desiredOn[id]` N times but issue at most
+        // one op at a time (root cause 1) — intermediate flips are simply dropped.
+        let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             self.expectedSelected = ids
 
-            // AP1-only devices are NEVER added (D6): filter the target to the ids we
-            // can actually stream to (known, AP2-capable, with an engine handle).
-            let addable = ids.filter { id in
-                guard let device = self.known[id] else { return false }
-                return device.supportsAirPlay2 && self.outputIDs[id] != nil
-            }
+            // AP1-only devices are NEVER added (D6): only ids we can actually stream
+            // to (known, AP2-capable, with an engine handle) can be desired-on.
+            var kicks: [(String, OutputID)] = []
+            for id in self.order {
+                guard let device = self.known[id], device.supportsAirPlay2,
+                      let outputID = self.outputIDs[id] else { continue }
+                let wantOn = ids.contains(id)
 
-            let toAddIDs = addable.subtracting(self.added)
-            let toRemoveIDs = self.added.subtracting(addable)
+                // A user re-toggle to ON clears a terminal-failure park so the
+                // device is re-enableable after a NACK (root cause 4: no permanent
+                // wedge). Toggling OFF a parked device likewise clears the park (the
+                // device is being deselected — nothing to retry).
+                if self.failedGate.contains(id) { self.failedGate.remove(id) }
 
-            // Carry the last-known descriptor for each add so converge can (re-)feed
-            // the engine's discovery immediately before addOutput — closing the race
-            // where the async `updateDiscovery` feed hasn't resolved yet and
-            // addOutput would throw `unknownOutput` (finding 7).
-            let toAdd = toAddIDs.compactMap { id in
-                self.outputIDs[id].map { (id, $0, self.lastDescriptors[id]) }
+                let previous = self.desiredOn[id]
+                self.desiredOn[id] = wantOn
+                // Kick only if the desired changed AND no loop is already running for
+                // this id (a running loop re-reads `desiredOn` when its op settles).
+                if previous != wantOn, !self.converging.contains(id) {
+                    self.converging.insert(id)
+                    kicks.append((id, outputID))
+                }
             }
-            let toRemove = toRemoveIDs.compactMap { id in self.outputIDs[id].map { (id, $0) } }
-            return (toAdd, toRemove)
+            // Ids that vanished from the model but were desired-on: drop their
+            // stale target so a re-appearance starts clean.
+            for id in Array(self.desiredOn.keys) where self.known[id] == nil {
+                self.desiredOn[id] = nil
+            }
+            return kicks
         }
 
-        Task { [weak self] in
-            guard let self else { return }
-            await self.converge(toAdd: plan.toAdd, toRemove: plan.toRemove)
+        for (id, outputID) in toKick {
+            Task { [weak self] in
+                guard let self else { return }
+                await self.convergeDevice(id: id, outputID: outputID)
+            }
         }
     }
 
-    // MARK: setOutputSet convergence (best-effort, D4)
+    // MARK: Per-device serial converge (best-effort, D4; coalesced, root cause 1)
 
-    /// Diff-and-converge over the engine's per-device `addOutput`/`removeOutput`
-    /// primitives (there is no atomic "replace the whole set" like OwnTone's
-    /// `outputs/set`). **Best-effort partial failure (D4): apply what succeeds, mark
-    /// the failed device unavailable, emit `deviceUpdated` — no rollback.** A group
-    /// activation that half-fails leaves an accurate mixed state, which the UI
-    /// already tolerates.
+    /// Drive ONE device toward its latest `desiredOn` target, one engine op at a
+    /// time. Re-reads the coalesced target after each op completes, so rapid
+    /// toggle spam that flipped the target mid-op converges to the FINAL value with
+    /// no overlapping add/removeOutput for the same device.
     ///
-    /// The engine marshals all C calls onto one thread, so issuing these
-    /// concurrently is non-blocking but not wall-clock parallel; we issue them
-    /// sequentially for a simple, deterministic best-effort story (removals first so
-    /// a swap frees the old session before the new one arms).
-    private func converge(toAdd: [(id: String, outputID: OutputID, descriptor: DeviceDescriptor?)],
-                          toRemove: [(id: String, outputID: OutputID)]) async {
-        for (id, outputID) in toRemove {
-            do {
-                try await engine.removeOutput(outputID)
-                stateQueue.sync {
-                    self.added.remove(id)
-                    self.applyLocal(id) { $0.isSelected = false }
-                }
-            } catch {
-                // Removal failed — best-effort: leave it in `added`/selected (it may
-                // still be streaming) and surface it as unavailable so the UI shows
-                // the failure rather than a silent wrong state.
-                stateQueue.sync { self.markUnavailable(id) }
+    /// Invariant on entry: `converging` already contains `id` (the caller claimed
+    /// the slot under `stateQueue`). On exit the slot is released.
+    ///
+    /// D4 best-effort: a failed op marks the device unavailable + parks it in
+    /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
+    /// and stops the loop; the park is cleared by a later discovery/state update or
+    /// a user re-toggle (root cause 4).
+    private func convergeDevice(id: String, outputID: OutputID) async {
+        defer {
+            // Release the in-flight slot. If the target moved again while we were
+            // settling (e.g. a flip arrived after our last op but the slot was still
+            // held), re-kick so we chase it — the release + re-check is atomic under
+            // stateQueue so a concurrent setOutputSet can't slip a kick past us.
+            let requeue: OutputID? = stateQueue.sync {
+                self.converging.remove(id)
+                guard !self.failedGate.contains(id),
+                      let want = self.desiredOn[id],
+                      let out = self.outputIDs[id],
+                      want != self.added.contains(id) else { return nil }
+                self.converging.insert(id)
+                return out
+            }
+            if let requeue {
+                Task { [weak self] in await self?.convergeDevice(id: id, outputID: requeue) }
             }
         }
 
-        for (id, outputID, descriptor) in toAdd {
-            do {
-                // Feed the engine's discovery immediately before addOutput and await
-                // it, so the engine is guaranteed to know this device even if the
-                // fire-and-forget `updateDiscovery` from handleDiscovery hasn't
-                // resolved yet (finding 7: otherwise addOutput throws unknownOutput
-                // and the device is wrongly surfaced as failed). `updateDiscovery` is
-                // idempotent — re-feeding an already-known descriptor just updates it.
-                if let descriptor { try await engine.updateDiscovery(descriptor) }
-                try await engine.addOutput(outputID)
-                stateQueue.sync {
-                    self.added.insert(id)
-                    self.applyLocal(id) {
-                        $0.isSelected = true
-                        // A successful add proves the device is reachable.
-                        $0.isAvailable = true
+        while true {
+            // Snapshot the current op to issue from the coalesced target.
+            let step: (want: Bool, descriptor: DeviceDescriptor?)? = stateQueue.sync {
+                guard !self.failedGate.contains(id), let want = self.desiredOn[id] else { return nil }
+                let isOn = self.added.contains(id)
+                guard want != isOn else { return nil } // already at target
+                return (want, want ? self.lastDescriptors[id] : nil)
+            }
+            guard let step else { return } // converged (or parked)
+
+            if step.want {
+                do {
+                    // Feed the engine's discovery before addOutput ONLY when the
+                    // engine doesn't already know this descriptor or it changed
+                    // (root cause 2: re-feeding an unchanged descriptor every toggle
+                    // caused the duplicate "Adding AirPlay device" storm). The first
+                    // feed / a genuinely changed descriptor still closes finding 7's
+                    // startup race.
+                    if let descriptor = self.descriptorToFeed(id: id) {
+                        try await engine.updateDiscovery(descriptor)
+                        stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
+                    try await engine.addOutput(outputID)
+                    stateQueue.sync {
+                        // An out-of-band `.failed` for this id can arrive on the state
+                        // stream between addOutput returning and this post-success
+                        // write. `applyEngineState` will have set `failedGate` (device
+                        // desired-on) and marked the device unavailable/deselected. Do
+                        // NOT clobber that failure by force-selecting a dead session:
+                        // if the device was parked in the interim, leave it parked and
+                        // don't re-add — the failure the engine just reported wins.
+                        guard !self.failedGate.contains(id) else { return }
+                        self.added.insert(id)
+                        self.applyLocal(id) { $0.isSelected = true; $0.isAvailable = true }
+                    }
+                } catch {
+                    // D4: no rollback of anything else. Mark THIS device
+                    // unavailable + deselected and PARK it so the loop stops issuing
+                    // new sessions post-failure (root cause 5). Recoverable via a
+                    // later discovery/state update or a user re-toggle (root cause 4).
+                    stateQueue.sync {
+                        self.added.remove(id)
+                        self.failedGate.insert(id)
+                        self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+                    }
+                    return
                 }
-            } catch {
-                // D4: the add failed — DON'T roll back the ones that succeeded. Mark
-                // just this device unavailable + not selected and emit deviceUpdated.
-                stateQueue.sync {
-                    self.added.remove(id)
-                    self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+            } else {
+                do {
+                    try await engine.removeOutput(outputID)
+                    stateQueue.sync {
+                        self.added.remove(id)
+                        self.applyLocal(id) { $0.isSelected = false }
+                    }
+                } catch {
+                    // Removal failed — best-effort: surface unavailable but do NOT
+                    // park (a stuck-on session should still be retryable). Drop it
+                    // from `added` so the loop can re-issue the stop on the next pass.
+                    stateQueue.sync {
+                        self.added.remove(id)
+                        self.markUnavailable(id)
+                    }
+                    return
                 }
             }
+        }
+    }
+
+    /// The descriptor to feed the engine before an addOutput, or `nil` if the
+    /// engine already knows an identical descriptor for this id (root cause 2:
+    /// avoid the per-toggle re-feed storm). On `stateQueue`-read but callable off
+    /// it (reads are snapshotted under `sync`).
+    private func descriptorToFeed(id: String) -> DeviceDescriptor? {
+        stateQueue.sync {
+            guard let current = self.lastDescriptors[id] else { return nil }
+            if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
+                return nil // engine already has this exact descriptor
+            }
+            return current
+        }
+    }
+
+    /// The last descriptor actually fed to the engine per id, so a converge can
+    /// skip re-feeding an unchanged descriptor (root cause 2). Cleared when the
+    /// device disappears / downgrades (the engine descriptor is removed then too).
+    private var fedDescriptors: [String: DeviceDescriptor] = [:]
+
+    /// Structural equality for the descriptor fields the engine's discovery feed
+    /// actually consumes (`DeviceDescriptor` isn't `Equatable`). If any of these
+    /// changed, the engine's registry entry would differ and a re-feed is warranted.
+    static func descriptorsEqual(_ a: DeviceDescriptor, _ b: DeviceDescriptor) -> Bool {
+        a.name == b.name && a.hostname == b.hostname && a.address == b.address
+            && sameFamily(a.family, b.family) && a.port == b.port && a.txtRecord == b.txtRecord
+    }
+
+    /// `AddressFamily` isn't `Equatable` in the engine's public surface (and we
+    /// don't own it), so compare the two cases explicitly.
+    private static func sameFamily(_ a: AddressFamily, _ b: AddressFamily) -> Bool {
+        switch (a, b) {
+        case (.ipv4, .ipv4), (.ipv6, .ipv6): return true
+        default: return false
         }
     }
 
@@ -373,6 +502,9 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     /// is swallowed (the descriptor removal that follows deregisters it anyway).
     private func teardownEngineOutput(id: String) {
         let outputID: OutputID? = stateQueue.sync {
+            // A future re-add must re-feed the engine's discovery (the descriptor is
+            // being deregistered), so forget the fed memo regardless of add state.
+            self.fedDescriptors[id] = nil
             guard self.added.contains(id) else { return nil }
             self.added.remove(id)
             return self.outputIDs[id]
@@ -384,11 +516,30 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
 
     /// Feed an AP2 device into the engine's discovery so it becomes `addOutput`-able.
     /// AP1-only devices are NEVER fed (D6) — the engine is an AP2-only sender.
+    ///
+    /// This is the DISCOVERY-driven feed (fires on genuine appear/update events,
+    /// not per toggle). It records what it fed into `fedDescriptors` so the
+    /// converge path's `descriptorToFeed` can skip a redundant re-feed of the exact
+    /// same descriptor (root cause 2). Only feeds when the descriptor is new or
+    /// changed, so a repeated identical `.updated` doesn't re-add either.
     private func feedEngineIfAP2(_ discovered: DiscoveredDevice, appearing: Bool) {
         guard discovered.isAirPlay2Supported else { return }
-        let engine = self.engine
         let descriptor = discovered.descriptor
-        Task { try? await engine.updateDiscovery(descriptor) }
+        let id = discovered.id
+        let shouldFeed: Bool = stateQueue.sync {
+            if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, descriptor) {
+                return false
+            }
+            return true
+        }
+        guard shouldFeed else { return }
+        let engine = self.engine
+        Task { [weak self] in
+            do {
+                try await engine.updateDiscovery(descriptor)
+                self?.stateQueue.sync { self?.fedDescriptors[id] = descriptor }
+            } catch { /* engine not up yet; converge will feed before addOutput */ }
+        }
     }
 
     private func removeEngineDiscovery(id: String) {
@@ -413,8 +564,16 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         self.outputIDs[id] = discovered.outputID
         if discovered.isAirPlay2Supported {
             self.lastDescriptors[id] = discovered.descriptor
+            // Availability recovery (root cause 4): a fresh AP2 (re-)resolution is
+            // evidence the device is reachable again, so clear any terminal-failure
+            // park — the device becomes re-enableable on the next user toggle (or,
+            // if it's still desired-on, the loop below re-kicks it).
+            self.failedGate.remove(id)
         } else {
             self.lastDescriptors[id] = nil
+            // The AP2 advert is gone: the engine descriptor will be removed, so a
+            // future re-add must re-feed. Drop the fed-descriptor memo.
+            self.fedDescriptors[id] = nil
         }
 
         let mapped = mapDiscovered(discovered)
@@ -432,6 +591,20 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
             order.append(id)
             emit(.deviceAdded(mapped))
         }
+
+        // Availability recovery (root cause 4): if this device is still desired-on
+        // but isn't streaming and no op is in flight (e.g. it just recovered from a
+        // failure park cleared above, or re-appeared after dropping), re-kick the
+        // converge loop so the intended selection is retried without a user toggle.
+        if discovered.isAirPlay2Supported,
+           self.desiredOn[id] == true,
+           !self.added.contains(id),
+           !self.converging.contains(id),
+           !self.failedGate.contains(id),
+           let outputID = self.outputIDs[id] {
+            self.converging.insert(id)
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        }
     }
 
     /// A device dropped off the network. It stays in the model as unavailable (so a
@@ -439,6 +612,9 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     /// On `stateQueue`.
     private func markDisappeared(_ id: String) {
         self.added.remove(id)
+        // The engine descriptor is deregistered on disappear; a future re-add must
+        // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
+        self.fedDescriptors[id] = nil
         guard var device = known[id] else { return }
         var changed = false
         if device.isAvailable { device.isAvailable = false; changed = true }
@@ -477,32 +653,63 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
     /// contract), so we diff against the last-known device before emitting to
     /// de-dupe. On `stateQueue`.
     private func applyEngineState(outputID: OutputID, state: OutputState) {
-        stateQueue.sync {
+        // A good transition (.streaming/.connected) for a device the user has since
+        // turned OFF must NOT re-wedge it ON — instead re-kick converge to tear the
+        // stale session down. We compute any needed re-kick under the lock and fire
+        // it after releasing it (convergeDevice takes the lock itself).
+        let rekick: (id: String, outputID: OutputID)? = stateQueue.sync {
             // Find the string id for this engine handle (discovery owns the mapping).
             guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key,
-                  var device = self.known[id] else { return }
+                  var device = self.known[id] else { return nil }
 
             let before = device
             switch state {
             case .streaming, .connected:
+                // Reconcile against the user's latest intent. If the device is
+                // desired OFF (a toggle-OFF that raced this queued good transition),
+                // do NOT insert `added` / select it — that would re-wedge a device
+                // the user just turned off, streaming with no converge scheduled
+                // (the state stream is not a converge re-kick site). Instead claim
+                // the converging slot (if free) and re-kick so the loop tears the
+                // stale session down. If it's already converging, the running loop
+                // will chase `desiredOn` when its current op settles — nothing to do.
+                if self.desiredOn[id] == false {
+                    let out = self.outputIDs[id]
+                    if let out, !self.converging.contains(id), self.added.contains(id) {
+                        self.converging.insert(id)
+                        return (id, out)
+                    }
+                    return nil
+                }
                 device.isAvailable = true
                 device.isSelected = true
                 self.added.insert(id)
+                // Recovery (root cause 4): a good transition clears any failure
+                // park so the device is re-enableable / stays converged.
+                self.failedGate.remove(id)
             case .failed, .passwordRequired:
                 // A live session died / needs a PIN we don't have: surface it as
-                // unavailable + deselected and drop it from the streaming set.
+                // unavailable + deselected and drop it from the streaming set. PARK
+                // it (root cause 5) so converge doesn't immediately re-issue a
+                // session against a receiver that just failed — the park is cleared
+                // by the next discovery/good-state transition or a user re-toggle.
                 device.isAvailable = false
                 device.isSelected = false
                 self.added.remove(id)
+                if self.desiredOn[id] == true { self.failedGate.insert(id) }
             case .stopped:
                 device.isSelected = false
                 self.added.remove(id)
             case .startup:
-                return // non-terminal progress; nothing to render yet
+                return nil // non-terminal progress; nothing to render yet
             }
-            guard device != before else { return }   // de-dupe the completion echo
+            guard device != before else { return nil }   // de-dupe the completion echo
             self.known[id] = device
             self.emit(.deviceUpdated(device))
+            return nil
+        }
+        if let rekick {
+            Task { [weak self] in await self?.convergeDevice(id: rekick.id, outputID: rekick.outputID) }
         }
     }
 

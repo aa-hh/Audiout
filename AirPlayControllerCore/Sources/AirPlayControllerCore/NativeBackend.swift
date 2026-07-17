@@ -1,4 +1,5 @@
 import Foundation
+import AudioToolbox
 import AirPlayEngine
 
 /// The native ``OutputBackend`` (T-NB-BACKEND-1): the app-visible seam that
@@ -166,6 +167,14 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         stateQueue.async {
             guard !self.started else { return }
             self.started = true
+            // Surface the Mac's OWN current output device immediately (BUG B), so
+            // the popover has a "Current Device" row and GroupController can seed
+            // the local-passthrough default the moment `start()` runs — before any
+            // AirPlay discovery, and independent of whether the engine comes up.
+            // It is NEVER fed to the engine or `addOutput`-ed: it's the local
+            // output, not an AirPlay receiver (guarded everywhere by
+            // `isLocalDevice` / `supportsAirPlay2 == false`).
+            self.surfaceLocalDevice()
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. AP2
@@ -490,6 +499,81 @@ public final class NativeBackend: OutputBackend, @unchecked Sendable {
         case (.ipv4, .ipv4), (.ipv6, .ipv6): return true
         default: return false
         }
+    }
+
+    // MARK: Current (local) output device (BUG B)
+    //
+    // The Mac's own default output is surfaced as a Device with
+    // `isLocalDevice == true`, `kind == .localMac`, `isAvailable == true`, and
+    // `supportsAirPlay2 == false` (mirroring MockBackend's local fixture,
+    // MockBackend.swift:457). It is the "Current Device" the popover renders and
+    // the target GroupController defaults Selected Devices to on launch
+    // (passthrough). Because `supportsAirPlay2 == false` it can never be desired-on
+    // in `setOutputSet` (which skips non-AP2 ids) and it is never fed to
+    // `engine.updateDiscovery` (only discovery events feed the engine), so it is
+    // structurally impossible for the local device to reach the engine.
+
+    /// Stable sentinel id for the Mac's own output. A FIXED id (not the Core Audio
+    /// UID) so it: (a) is stable across default-output changes, (b) can never
+    /// collide with an AirPlay colon-hex `deviceid`, and (c) matches how
+    /// MockBackend keys its local device — the two backends present the local row
+    /// identically, so selection/persistence keyed on `Device.id` behaves the same
+    /// whichever backend is live. The real discriminator everywhere is
+    /// `Device.isLocalDevice`, not this id.
+    static let localDeviceID = "local-mac"
+
+    /// Add the current local output device to the model and emit `deviceAdded`.
+    /// On `stateQueue`. Idempotent-ish: only appended once per `start()` (cleared
+    /// on `stop()` with everything else).
+    private func surfaceLocalDevice() {
+        let id = Self.localDeviceID
+        guard known[id] == nil else { return }
+        let device = Device(
+            id: id,
+            name: Self.currentOutputDeviceName(),
+            kind: .localMac,
+            isAvailable: true,
+            supportsAirPlay2: false,       // mirrors MockBackend's local fixture
+            volume: 65,
+            isLocalDevice: true
+        )
+        known[id] = device
+        order.append(id)
+        emit(.deviceAdded(device))
+    }
+
+    /// Best-effort name of the system default output device via Core Audio
+    /// (`kAudioHardwarePropertyDefaultOutputDevice` → `kAudioObjectPropertyName`).
+    /// Falls back to "This Mac" if any query fails, so the row always has a label.
+    ///
+    /// TODO (nice-to-have, PLAN-PHASE-2B): react to system-default-output changes
+    /// via an `AudioObjectAddPropertyListener` on
+    /// `kAudioHardwarePropertyDefaultOutputDevice` and re-`emit(.deviceUpdated)`
+    /// with the new name. Not required for BUG B — the name is read once at
+    /// `start()`.
+    static func currentOutputDeviceName(fallback: String = "This Mac") -> String {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let devErr = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID)
+        guard devErr == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return fallback }
+
+        var nameAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var name: CFString? = nil
+        var nameSize = UInt32(MemoryLayout<CFString?>.size)
+        let nameErr = withUnsafeMutablePointer(to: &name) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &nameAddr, 0, nil, &nameSize, ptr)
+        }
+        guard nameErr == noErr, let cf = name else { return fallback }
+        let str = cf as String
+        return str.isEmpty ? fallback : str
     }
 
     // MARK: Discovery → app model (all on stateQueue)

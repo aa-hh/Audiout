@@ -449,7 +449,13 @@ final class GroupControllerTests: XCTestCase {
 
     // MARK: Routing persistence (SPEC §9b — Selected Devices + Main Out)
 
-    func testRoutingPersistenceRoundTrip() async throws {
+    // DECISION (Alec, 2026-07-17): the live Selected-Devices routing set does
+    // NOT auto-resume on launch — every launch defaults to {current device} =
+    // passthrough. Saved GROUPS still persist and stay re-applyable. This test
+    // pins that split: the group loads on session 2, but the previously-selected
+    // AirPlay set + group Main Out target do NOT restore — they reset to the
+    // local-passthrough default.
+    func testGroupsPersistButRoutingResetsToLocalOnLaunch() async throws {
         let dir = tempDirectory()
         let routingStore = RoutingStore(directory: dir)
 
@@ -462,12 +468,21 @@ final class GroupControllerTests: XCTestCase {
         _ = c1.setDeviceSelected("homepod-bed", true)
         c1.setMainOut(.group(id: "g1"))
 
-        // Session 2: a fresh controller over the same stores reloads the state.
+        // Session 2: a fresh controller over the same stores. The GROUP is
+        // reloaded, but the live routing set is NOT resumed — it resets to the
+        // local-passthrough default once the fleet is known.
         let backend2 = try await makeBackend()
         let c2 = GroupController(backend: backend2, store: GroupStore(directory: dir),
                                  routingStore: RoutingStore(directory: dir), loadPersisted: true)
-        XCTAssertEqual(c2.selectedDeviceIDs, ["office", "homepod-bed"], "Selected Devices round-tripped")
-        XCTAssertEqual(c2.mainOut, .group(id: "g1"), "Main Out target round-tripped")
+        XCTAssertEqual(c2.groups.map(\.id), ["g1"], "saved group still persists")
+        XCTAssertTrue(c2.selectedDeviceIDs.isEmpty,
+                      "persisted AirPlay selection is NOT auto-resumed on launch")
+        XCTAssertEqual(c2.mainOut, .selectedDevices,
+                       "persisted group Main Out target is NOT auto-resumed on launch")
+        c2.ensureDefaultSelection()
+        XCTAssertEqual(c2.selectedDeviceIDs, ["local-mac"],
+                       "launch default = {current device} = passthrough")
+        XCTAssertTrue(c2.isPassthrough)
     }
 
     func testRoutingDefaultWhenNoPersistedState() async throws {

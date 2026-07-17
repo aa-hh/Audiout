@@ -91,22 +91,30 @@ public final class GroupController {
         self.store = store
         self.routingStore = routingStore
         self.groups = loadPersisted ? ((try? store.load()) ?? []) : []
-        if loadPersisted, let state = try? routingStore.load() {
-            self.selectedDeviceIDs = Set(state.selectedDeviceIDs)
-            self.mainOut = state.mainOut
-            self.loadedPersistedRouting = true
-        }
+        // DECISION (Alec, 2026-07-17): the live Selected-Devices routing set is
+        // NOT auto-resumed on launch. Every launch defaults to {current device}
+        // = passthrough, so a previously-selected AirPlay device never
+        // auto-streams when the app opens. Saved GROUPS still persist and stay
+        // re-applyable (loaded above); only this live routing set resets to
+        // local. We therefore do NOT read the persisted `selectedDeviceIDs` /
+        // `mainOut` from `routingStore` here — `ensureDefaultSelection()` seeds
+        // {local} once the fleet (incl. the current device) is known.
+        //
+        // `routingStore` is retained so ongoing changes are still SAVED (via
+        // `persistRouting()`), which keeps the field live and lets a future
+        // "resume last routing" option read it back without a signature change.
+        _ = routingStore
     }
 
-    /// True once persisted routing has been loaded (or established), so
-    /// ``ensureDefaultSelection()`` doesn't stomp a real saved set with the
-    /// default.
+    /// True once the out-of-the-box default has been established, so
+    /// ``ensureDefaultSelection()`` doesn't re-seed after the user has made a
+    /// deliberate selection that was later cleared to empty.
     private var loadedPersistedRouting = false
 
     /// Establish the out-of-the-box default once the fleet is known (SPEC §9b):
     /// **Current Device toggled ON**, Main Out = Selected Devices ⇒ passthrough.
-    /// No-op if a persisted set was already loaded or a selection already exists.
-    /// The app calls this after discovery; safe to call repeatedly.
+    /// No-op once established or if a selection already exists. The app calls
+    /// this after every discovery event; safe to call repeatedly.
     public func ensureDefaultSelection() {
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
         guard let local = backend.devices.first(where: \.isLocalDevice) else { return }

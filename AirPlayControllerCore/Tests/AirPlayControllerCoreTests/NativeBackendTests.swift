@@ -240,6 +240,55 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(engine.addedIDs.isEmpty, "AP1 device must NEVER be addOutput-ed (D6)")
     }
 
+    // MARK: Current (local) device (BUG B)
+
+    /// `start()` surfaces the Mac's own output as a local device: isLocalDevice,
+    /// kind == .localMac, available, supportsAirPlay2 == false — mirroring
+    /// MockBackend's local fixture so the popover renders a "Current Device" row.
+    func testStartSurfacesLocalCurrentDevice() async {
+        let (backend, engine, _) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Poll: the local device is added on stateQueue at start().
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+        let local = backend.devices.first { $0.isLocalDevice }
+        XCTAssertNotNil(local, "NativeBackend must surface a current/local device")
+        XCTAssertEqual(local?.kind, .localMac)
+        XCTAssertEqual(local?.isAvailable, true)
+        XCTAssertEqual(local?.supportsAirPlay2, false, "local device mirrors MockBackend: not AP2")
+        XCTAssertEqual(local?.id, NativeBackend.localDeviceID)
+        XCTAssertFalse(local?.name.isEmpty ?? true, "local device must have a name")
+    }
+
+    /// The local device is emitted as a `deviceAdded` event to subscribers.
+    func testLocalDeviceEmittedAsDeviceAdded() async {
+        let (backend, _, _) = makeBackend()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.isLocalDevice } else { return false } }
+        } after: { backend.start() }
+        defer { backend.stop() }
+
+        let local = events.compactMap { if case .deviceAdded(let d) = $0, d.isLocalDevice { return d } else { return nil } }.first
+        XCTAssertNotNil(local, "local device should arrive as deviceAdded")
+        XCTAssertEqual(local?.kind, .localMac)
+    }
+
+    /// The local device is NEVER fed to the engine nor addOutput-ed, even when a
+    /// `setOutputSet` names it (it is not AP2, so it is structurally skipped).
+    func testLocalDeviceNeverReachesEngine() async {
+        let (backend, engine, _) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        backend.setOutputSet([NativeBackend.localDeviceID])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(engine.fedIDs.isEmpty, "local device must NOT be fed to the engine")
+        XCTAssertTrue(engine.addedIDs.isEmpty, "local device must NEVER be addOutput-ed")
+    }
+
     /// An out-of-band engine state transition (`.streaming` → `.failed` after the
     /// op resolved) emits a `deviceUpdated` marking the device unavailable.
     func testEngineStateTransitionEmitsDeviceUpdated() async {

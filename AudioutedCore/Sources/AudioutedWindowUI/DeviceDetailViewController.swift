@@ -28,9 +28,15 @@ import AudioutedSharedUI
 ///   `DeviceIconController.setSymbolName`/`resetIcon`, instant-apply like the
 ///   group editor's icon well;
 /// - the device name as a title;
-/// - a read-only metadata form (secondary-colour captions): Status, Available,
-///   Volume, Kind, and "In groups:" — the saved groups (from the injected
-///   `GroupController`) whose `memberIDs` contain this device.
+/// - a read-only metadata form (secondary-colour captions), sectioned into two
+///   groups separated by a thin stock `NSBox` divider: device STATE (Status,
+///   Available, Volume, Kind) above the line, MEMBERSHIP ("In groups:" — the
+///   saved groups from the injected `GroupController` whose `memberIDs`
+///   contain this device) below it;
+/// - a minimal, single-line secondary-colour hint ("View-only — control
+///   playback from the menu-bar popover.") under the form. Deliberately
+///   terse: the fuller "configure here / play in the popover" teaching lives
+///   in a footer elsewhere in this window (a sibling task), not restated here.
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group-activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -56,6 +62,10 @@ public final class DeviceDetailViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let formStack = NSStackView()
+    // Text is set at declaration (not in `loadView`) so it's correct even
+    // before the view hierarchy is lazily loaded — `refreshUI()` mutates the
+    // other labels the same way, independent of `loadView` having run.
+    private let hintLabel = NSTextField(labelWithString: DeviceDetailViewController.viewOnlyHint)
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let availableValueLabel = NSTextField(labelWithString: "")
@@ -91,20 +101,44 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.alignment = .center
         nameLabel.lineBreakMode = .byTruncatingTail
 
-        formStack.translatesAutoresizingMaskIntoConstraints = false
-        formStack.orientation = .vertical
-        formStack.alignment = .leading
-        formStack.spacing = 8
-
+        // Two logical groups within one outer stack: device STATE (status,
+        // availability, volume, kind) above a thin stock separator, then
+        // MEMBERSHIP ("In groups:") below it — the wider inter-group spacing
+        // plus the divider is what actually reads as sectioning; the rows
+        // within a group keep the tighter spacing they always had.
+        let stateStack = NSStackView()
+        stateStack.orientation = .vertical
+        stateStack.alignment = .leading
+        stateStack.spacing = 10
         for (caption, valueLabel) in [
             ("Status", statusValueLabel),
             ("Available", availableValueLabel),
             ("Volume", volumeValueLabel),
             ("Kind", kindValueLabel),
-            ("In groups:", groupsValueLabel),
         ] {
-            formStack.addArrangedSubview(makeMetadataRow(caption: caption, valueLabel: valueLabel))
+            stateStack.addArrangedSubview(makeMetadataRow(caption: caption, valueLabel: valueLabel))
         }
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let membershipRow = makeMetadataRow(caption: "In groups:", valueLabel: groupsValueLabel)
+
+        formStack.translatesAutoresizingMaskIntoConstraints = false
+        formStack.orientation = .vertical
+        formStack.alignment = .leading
+        formStack.spacing = 18
+        for v in [stateStack, divider, membershipRow] { formStack.addArrangedSubview(v) }
+        // Stretch the divider to the column's full width — an arranged
+        // subview otherwise sizes to its own intrinsic (near-zero) width
+        // under `.leading` alignment, drawing an invisible sliver.
+        divider.widthAnchor.constraint(equalTo: formStack.widthAnchor).isActive = true
+
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.lineBreakMode = .byTruncatingTail
 
         let container = NSView()
         // The form column: capped to `contentMaxWidth`, leading-aligned, pinned
@@ -114,7 +148,7 @@ public final class DeviceDetailViewController: NSViewController {
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [iconWell, nameLabel, formStack] { column.addSubview(v) }
+        for v in [iconWell, nameLabel, formStack, hintLabel] { column.addSubview(v) }
         container.addSubview(column)
 
         NSLayoutConstraint.activate([
@@ -130,14 +164,24 @@ public final class DeviceDetailViewController: NSViewController {
             nameLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             nameLabel.trailingAnchor.constraint(equalTo: column.trailingAnchor),
 
-            formStack.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 20),
+            formStack.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 24),
             formStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             formStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
-            formStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
+
+            hintLabel.topAnchor.constraint(equalTo: formStack.bottomAnchor, constant: 16),
+            hintLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
+            hintLabel.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
 
         view = container
     }
+
+    /// Minimal one-line view-only hint. Deliberately terse — the fuller
+    /// "configure here / play in the popover" teaching lives in a footer
+    /// elsewhere in this window (a sibling task); this pane only needs to
+    /// mark itself as non-interactive.
+    private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
 
     /// Build one "Caption   Value" row: a fixed-width secondary-colour caption
     /// (so all five rows' values line up in a column) plus the value label.
@@ -304,6 +348,11 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// The "In groups:" value text ("None" when the device is in no saved group).
     public var test_groupMembershipText: String { groupsValueLabel.stringValue }
+
+    /// The minimal view-only hint's visible text — asserts it stays a single,
+    /// short line rather than restating the fuller footer copy owned
+    /// elsewhere in this window.
+    public var test_hintText: String { hintLabel.stringValue }
 
     /// The symbol name currently rendered by the icon well.
     public var test_iconSymbolName: String? {

@@ -109,6 +109,15 @@ public final class SettingsWindowController: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    /// The content view controller set as the window's `contentViewController`
+    /// (`rootVC`) — exposed so the shared control-panel shell
+    /// (`AudioutedSharedUI.ControlPanelWindowController`) can host this same
+    /// assembled content inside its own panel later, without this controller
+    /// creating a second copy of the sections. Does not affect the existing
+    /// window path: `showWindow()`/`window` are unchanged, and this accessor
+    /// is purely additive.
+    public var settingsContentViewController: NSViewController { rootVC }
+
     // MARK: Test-support hooks
 
     public var test_general: GeneralSettingsViewController { generalVC }

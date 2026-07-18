@@ -26,6 +26,36 @@ to a backend directly.
 - **The content pane is swapped, not toggled.** `swapContent(to:)` removes
   and re-adds the content `NSSplitViewItem`; there is no hidden/shown view
   pair to reach for instead.
+- **Persistent footer caption, never flag-gated.** `MixerWindowController`
+  wraps `splitViewController` in a plain `rootViewController` (split view on
+  top, `footerLabel` pinned beneath) and it's `rootViewController` — not the
+  split view — that both `window.contentViewController` and the public
+  `contentController` accessor vend. That means the footer ("Set up here —
+  play from the menu-bar icon", stock `NSTextField`, `.secondaryLabelColor`,
+  centered, small system font) is ALWAYS on screen in the Groups content,
+  whether hosted in the standalone window or handed to the control-panel
+  shell — it is content, not chrome, so `AIRPLAY_CONTROL_PANEL` has no say
+  over it. It teaches the config-vs-playback split ONCE as the full sentence;
+  `GroupsEmptyStateViewController.subtitleLabel` ("Play groups from the menu
+  bar") is a shorter, lighter echo shown only when the empty pane itself is
+  up — don't duplicate the footer's exact wording there. Test hook:
+  `test_footerText`.
+- **This controller only builds the shipping `NSWindow`; the control-panel
+  shell is a separate host.** `makeContainer()` always builds the
+  document-style window. The control-panel rollout (`AIRPLAY_CONTROL_PANEL=1`)
+  does NOT live here — the app hosts this controller's content in the shared
+  `ControlPanelWindowController` (in `AudioutedSharedUI`) via the public
+  `contentController` accessor (the split view controller). There is no
+  `Chrome` enum, no `showPanel`, and no `onClose` on this type anymore — the
+  land-home-on-close behavior belongs to the shell. When touching hosting,
+  edit the shell, not this controller.
+- **The create sheet gates on the split VC's OWN host window, not
+  `self.window`.** `presentCreateSheet` presents on `splitViewController` and
+  guards `splitViewController.view.window?.isVisible`, so the sheet re-parents
+  correctly whether the content sits in the standalone window OR the shell's
+  panel (where `self.window` is off screen and would be the wrong window to
+  consult). Headless runs (host never shown) keep the sheet reference and
+  drive it through the `test_*` hooks.
 - **Group creation moved to a sheet.** The old in-pane draft flow is gone.
   `GroupCreationSheetController` is a standard macOS sheet (`presentAsSheet`)
   that never activates a group — the caller selects the resolved group and
@@ -69,7 +99,12 @@ to a backend directly.
 - **The icon hover scrim is the one approved custom-drawn element**
   (`../../AGENTS.md`) — `DeviceIconWellView`, shared by exactly two hosts:
   `DeviceDetailViewController` and `GroupEditorViewController` (header
-  parity). Hovering the large icon shows a translucent full-coverage
+  parity). The edit affordance is discoverable AT REST, not hover-only: a
+  small faint circular pencil badge sits in the well's bottom-trailing
+  corner at all times and steps up to a higher alpha on hover; both the
+  badge and the full scrim honor Reduce Motion identically (instant
+  show/hide vs. a brief cross-fade), through the same `setOverlayVisible(_:)`
+  call. Hovering the large icon shows a translucent full-coverage
   rounded-rect scrim with a centered pencil glyph; clicking it presents
   `IconPickerViewController` as an anchored popover, and picking a symbol
   (or "use default") writes through `DeviceIconController` (devices) or
@@ -103,13 +138,13 @@ to a backend directly.
 
 | Type | Role |
 |---|---|
-| `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes; auto-select rule. |
-| `GroupsEmptyStateViewController` | "No groups yet" pane + New Group call-to-action. |
+| `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes; auto-select rule. Exposes `contentController` so the shared control-panel shell can host the same content, including the persistent footer caption. |
+| `GroupsEmptyStateViewController` | "No groups yet" empty state: primary message + secondary subtitle ("Play groups from the menu bar") + New Group call-to-action. |
 | `SidebarViewController` | Source-list (Groups + Devices sections); selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete; no creation flow. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
 | `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom hover scrim lives on its icon well. |
 | `IconPickerViewController` | Curated SF Symbol grid + validated free-text search, presented as an anchored popover; reports a symbol name via `onPick`. |
 | `MembershipRowView` | Checkbox + icon + name row used in creation sheet and editor. |
-| `DeviceIconWellView` | Shared large icon + hover scrim (the approved custom element); used by editor + detail headers. |
+| `DeviceIconWellView` | Shared large icon + at-rest edit badge + hover scrim (the approved custom element); used by editor + detail headers. |
 | `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |

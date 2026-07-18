@@ -167,7 +167,7 @@ let package = Package(
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
             name: "window-snapshot",
-            dependencies: ["AudioutedCore", "AudioutedWindowUI"]
+            dependencies: ["AudioutedCore", "AudioutedWindowUI", "AudioutedSharedUI"]
         ),
         .testTarget(
             name: "AudioutedCoreTests",

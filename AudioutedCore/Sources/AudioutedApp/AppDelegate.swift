@@ -119,6 +119,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stream finishes cleanly and we don't leak it past app exit.
     private var eventTask: Task<Void, Never>?
 
+    /// Control-panel prototype (design review 2026-07-18): route Groups through a
+    /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
+    /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
+    /// the shipping window path is untouched. See `dev/notes/`.
+    private let useControlPanel = ProcessInfo.processInfo.environment["AIRPLAY_CONTROL_PANEL"] == "1"
+
+    /// True while a control-panel session is live (panel opened, not yet closed).
+    /// A status-item click during a session re-summons the tucked panel (restore
+    /// in place) instead of toggling the popover.
+    private var controlPanelSessionActive = false
+
+    /// The ONE shared control-panel shell (control-panel rollout). The Groups,
+    /// Settings, and future Setup surfaces unify onto this single sticky floating
+    /// `NSPanel` instead of each owning an orphaned window: opening a different
+    /// surface swaps its content (`setContent`) rather than stacking a second
+    /// window. Created lazily on the first control-panel open, then reused; its
+    /// `onClose` "lands home" by re-presenting the popover.
+    private var controlPanel: ControlPanelWindowController?
+
+    /// Which surface the shared shell is currently hosting (control-panel
+    /// rollout). Groups today; Settings folds onto the same shell next.
+    private enum ControlPanelSurface { case groups, settings }
+    private var activePanelSurface: ControlPanelSurface = .groups
+
     /// Set once `applicationShouldTerminate` has begun tearing down (C1). A second
     /// Quit while the first is still waiting on `stopAndWait` must not re-enter
     /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
@@ -148,7 +172,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The button's action toggles the popover (SPEC §9 revised).
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] button in
-            self?.popoverController.toggle(relativeTo: button)
+            guard let self else { return }
+            // Control-panel rollout: while a control-panel session is live (the
+            // shell may be tucked away after an app-switch), a click restores the
+            // shared shell in place — whatever surface it's hosting — rather than
+            // toggling the popover. Otherwise: normal popover.
+            if self.useControlPanel, self.controlPanelSessionActive,
+               let shell = self.controlPanel {
+                shell.show(anchorRect: self.statusAnchorRect())
+                return
+            }
+            self.popoverController.toggle(relativeTo: button)
         }
 
         // The mixer model binds to the resolved backend, then the popover binds
@@ -263,6 +297,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `GroupController`, so menu and window never diverge.
     @MainActor
     private func openMixer() {
+        if useControlPanel {
+            openGroupsPanel()
+            return
+        }
         let controller: MixerWindowController
         if let existing = mixerWindowController {
             controller = existing
@@ -275,6 +313,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.update(devices: Array(devicesByID.values))
         controller.showWindow()
         log("Open Mixer… (window shown)")
+    }
+
+    /// Control-panel rollout: open Groups in the shared floating shell anchored
+    /// under the menu-bar item. Build/reuse the `MixerWindowController` (WINDOW
+    /// chrome — the shell provides the panel now; this controller only supplies
+    /// its content view), then host its content in the one shared shell.
+    @MainActor
+    private func openGroupsPanel() {
+        let controller: MixerWindowController
+        if let existing = mixerWindowController {
+            controller = existing
+        } else {
+            controller = MixerWindowController(groupController: groupController,
+                                               appRouting: appRouting,
+                                               deviceIconController: deviceIconController)
+            mixerWindowController = controller
+        }
+        controller.update(devices: Array(devicesByID.values))
+        presentInControlPanel(content: controller.contentController,
+                              title: "Groups",
+                              surface: .groups)
+        log("Open Groups (control panel)")
+    }
+
+    /// Host `content` in the ONE shared control-panel shell (control-panel
+    /// rollout). Create the shell and wire its land-home `onClose` exactly once;
+    /// otherwise swap its content in place (opening a different surface replaces
+    /// the current one in the same shell). Hands off from the popover (close it
+    /// first), records the active surface, marks the session live, and shows the
+    /// shell anchored just under the menu-bar item. When the shell later closes
+    /// for real, `onClose` re-presents the popover so you always land back
+    /// "home" and are never stranded in a dockless void.
+    @MainActor
+    private func presentInControlPanel(content: NSViewController,
+                                       title: String,
+                                       surface: ControlPanelSurface) {
+        let shell: ControlPanelWindowController
+        if let existing = controlPanel {
+            shell = existing
+        } else {
+            shell = ControlPanelWindowController()
+            shell.onClose = { [weak self] in
+                guard let self else { return }
+                self.controlPanelSessionActive = false
+                self.showPopoverHome()
+            }
+            controlPanel = shell
+        }
+        shell.setContent(content)
+        shell.setTitle(title)
+        activePanelSurface = surface
+        controlPanelSessionActive = true
+        popoverController.popover.performClose(nil)   // hand off from the popover
+        shell.show(anchorRect: statusAnchorRect())
+    }
+
+    /// Re-present the popover from the status item — the "return home" after the
+    /// control panel closes. No-op if it's somehow already showing.
+    @MainActor
+    private func showPopoverHome() {
+        guard let button = statusItemController.button else { return }
+        if !popoverController.popover.isShown {
+            popoverController.toggle(relativeTo: button)
+        }
+    }
+
+    /// The menu-bar item's frame in screen coordinates, for anchoring the panel
+    /// just beneath it. `nil` (item not yet in the bar) → the panel centers.
+    @MainActor
+    private func statusAnchorRect() -> NSRect? {
+        guard let button = statusItemController.button, let win = button.window else { return nil }
+        return win.convertToScreen(button.convert(button.bounds, to: nil))
     }
 
     /// Header gear target — open/focus the Settings window (previously a
@@ -293,6 +403,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
             settingsWindowController = controller
+        }
+        if useControlPanel {
+            presentInControlPanel(content: controller.settingsContentViewController,
+                                  title: "Settings",
+                                  surface: .settings)
+            log("Open Settings (control panel)")
+            return
         }
         controller.showWindow()
         log("Open Settings (window shown)")

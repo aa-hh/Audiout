@@ -281,6 +281,15 @@ final class DeviceDetailViewTests: XCTestCase {
                        "nothing to write through — the glyph stays at the kind default")
     }
 
+    // MARK: View-only hint
+
+    func testHintIsAMinimalSingleLineViewOnlyNotice() {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        detail.show(device: makeDevice())
+        XCTAssertEqual(detail.test_hintText, "View-only — control playback from the menu-bar popover.")
+        XCTAssertFalse(detail.test_hintText.contains("\n"), "stays a single line")
+    }
+
     // MARK: Hover scrim headless test hook
 
     func testSetOverlayVisibleDoesNotCrashHeadless() {

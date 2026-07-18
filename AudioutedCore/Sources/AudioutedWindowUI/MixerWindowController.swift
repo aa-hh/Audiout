@@ -71,6 +71,23 @@ public final class MixerWindowController: NSWindowController {
     private let detailViewController: DeviceDetailViewController
     private let emptyStateViewController = GroupsEmptyStateViewController()
 
+    /// Wraps `splitViewController` plus the persistent footer caption
+    /// (`footerLabel`) beneath it. This — not `splitViewController` — is what
+    /// both `window.contentViewController` AND the public `contentController`
+    /// accessor vend, so the footer is ALWAYS present in both the standalone
+    /// window and the control-panel shell (the footer teaches "config lives
+    /// here, playback lives in the menu bar" and is never flag-gated). See
+    /// `AudioutedWindowUI/AGENTS.md` for the full placement rationale.
+    private let rootViewController = NSViewController()
+
+    /// Persistent secondary-color caption beneath the split view. ALWAYS
+    /// visible in the Groups content (window or panel) — never gated by
+    /// `AIRPLAY_CONTROL_PANEL`. Pairs with, but doesn't duplicate, the empty
+    /// state's lighter nudge (`GroupsEmptyStateViewController.subtitleLabel`):
+    /// the footer is the one full teaching line; the empty-state subtitle is a
+    /// shorter contextual nudge shown only when there's nothing else on screen.
+    private let footerLabel = NSTextField(labelWithString: "Set up here — play from the menu-bar icon")
+
     /// The content split item — its view controller is swapped between the
     /// editor / detail / empty panes as the sidebar selection changes.
     private let contentSplitItem: NSSplitViewItem
@@ -104,21 +121,38 @@ public final class MixerWindowController: NSWindowController {
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(contentSplitItem)
 
+        // Root container: split view on top, persistent footer caption
+        // beneath it. Built as a real child controller (not just a subview)
+        // so the responder chain stays correct in both hosts.
+        footerLabel.translatesAutoresizingMaskIntoConstraints = false
+        footerLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        footerLabel.textColor = .secondaryLabelColor
+        footerLabel.alignment = .center
+        footerLabel.lineBreakMode = .byTruncatingTail
+
+        rootViewController.addChild(splitViewController)
+        let rootView = NSView()
+        let splitView = splitViewController.view
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(splitView)
+        rootView.addSubview(footerLabel)
+        NSLayoutConstraint.activate([
+            splitView.topAnchor.constraint(equalTo: rootView.topAnchor),
+            splitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            splitView.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -6),
+            footerLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 8),
+            footerLabel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -8),
+            footerLabel.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -8),
+        ])
+        rootViewController.view = rootView
+
         // Window chrome: full-size content view, NO toolbar (the master slider
-        // left with the mixer pane — live-test feedback 2026-07-18);
-        // `.titled/.closable/.resizable/.miniaturizable` for a normal
-        // document-style window.
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Groups"
-        window.contentViewController = splitViewController
+        // left with the mixer pane — live-test feedback 2026-07-18).
+        let window = Self.makeContainer()
+        window.contentViewController = rootViewController
         window.setContentSize(NSSize(width: 720, height: 460))
         window.center()
-        window.setFrameAutosaveName("MixerWindow")
         // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
 
         super.init(window: window)
@@ -163,6 +197,23 @@ public final class MixerWindowController: NSWindowController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Build the shipping document-style `NSWindow` container. The control-panel
+    /// rollout hosts this same content in a sticky floating panel instead — that
+    /// shell (`ControlPanelWindowController` in `AudioutedSharedUI`) is a separate
+    /// type that hosts `contentViewController`; this controller only ever builds
+    /// the window.
+    private static func makeContainer() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Groups"
+        window.setFrameAutosaveName("MixerWindow")
+        return window
+    }
+
     // MARK: App integration
 
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
@@ -178,6 +229,20 @@ public final class MixerWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The root content view controller — the split view (sidebar +
+    /// editor/detail/empty panes) PLUS the persistent footer caption beneath
+    /// it — hosting the sidebar + panes. Exposed so the shared control-panel
+    /// shell (`ControlPanelWindowController`) can host the exact same content
+    /// the standalone window shows — one controller, two possible hosts,
+    /// footer included in both (it is not flag-gated). Refreshing the content
+    /// before handing it off keeps a freshly-hosted panel correct.
+    /// (Named `contentController`, not `contentViewController`, to avoid
+    /// overriding `NSWindowController`'s optional `contentViewController`.)
+    public var contentController: NSViewController {
+        refreshAll()
+        return rootViewController
     }
 
     /// Open the window and immediately present the new-group creation sheet —
@@ -270,10 +335,17 @@ public final class MixerWindowController: NSWindowController {
             self.showEditor(for: result.group.id)
         }
         createSheetController = sheet
-        // Present as a sheet only when there's a window on screen to host it;
-        // headless runs keep the reference and drive it via the test hooks.
-        if let contentVC = window?.contentViewController, window?.isVisible == true {
-            contentVC.presentAsSheet(sheet)
+        // Present the sheet over the split view controller so it re-parents to
+        // whichever window currently hosts the content — the standalone window
+        // OR the shared control-panel shell. Gate on the split VC's OWN host
+        // window (`view.window`), NOT `self.window?.isVisible`: when the content
+        // is hosted in the shell, this controller's own `window` is off screen
+        // but the content is on screen in the panel, so `self.window` is the
+        // wrong window to consult. An on-screen host means there's a real sheet
+        // parent; headless runs (host never shown) keep the reference and drive
+        // it via the test hooks instead.
+        if let host = splitViewController.view.window, host.isVisible {
+            splitViewController.presentAsSheet(sheet)
         }
     }
 
@@ -400,19 +472,24 @@ public final class MixerWindowController: NSWindowController {
     public var test_isPresentingCreateSheet: Bool {
         createSheetController != nil
     }
+
+    /// The persistent footer caption's text (always present, window or panel).
+    public var test_footerText: String { footerLabel.stringValue }
 }
 
 // MARK: - GroupsEmptyStateViewController
 
 /// The "No groups yet" pane shown when there is nothing to select (stock
-/// AppKit): a centered secondary-colour message plus a "New Group" button
-/// running the same creation sheet as the sidebar's bottom-bar button.
+/// AppKit): a centered primary message, a light secondary nudge, and a
+/// "New Group" button running the same creation sheet as the sidebar's
+/// bottom-bar button.
 public final class GroupsEmptyStateViewController: NSViewController {
 
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
     private let messageLabel = NSTextField(labelWithString: "No groups yet")
+    private let subtitleLabel = NSTextField(labelWithString: "Play groups from the menu bar")
     private let newGroupButton = NSButton()
 
     public override func loadView() {
@@ -420,6 +497,11 @@ public final class GroupsEmptyStateViewController: NSViewController {
         messageLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 2)
         messageLabel.textColor = .secondaryLabelColor
         messageLabel.alignment = .center
+
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.font = .systemFont(ofSize: NSFont.systemFontSize - 1)
+        subtitleLabel.textColor = .tertiaryLabelColor
+        subtitleLabel.alignment = .center
 
         newGroupButton.translatesAutoresizingMaskIntoConstraints = false
         newGroupButton.title = "New Group"
@@ -429,13 +511,16 @@ public final class GroupsEmptyStateViewController: NSViewController {
 
         let container = NSView()
         container.addSubview(messageLabel)
+        container.addSubview(subtitleLabel)
         container.addSubview(newGroupButton)
 
         NSLayoutConstraint.activate([
             messageLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             messageLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: -16),
+            subtitleLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 4),
             newGroupButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            newGroupButton.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 12),
+            newGroupButton.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12),
         ])
 
         view = container
@@ -450,4 +535,7 @@ public final class GroupsEmptyStateViewController: NSViewController {
 
     /// The visible message text (for structural assertions).
     public var test_messageText: String { messageLabel.stringValue }
+
+    /// The visible subtitle text (for structural assertions).
+    public var test_subtitleText: String { subtitleLabel.stringValue }
 }

@@ -37,6 +37,7 @@ public final class AppRoutingController {
         self.appRoutes = loadPersisted ? ((try? store.load()) ?? []) : []
     }
 
+    // STABILITY(D4): UI-thread stalls and stuck-drag state — see dev/notes/stability-audit-2026-07-18.md
     /// Persist the current table AND notify observers. Called on the change edge
     /// only (every caller guards on an actual mutation first), so `onRoutesDidChange`
     /// fires exactly when the table changed.

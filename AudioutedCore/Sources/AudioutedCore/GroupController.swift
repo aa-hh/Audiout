@@ -139,6 +139,7 @@ public final class GroupController {
     }
 
     /// Persist the current routing state (Selected Devices + Main Out target).
+    // STABILITY(D4): UI-thread stalls and stuck-drag state — see dev/notes/stability-audit-2026-07-18.md
     private func persistRouting() {
         let state = RoutingStore.State(selectedDeviceIDs: Array(selectedDeviceIDs).sorted(),
                                        mainOut: mainOut)
@@ -151,6 +152,7 @@ public final class GroupController {
     /// never caches its own copy.
     public var devices: [Device] { backend.devices }
 
+    // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
     private func device(_ id: String) -> Device? {
         backend.devices.first { $0.id == id }
     }

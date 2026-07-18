@@ -47,6 +47,8 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
 | `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
 | `notes/playback-meter-research.md` | Level-meter design research (not built). |
+| `notes/stability-audit-2026-07-18.md` | Crash/freeze audit ledger: findings, marker convention, resolved list. |
+| `notes/objc-exception-shim-handoff.md` | ObjC exception shim adoption brief for the per-app-routing branch. |
 | `notes/p1-*.md` | Phase 1 UI/API research. |
 | `notes/0e-taps-brief.md`, `0f-pipe-brief.md`, `p2-ptp-bind-probe.md` | Early capture/pipe/PTP-bind spikes. |
 | `../AirPlayEngine/docs/first-light-report.md` | Live-hardware-test ledger (that package). |

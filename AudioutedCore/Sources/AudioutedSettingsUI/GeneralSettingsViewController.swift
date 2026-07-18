@@ -50,6 +50,7 @@ public final class GeneralSettingsViewController: NSViewController {
         launchSwitch.state = loginItem.isEnabled ? .on : .off
     }
 
+    // STABILITY(D4): SMAppService register/status round-trips launchd XPC synchronously on the main thread; see dev/notes/stability-audit-2026-07-18.md
     @objc private func launchToggled() {
         let desired = launchSwitch.state == .on
         do {

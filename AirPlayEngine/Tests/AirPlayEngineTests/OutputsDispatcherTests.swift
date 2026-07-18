@@ -340,4 +340,24 @@ final class OutputsDispatcherTests: XCTestCase {
         XCTAssertEqual(completionCalls.count, ids.count)
         XCTAssertEqual(Set(completionCalls.map { $0.deviceId }), Set(ids))
     }
+
+    // MARK: - removeOutput TOCTOU guard (crash fix, A2)
+    //
+    // A receiver-side RTSP drop frees the airplay_session and NULLs
+    // device->session (shims/outputs.c outputs_device_session_remove) while the
+    // device stays registered (FAILED, not yet .stopped). removeOutput's issue
+    // closure must not call the vendored device_stop against a NULL session
+    // (airplay_device_stop dereferences it unconditionally -> EXC_BAD_ACCESS).
+    // startOp swaps in issueOverride under test, so the guard predicate is
+    // extracted to `AirPlayEngine.stopSessionIsLive` and exercised directly here.
+
+    func testStopSessionIsLiveFalseWhenSessionIsNull() {
+        let dev = makeDevice(id: 0xCAFE, session: false)
+        XCTAssertFalse(AirPlayEngine.stopSessionIsLive(dev))
+    }
+
+    func testStopSessionIsLiveTrueWhenSessionIsSet() {
+        let dev = makeDevice(id: 0xCAFE + 1, session: true)
+        XCTAssertTrue(AirPlayEngine.stopSessionIsLive(dev))
+    }
 }

@@ -8,10 +8,12 @@ public final class DefaultOutputObserver: @unchecked Sendable {
 
     // MARK: - Public API
 
+    // STABILITY(D6): narrow verified races — see dev/notes/stability-audit-2026-07-18.md
     /// Called on the observer's private queue when the default output device changes.
     /// The argument is the new device name.
     public var onChange: ((String) -> Void)?
 
+    // STABILITY(D6): narrow verified races — see dev/notes/stability-audit-2026-07-18.md
     /// The current default output device name. Readable from any thread (the
     /// backing store is only mutated on `queue`).
     public private(set) var currentDeviceName: String = "Mac"

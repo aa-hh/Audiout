@@ -273,6 +273,7 @@ public struct NetworkConnectionDiagnostics: ConnectionDiagnosing {
         )
         return await withTaskGroup(of: BonjourPresence.Endpoint?.self) { group in
             group.addTask {
+                // STABILITY(D5): legacy OwnTone backend - browse continuation never resumed on .cancelled — see dev/notes/stability-audit-2026-07-18.md
                 await withCheckedContinuation { (continuation: CheckedContinuation<BonjourPresence.Endpoint?, Never>) in
                     let box = ContinuationBox(continuation)
                     browser.browseResultsChangedHandler = { results, _ in

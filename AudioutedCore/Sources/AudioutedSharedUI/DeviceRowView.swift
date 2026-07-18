@@ -603,6 +603,7 @@ public final class DeviceRowView: NSView {
     // MARK: Actions
 
     @objc private func volumeChanged(_ sender: NSSlider) {
+        // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
         // NSSlider continuous drag: mark drag in-progress so a concurrent
         // `deviceUpdated` echo doesn't yank the thumb back under the user.
         isDraggingSlider = true
@@ -804,6 +805,7 @@ public final class DeviceRowView: NSView {
 
     private func installMouseMovedMonitor() {
         guard mouseMovedMonitor == nil else { return }
+        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see this target's AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
         // `.mouseMoved` fires for pointer movement anywhere in the app; on every
         // move we reconcile hover against the true pointer position, so leaving
         // the row into an untracked region still clears the highlight.

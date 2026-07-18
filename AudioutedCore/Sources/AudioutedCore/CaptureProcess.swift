@@ -117,6 +117,7 @@ final class AudiocapProcess: CaptureProcess, @unchecked Sendable {
 
         // Stream stderr line-by-line as it arrives.
         let buffer = LineBuffer()
+        // STABILITY(D6): narrow verified races — see dev/notes/stability-audit-2026-07-18.md
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }

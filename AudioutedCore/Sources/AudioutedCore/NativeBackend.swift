@@ -463,6 +463,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
 
     // MARK: OutputBackend
 
+    // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
     public var devices: [Device] {
         stateQueue.sync { order.compactMap { known[$0] } }
     }
@@ -756,6 +757,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         // desired state actually changed. Rapid toggle spam collapses here: N
         // flips for one device overwrite `desiredOn[id]` N times but issue at most
         // one op at a time (root cause 1) — intermediate flips are simply dropped.
+        // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             self.expectedSelected = ids
 
@@ -1838,6 +1840,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // evidence the device is reachable again, so clear any terminal-failure
             // park — the device becomes re-enableable on the next user toggle (or,
             // if it's still desired-on, the loop below re-kicks it).
+            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
             self.failedGate.remove(id)
         } else {
             self.lastDescriptors[id] = nil
@@ -1874,6 +1877,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
            !self.failedGate.contains(id),
            let outputID = self.outputIDs[id] {
             self.converging.insert(id)
+            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
     }
@@ -2317,6 +2321,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// Fan a capture-side RMS sample out as `.level` for every currently-selected,
     /// unmuted device (the meter is a property of the captured audio, identical for
     /// every fanned-out device — playback-meter-research.md). On `stateQueue`.
+    // STABILITY(D3): per-buffer level fan-out amplifies every stall — see dev/notes/stability-audit-2026-07-18.md
     private func emitLevel(_ rms: Float) {
         stateQueue.async {
             for id in self.order {

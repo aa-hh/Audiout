@@ -6,6 +6,31 @@ import AudioutedPopoverUI
 import AudioutedWindowUI
 import AudioutedSettingsUI
 
+/// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
+/// `EINTR` and otherwise ignoring failures.
+///
+/// `FileHandle.write(_:)` raises an uncatchable `NSException` (not a Swift
+/// error) when the underlying fd is closed or broken — e.g. a dev launch
+/// from a terminal whose pipe has gone away. That turns routine logging into
+/// a crash. This helper never throws and never raises: a lost log line is
+/// acceptable, a crashed logger is not. Shared by `main.swift`'s uncaught
+/// exception handler and `AppDelegate.log(_:)`.
+func audioutedEmergencyWriteStderr(_ message: String) {
+    var bytes = Array(message.utf8)
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes.withUnsafeMutableBytes { buf -> Int in
+            write(STDERR_FILENO, buf.baseAddress!.advanced(by: offset), buf.count - offset)
+        }
+        if written >= 0 {
+            offset += written
+        } else if errno != EINTR {
+            return // Broken/closed fd or other unrecoverable error — drop the log line.
+        }
+        // EINTR: retry the same write.
+    }
+}
+
 /// Resolve a bundle ID to the pid of a running instance, or nil if it isn't
 /// running (T7). This is the real per-app-capture resolver the native backend
 /// needs: Core can't import AppKit (`NSRunningApplication`), so the AppKit layer
@@ -414,6 +439,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func log(_ message: String) {
-        FileHandle.standardError.write(Data("[Audiouted] \(message)\n".utf8))
+        audioutedEmergencyWriteStderr("[Audiouted] \(message)\n")
     }
 }

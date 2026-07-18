@@ -77,6 +77,9 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
+- Known stability findings in this package carry `STABILITY(id)` inline
+  markers — details and fix sketches in
+  [../dev/notes/stability-audit-2026-07-18.md](../dev/notes/stability-audit-2026-07-18.md).
 
 ## Map
 

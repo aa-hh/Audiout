@@ -261,16 +261,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
     // MARK: Start sequence
     //
-    // Unlike NativeCaptureCoordinator.beginStart() (which runs the blocking
-    // tap-creation call INSIDE queue.sync because it only ever manages one
-    // tap), this coordinator must let independent bundle IDs' start/stop
-    // calls interleave — so the pattern here is the "claim under the lock,
-    // do the blocking work outside it, then commit under the lock" shape
-    // NativeCaptureCoordinator already uses for its slower path,
-    // handleDeviceChange(). Every commit re-checks the slot is still in the
-    // state we left it in, so a concurrent stop(bundleID:) racing in during
-    // tap creation is handled by tearing the just-created tap back down
-    // instead of resurrecting a stopped slot.
+    // This coordinator must let independent bundle IDs' start/stop calls
+    // interleave — so the pattern here is the "claim under the lock, do the
+    // blocking work outside it, then commit under the lock" shape
+    // NativeCaptureCoordinator also uses (its start() and recreateTap()).
+    // Every commit re-checks the slot is still in the state we left it in, so
+    // a concurrent stop(bundleID:) racing in during tap creation is handled by
+    // tearing the just-created tap back down instead of resurrecting a stopped
+    // slot.
 
     private func beginStart(bundleID: String) {
         guard let pid = resolvePID(bundleID) else {

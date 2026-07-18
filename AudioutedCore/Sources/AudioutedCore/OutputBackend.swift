@@ -110,6 +110,16 @@ public protocol OutputBackend: AnyObject {
     /// Stop discovery and tear down any streams.
     func stop()
 
+    /// Await the teardown that ``stop()`` started, bounded by `timeout` (C1). Call
+    /// AFTER ``stop()`` on the app's terminate path so graceful stream teardown gets
+    /// a bounded window before process exit, rather than being outrun by it. Returns
+    /// as soon as teardown completes OR `timeout` elapses — never hangs the quit.
+    ///
+    /// Default no-op: only ``NativeBackend`` holds real streaming sessions whose
+    /// teardown outlives ``stop()``; ``MockBackend``/``OwnToneBackend`` have nothing
+    /// to await, so they inherit the empty default and stay unchanged.
+    func stopAndWait(timeout: Duration) async
+
     /// Subscribe to backend events. Each call returns an independent stream;
     /// finishing/cancelling one doesn't affect others. Typically the app makes
     /// one and drives the whole UI from it.
@@ -134,6 +144,11 @@ public protocol OutputBackend: AnyObject {
     /// path and moves it back to `.connecting`
     /// (`dev/notes/p1-connection-status-brief.md` §1/§3).
     func setOutputSet(_ ids: Set<String>)
+}
+
+public extension OutputBackend {
+    /// Backends with no post-`stop()` teardown to await inherit this no-op.
+    func stopAndWait(timeout: Duration) async {}
 }
 
 /// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend

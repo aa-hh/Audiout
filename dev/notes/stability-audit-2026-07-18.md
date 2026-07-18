@@ -22,33 +22,6 @@ lands, re-verify against source rather than trusting this line number.
 
 ## Section 1 — Fix when you touch this code
 
-### C5 — start() holds the state lock across blocking HAL work
-
-**Site:** `AudioutedCore/Sources/AudioutedCore/NativeCaptureCoordinator.swift`
-`start()` at line 159 wraps `beginStart()` (194–219) in `queue.sync`, and
-`beginStart()` calls `tap.createAndStart(...)` at line 205 — a blocking Core
-Audio call — from inside that same lock.
-
-**Mechanism:** every other reader of the state queue (the `stop()` path, a
-concurrent buffer delivery, or a plain state read) blocks behind however
-long `createAndStart` takes on the HAL. On a slow or contended device that
-turns a start into an app-wide stall; a caller waiting on quit or state read
-sees a freeze, not a crash, but the shape is identical to the deadlock this
-audit found elsewhere in the same file's `handleDeviceChange`.
-
-**Fix sketch:** apply the claim-under-lock / create-off-lock / commit-under-
-lock pattern `handleDeviceChange()` already uses (251–299): claim the "we're
-starting" state and hand off any old tap reference inside a short lock,
-call `createAndStart` outside any lock, then commit the new tap/converter
-back under a second short lock (guarding against a race with `stop()`).
-
-**Rough cost:** medium — restructuring one method to mirror an existing
-sibling pattern in the same file; the hard design work is already done.
-
-When fixed: delete the STABILITY(C5) marker(s) at
-`NativeCaptureCoordinator.swift:159,194,205` and move this entry to
-Resolved.
-
 ### C6 — a device change during tap recreation is silently dropped
 
 **Site:** `AudioutedCore/Sources/AudioutedCore/NativeCaptureCoordinator.swift`
@@ -285,22 +258,10 @@ When fixed: delete the STABILITY(D6) marker(s) at
 
 ## Section 2 — Scheduled work (no inline markers)
 
-These are tracked outside this file — by pending one-click task chips
-(B1/B2/C4) or as phase-2/3 backlog (B3/B4/B5/B6/B9/C1/C2/C3) — and
-deliberately carry **no** `STABILITY(id)` marker in source. Don't add one;
-duplicating tracking here would just drift.
+These are tracked outside this file — as phase-2/3 backlog
+(B3/B4/B5/B6/B9/C1/C2/C3) — and deliberately carry **no** `STABILITY(id)`
+marker in source. Don't add one; duplicating tracking here would just drift.
 
-- **B1** — `NativeCaptureCoordinator.swift`, the HAL property-listener
-  registration — passes a `nil` dispatch queue, so the callback lands on an
-  unspecified (potentially the HAL's own) thread instead of a queue this
-  code controls.
-- **B2** — `NativeCaptureCoordinator.swift`, `handleDeviceChange()` — the
-  old tap's teardown historically ran inside the state lock in this path
-  (distinct from the `beginStart` case tracked as C5); risk is the same
-  head-of-line blocking shape.
-- **C4** — `NativeCaptureCoordinator.swift`, tap format construction — no
-  guard against a NaN/zero sample rate reaching the converter, which would
-  propagate silently rather than failing loud.
 - **B7** — RESOLVED by the per-app-routing landing (the app-row volume
   handler now explicitly avoids the per-tick rebuild; its comment documents
   why). No further work needed.
@@ -310,6 +271,23 @@ duplicating tracking here would just drift.
 
 ## Section 3 — Resolved by this merge
 
+- **C5** — `NativeCaptureCoordinator.start()` no longer holds `queue` across
+  `createAndStart`: restructured to claim-under-lock / create-off-lock /
+  commit-under-lock (the shape `recreateTap()` uses), with the commit
+  detecting a racing `stop()` and discarding the new tap out of lock.
+  `beginStart()` was folded away and its STABILITY(C5) markers deleted.
+- **B1** — the default-output-device HAL listener is now registered (and
+  removed) with a private serial `listenerQueue` instead of a `nil` queue,
+  so the blocking teardown+recreate handler no longer runs re-entrantly on
+  Core Audio's own notification thread. Mirrors `SystemOutputVolume`.
+- **B2** — the raced-stop branch in `recreateTap()` now returns the orphan
+  just-created tap from the `queue.sync` block and tears it down OUTSIDE the
+  lock (its IO callback also takes `queue`, so in-lock teardown deadlocked).
+- **C4** — tap format construction guards `asbd.mSampleRate.isFinite && > 0`
+  before the `Int(...)` narrowing (NaN would trap), the converter guards its
+  resample-ratio site, and the coordinator validates the format into
+  `.failed(.formatReadFailed)` before committing to `.capturing`. New unit
+  test `testZeroSampleRateFormatLandsInFailed` covers it.
 - **A2** — null-session guard added in the output-removal path (`removeOutput`)
   so a session already torn down doesn't get operated on a second time.
 - **D1** — SIGPIPE is ignored at launch, and a crash-proof stderr log is

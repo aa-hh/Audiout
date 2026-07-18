@@ -83,7 +83,11 @@ func tempDir() -> URL {
 
 @MainActor
 func run() -> Int32 {
-    // Headless AppKit: an accessory app so NSImage(systemSymbolName:) etc. work.
+    // Never show a real window on the developer's screen while this headless
+    // tool runs (`HeadlessRuntime` in AudiouterCore) — set BEFORE touching
+    // AppKit. Headless AppKit: an accessory app so NSImage(systemSymbolName:)
+    // etc. work.
+    setenv("AIRPLAY_HEADLESS", "1", 1)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
@@ -119,8 +123,8 @@ func run() -> Int32 {
                        "'Groups' and 'Devices' sections both present even with zero groups")
     checks.expect(window.test_sidebar.test_hasGroupsEmptyStateRow,
                   "the Groups section shows its empty-state row at zero groups")
-    checks.expectEqual(window.test_sidebar.test_ungroupedDeviceRowCount, 7,
-                       "all 7 devices listed as ungrouped")
+    checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
+                       "all 7 devices listed (Devices section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
 
     // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on

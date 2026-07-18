@@ -23,23 +23,33 @@ to a backend directly.
   opens its editor so the user can rename it, add/remove members, or delete it.
   No member becomes active, no audio moves, no Main Out change. Activation
   lives in the popover (`../ AudiouterPopoverUI`), not here.
-- **The content pane is swapped, not toggled.** `swapContent(to:)` removes
-  and re-adds the content `NSSplitViewItem`; there is no hidden/shown view
-  pair to reach for instead.
-- **Persistent footer caption, never flag-gated.** `MixerWindowController`
-  wraps `splitViewController` in a plain `rootViewController` (split view on
-  top, `footerLabel` pinned beneath) and it's `rootViewController` — not the
-  split view — that both `window.contentViewController` and the public
-  `contentController` accessor vend. That means the footer ("Set up here —
-  play from the menu-bar icon", stock `NSTextField`, `.secondaryLabelColor`,
-  centered, small system font) is ALWAYS on screen in the Groups content,
-  whether hosted in the standalone window or handed to the control-panel
-  shell — it is content, not chrome, so `AIRPLAY_CONTROL_PANEL` has no say
-  over it. It teaches the config-vs-playback split ONCE as the full sentence;
-  `GroupsEmptyStateViewController.subtitleLabel` ("Play groups from the menu
-  bar") is a shorter, lighter echo shown only when the empty pane itself is
-  up — don't duplicate the footer's exact wording there. Test hook:
-  `test_footerText`.
+- **The content pane is swapped, not toggled.** `swapContent(to:)` calls
+  `ContentPaneHostViewController.setContent(_:)`, which re-parents the new
+  child controller inside the content split item's fixed host (removing the
+  old child) — there is no hidden/shown view pair to reach for instead. The
+  content `NSSplitViewItem` itself is never removed/re-added anymore (that
+  used to also carry the footer along with it; now the footer lives in the
+  host and never moves).
+- **Persistent footer caption, scoped to the content pane, never
+  flag-gated.** `MixerWindowController`'s content split item wraps a
+  `ContentPaneHostViewController` — NOT `splitViewController` itself — which
+  hosts the swapped editor/detail/empty pane on top and `footerLabel` pinned
+  beneath it. The SIDEBAR split item is untouched by any of this and runs the
+  full height of the split view down to its own "New Group" bar (design
+  review 2026-07-18: the footer used to wrap the WHOLE split view via an outer
+  `rootViewController`, which left a gap above it under the sidebar too —
+  that outer wrapper is gone; `window.contentViewController` and the public
+  `contentController` accessor now vend `splitViewController` directly). The
+  footer text ("Set up here — play from the menu-bar icon", stock
+  `NSTextField`, `.secondaryLabelColor`, centered, small system font) is
+  ALWAYS on screen under the content pane, whether hosted in the standalone
+  window or handed to the control-panel shell — it is content, not chrome, so
+  `AIRPLAY_CONTROL_PANEL` has no say over it. It teaches the config-vs-playback
+  split ONCE as the full sentence; `GroupsEmptyStateViewController.subtitleLabel`
+  ("Play groups from the menu bar") is a shorter, lighter echo shown only when
+  the empty pane itself is up — don't duplicate the footer's exact wording
+  there. Test hook: `test_footerText` (reads through to
+  `ContentPaneHostViewController.test_footerText`).
 - **This controller only builds the shipping `NSWindow`; the control-panel
   shell is a separate host.** `makeContainer()` always builds the
   document-style window. The control-panel rollout (`AIRPLAY_CONTROL_PANEL=1`)
@@ -63,7 +73,22 @@ to a backend directly.
 - **The sidebar always shows the Groups section** (design revamp: this window
   is groups-configuration only). When empty it displays "No groups yet"
   (a non-selectable placeholder), plus a labeled "New Group" button at the
-  bottom. Devices section appears only when there are ungrouped speakers.
+  bottom. The Devices section appears whenever there is at least one device.
+- **Both sidebar sections are FLAT — no expand/collapse, no nested rows**
+  (design review 2026-07-18). A group row is a single leaf row: icon (in the
+  SAME icon column as a device row) + name, no disclosure chevron, no
+  member-device children under it — `SidebarViewController.Node.Payload.group`
+  carries no `children` anymore. Previewing a group's members happens in
+  `GroupEditorViewController`'s own "Speakers" checklist, not by expanding the
+  sidebar row, so the old nesting was pure duplication. Consequently the
+  **Devices section now lists EVERY device**, grouped or not — the old filter
+  that hid a device because it belonged to the (never-set, in this
+  config-only window) active group is gone; hiding a device here would make
+  it unreachable now that membership isn't previewed via expansion. Test
+  hooks: `test_groupRowCount`, `test_deviceRowCount` (was
+  `test_ungroupedDeviceRowCount`), `test_groupRowsAreFlat`. There is no more
+  `test_memberIDs(underGroup:)` — nothing to assert, group rows have no
+  children.
 - **`GroupEditorViewController` is edit-only.** It shows an already-persisted
   group, allows renaming and membership edits, and can delete it. Group
   creation (`GroupCreationSheetController`) is a separate, parallel flow.
@@ -113,11 +138,19 @@ to a backend directly.
 - **`IconPickerViewController` has no opinion on presentation.** It only
   builds a curated grid (`DeviceIcon.curated`, filtered through
   `DeviceIcon.isValid` so a stale curated name never renders a blank glyph)
-  plus a free-text SF Symbol search field (validated live against
-  `DeviceIcon.isValid`; invalid/empty disables Apply) and a "Use default
-  icon" button. Icons shown are monochrome only — no color-picking, matching
-  the house rule. Every path funnels through `onPick`; the caller (icon well
-  in the group editor, creation sheet, or `DeviceDetailViewController`)
+  plus one search field doing double duty, and a "Use default icon" button.
+  The search field (a) LIVE-FILTERS the curated grid by case-insensitive
+  substring match on every keystroke — empty text shows the full curated
+  set, a non-matching search shows an empty grid with a plain "No matches"
+  label (never a crash) — AND (b), independently, validates the typed text
+  live as an EXACT SF Symbol name against `DeviceIcon.isValid` for a preview
+  + Apply gate (invalid/empty disables Apply). Both behaviors run off the
+  same keystroke and coexist: a user can type a partial name to browse the
+  narrowed grid and tap a result, or type a full valid name and hit Apply
+  directly — narrowing the grid never disables or replaces the exact-name
+  path. Icons shown are monochrome only — no color-picking, matching the
+  house rule. Every path funnels through `onPick`; the caller (icon well in
+  the group editor, creation sheet, or `DeviceDetailViewController`)
   presents it as an anchored `NSPopover` and persists the result.
 - **`DeviceIcon` is the single resolution point for "what SF Symbol
   represents this device/group."** `DeviceIcon.resolve(_:default:)` is the
@@ -139,9 +172,10 @@ to a backend directly.
 
 | Type | Role |
 |---|---|
-| `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes; auto-select rule. Exposes `contentController` so the shared control-panel shell can host the same content, including the persistent footer caption. |
+| `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes inside `ContentPaneHostViewController`; auto-select rule. Exposes `contentController` (the split view controller) so the shared control-panel shell can host the same content. |
+| `ContentPaneHostViewController` | Wraps the swapped editor/detail/empty pane plus the persistent footer caption, scoped to the content split item only — the sidebar item is untouched and runs the full split-view height. |
 | `GroupsEmptyStateViewController` | "No groups yet" empty state: primary message + secondary subtitle ("Play groups from the menu bar") + New Group call-to-action. |
-| `SidebarViewController` | Source-list (Groups + Devices sections); selection drives the content pane. |
+| `SidebarViewController` | Source-list (Groups + Devices sections), both FLAT (no expand/collapse, no nested rows); selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete; no creation flow. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
 | `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom-drawn icon-edit badge lives on its icon well. |

@@ -102,9 +102,16 @@ public final class SettingsWindowController: NSWindowController {
     /// the sizing-bug note on the type — so a stale autosaved frame can never
     /// leave stray empty space below the content.
     public func showWindow() {
-        NSApp.activate(ignoringOtherApps: true)
+        // Sizing always runs headlessly too — `testContentSizeIsFittedNotDegenerate`
+        // depends on it. Only the actual on-screen presentation is gated: never
+        // order a real window on screen under `swift test`/a headless tool
+        // (`HeadlessRuntime`) — those hold a real WindowServer connection, so an
+        // un-gated order-front here would flash a real, empty window on the
+        // developer's actual screen.
         rootVC.view.layoutSubtreeIfNeeded()
         window?.setContentSize(rootVC.view.fittingSize)
+        guard !HeadlessRuntime.isActive else { return }
+        NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }

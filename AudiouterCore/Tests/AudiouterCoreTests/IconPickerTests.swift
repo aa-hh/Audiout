@@ -48,6 +48,70 @@ final class IconPickerTests: XCTestCase {
         XCTAssertFalse(fired, "only an actual curated cell tap reports a pick")
     }
 
+    // MARK: Search field — live grid filtering
+
+    func testTypingASubstringNarrowsTheGridToMatchingCuratedNamesOnly() {
+        let picker = IconPickerViewController()
+        let fullSet = picker.test_curatedSymbolNames
+
+        picker.test_setSearchText("pod")
+
+        let narrowed = picker.test_curatedSymbolNames
+        XCTAssertFalse(narrowed.isEmpty)
+        XCTAssertLessThan(narrowed.count, fullSet.count)
+        for name in narrowed {
+            XCTAssertTrue(name.range(of: "pod", options: .caseInsensitive) != nil, "\(name) should match the substring")
+        }
+        for name in fullSet where name.range(of: "pod", options: .caseInsensitive) != nil {
+            XCTAssertTrue(narrowed.contains(name), "\(name) matches but is missing from the narrowed grid")
+        }
+    }
+
+    func testGridFilteringIsCaseInsensitive() {
+        let picker = IconPickerViewController()
+        picker.test_setSearchText("POD")
+        XCTAssertFalse(picker.test_curatedSymbolNames.isEmpty)
+        XCTAssertEqual(picker.test_curatedSymbolNames, picker.test_curatedSymbolNames.filter {
+            $0.range(of: "pod", options: .caseInsensitive) != nil
+        })
+    }
+
+    func testClearingSearchRestoresTheFullCuratedSet() {
+        let picker = IconPickerViewController()
+        let fullSet = picker.test_curatedSymbolNames
+
+        picker.test_setSearchText("pod")
+        XCTAssertNotEqual(picker.test_curatedSymbolNames, fullSet)
+
+        picker.test_setSearchText("")
+        XCTAssertEqual(picker.test_curatedSymbolNames, fullSet)
+    }
+
+    func testSearchWithZeroMatchesShowsAnEmptyGridWithoutCrashing() {
+        let picker = IconPickerViewController()
+        picker.test_setSearchText("definitely.not.curated.zzz")
+        XCTAssertTrue(picker.test_curatedSymbolNames.isEmpty)
+    }
+
+    func testGridFilteringDoesNotAffectTheExactNamePreviewAndApplyPath() {
+        // The narrowed grid and the exact-name preview/Apply gate are
+        // independent — a substring that matches multiple curated names
+        // (so it's NOT itself a valid, exact SF Symbol name) narrows the
+        // grid but leaves Apply disabled, same as before this feature.
+        let picker = IconPickerViewController()
+        picker.test_setSearchText("pod")
+        XCTAssertFalse(picker.test_curatedSymbolNames.isEmpty)
+        XCTAssertFalse(picker.test_isApplyEnabled)
+        XCTAssertNil(picker.test_previewSymbolName)
+
+        // An exact valid name both narrows the grid to itself/related
+        // matches AND enables the preview/Apply path.
+        picker.test_setSearchText("airpods")
+        XCTAssertTrue(picker.test_curatedSymbolNames.contains("airpods"))
+        XCTAssertTrue(picker.test_isApplyEnabled)
+        XCTAssertEqual(picker.test_previewSymbolName, "airpods")
+    }
+
     // MARK: Search field validation — Apply gating + live preview
 
     func testApplyIsDisabledWithEmptySearchText() {

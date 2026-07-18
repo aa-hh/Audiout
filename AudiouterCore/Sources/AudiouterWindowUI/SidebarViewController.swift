@@ -12,16 +12,25 @@ public enum SidebarSelection: Equatable, Sendable {
 }
 
 /// The mixer window's sidebar (SPEC §9 "Sidebar list": source-list
-/// `NSOutlineView`, "saved groups → member devices, Finder-favorites style").
+/// `NSOutlineView`).
 ///
-/// Two top-level sections — **Groups** (each saved group, expandable to its
-/// member devices) and **Devices** (ungrouped speakers) — exactly the "Groups"
+/// Two top-level sections — **Groups** and **Devices** — exactly the "Groups"
 /// / "Devices" split the menu uses, in the documented source-list style
 /// (`selectionHighlightStyle = .sourceList`, header rows via
-/// `isGroupItem`). Selection is reported through `onSelect`.
+/// `isGroupItem`). Both sections are FLAT: a group row is a single leaf row
+/// (icon + name, same icon column as a device row) with no disclosure
+/// chevron and no child device rows — previewing a group's members happens in
+/// the group editor's own "Speakers" checklist, not by expanding the sidebar
+/// row, so nesting here was pure duplication (design review 2026-07-18). The
+/// Devices section lists every device, grouped or not, since membership is no
+/// longer previewed via expansion. Selection is reported through `onSelect`.
 ///
-/// The outline model is a small tree of reference-typed `Node`s so the
-/// `NSOutlineViewDataSource` identity methods are stable across reloads.
+/// The outline model is still a small tree of reference-typed `Node`s (one
+/// level: section header → leaf rows) so the `NSOutlineViewDataSource`
+/// identity methods are stable across reloads and the source-list header
+/// styling (`isGroupItem`) keeps working; `NSOutlineView` with zero-depth
+/// leaves is simpler here than switching containers, since header
+/// vibrancy/appearance still requires it.
 public final class SidebarViewController: NSViewController {
 
     /// A node in the source-list tree. Reference type so `NSOutlineView` can key
@@ -29,11 +38,13 @@ public final class SidebarViewController: NSViewController {
     final class Node {
         enum Payload {
             case header(String)             // "Groups" / "Devices" (isGroupItem)
-            case group(Group)               // a saved group (expandable)
-            case device(Device)             // a device row (leaf)
+            case group(Group)               // a saved group (flat leaf row)
+            case device(Device)             // a device row (flat leaf row)
             case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
         }
         let payload: Payload
+        /// Only section headers ever have children now — group/device rows are
+        /// always leaves (flat model, no expand/collapse).
         var children: [Node]
         init(_ payload: Payload, children: [Node] = []) {
             self.payload = payload
@@ -172,38 +183,37 @@ public final class SidebarViewController: NSViewController {
 
     /// Rebuild the tree from the current groups + devices and reload. Preserves
     /// the selection by `SidebarSelection` identity where possible.
+    ///
+    /// Both sections are flat leaf lists (design review 2026-07-18): a group
+    /// row never carries member-device children, and the Devices section lists
+    /// EVERY device rather than filtering out members of the active group —
+    /// once the sidebar no longer previews membership via expansion, hiding a
+    /// device here would just make it unreachable. `activeGroupID` is kept as
+    /// a parameter for call-site compatibility but no longer affects this list.
     public func reload(groups: [Group], activeGroupID: String?, devices: [Device]) {
         let previous = currentSelection
-
-        let devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        _ = activeGroupID   // no longer used to filter the Devices section
 
         var newRoots: [Node] = []
 
         // 1. Groups section — always shown (this window is groups-configuration
-        //    only), each group expands to its member devices. Zero groups gets a
-        //    non-selectable "No groups yet" placeholder row instead of vanishing.
+        //    only). Zero groups gets a non-selectable "No groups yet"
+        //    placeholder row instead of vanishing. Each group is a flat leaf
+        //    row (icon + name); members are previewed in the group editor's
+        //    own checklist, not here.
         let groupsHeader = Node(.header("Groups"))
         if groups.isEmpty {
             groupsHeader.children = [Node(.emptyState("No groups yet"))]
         } else {
-            for group in groups {
-                let groupNode = Node(.group(group))
-                groupNode.children = group.memberIDs.compactMap { id in
-                    devicesByID[id].map { Node(.device($0)) }
-                }
-                groupsHeader.children.append(groupNode)
-            }
+            groupsHeader.children = groups.map { Node(.group($0)) }
         }
         newRoots.append(groupsHeader)
 
-        // 2. Devices section — devices not in the active group (matches the
-        //    menu's "ungrouped" split; falls back to all devices when nothing is
-        //    active so every speaker stays reachable).
-        let activeMemberIDs = Set(groups.first { $0.id == activeGroupID }?.memberIDs ?? [])
-        let ungrouped = devices.filter { !activeMemberIDs.contains($0.id) }
-        if !ungrouped.isEmpty {
+        // 2. Devices section — every device, grouped or not, so it stays
+        //    reachable now that membership isn't previewed via expansion.
+        if !devices.isEmpty {
             let devicesHeader = Node(.header("Devices"))
-            devicesHeader.children = ungrouped.map { Node(.device($0)) }
+            devicesHeader.children = devices.map { Node(.device($0)) }
             newRoots.append(devicesHeader)
         }
 
@@ -276,7 +286,7 @@ public final class SidebarViewController: NSViewController {
     }
 
     /// Number of group rows under the "Groups" header (excludes the "no groups
-    /// yet" placeholder row).
+    /// yet" placeholder row). Each is a flat leaf row — no member children.
     public var test_groupRowCount: Int {
         roots.first { if case .header("Groups") = $0.payload { return true } else { return false } }?
             .children.filter {
@@ -284,17 +294,23 @@ public final class SidebarViewController: NSViewController {
             }.count ?? 0
     }
 
-    /// Number of device rows under the "Devices" header (ungrouped).
-    public var test_ungroupedDeviceRowCount: Int {
+    /// Number of device rows under the "Devices" header. Lists every device
+    /// (grouped or not) since the flat model no longer previews membership
+    /// via expansion.
+    public var test_deviceRowCount: Int {
         roots.first { if case .header("Devices") = $0.payload { return true } else { return false } }?
             .children.count ?? 0
     }
 
-    /// The member-device ids listed under a given group node in the sidebar.
-    public func test_memberIDs(underGroup groupID: String) -> [String] {
-        guard let groupNode = findGroupNode(groupID) else { return [] }
-        return groupNode.children.compactMap {
-            if case .device(let d) = $0.payload { return d.id } else { return nil }
+    /// True when every group row has no expandable children (flat model:
+    /// selecting a group opens its editor, it never discloses member rows).
+    public var test_groupRowsAreFlat: Bool {
+        guard let groupsHeader = roots.first(where: {
+            if case .header("Groups") = $0.payload { return true } else { return false }
+        }) else { return true }
+        return groupsHeader.children.allSatisfy { node in
+            if case .group = node.payload { return node.children.isEmpty }
+            return true
         }
     }
 
@@ -328,15 +344,6 @@ public final class SidebarViewController: NSViewController {
 
     /// True when the outline view allows multi-selection (SPEC.md §9).
     public var test_allowsMultipleSelection: Bool { outlineView.allowsMultipleSelection }
-
-    private func findGroupNode(_ groupID: String) -> Node? {
-        for root in roots {
-            for child in root.children {
-                if case .group(let g) = child.payload, g.id == groupID { return child }
-            }
-        }
-        return nil
-    }
 }
 
 // MARK: - NSOutlineViewDataSource

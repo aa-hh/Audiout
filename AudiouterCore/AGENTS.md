@@ -9,6 +9,24 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
 ## Rules
 
+- **Any window/panel `show*()` entry point must gate its actual on-screen
+  presentation behind `HeadlessRuntime.isActive`** (`HeadlessRuntime.swift`).
+  `swift test` and the harness/snapshot tools (`window-harness`,
+  `window-snapshot`, `popover-harness`, `popover-snapshot`, `settings-snapshot`)
+  hold a real WindowServer connection — an un-gated `makeKeyAndOrderFront`/
+  `NSApp.activate`/`popover.show`/etc. in one of these code paths flashes a
+  real, empty window on the developer's actual screen for the run's duration.
+  `HeadlessRuntime.isActive` detects `swift test` automatically (checks whether
+  `XCTest` is loaded into the process — reliable regardless of invocation, no
+  env var needed); the 5 non-app executable tools each set
+  `AIRPLAY_HEADLESS=1` at the very top of their own `run()`, before touching
+  AppKit. Only gate the actual presentation call — keep layout/sizing/model
+  work (`layoutSubtreeIfNeeded`, `setContentSize`, frame-origin math) running
+  unconditionally, since headless assertions (structural tests, offscreen PNG
+  renders via `bitmapImageRepForCachingDisplay`) depend on it and never need
+  the window actually on screen. The real app (`AudiouterApp`) never sets the
+  env var and isn't an XCTest process, so a live launch always shows its
+  windows normally.
 - **`Device.isSelected` means "currently in the backend's output set"
   (streaming now) — NOT membership in the UI's Selected Devices set**
   (`GroupController.selectedDeviceIDs`). The output set is exactly the Selected

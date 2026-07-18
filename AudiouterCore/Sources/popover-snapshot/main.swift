@@ -304,6 +304,10 @@ func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDi
 
 @MainActor
 func run() -> Int32 {
+    // Never show a real window on the developer's screen while this
+    // headless tool runs (`HeadlessRuntime` in AudiouterCore) — set BEFORE
+    // touching AppKit.
+    setenv("AIRPLAY_HEADLESS", "1", 1)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 

@@ -71,25 +71,20 @@ public final class MixerWindowController: NSWindowController {
     private let detailViewController: DeviceDetailViewController
     private let emptyStateViewController = GroupsEmptyStateViewController()
 
-    /// Wraps `splitViewController` plus the persistent footer caption
-    /// (`footerLabel`) beneath it. This — not `splitViewController` — is what
-    /// both `window.contentViewController` AND the public `contentController`
-    /// accessor vend, so the footer is ALWAYS present in both the standalone
-    /// window and the control-panel shell (the footer teaches "config lives
-    /// here, playback lives in the menu bar" and is never flag-gated). See
-    /// `AudiouterWindowUI/AGENTS.md` for the full placement rationale.
-    private let rootViewController = NSViewController()
+    /// Hosts the swapped content pane (editor / detail / empty) PLUS the
+    /// persistent footer caption pinned beneath it. SCOPED TO THE CONTENT
+    /// SPLIT ITEM ONLY — the sidebar split item runs the full height of the
+    /// split view down to its own "New Group" bar, with no footer stealing
+    /// its bottom space (design review 2026-07-18: the footer used to wrap
+    /// the whole split view, which left a gap above it under the sidebar
+    /// too). The footer is content, not chrome, so it is NEVER flag-gated by
+    /// `AIRPLAY_CONTROL_PANEL` and shows identically in the standalone window
+    /// and the control-panel shell. See `AudiouterWindowUI/AGENTS.md`.
+    private let contentHostViewController = ContentPaneHostViewController()
 
-    /// Persistent secondary-color caption beneath the split view. ALWAYS
-    /// visible in the Groups content (window or panel) — never gated by
-    /// `AIRPLAY_CONTROL_PANEL`. Pairs with, but doesn't duplicate, the empty
-    /// state's lighter nudge (`GroupsEmptyStateViewController.subtitleLabel`):
-    /// the footer is the one full teaching line; the empty-state subtitle is a
-    /// shorter contextual nudge shown only when there's nothing else on screen.
-    private let footerLabel = NSTextField(labelWithString: "Set up here — play from the menu-bar icon")
-
-    /// The content split item — its view controller is swapped between the
-    /// editor / detail / empty panes as the sidebar selection changes.
+    /// The content split item — wraps `contentHostViewController`, which is
+    /// never itself swapped; only its inner child (editor / detail / empty)
+    /// changes as the sidebar selection changes.
     private let contentSplitItem: NSSplitViewItem
 
     public init(groupController: GroupController,
@@ -114,43 +109,20 @@ public final class MixerWindowController: NSWindowController {
         sidebarItem.minimumThickness = 200
         sidebarItem.canCollapse = true
 
-        // Content item — starts on the empty pane; the first refresh auto-selects
-        // a group when one exists.
-        contentSplitItem = NSSplitViewItem(viewController: emptyStateViewController)
+        // Content item — wraps the footer-bearing host, which starts on the
+        // empty pane; the first refresh auto-selects a group when one exists.
+        contentHostViewController.setContent(emptyStateViewController)
+        contentSplitItem = NSSplitViewItem(viewController: contentHostViewController)
 
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(contentSplitItem)
 
-        // Root container: split view on top, persistent footer caption
-        // beneath it. Built as a real child controller (not just a subview)
-        // so the responder chain stays correct in both hosts.
-        footerLabel.translatesAutoresizingMaskIntoConstraints = false
-        footerLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        footerLabel.textColor = .secondaryLabelColor
-        footerLabel.alignment = .center
-        footerLabel.lineBreakMode = .byTruncatingTail
-
-        rootViewController.addChild(splitViewController)
-        let rootView = NSView()
-        let splitView = splitViewController.view
-        splitView.translatesAutoresizingMaskIntoConstraints = false
-        rootView.addSubview(splitView)
-        rootView.addSubview(footerLabel)
-        NSLayoutConstraint.activate([
-            splitView.topAnchor.constraint(equalTo: rootView.topAnchor),
-            splitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            splitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -6),
-            footerLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 8),
-            footerLabel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -8),
-            footerLabel.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -8),
-        ])
-        rootViewController.view = rootView
-
         // Window chrome: full-size content view, NO toolbar (the master slider
-        // left with the mixer pane — live-test feedback 2026-07-18).
+        // left with the mixer pane — live-test feedback 2026-07-18). The split
+        // view IS the window's content controller now — the sidebar item runs
+        // the full window height; only the content item hosts the footer.
         let window = Self.makeContainer()
-        window.contentViewController = rootViewController
+        window.contentViewController = splitViewController
         window.setContentSize(NSSize(width: 720, height: 460))
         window.center()
         // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
@@ -224,25 +196,32 @@ public final class MixerWindowController: NSWindowController {
     }
 
     /// Bring the window to front (called from the popover's Groups button).
+    /// Never actually orders the window on screen under `swift test` or a
+    /// harness/snapshot tool (`HeadlessRuntime`) — those hold a real
+    /// WindowServer connection, so an un-gated order-front here would flash a
+    /// real, empty window on the developer's actual screen. `refreshAll()`
+    /// still runs so headless assertions stay exactly as strong.
     public func showWindow() {
         refreshAll()
+        guard !HeadlessRuntime.isActive else { return }
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// The root content view controller — the split view (sidebar +
-    /// editor/detail/empty panes) PLUS the persistent footer caption beneath
-    /// it — hosting the sidebar + panes. Exposed so the shared control-panel
-    /// shell (`ControlPanelWindowController`) can host the exact same content
-    /// the standalone window shows — one controller, two possible hosts,
-    /// footer included in both (it is not flag-gated). Refreshing the content
-    /// before handing it off keeps a freshly-hosted panel correct.
+    /// The root content view controller — the split view (sidebar full-height
+    /// + the footer-bearing content host swapping editor/detail/empty panes).
+    /// Exposed so the shared control-panel shell (`ControlPanelWindowController`)
+    /// can host the exact same content the standalone window shows — one
+    /// controller, two possible hosts, footer included in both (it is not
+    /// flag-gated; it lives under the content pane only, not the sidebar).
+    /// Refreshing the content before handing it off keeps a freshly-hosted
+    /// panel correct.
     /// (Named `contentController`, not `contentViewController`, to avoid
     /// overriding `NSWindowController`'s optional `contentViewController`.)
     public var contentController: NSViewController {
         refreshAll()
-        return rootViewController
+        return splitViewController
     }
 
     /// Open the window and immediately present the new-group creation sheet —
@@ -349,21 +328,17 @@ public final class MixerWindowController: NSWindowController {
         }
     }
 
+    /// Swap the pane shown INSIDE `contentHostViewController` (editor / detail
+    /// / empty). The content split item itself is never swapped anymore — only
+    /// its inner child changes — so the footer beneath it never moves and the
+    /// sidebar item is untouched by any of this.
     private func swapContent(to controller: NSViewController) {
-        let live = currentContentItem
-        guard live.viewController !== controller else { return }
-        let newItem = NSSplitViewItem(viewController: controller)
-        splitViewController.removeSplitViewItem(live)
-        splitViewController.addSplitViewItem(newItem)
-        // Keep the reference current for the next swap.
-        contentSplitItemRef = newItem
+        contentHostViewController.setContent(controller)
     }
 
-    /// `NSSplitViewItem` is a wrapper we swap out; track the live content item so
-    /// we can compare/replace it. `contentSplitItem` is the initial one; after
-    /// the first swap `contentSplitItemRef` holds the current.
-    private var contentSplitItemRef: NSSplitViewItem?
-    private var currentContentItem: NSSplitViewItem { contentSplitItemRef ?? contentSplitItem }
+    /// The view controller currently shown inside the content host (editor /
+    /// detail / empty pane), for structural comparisons.
+    private var currentContent: NSViewController? { contentHostViewController.currentChild }
 
     // MARK: Refresh
 
@@ -375,7 +350,7 @@ public final class MixerWindowController: NSWindowController {
         // Refresh whichever content pane is showing. The create sheet is a
         // separate presentation (not the content pane) — it is never disturbed
         // here.
-        if currentContentItem.viewController === editorViewController {
+        if currentContent === editorViewController {
             if let id = editorViewController.editingGroupID,
                groupController.groups.contains(where: { $0.id == id }) {
                 editorViewController.show(groupID: id, devices: devices)
@@ -383,7 +358,7 @@ public final class MixerWindowController: NSWindowController {
                 // The edited group disappeared (deleted elsewhere) — fall back.
                 showDefaultContent()
             }
-        } else if currentContentItem.viewController === detailViewController {
+        } else if currentContent === detailViewController {
             // Re-render the detail pane from the fresher snapshot; if the shown
             // device has since disappeared, fall back to the default content.
             if let id = shownDetailDeviceID, let device = devicesByID[id] {
@@ -436,17 +411,17 @@ public final class MixerWindowController: NSWindowController {
 
     /// True when the editor pane is the visible content (vs detail/empty pane).
     public var test_isShowingEditor: Bool {
-        currentContentItem.viewController === editorViewController
+        currentContent === editorViewController
     }
 
     /// True when the read-only device detail pane is the visible content.
     public var test_isShowingDetail: Bool {
-        currentContentItem.viewController === detailViewController
+        currentContent === detailViewController
     }
 
     /// True when the "No groups yet" empty pane is the visible content.
     public var test_isShowingEmptyState: Bool {
-        currentContentItem.viewController === emptyStateViewController
+        currentContent === emptyStateViewController
     }
 
     /// Simulate the user selecting a sidebar row (nil = deselect → AUTO-SELECT).
@@ -473,8 +448,85 @@ public final class MixerWindowController: NSWindowController {
         createSheetController != nil
     }
 
-    /// The persistent footer caption's text (always present, window or panel).
-    public var test_footerText: String { footerLabel.stringValue }
+    /// The persistent footer caption's text (always present, window or panel,
+    /// scoped to the content pane — see `ContentPaneHostViewController`).
+    public var test_footerText: String { contentHostViewController.test_footerText }
+}
+
+// MARK: - ContentPaneHostViewController
+
+/// Hosts the swapped content pane (editor / detail / empty) plus the
+/// persistent footer caption pinned beneath it. This exists so the footer is
+/// scoped to the CONTENT split item only — the sidebar split item runs the
+/// full height of the split view, with no footer stealing its bottom space
+/// (design review 2026-07-18). `setContent(_:)` swaps the inner child view
+/// controller; this host controller itself is never swapped, so the footer
+/// never moves as the sidebar selection changes.
+final class ContentPaneHostViewController: NSViewController {
+
+    /// Persistent secondary-color caption beneath the content pane. ALWAYS
+    /// visible — never gated by `AIRPLAY_CONTROL_PANEL`. Pairs with, but
+    /// doesn't duplicate, the empty state's lighter nudge
+    /// (`GroupsEmptyStateViewController.subtitleLabel`): the footer is the one
+    /// full teaching line; the empty-state subtitle is a shorter contextual
+    /// nudge shown only when there's nothing else on screen.
+    private let footerLabel = NSTextField(labelWithString: "Set up here — play from the menu-bar icon")
+
+    /// The container the swapped child view fills; sits above the footer.
+    private let contentContainer = NSView()
+
+    /// The currently-hosted child (editor / detail / empty pane), for
+    /// structural comparisons. `nil` only before the first `setContent(_:)`.
+    private(set) var currentChild: NSViewController?
+
+    override func loadView() {
+        footerLabel.translatesAutoresizingMaskIntoConstraints = false
+        footerLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        footerLabel.textColor = .secondaryLabelColor
+        footerLabel.alignment = .center
+        footerLabel.lineBreakMode = .byTruncatingTail
+
+        contentContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView()
+        root.addSubview(contentContainer)
+        root.addSubview(footerLabel)
+        NSLayoutConstraint.activate([
+            contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
+            contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentContainer.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -6),
+            footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            footerLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+        ])
+        view = root
+    }
+
+    /// Swap the hosted child, re-parenting it as a real child controller (not
+    /// just a subview) so the responder chain stays correct.
+    func setContent(_ child: NSViewController) {
+        loadViewIfNeeded()
+        guard currentChild !== child else { return }
+        if let currentChild {
+            currentChild.view.removeFromSuperview()
+            currentChild.removeFromParent()
+        }
+        addChild(child)
+        let childView = child.view
+        childView.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(childView)
+        NSLayoutConstraint.activate([
+            childView.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            childView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            childView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            childView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
+        currentChild = child
+    }
+
+    /// The persistent footer caption's text (structural test hook).
+    var test_footerText: String { footerLabel.stringValue }
 }
 
 // MARK: - GroupsEmptyStateViewController

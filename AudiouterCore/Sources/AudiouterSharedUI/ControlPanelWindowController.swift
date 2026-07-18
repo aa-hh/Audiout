@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterCore
 
 /// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
 /// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
@@ -226,8 +227,17 @@ public final class ControlPanelWindowController: NSWindowController {
         // desync the backing window from wherever the panel really landed
         // (found via manual verification — the naive "compute once, position
         // both" ordering left the beak pointing at nothing).
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        //
+        // NEVER actually put a window on screen under `swift test` or a
+        // harness/snapshot tool (`HeadlessRuntime`) — those hold a real
+        // WindowServer connection, so an un-gated `makeKeyAndOrderFront` here
+        // would flash an empty, real window on the developer's actual screen
+        // for the run's duration. Everything else (frame math, model state)
+        // still runs so headless assertions stay exactly as strong.
+        if !HeadlessRuntime.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
 
         let finalFrame = panel.frame
         let beakFraction: CGFloat
@@ -236,7 +246,9 @@ public final class ControlPanelWindowController: NSWindowController {
         } else {
             beakFraction = 0.85
         }
-        backingWindow.orderFront(nil)
+        if !HeadlessRuntime.isActive {
+            backingWindow.orderFront(nil)
+        }
         backingWindow.setFrame(
             NSRect(x: finalFrame.minX, y: finalFrame.minY,
                   width: finalFrame.width, height: finalFrame.height + ControlPanelBackingView.beakHeight),

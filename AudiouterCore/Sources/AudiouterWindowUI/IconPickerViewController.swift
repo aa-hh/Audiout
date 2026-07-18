@@ -16,10 +16,18 @@ import AudiouterSharedUI
 /// Layout, top to bottom:
 /// - a grid of borderless square buttons, one per `DeviceIcon.curated`
 ///   symbol (already filtered through `DeviceIcon.isValid` so a stale
-///   curated name never renders a blank glyph), ~``columnsPerRow`` per row;
-/// - a search field accepting ANY SF Symbol name, validated live against
-///   `DeviceIcon.isValid`: valid shows a preview + enables Apply, invalid or
-///   empty shows no preview and disables Apply;
+///   curated name never renders a blank glyph), ~``columnsPerRow`` per row.
+///   The search field below LIVE-FILTERS this grid: empty shows the full
+///   curated set, non-empty case-insensitive-substring-narrows it to
+///   matching names on every keystroke (a "No matches" label stands in for
+///   an empty result, never a crash);
+/// - the same search field ALSO accepts ANY SF Symbol name for an exact-name
+///   preview + Apply path, validated live against `DeviceIcon.isValid`:
+///   valid shows a preview + enables Apply, invalid or empty shows no
+///   preview and disables Apply. This is independent of and coexists with
+///   the grid filtering above — a user can narrow the grid with a partial
+///   name and tap a result, or type a full valid name and hit Apply
+///   directly, in the same field;
 /// - a trailing "Use default icon" button that reports `nil` immediately
 ///   (no Apply gate — resetting is always available).
 ///
@@ -44,11 +52,19 @@ public final class IconPickerViewController: NSViewController {
     private let previewImageView = NSImageView()
     private let applyButton = NSButton()
     private let defaultButton = NSButton()
+    private let emptyResultsLabel = NSTextField(labelWithString: "No matches")
 
-    /// The curated symbol names actually offered, in row order — pre-filtered
-    /// through `DeviceIcon.isValid` at build time (never trust the curation
-    /// list blindly; a name can go stale on a future OS).
-    private var curatedNames: [String] = DeviceIcon.curated.filter(DeviceIcon.isValid)
+    /// The full curated symbol set, pre-filtered through `DeviceIcon.isValid`
+    /// once at build time (never trust the curation list blindly; a name can
+    /// go stale on a future OS). ``curatedNames`` — the grid's live data
+    /// source — is a search-narrowed view of this list.
+    private let allCuratedNames: [String] = DeviceIcon.curated.filter(DeviceIcon.isValid)
+
+    /// The curated symbol names actually offered as grid cells, in row order.
+    /// Equal to ``allCuratedNames`` when the search field is empty; otherwise
+    /// narrowed to a case-insensitive substring match against the trimmed
+    /// search text, recomputed on every keystroke by ``updateSearchState()``.
+    private var curatedNames: [String] = []
 
     private var currentSymbolName: String?
     private var defaultSymbolName: String = ""
@@ -60,6 +76,7 @@ public final class IconPickerViewController: NSViewController {
 
     public init() {
         super.init(nibName: nil, bundle: nil)
+        curatedNames = allCuratedNames
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -96,6 +113,12 @@ public final class IconPickerViewController: NSViewController {
         defaultButton.target = self
         defaultButton.action = #selector(defaultTapped(_:))
 
+        emptyResultsLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyResultsLabel.textColor = .secondaryLabelColor
+        emptyResultsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        emptyResultsLabel.alignment = .center
+        emptyResultsLabel.isHidden = true
+
         let searchRow = NSStackView(views: [searchField, previewImageView, applyButton])
         searchRow.translatesAutoresizingMaskIntoConstraints = false
         searchRow.orientation = .horizontal
@@ -104,7 +127,7 @@ public final class IconPickerViewController: NSViewController {
         previewImageView.widthAnchor.constraint(equalToConstant: Self.cellSize * 0.6).isActive = true
         previewImageView.heightAnchor.constraint(equalToConstant: Self.cellSize * 0.6).isActive = true
 
-        for v in [grid, searchRow, defaultButton] {
+        for v in [grid, emptyResultsLabel, searchRow, defaultButton] {
             container.addSubview(v)
         }
 
@@ -114,6 +137,9 @@ public final class IconPickerViewController: NSViewController {
             grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
             grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             grid.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12),
+
+            emptyResultsLabel.topAnchor.constraint(equalTo: grid.topAnchor, constant: 4),
+            emptyResultsLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
 
             searchRow.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 12),
             searchRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
@@ -193,6 +219,25 @@ public final class IconPickerViewController: NSViewController {
             previewImageView.isHidden = true
             applyButton.isEnabled = false
         }
+
+        updateCuratedGrid(matching: trimmed)
+    }
+
+    /// Narrow ``curatedNames`` to a case-insensitive substring match against
+    /// `trimmed` (the full curated set when empty), then rebuild the grid so
+    /// it reflects the search live — independent of, and alongside, the
+    /// exact-name preview/Apply gating above.
+    private func updateCuratedGrid(matching trimmed: String) {
+        curatedNames = trimmed.isEmpty
+            ? allCuratedNames
+            : allCuratedNames.filter { $0.range(of: trimmed, options: .caseInsensitive) != nil }
+
+        // `grid`/`emptyResultsLabel` exist independent of the view hierarchy
+        // (both are plain stored properties), so this is safe to call even
+        // before `loadView` runs — matches `buildGridRows()`'s own contract.
+        buildGridRows()
+        emptyResultsLabel.isHidden = !curatedNames.isEmpty
+        grid.isHidden = curatedNames.isEmpty
     }
 
     private var previewSymbolName: String? {
@@ -270,8 +315,10 @@ public final class IconPickerViewController: NSViewController {
     /// Simulate clicking "Use default icon".
     public func test_useDefault() { useDefault() }
 
-    /// The curated symbol names actually offered as grid cells, in order
-    /// (already filtered through `DeviceIcon.isValid`).
+    /// The curated symbol names actually offered as grid cells right now, in
+    /// order — the full curated set (already filtered through
+    /// `DeviceIcon.isValid`) when the search field is empty, or the live
+    /// search-narrowed subset otherwise. Mirrors what the grid visibly shows.
     public var test_curatedSymbolNames: [String] { curatedNames }
 }
 

@@ -112,7 +112,7 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"])
         XCTAssertTrue(window.test_sidebar.test_hasGroupsEmptyStateRow,
                       "zero saved groups shows the empty-state placeholder row")
-        XCTAssertEqual(window.test_sidebar.test_ungroupedDeviceRowCount, 7)
+        XCTAssertEqual(window.test_sidebar.test_deviceRowCount, 7)
         XCTAssertFalse(window.test_isShowingEditor)
     }
 
@@ -143,16 +143,19 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.activeGroupID, "auto-select never activates")
     }
 
-    func testSavingGroupAddsGroupsSectionWithMembersAndClearsEmptyState() async throws {
+    func testSavingGroupAddsFlatGroupRowClearsEmptyStateAndKeepsAllDevicesListed() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
         XCTAssertEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"])
         XCTAssertFalse(window.test_sidebar.test_hasGroupsEmptyStateRow)
         XCTAssertEqual(window.test_sidebar.test_groupRowCount, 1)
-        XCTAssertEqual(Set(window.test_sidebar.test_memberIDs(underGroup: saved.id)),
-                       Set(saved.memberIDs))
+        XCTAssertTrue(window.test_sidebar.test_groupRowsAreFlat,
+                      "a group row is a flat leaf — no expandable member children (design review 2026-07-18)")
+        XCTAssertEqual(window.test_sidebar.test_deviceRowCount, 7,
+                       "the Devices section lists every device, including a saved group's members, " +
+                       "since membership is previewed in the editor now, not by sidebar expansion")
     }
 
     func testSidebarSupportsMultipleSelection() async throws {

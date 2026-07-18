@@ -496,6 +496,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             // `animates` left true — the show fade below still plays; only later,
             // IN-PLACE resizes (T-4 expand/collapse) animate the frame.
             panel.panelContentDidChangeHeight(animated: false)
+            // Never actually present under `swift test`/a headless tool
+            // (`HeadlessRuntime`) — those hold a real WindowServer connection,
+            // so an un-gated `popover.show` would flash a real window on the
+            // developer's actual screen. No test/tool currently calls
+            // `toggle()` (real presentation only happens from the live app's
+            // status-item click), but gate it for defense-in-depth.
+            guard !HeadlessRuntime.isActive else { return }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }

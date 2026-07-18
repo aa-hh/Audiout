@@ -6,6 +6,7 @@ import AudiouterPopoverUI
 import AudiouterWindowUI
 import AudiouterSettingsUI
 import AudiouterSharedUI
+import AudiouterOnboardingUI
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
 /// `EINTR` and otherwise ignoring failures.
@@ -88,6 +89,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reused/focused — same lifecycle as the mixer window.
     private var settingsWindowController: SettingsWindowController?
 
+    /// The resolved backend kind (same resolution `makeBackend()` used). The
+    /// first-run setup flow only presents on `.native` — the sole path that taps
+    /// audio in-process and discovers under the app's own identity, so the sole
+    /// path that needs the two OS grants.
+    private let backendKind = BackendKind.resolved()
+
+    /// The first-run onboarding/permission-priming window, retained while open
+    /// (first launch, or "Run Setup Again…" from Settings ▸ General).
+    private var onboardingWindowController: OnboardingWindowController?
+
+    /// Whether `backend.start()` has run. On first-run native the backend start
+    /// (and its Bonjour discovery, which triggers the Local Network prompt) is
+    /// DEFERRED until onboarding is dismissed, so the prompt is primed by the
+    /// setup screen rather than sprung at launch. Guards against double-start.
+    private var backendStarted = false
+
     /// Per-app routing model (Applications card). Held here (not just handed to
     /// the popover) so the app can enforce the excluded-apps precedence — pruning
     /// a route when its app is excluded.
@@ -169,10 +186,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyAppearance(settings.theme)
 
         // Status item first so there's immediate UI feedback that we launched.
-        // The button's action toggles the popover (SPEC §9 revised).
+        // The button's action toggles the popover (SPEC §9 revised) — EXCEPT while
+        // first-run setup is open: setup is the only thing the user should be in
+        // until it's done, and it's how they get the window back after clicking
+        // away (e.g. to grant a permission in System Settings). So while it's up,
+        // the menu-bar click re-fronts Setup instead of opening the popover.
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] button in
             guard let self else { return }
+            if let onboarding = self.onboardingWindowController {
+                onboarding.present()
+                return
+            }
             // Control-panel rollout: while a control-panel session is live (the
             // shell may be tucked away after an app-switch), a click restores the
             // shared shell in place — whatever surface it's hosting — rather than
@@ -290,12 +315,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can ever wake; the Settings pane re-pushes on change.
         pushWakeRestoreSetting()
 
-        // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
-        // burst the backend emits as it enumerates what's already there.
+        // First-run priming: on the native path, explain BOTH permissions before
+        // either system prompt fires. We hold the backend (its discovery triggers
+        // the Local Network prompt) until the user has seen the setup screen —
+        // otherwise the OS dialog would be their first exposure to the ask, which
+        // is the exact thing this flow exists to prevent. Every other launch (and
+        // every non-native backend) starts immediately.
+        if SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind) {
+            log("Audiouter launched (backend: \(type(of: backend))) — first-run setup")
+            presentSetup()
+        } else {
+            startBackendIfNeeded()
+            log("Audiouter launched (backend: \(type(of: backend)))")
+        }
+    }
+
+    /// Start the backend exactly once. Subscribes to the event stream BEFORE
+    /// `start()` so the initial `deviceAdded` burst isn't missed. On first-run
+    /// native this runs when onboarding is dismissed; otherwise at launch.
+    @MainActor
+    private func startBackendIfNeeded() {
+        guard !backendStarted else { return }
+        backendStarted = true
         subscribeToBackendEvents()
         backend.start()
+    }
 
-        log("Audiouter launched (backend: \(type(of: backend)))")
+    /// Build a fresh ``SetupModel`` (production probes) + onboarding window and
+    /// present it. Used for both first-run and "Run Setup Again…". `onFinished`
+    /// starts the backend if it hasn't already (first run) and is a guarded no-op
+    /// on a re-run (backend already streaming).
+    @MainActor
+    private func presentSetup() {
+        let model = SetupModel(
+            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
+            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
+            remoteControl: RemoteControlPrimerFactory.makeDefault(),
+            settings: settings)
+        let controller = OnboardingWindowController(model: model) { [weak self] in
+            self?.onboardingWindowController = nil
+            self?.startBackendIfNeeded()
+        }
+        onboardingWindowController = controller
+        controller.present()
     }
 
     /// "Open Mixer…" target — open/focus the full mixer window (SPEC §9, T-U4).
@@ -409,6 +471,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   wakeRestore: makeWakeRestoreSettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
+            // "Run Setup Again…" (General pane) re-opens the first-run priming
+            // window; the backend is already running, so its onFinished is a
+            // guarded no-op.
+            controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }
             settingsWindowController = controller
         }
         if useControlPanel {

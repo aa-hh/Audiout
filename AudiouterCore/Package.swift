@@ -50,6 +50,10 @@ let package = Package(
         // Appearance/Audio layout, T-2026-07-17 sizing-bug fix + tile-picker
         // redesign) — see the product comment in settings-snapshot/main.swift.
         .executable(name: "settings-snapshot", targets: ["settings-snapshot"]),
+        // Offscreen PNG renderer for the first-run onboarding window (permission
+        // priming) — the window isn't visible to an agent shell, so this renders
+        // it (light + dark, each permission status) for visual verification.
+        .executable(name: "onboarding-snapshot", targets: ["onboarding-snapshot"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
@@ -126,10 +130,21 @@ let package = Package(
             name: "AudiouterSettingsUI",
             dependencies: ["AudiouterCore"]
         ),
+        // The pure-AppKit first-run onboarding window (permission priming): an
+        // `OnboardingWindowController` hosting a single-screen explanation + a
+        // "System Audio" and a "Local Network" permission row, each with a Grant
+        // button and live status, driven by Core's `SetupModel`. A *library* (like
+        // the popover/mixer/settings UI) so the app AND the headless
+        // `onboarding-snapshot` / tests can link it and assert the built window.
+        // Only needs Core (`SetupModel` + the permission seams).
+        .target(
+            name: "AudiouterOnboardingUI",
+            dependencies: ["AudiouterCore"]
+        ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
         // lifecycle); the popover dropdown lives in AudiouterPopoverUI,
         // the mixer window in AudiouterWindowUI, the Settings window in
-        // AudiouterSettingsUI.
+        // AudiouterSettingsUI, the first-run onboarding in AudiouterOnboardingUI.
         .executableTarget(
             name: "AudiouterApp",
             dependencies: [
@@ -137,6 +152,7 @@ let package = Package(
                 "AudiouterPopoverUI",
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
+                "AudiouterOnboardingUI",
             ]
         ),
         // Programmatic popover-structure verification for T-U6 (the popover isn't
@@ -163,6 +179,12 @@ let package = Package(
             name: "settings-snapshot",
             dependencies: ["AudiouterCore", "AudiouterSettingsUI"]
         ),
+        // Offscreen PNG renderer for the onboarding window — see the product
+        // comment above.
+        .executableTarget(
+            name: "onboarding-snapshot",
+            dependencies: ["AudiouterCore", "AudiouterOnboardingUI"]
+        ),
         // Offscreen PNG renderer for the mixer window (group-creation design
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
@@ -177,6 +199,7 @@ let package = Package(
                 "AudiouterPopoverUI",
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
+                "AudiouterOnboardingUI",
             ]
         ),
     ]

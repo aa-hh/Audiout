@@ -51,6 +51,16 @@ final class SettingsWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.test_sectionTitles, ["General", "Appearance", "Audio"])
     }
 
+    func testRunSetupAgainForwardsFromGeneralPane() {
+        let controller = SettingsWindowController(
+            settings: makeSettings(), loginItem: FakeLoginItem(enabled: false),
+            excludedApps: makeExcluded(), runningAppsProvider: { [] })
+        var fired = 0
+        controller.onRunSetupAgain = { fired += 1 }
+        controller.test_general.test_tapRunSetupAgain()
+        XCTAssertEqual(fired, 1, "Run Setup Again… routes from the General pane out to the app")
+    }
+
     /// The sizing-bug regression test: the assembled single-screen content must
     /// have a real, non-degenerate size (previously the window opened at an
     /// AppKit fallback size for an empty tab controller, leaving a huge empty

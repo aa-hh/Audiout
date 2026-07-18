@@ -14,6 +14,12 @@ public final class GeneralSettingsViewController: NSViewController {
 
     private let loginItem: LoginItemManaging
     private let launchSwitch = NSSwitch()
+    private let setupButton = NSButton()
+
+    /// Fired when "Run Setup Again…" is clicked, so the app can re-present the
+    /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
+    /// button inert — the app layer wires it in `openSettings`.
+    public var onRunSetupAgain: (() -> Void)?
 
     public init(loginItem: LoginItemManaging) {
         self.loginItem = loginItem
@@ -28,11 +34,24 @@ public final class GeneralSettingsViewController: NSViewController {
         launchSwitch.action = #selector(launchToggled)
         launchSwitch.setAccessibilityLabel("Launch at login")
 
-        let row = SettingsForm.row(
+        let launchRow = SettingsForm.row(
             title: "Launch at login",
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
-        view = SettingsForm.paneView(rows: [row])
+
+        // "Run Setup Again…" re-opens the first-run permission-priming window —
+        // the way a user re-checks the System Audio / Local Network grants after
+        // changing them in System Settings (the flow itself deep-links there).
+        setupButton.title = "Run Setup Again…"
+        setupButton.bezelStyle = .rounded
+        setupButton.target = self
+        setupButton.action = #selector(runSetupAgainTapped)
+        let setupRow = SettingsForm.row(
+            title: "Setup",
+            subtitle: "Review what Audiouter needs and re-check permissions.",
+            control: setupButton)
+
+        view = SettingsForm.paneView(rows: [launchRow, setupRow])
     }
 
     public override func viewDidLoad() {
@@ -49,6 +68,8 @@ public final class GeneralSettingsViewController: NSViewController {
     private func syncFromLoginItem() {
         launchSwitch.state = loginItem.isEnabled ? .on : .off
     }
+
+    @objc private func runSetupAgainTapped() { onRunSetupAgain?() }
 
     // STABILITY(D4): SMAppService register/status round-trips launchd XPC synchronously on the main thread; see dev/notes/stability-audit-2026-07-18.md
     @objc private func launchToggled() {
@@ -82,5 +103,11 @@ public final class GeneralSettingsViewController: NSViewController {
         _ = view
         launchSwitch.state = on ? .on : .off
         launchToggled()
+    }
+
+    /// Invoke "Run Setup Again…" as a click would.
+    public func test_tapRunSetupAgain() {
+        _ = view
+        runSetupAgainTapped()
     }
 }

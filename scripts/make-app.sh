@@ -27,6 +27,9 @@ BUILD_NUMBER="1"
 # and states the limit explicitly — this is the only text they get before
 # deciding, so it has to do the whole job.
 AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+# Shown INSIDE the macOS Local Network permission dialog. The app browses Bonjour
+# (_airplay._tcp / _raop._tcp) to find AirPlay speakers; say that plainly.
+LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
 
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
@@ -89,6 +92,21 @@ plutil -insert NSAudioCaptureUsageDescription -string "$AUDIO_CAPTURE_USAGE" "$P
 # Assert it actually landed: this key failing silently is the exact bug above,
 # and a missing permission rationale is not something to discover in the wild.
 plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSAudioCaptureUsageDescription missing from Info.plist" >&2; exit 1; }
+
+# Local Network: the app browses Bonjour to discover AirPlay speakers, which macOS
+# gates behind the Local Network permission (a separate prompt from audio). Two
+# keys are needed and BOTH must be present or discovery silently finds nothing:
+#   NSLocalNetworkUsageDescription — the prompt's rationale (same plutil-not-
+#     PlistBuddy reasoning as above: the prose has apostrophes).
+#   NSBonjourServices — the service types we're allowed to browse; without it the
+#     browse is blocked even with the usage string. These MUST match the types
+#     NativeDiscovery browses (_airplay._tcp for AirPlay 2, _raop._tcp for AP1).
+plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
+plutil -insert NSBonjourServices -array "$PLIST"
+plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
+plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
+plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
+plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 
 # --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2

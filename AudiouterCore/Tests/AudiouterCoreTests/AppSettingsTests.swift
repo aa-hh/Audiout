@@ -87,6 +87,20 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(AppSettings.startBufferOptionsMs.allSatisfy { (300...5000).contains($0) })
     }
 
+    // MARK: First-run setup (SetupModel)
+
+    func testHasCompletedSetupDefaultsFalse() {
+        // A fresh install must show setup once, so the unset default is false.
+        XCTAssertFalse(AppSettings(defaults: defaults).hasCompletedSetup)
+    }
+
+    func testHasCompletedSetupRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.hasCompletedSetup = true
+        XCTAssertTrue(settings.hasCompletedSetup)
+        XCTAssertTrue(AppSettings(defaults: defaults).hasCompletedSetup)
+    }
+
     // MARK: Wake restore (B6b)
 
     func testWakeRestoreDefaultsToTwoMinutesWhenUnset() {

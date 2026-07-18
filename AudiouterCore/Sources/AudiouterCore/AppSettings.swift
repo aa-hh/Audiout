@@ -52,6 +52,7 @@ public struct AppSettings {
         static let theme = "appearance.theme"
         static let density = "appearance.density"
         static let startBufferMs = "audio.startBufferMs"
+        static let hasCompletedSetup = "setup.hasCompleted"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
     }
 
@@ -91,6 +92,18 @@ public struct AppSettings {
             return Self.startBufferOptionsMs.contains(stored) ? stored : Self.defaultStartBufferMs
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.startBufferMs) }
+    }
+
+    /// Whether the first-run setup/onboarding flow has been completed (the
+    /// permission-priming window — ``SetupModel``). Defaults to `false` (unset),
+    /// so a fresh install shows setup once; ``SetupModel/complete()`` flips it,
+    /// and "Run Setup Again…" (Settings › General) never clears it — re-running
+    /// setup is a manual re-open, not a reset of this flag. A plain scalar bool,
+    /// exactly what this store is for (see the type comment). The launch gate
+    /// that reads this is ``SetupModel/shouldPresentOnLaunch(settings:backendKind:)``.
+    public var hasCompletedSetup: Bool {
+        get { defaults.bool(forKey: Keys.hasCompletedSetup) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.hasCompletedSetup) }
     }
 
     /// Options (in MINUTES) for the post-wake "restore Mac audio if speakers don't

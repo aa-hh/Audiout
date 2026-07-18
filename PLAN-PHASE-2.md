@@ -109,10 +109,10 @@ real-hardware checkpoint.
   - (a, **recommended**) A **new top-level SwiftPM package** `AirPlayEngine/`
     (its own `Package.swift`, `.macOS(.v14)`) with a C target
     (`CAirPlayEngine`, the vendored sources + a module map) and a Swift target
-    wrapping it; `AudioutedCore` depends on it only via the
+    wrapping it; `AudiouterCore` depends on it only via the
     `NativeBackend`. Keeps the extracted GPL C isolated in one package, keeps the
     v13 core lib clean, and lets the engine build/test independently.
-  - (b) Add a `CAirPlayEngine` target *inside* `AudioutedCore/Package.swift`.
+  - (b) Add a `CAirPlayEngine` target *inside* `AudiouterCore/Package.swift`.
     Simpler wiring, but drags brew/C build flags + GPL sources into the core lib
     and forces its platform up to v14.
   - (c) Build the C cluster as a **standalone static lib via Makefile/CMake**
@@ -409,9 +409,9 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
 ### Wave 4 — Land behind the OutputBackend seam
 
 **T-BACKEND-1 — `NativeBackend : OutputBackend` + `AIRPLAY_BACKEND=native`**
-- files: `AudioutedCore/Sources/AudioutedCore/NativeBackend.swift`
-  (new); `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
-  (edit `BackendKind` + `makeBackend`); `AudioutedCore/Package.swift` (add
+- files: `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`
+  (new); `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift`
+  (edit `BackendKind` + `makeBackend`); `AudiouterCore/Package.swift` (add
   dependency on the `AirPlayEngine` package); `dev/README.md` (document `native`).
 - what: Implement `OutputBackend` (devices/start/stop/makeEventStream/setVolume/
   setMuted/setSoloed/setOutputSet — OutputBackend.swift:31-59) on top of
@@ -436,7 +436,7 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
   `native` value (haiku, low) — same file, serialize after T-BACKEND-1's enum edit.
 
 **T-CLEANUP-1 — Retire the interim OwnTone scaffolding (GATED on `native` proven)**
-- files: delete `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`'s
+- files: delete `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift`'s
   `OwnToneBackend` type + the `.ownTone` `BackendKind` case + `owntone` env value +
   its `makeBackend` case; delete `dev/owntone/` (git-ignored spike server) and its
   `AIRPLAY_BACKEND=owntone` docs in `dev/README.md`. HOT FILE: `OwnToneBackend.swift`
@@ -452,7 +452,7 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
   resolver seam; small but not haiku-blind (must keep resolution + tests green).
 - effort: med.
 - verify: `swift build` + `swift test` green with no `OwnTone`/`owntone` symbols
-  remaining (`grep -ri owntone AudioutedCore/Sources` empty); app still
+  remaining (`grep -ri owntone AudiouterCore/Sources` empty); app still
   resolves `mock`/`native`.
 
 **T-DOC-P2 — Phase-2 close-out: SPEC + NOTICE + engine README**
@@ -477,10 +477,10 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
 - `AirPlayEngine/Sources/CAirPlayEngine/` (sources + shims) — **T-BUILD-1 and
   T-SHIM-1 edit the same dir; treat as ONE workstream / one agent. Do not run
   concurrently.**
-- `AudioutedCore/.../OwnToneBackend.swift` — T-BACKEND-1 AND T-CLEANUP-1
+- `AudiouterCore/.../OwnToneBackend.swift` — T-BACKEND-1 AND T-CLEANUP-1
   (this plan) edit it; **serialize (T-BACKEND-1 first, then T-CLEANUP-1)**.
   Cross-plan contention risk with Phase 1's resolver work → coordinate.
-- `AudioutedCore/.../BackendKindResolutionTests.swift` — T-BACKEND-1b after
+- `AudiouterCore/.../BackendKindResolutionTests.swift` — T-BACKEND-1b after
   T-BACKEND-1.
 - `SPEC.md` — T-DOC-P2 only.
 - `.gitignore` (root) — appended by T-SRC-1 and T-PKG-1; tiny, serialize or

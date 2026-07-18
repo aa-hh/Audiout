@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import XCTest
+@testable import AudiouterSharedUI
+
+/// Unit coverage for ``LevelMeterView/ballisticsStep(displayed:target:)`` (task
+/// T8) — the pure ease function the live display-link loop calls every frame.
+/// Asserted standalone with no view/display link involved, mirroring
+/// `NativeCaptureCoordinatorTests`' pure-function style for `rmsOfS16LE`.
+final class LevelMeterViewTests: XCTestCase {
+
+    // MARK: Attack is faster than decay
+
+    func testAttackStepIsLargerThanDecayStep() {
+        // Same distance-to-target (0.5) on both sides of `displayed`: a rise
+        // from 0.25 toward 1.0 and a fall from 0.75 toward 0.0.
+        let rising = LevelMeterView.ballisticsStep(displayed: 0.25, target: 1.0) - 0.25
+        let falling = 0.75 - LevelMeterView.ballisticsStep(displayed: 0.75, target: 0.0)
+        XCTAssertGreaterThan(rising, falling,
+                             "the attack coefficient (rising) must produce a bigger step than decay (falling)")
+    }
+
+    // MARK: Monotone convergence toward target
+
+    func testRepeatedStepsMonotonicallyConvergeUpwardToTarget() {
+        var displayed: CGFloat = 0
+        let target: CGFloat = 1
+        var previous: CGFloat = -1
+        for _ in 0..<200 {
+            displayed = LevelMeterView.ballisticsStep(displayed: displayed, target: target)
+            XCTAssertGreaterThanOrEqual(displayed, previous, "each attack step must move toward, never past, target")
+            XCTAssertLessThanOrEqual(displayed, target, "an ease step never overshoots the target")
+            previous = displayed
+        }
+        XCTAssertEqual(displayed, target, accuracy: 0.001, "200 steps is enough to converge on the target")
+    }
+
+    func testRepeatedStepsMonotonicallyConvergeDownwardToTarget() {
+        var displayed: CGFloat = 1
+        let target: CGFloat = 0
+        var previous: CGFloat = 2
+        for _ in 0..<200 {
+            displayed = LevelMeterView.ballisticsStep(displayed: displayed, target: target)
+            XCTAssertLessThanOrEqual(displayed, previous, "each decay step must move toward, never past, target")
+            XCTAssertGreaterThanOrEqual(displayed, target, "an ease step never overshoots the target")
+            previous = displayed
+        }
+        XCTAssertEqual(displayed, target, accuracy: 0.001, "200 steps is enough to converge on the target")
+    }
+
+    // MARK: Idle-stop condition
+
+    func testDisplayedAtRestWithZeroTargetStaysAtRest() {
+        // The idle-stop condition the display link's `tick()` checks: displayed
+        // ~0 and target 0 ⇒ the step must not push `displayed` away from rest
+        // (verifies the ease function itself has a fixed point at zero, which is
+        // what makes the display-link teardown safe).
+        let displayed: CGFloat = 0
+        let target: CGFloat = 0
+        XCTAssertEqual(LevelMeterView.ballisticsStep(displayed: displayed, target: target), 0,
+                       "zero displayed easing toward a zero target must stay exactly at rest")
+    }
+
+    func testNearRestDisplayedWithZeroTargetStaysBelowRestEpsilon() {
+        // A displayed value already inside the documented rest epsilon (0.001)
+        // must decay to something still at/under that epsilon, not bounce back up.
+        let displayed: CGFloat = 0.0005
+        let stepped = LevelMeterView.ballisticsStep(displayed: displayed, target: 0)
+        XCTAssertLessThanOrEqual(stepped, displayed, "decaying toward zero never increases displayed")
+        XCTAssertGreaterThanOrEqual(stepped, 0, "the step never goes negative")
+    }
+}

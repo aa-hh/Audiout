@@ -1,7 +1,7 @@
 # Synced local Core Audio endpoint — implementation brief (T-P2B)
 
 **The ask** (SPEC §8.1, PLAN-PHASE-2 "NEW REQUIREMENT"): in "play everywhere"
-mode, the Mac's own speakers become a first-class, PTP-synced Audiouted
+mode, the Mac's own speakers become a first-class, PTP-synced Audiouter
 output — mute the live OS output (`muteBehavior = .mutedWhenTapped`, already
 proven in `dev/audiocap`) and render a DELAYED local copy sample-aligned with
 the remote AirPlay 2 receivers (raw local currently runs ~2s AHEAD of AirPlay's

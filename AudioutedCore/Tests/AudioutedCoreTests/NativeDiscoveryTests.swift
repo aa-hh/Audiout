@@ -887,6 +887,71 @@ final class NativeDiscoveryTests: XCTestCase {
         XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: ipv4, family: .ipv4))
         XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: linkLocalV6, family: .ipv6))
     }
+
+    // MARK: B9 — `.failed` recreate backoff (NetworkFrameworkBrowser)
+
+    /// `.failed` is a TERMINAL NWBrowser state — Network.framework does not
+    /// restart it, unlike `.waiting` which self-recovers — so
+    /// `NetworkFrameworkBrowser` recreates its own browser after `.failed`,
+    /// with capped exponential backoff. The actual NWBrowser recreate can't be
+    /// exercised headlessly (needs a live socket/Bonjour stack); the schedule
+    /// itself is a pure static and is fully covered here.
+
+    /// 1s, 2s, 4s, 8s, 16s, then capped at 30s.
+    func testBackoffScheduleDoubles() {
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0), 1)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 1), 2)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 2), 4)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 3), 8)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 4), 16)
+    }
+
+    /// The schedule never exceeds the 30s cap, however many consecutive
+    /// failures precede it.
+    func testBackoffScheduleCapsAtThirtySeconds() {
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 5), 30)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 6), 30)
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 20), 30)
+    }
+
+    /// Attempt 0 (no prior failures) is always the 1s floor, never a
+    /// zero/negative delay.
+    func testBackoffScheduleFirstAttemptIsOneSecond() {
+        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0), 1)
+    }
+
+    /// `NativeDiscovery` itself must not treat `.failed` as anything but
+    /// informational: it never tears down `known` devices on a `.failed`
+    /// state-change from its injected browser (the double doesn't recreate
+    /// itself — only the real `NetworkFrameworkBrowser` does — but consumer
+    /// behavior across the state change must stay sane either way: existing
+    /// devices are untouched and later resolves still land normally).
+    func testFailedStateChangeDoesNotDropKnownDevices() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let collector = EventCollector()
+        discovery.onEvent = { collector.append($0) }
+        discovery.start()
+
+        browser.resolve(airplayService(
+            id: "AA:BB:CC:DD:EE:01", name: "Kitchen", features: ap2Features))
+        collector.wait(count: 1)
+
+        browser.state(.failed("mDNSResponder restarted"))
+
+        // The device must still be present — a transient `.failed` must not
+        // spuriously drop it.
+        XCTAssertEqual(discovery.devices.count, 1)
+        XCTAssertEqual(discovery.devices.first?.id, "AA:BB:CC:DD:EE:01")
+
+        // And a fresh resolve after `.failed` (what a real recreate would
+        // eventually deliver) must still flow through as an ordinary update,
+        // not be swallowed by any leftover failure state.
+        browser.resolve(airplayService(
+            id: "AA:BB:CC:DD:EE:02", name: "Living Room", features: ap2Features))
+        collector.wait(count: 2)
+        XCTAssertEqual(discovery.devices.count, 2)
+    }
 }
 
 // MARK: - EventCollector

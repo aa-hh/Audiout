@@ -116,11 +116,32 @@ public actor AirPlayEngine {
     // MARK: Stored state
 
     private let config: EngineConfig
-    private let engineThread: EngineThread
+    // C2: the engine thread is (re)created per `start()` — a single Thread can't
+    // be restarted — and held in a nonisolated, swappable slot the hot `write`
+    // path can read without an actor hop. `nil` before the first start / after
+    // stop.
+    private nonisolated let engineThreadHolder = EngineThreadHolder()
     private let completions = CompletionRegistry()
     private let stateHub = StateStreamHub()
 
     private var started = false
+    // C2: set BEFORE the first suspension point in `start()`, so two concurrent
+    // `start()` calls can't both pass `guard !started` and each spin up a thread
+    // (the second `Thread.start()` would abort). Cleared when start finishes or
+    // fails.
+    private var starting = false
+
+    // B5.1: OutputIDs with an op (addOutput/removeOutput/setVolume) currently
+    // in flight, plus the FIFO of tasks waiting to run the next op on that id.
+    // A second op on an id awaits the first — belt-and-suspenders with
+    // NativeBackend's per-output volume serialization AND the C dispatcher's
+    // "one pending callback per device" contract: two overlapping ops on one
+    // device would otherwise clobber each other's completion waiter (a permanent
+    // hang + a false timeout on the other). Coexists with (never deadlocks) the
+    // app-layer guard: every op resolves within the bounded op timeout, so a
+    // waiter can block at most that long behind an in-flight op on the same id.
+    private var opsInFlight: Set<OutputID> = []
+    private var opWaiters: [OutputID: [CheckedContinuation<Void, Never>]] = [:]
     // A nonisolated mirror of `started` the hot write path can read without an
     // actor hop. Kept in lock-step with `started`.
     private nonisolated let startedFlag = AtomicBool(false)
@@ -202,9 +223,9 @@ public actor AirPlayEngine {
 
     public init(config: EngineConfig = EngineConfig()) {
         self.config = config
-        self.engineThread = EngineThread()
         self.latencyProbe = WriteLatencyProbe(startBufferMs: config.startBufferMs)
         self.currentStartBufferMs = config.startBufferMs
+        // The engine thread is created lazily in start() (C2), not here.
     }
 
     /// The start buffer currently in force (config value until
@@ -227,7 +248,8 @@ public actor AirPlayEngine {
         // test path will serve the stored value at start(); nothing to do now.
         guard started || issueOverride != nil else { return }
         let apply: () -> Void = { outputs_set_buffer_duration_ms(UInt64(max(0, ms))) }
-        if issueOverride != nil { apply() } else { await engineThread.run(apply) }
+        if issueOverride != nil { apply() }
+        else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
     // MARK: Backward-compatible scaffold probe (kept so T-BUILD-1 tests pass)
@@ -257,14 +279,24 @@ public actor AirPlayEngine {
     /// happens — the gated step. In headless tests this is not called (tests use
     /// the test hook), so no sockets are opened.
     public func start() async throws {
-        guard !started else { return }
+        // C2: refuse a re-entrant/concurrent start BEFORE any suspension point.
+        // Two concurrent start()s both passing `guard !started` would each call
+        // Thread.start() — the second aborts the process.
+        guard !started, !starting else { return }
+        starting = true
+        defer { starting = false }
 
+        // C2: a fresh EngineThread per start — a single OS Thread can't be
+        // restarted (Thread.start() on an already-started thread aborts). The
+        // previous thread (if any) was torn down and released in stop().
+        let engineThread = EngineThread()
         guard engineThread.start(), let base = engineThread.base else {
             throw AirPlayEngineError.engineThreadFailed
         }
+        engineThreadHolder.set(engineThread)
 
         // Everything below touches the C cluster -> must run on the engine thread.
-        let initResult: Int32 = await engineThread.run { [self] in
+        let initResult: Int32 = try await engineThread.run { [self] in
             // 0. App-side crypto init (libgcrypt + libsodium). pair_ap only
             //    CHECKS initialization (is_initialized, pair.c); without this
             //    every pair_setup_new() fails — gated first-light 2026-07-16.
@@ -319,12 +351,14 @@ public actor AirPlayEngine {
 
         if initResult != 0 {
             // Roll back the thread; nothing is streaming yet.
-            await engineThread.run { [self] in
+            try? await engineThread.run { [self] in
                 completions.uninstall()
                 stateHub.uninstall()
                 outputs_dispatcher_deinit()
+                outputs_registry_clear()
             }
             engineThread.stop()
+            engineThreadHolder.set(nil)
             freeConfigStrings()
             throw initResult == -100 ? AirPlayEngineError.engineThreadFailed
                 : AirPlayEngineError.initFailed
@@ -390,19 +424,30 @@ public actor AirPlayEngine {
         stateReconcileTask?.cancel()
         stateReconcileTask = nil
 
-        await engineThread.run { [self] in
-            if let deinitFn = output_airplay.deinit {
-                deinitFn()
+        let engineThread = engineThreadHolder.current
+        if let engineThread {
+            try? await engineThread.run { [self] in
+                if let deinitFn = output_airplay.deinit {
+                    deinitFn()
+                }
+                // Symmetric with ptpd_find_or_bind() in start(). NULL-safe:
+                // airptp_end() guards a never-bound handle.
+                ptpd_deinit()
+                completions.uninstall()
+                stateHub.uninstall()
+                outputs_dispatcher_deinit()
+                // C2: airplay_deinit frees the sessions but leaves device->session
+                // dangling and never empties device_list — clear the registry so a
+                // later start() doesn't inherit stale devices / leaked callback
+                // slots. Runs on the engine thread AFTER deinit/uninstall, so the
+                // (now teardown-safe) empty registry is what any leftover swept
+                // startOp body sees.
+                outputs_registry_clear()
+                evbase_player = nil
             }
-            // Symmetric with ptpd_find_or_bind() in start(). NULL-safe:
-            // airptp_end() guards a never-bound handle.
-            ptpd_deinit()
-            completions.uninstall()
-            stateHub.uninstall()
-            outputs_dispatcher_deinit()
-            evbase_player = nil
+            engineThread.stop()
         }
-        engineThread.stop()
+        engineThreadHolder.set(nil)
         freeConfigStrings()
         knownOutputs.removeAll()
     }
@@ -472,7 +517,9 @@ public actor AirPlayEngine {
         try requireStarted()
         guard let id = descriptor.parsedID else { throw AirPlayEngineError.invalidDescriptor }
 
-        await engineThread.run { [self] in feedDescriptor(descriptor, appearing: true) }
+        if let t = engineThreadHolder.current {
+            try await t.run { [self] in feedDescriptor(descriptor, appearing: true) }
+        }
         if knownOutputs[id] == nil { knownOutputs[id] = .stopped }
         return id
     }
@@ -481,7 +528,9 @@ public actor AirPlayEngine {
     /// NWBrowser lost it). Matches on the descriptor's `name` (seam-map §4).
     public func removeDiscovery(_ descriptor: DeviceDescriptor) async {
         guard started else { return }
-        await engineThread.run { [self] in feedDescriptor(descriptor, appearing: false) }
+        if let t = engineThreadHolder.current {
+            try? await t.run { [self] in feedDescriptor(descriptor, appearing: false) }
+        }
         if let id = descriptor.parsedID { knownOutputs.removeValue(forKey: id) }
     }
 
@@ -739,7 +788,8 @@ public actor AirPlayEngine {
             guard let device = outputs_device_get(id.rawValue) else { return }
             device.pointee.volume = Int32((normalized * 100.0).rounded())
         }
-        if issueOverride != nil { apply() } else { await engineThread.run(apply) }
+        if issueOverride != nil { apply() }
+        else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
     /// Set the C device's `stream_id` field (T2, per-app multi-stream routing).
@@ -751,7 +801,8 @@ public actor AirPlayEngine {
             guard let device = outputs_device_get(id.rawValue) else { return }
             device.pointee.stream_id = streamId
         }
-        if issueOverride != nil { apply() } else { await engineThread.run(apply) }
+        if issueOverride != nil { apply() }
+        else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
     /// The LIVE state of the vendored C `output_device` for `id` — read straight
@@ -767,7 +818,9 @@ public actor AirPlayEngine {
             return OutputState(device.pointee.state)
         }
         let live: OutputState?
-        if issueOverride != nil { live = read() } else { live = await engineThread.run(read) }
+        if issueOverride != nil { live = read() }
+        else if let t = engineThreadHolder.current { live = (try? await t.run(read)) ?? nil }
+        else { live = nil }
         return live ?? knownOutputs[id] ?? .stopped
     }
 
@@ -912,7 +965,11 @@ public actor AirPlayEngine {
         if headlessFlag.load() {
             body()
         } else {
-            engineThread.enqueue(body)
+            // Untracked: an audio frame carries no continuation, so dropping a
+            // late one on teardown is correct (and keeps the hot path free of a
+            // per-write pending-table op). `current` is nil after stop() — the
+            // `startedFlag` guard above already gates that, this just no-ops.
+            engineThreadHolder.current?.enqueue(body, tracked: false)
         }
     }
 
@@ -979,6 +1036,12 @@ public actor AirPlayEngine {
         id: OutputID,
         issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32
     ) async throws -> OutputState {
+        // B5.1: serialize ops per OutputID — a second op on the same id awaits the
+        // first, so two overlapping ops can never clobber each other's completion
+        // waiter (the C dispatcher's "one pending callback per device" contract).
+        await acquireOp(id)
+        defer { releaseOp(id) }
+
         // In headless test mode the backend call is replaced by issueOverride and
         // the work runs inline (no engine thread / libevent). Everything else —
         // arming the REAL C dispatcher waiter and resolving through the genuine
@@ -1015,13 +1078,31 @@ public actor AirPlayEngine {
                 //     during NORMAL running, which the teardown-only cancel missed).
                 // NativeBackend maps the thrown failure onto its normal op-failure
                 // / recovery path — a timeout is not special-cased there.
-                completions.arm(
+                let armed = completions.arm(
                     callbackId: cbId,
                     timeout: opTimeout,
                     onCancel: { cont.resume(throwing: AirPlayEngineError.engineNotRunning) },
-                    onTimeout: { cont.resume(throwing: AirPlayEngineError.opTimedOut) }
+                    onTimeout: { [self] in
+                        // B5.2: a timed-out op leaves its C slot armed and the
+                        // session carrying this callback_id. Clear the slot (else
+                        // 64 leaks exhaust outputs_callback_add) and reset the
+                        // session's callback_id so a late completion can't resolve
+                        // a reused slot's op. Do this BEFORE resuming the awaiter
+                        // (in headless the cleanup runs inline/synchronously, so
+                        // the slot is free before the next op can arm).
+                        scheduleSlotCleanup(callbackId: cbId, id: id)
+                        cont.resume(throwing: AirPlayEngineError.opTimedOut)
+                    }
                 ) { state in
                     cont.resume(returning: state)
+                }
+                guard armed else {
+                    // B5.3: a waiter was already armed for this id (should be
+                    // unreachable given per-id serialization). Release the C slot
+                    // we just took and fail this op rather than strand it.
+                    outputs_callback_remove(device)
+                    cont.resume(throwing: AirPlayEngineError.operationRejected)
+                    return
                 }
                 let n = effectiveIssue(device, cbId)
                 if n <= 0 {
@@ -1035,9 +1116,56 @@ public actor AirPlayEngine {
             }
             if issueOverride != nil {
                 body() // headless: run inline, no engine thread required
+            } else if let t = engineThreadHolder.current {
+                // B4: if the engine thread can't schedule the body (base torn
+                // down), fail fast instead of leaking this continuation.
+                if !t.enqueue(body) {
+                    cont.resume(throwing: AirPlayEngineError.engineNotRunning)
+                }
             } else {
-                engineThread.enqueue(body)
+                cont.resume(throwing: AirPlayEngineError.engineNotRunning)
             }
+        }
+    }
+
+    /// B5.1 op-serialization gate: block until no op is in flight for `id`, then
+    /// mark this op in flight. Actor-isolated, so the check-and-mark is atomic.
+    private func acquireOp(_ id: OutputID) async {
+        while opsInFlight.contains(id) {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                opWaiters[id, default: []].append(cont)
+            }
+        }
+        opsInFlight.insert(id)
+    }
+
+    /// Release the in-flight op for `id` and wake every waiter (each re-checks the
+    /// gate; the actor serializes them so exactly one proceeds).
+    private func releaseOp(_ id: OutputID) {
+        opsInFlight.remove(id)
+        if let waiters = opWaiters.removeValue(forKey: id) {
+            for w in waiters { w.resume() }
+        }
+    }
+
+    /// B5.2: schedule the C-slot cleanup for a timed-out op onto the engine
+    /// thread (or inline in headless mode). `nonisolated` because the timeout
+    /// fires off-actor on the CompletionRegistry timer queue. Clears the leaked
+    /// callback slot and, if the device still has a live session, resets its
+    /// `callback_id` so a late completion can't resolve a reused slot's op.
+    private nonisolated func scheduleSlotCleanup(callbackId: Int32, id: OutputID) {
+        let cleanup: () -> Void = {
+            outputs_callback_clear(callbackId)
+            if let device = outputs_device_get(id.rawValue),
+               device.pointee.session != nil,
+               let cbSet = output_airplay.device_cb_set {
+                cbSet(device, -1)
+            }
+        }
+        if headlessFlag.load() {
+            cleanup()
+        } else {
+            engineThreadHolder.current?.enqueue(cleanup, tracked: false)
         }
     }
 

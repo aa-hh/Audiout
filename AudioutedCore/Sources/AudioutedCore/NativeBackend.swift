@@ -179,6 +179,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// them in that same order, off the hot path.
     private let captureControlQueue = DispatchQueue(label: "NativeBackend.captureControl")
 
+    // MARK: Sleep/wake (B6b — all confined to `stateQueue`)
+    //
+    // Sleep severs the RTSP/PTP sockets. `handleSystemWillSleep()` tears the engine
+    // outputs down cleanly (graceful TEARDOWN) but KEEPS `expectedSelected` /
+    // `desiredOn` intact, and `handleSystemDidWake()` re-converges them — so a sleep
+    // is a transient dropout, never a deselection. Crucially the willSleep teardown
+    // emits NO `deviceUpdated`: GroupController's reverse auto-swap (which restores
+    // {local} and clears the Selected Devices intent) is event-driven, so emitting
+    // nothing means it can't fire.
+
+    /// Whether the backend is currently suspended for system sleep. While true the
+    /// capture gate is forced off (`reconcileCaptureGate`) and no converge/discovery
+    /// path re-adds an output — `handleSystemDidWake()` is the one thing that clears
+    /// it and re-drives convergence.
+    private var suspended = false
+
+    /// The wake fallback watchdog's override on the capture gate. When the watchdog
+    /// fires (no desired-on device reconnected in time), this flips true and the
+    /// gate computes `want == false` even though `expectedSelected` is non-empty —
+    /// un-muting the Mac WITHOUT clearing intent. A later reconnect
+    /// (`noteWakeReconnect`) clears it and re-reconciles, cleanly re-engaging the gate.
+    private var wakeCaptureOverride = false
+
+    /// True between `handleSystemDidWake()` and the first post-wake reconnect (or the
+    /// watchdog firing). Gates `noteWakeReconnect` so the reconnect hook is inert
+    /// during ordinary operation.
+    private var awaitingWakeReconnect = false
+
+    /// The post-wake fallback delay in seconds (Settings › Audio), or `nil` for
+    /// "Never". Pushed by the app layer via ``setWakeAudioRestoreDelay(_:)``; read
+    /// when arming the watchdog on wake. Confined to `stateQueue`.
+    private var wakeAudioRestoreDelay: TimeInterval?
+
+    /// The armed post-wake watchdog, scheduled on `stateQueue`. Cancelled on the
+    /// first reconnect, on a new sleep/wake cycle, or on `stop()`.
+    private var wakeWatchdog: DispatchWorkItem?
+
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
     // The 2026-07-17 gated session wedged a device with rapid enable/disable spam:
@@ -668,6 +705,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
             self.captureRunning = false
+            // B6b: drop any pending wake watchdog + reset sleep/wake flags so a stop
+            // mid-wait can't leave capture wedged off (override) or suspended.
+            self.wakeWatchdog?.cancel()
+            self.wakeWatchdog = nil
+            self.awaitingWakeReconnect = false
+            self.wakeCaptureOverride = false
+            self.suspended = false
             // `captureControlQueue` gets the last word — and, since the eager
             // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
             // caller-thread stop would be unordered against a start still queued from
@@ -1459,6 +1503,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                         // `connectVolumeSeed`.
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
+                        if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot)
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
@@ -1773,6 +1818,141 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         await convergeDevice(id: id, outputID: outputID)
     }
 
+    // MARK: Sleep/wake (B6b)
+
+    public func setWakeAudioRestoreDelay(_ delay: TimeInterval?) {
+        stateQueue.async { self.wakeAudioRestoreDelay = delay }
+    }
+
+    /// Test-only (`@testable`): the raw selection INTENT the app last asked for
+    /// (`expectedSelected`) — distinct from `Device.isSelected` (streaming-now).
+    /// Lets B6b tests assert intent survives a sleep/wake/watchdog cycle even when a
+    /// failed reconnect legitimately deselects the model row.
+    var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
+
+    /// System will sleep: proactively remove every streaming engine output so the
+    /// receivers get a clean RTSP TEARDOWN before sleep severs the sockets, while
+    /// PRESERVING the selection intent (`expectedSelected` / `desiredOn`) so
+    /// ``handleSystemDidWake()`` can re-converge.
+    ///
+    /// Deliberately NOT routed through `convergeToTarget(on: false)` / a plain
+    /// deselect: that sets `desiredOn[id] = false` (clearing per-device intent) and
+    /// emits a `deviceUpdated` deselect that GroupController's reverse auto-swap
+    /// keys off. We instead clear `added` under the lock (bookkeeping only), issue
+    /// the `removeOutput`s off `stateQueue`, and emit NOTHING — so intent survives
+    /// and no reverse auto-swap can fire. `applyEngineState` swallows the `.stopped`
+    /// echoes these removals produce while `suspended` (below), for the same reason.
+    public func handleSystemWillSleep() {
+        let toRemove: [(id: String, outputID: OutputID)] = stateQueue.sync {
+            guard self.started, !self.suspended else { return [] }
+            self.suspended = true
+            // Abandon any in-flight wake bookkeeping from a prior cycle.
+            self.wakeWatchdog?.cancel()
+            self.wakeWatchdog = nil
+            self.awaitingWakeReconnect = false
+            self.wakeCaptureOverride = false
+            // Stop the whole-system tap (ordered on `captureControlQueue`, like every
+            // other gate decision) so the Mac isn't left muted by a tap streaming into
+            // dead sockets. `expectedSelected` is untouched.
+            self.captureRunning = false
+            if let coordinator = self.captureCoordinator {
+                self.captureControlQueue.async { coordinator.stop() }
+            }
+            // Snapshot the streaming set, then clear `added` SYNCHRONOUSLY: the engine
+            // sessions are about to die on sleep, so the bookkeeping must reflect
+            // "torn down" immediately — otherwise a fast wake could see them still
+            // `added` and skip the re-add, leaving silence. `desiredOn` is preserved.
+            let items: [(String, OutputID)] = self.added.compactMap { id in
+                guard let outputID = self.outputIDs[id] else { return nil }
+                return (id, outputID)
+            }
+            self.added.removeAll()
+            return items
+        }
+        for (_, outputID) in toRemove {
+            Task { [weak self] in try? await self?.engine.removeOutput(outputID) }
+        }
+    }
+
+    /// System woke: re-converge every still-desired device (intent survived sleep)
+    /// and arm the fallback watchdog. A wake reconnect is a genuine reconnect, so
+    /// `convergeDevice`'s add path reseeds the volume as documented (the `added`
+    /// false→true edge).
+    public func handleSystemDidWake() {
+        let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
+            guard self.started, self.suspended else { return [] }
+            self.suspended = false
+            self.wakeCaptureOverride = false
+
+            var kicks: [(String, OutputID)] = []
+            let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
+            for id in desiredIDs {
+                guard let outputID = self.outputIDs[id] else { continue }
+                // A sleep is not a device failure — clear any park so the re-add isn't
+                // gated, mirroring a user re-toggle.
+                self.failedGate.remove(id)
+                self.setConnectionState(.connecting, for: id)
+                if !self.converging.contains(id) {
+                    self.converging.insert(id)
+                    kicks.append((id, outputID))
+                }
+            }
+            // Re-decide the capture gate now that `suspended` is lifted (re-mute if a
+            // streaming selection is still in force).
+            self.reconcileCaptureGate()
+            // Arm the fallback watchdog only if we're actually waiting on a reconnect.
+            self.awaitingWakeReconnect = !desiredIDs.isEmpty
+            if self.awaitingWakeReconnect { self.armWakeWatchdog() }
+            return kicks
+        }
+        for (id, outputID) in toKick {
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        }
+        // Discovery nudge: a receiver that changed address / dropped during sleep
+        // needs re-resolving. `NativeDiscovery` has no explicit refresh seam today
+        // (sibling task B9 makes discovery self-healing) — noted, not forced here.
+    }
+
+    /// Called on the `added` false→true edge (both add-success sites) — inert unless
+    /// we're waiting on a post-wake reconnect. The first reconnect disarms the
+    /// watchdog; if the watchdog had already un-gated capture, this re-engages the
+    /// gate (re-muting the Mac for the recovered stream). Intent is never touched.
+    /// On `stateQueue`.
+    private func noteWakeReconnect() {   // on stateQueue
+        guard self.awaitingWakeReconnect else { return }
+        self.awaitingWakeReconnect = false
+        self.wakeWatchdog?.cancel()
+        self.wakeWatchdog = nil
+        if self.wakeCaptureOverride {
+            self.wakeCaptureOverride = false
+            self.reconcileCaptureGate()
+        }
+    }
+
+    /// Arm the fallback watchdog on `stateQueue`. A `nil`/non-positive delay ("Never")
+    /// arms nothing. On `stateQueue`.
+    private func armWakeWatchdog() {   // on stateQueue
+        self.wakeWatchdog?.cancel()
+        self.wakeWatchdog = nil
+        guard let delay = self.wakeAudioRestoreDelay, delay > 0 else { return }
+        let work = DispatchWorkItem { [weak self] in self?.fireWakeWatchdog() }
+        self.wakeWatchdog = work
+        // Scheduled ON `stateQueue`, so the body runs serialized with every other
+        // state mutation; a cancel before it fires simply drops it.
+        self.stateQueue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The watchdog fired: no desired-on device reconnected in time. Un-gate capture
+    /// so the Mac un-mutes, leaving the selection intent intact — a later reconnect
+    /// clears the override (`noteWakeReconnect`) and re-mutes. On `stateQueue`.
+    private func fireWakeWatchdog() {   // on stateQueue (scheduled there)
+        guard self.awaitingWakeReconnect, self.wakeWatchdog != nil else { return }
+        self.wakeWatchdog = nil
+        self.awaitingWakeReconnect = false
+        self.wakeCaptureOverride = true
+        self.reconcileCaptureGate()
+    }
+
     // MARK: Discovery → app model (all on stateQueue)
 
     private func handleDiscovery(_ event: DiscoveryEvent) {
@@ -1999,6 +2179,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         // stale session down. We compute any needed re-kick under the lock and fire
         // it after releasing it (convergeDevice takes the lock itself).
         let rekick: (id: String, outputID: OutputID)? = stateQueue.sync {
+            // While suspended for sleep (B6b), swallow every transition: the
+            // `handleSystemWillSleep()` removals produce `.stopped` echoes that would
+            // otherwise emit a `deviceUpdated` deselect and let GroupController's
+            // reverse auto-swap clear the very intent sleep is preserving. Wake
+            // re-converges from `desiredOn`, so nothing is lost.
+            guard !self.suspended else { return nil }
             // Find the string id for this engine handle (discovery owns the mapping).
             guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key,
                   var device = self.known[id] else { return nil }
@@ -2027,6 +2213,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                 device.isSelected = true
                 device.connectionState = .connected
                 self.added.insert(id)
+                if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
                 self.failedGate.remove(id)
@@ -2377,7 +2564,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// start/stop/start/… in exactly the decided order and settle on the last one.
     private func reconcileCaptureGate() {   // on stateQueue
         guard let coordinator = captureCoordinator else { return }
-        let want = expectedSelected.contains { known[$0]?.supportsAirPlay2 == true }
+        // Two B6b overrides force the tap OFF regardless of selection: while
+        // `suspended` (system sleep — nothing to send, and a later didWake re-decides)
+        // and while the wake watchdog has un-gated capture (`wakeCaptureOverride` —
+        // no receiver came back, so un-mute the Mac). Neither touches the selection
+        // intent, so the gate re-engages the moment both clear.
+        let want = !suspended && !wakeCaptureOverride
+            && expectedSelected.contains { known[$0]?.supportsAirPlay2 == true }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
         captureControlQueue.async {

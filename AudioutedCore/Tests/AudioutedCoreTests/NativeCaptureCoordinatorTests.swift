@@ -481,6 +481,68 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
+    #if canImport(AudioToolbox)
+    // MARK: - pts drift self-heal (B6a): a sleep mid-tap must not silence
+    // streaming until relaunch — the offset is per-tap and self-heals.
+
+    /// A simulated 5s sleep (mach halted, CLOCK_MONOTONIC advanced 5s) must be
+    /// detected: `machNanos + offset` now trails "now" by 5s, well past the
+    /// ~1s threshold, so a caller must resample.
+    @available(macOS 14.2, *)
+    func testShouldResampleDetectsSleepDrift() {
+        let machNanos: UInt64 = 100_000_000_000          // 100s of mach time
+        let offsetAtTapStart: Int64 = 0                   // clocks agreed at start
+        let monotonicNowAfterFiveSecondSleep: UInt64 = 105_000_000_000
+        XCTAssertTrue(CoreAudioSystemTap.shouldResample(
+            machNanos: machNanos,
+            offset: offsetAtTapStart,
+            monotonicNowNanos: monotonicNowAfterFiveSecondSleep))
+    }
+
+    /// No sleep, no drift: an offset that still agrees with "now" to well under
+    /// 1s must NOT trigger a resample on every single buffer.
+    @available(macOS 14.2, *)
+    func testShouldResampleToleratesNoDrift() {
+        let machNanos: UInt64 = 100_000_000_000
+        let offset: Int64 = 0
+        let monotonicNow: UInt64 = 100_050_000_000        // 50ms of normal scheduling jitter
+        XCTAssertFalse(CoreAudioSystemTap.shouldResample(
+            machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNow))
+    }
+
+    /// A negative offset (CLOCK_MONOTONIC behind mach-absolute, i.e. the box
+    /// slept before the offset was even sampled) must be handled correctly in
+    /// signed space, not wrap or crash.
+    @available(macOS 14.2, *)
+    func testShouldResampleHandlesNegativeOffset() {
+        let machNanos: UInt64 = 50_000_000_000
+        let offset: Int64 = -10_000_000_000               // monotonic trails mach by 10s
+        let monotonicNowAgreeing: UInt64 = 40_000_000_000  // 50s + (-10s) = 40s: agrees
+        XCTAssertFalse(CoreAudioSystemTap.shouldResample(
+            machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNowAgreeing))
+
+        let monotonicNowDrifted: UInt64 = 46_000_000_000   // now 6s off from the 40s prediction
+        XCTAssertTrue(CoreAudioSystemTap.shouldResample(
+            machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNowDrifted))
+    }
+
+    /// `timespec(machNanos:offset:)` pts math round-trip: a known machNanos +
+    /// offset must land on the expected wall-clock seconds/nanos, including the
+    /// zero-clamp for a pathological negative result.
+    @available(macOS 14.2, *)
+    func testTimespecMachNanosOffsetRoundTrip() {
+        let ts = CoreAudioSystemTap.timespec(machNanos: 2_500_000_000, offset: 500_000_000)
+        // 2.5s + 0.5s = 3.0s exactly.
+        XCTAssertEqual(ts.tv_sec, 3)
+        XCTAssertEqual(ts.tv_nsec, 0)
+
+        let clamped = CoreAudioSystemTap.timespec(machNanos: 1_000_000_000, offset: -5_000_000_000)
+        // Would be -4s; must clamp to zero rather than go negative.
+        XCTAssertEqual(clamped.tv_sec, 0)
+        XCTAssertEqual(clamped.tv_nsec, 0)
+    }
+    #endif
+
     // MARK: - RMS metering (pure).
 
     func testRMSOfS16LE() {

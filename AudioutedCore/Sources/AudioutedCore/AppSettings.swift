@@ -52,6 +52,7 @@ public struct AppSettings {
         static let theme = "appearance.theme"
         static let density = "appearance.density"
         static let startBufferMs = "audio.startBufferMs"
+        static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -90,5 +91,32 @@ public struct AppSettings {
             return Self.startBufferOptionsMs.contains(stored) ? stored : Self.defaultStartBufferMs
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.startBufferMs) }
+    }
+
+    /// Options (in MINUTES) for the post-wake "restore Mac audio if speakers don't
+    /// return" fallback (Settings › Audio, B6b). `0` means "Never". Bare numeric
+    /// values by design (ahh, 2026-07-17: named presets with embedded text don't
+    /// survive localization; the pane's popup formats these as "N minute(s)").
+    public static let wakeRestoreMinuteOptions: [Int] = [0, 1, 2, 5, 10]
+
+    /// The default wake-restore fallback (minutes). `2` — a short sleep reconnects
+    /// in ~1–2 s, so 2 minutes only ever trips on a genuine "speaker isn't coming
+    /// back" wake, at which point silent-everywhere is worse than un-muting the Mac.
+    public static let defaultWakeRestoreMinutes = 2
+
+    /// The persisted post-wake fallback in minutes (`0` = Never). Unset resolves to
+    /// ``defaultWakeRestoreMinutes`` (NOT 0 — `UserDefaults.integer` returns 0 for a
+    /// missing key, which is a valid "Never", so unset is distinguished via
+    /// `object(forKey:)`). Any stored value outside ``wakeRestoreMinuteOptions``
+    /// (a newer/older build) also resolves to the default.
+    public var wakeRestoreMinutes: Int {
+        get {
+            guard defaults.object(forKey: Keys.wakeRestoreMinutes) != nil else {
+                return Self.defaultWakeRestoreMinutes
+            }
+            let stored = defaults.integer(forKey: Keys.wakeRestoreMinutes)
+            return Self.wakeRestoreMinuteOptions.contains(stored) ? stored : Self.defaultWakeRestoreMinutes
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.wakeRestoreMinutes) }
     }
 }

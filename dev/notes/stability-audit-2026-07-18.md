@@ -312,3 +312,43 @@ marker in source. Don't add one; duplicating tracking here would just drift.
   `routeMixer.flush()` / `localPlaybackEngine?.stop()` on the caller thread —
   bounded, graphQueue-serialized work, but a follow-up candidate to move off
   the quit path.
+- **B4** (E1) — `EngineThread.enqueue` no longer silently drops work: it returns
+  `Bool`, `run` throws `engineNotRunning` when scheduling fails, tracked pending
+  bodies are swept in `stop()`, and `startOp` fails its continuation on a failed
+  enqueue — so a pre-start/post-stop op fails fast instead of freezing forever.
+- **B5** (E1) — completion-slot reuse closed three ways: per-`OutputID` op
+  serialization in the `AirPlayEngine` actor (a second op on an id awaits the
+  first), a `outputs_callback_clear(callback_id)` shim enqueued on op timeout to
+  free the leaked C slot (plus a `device_cb_set(-1)` session reset when live),
+  and `CompletionRegistry.arm` now refuses (returns false) rather than clobber an
+  existing waiter. Coexists with NativeBackend's per-output volume serialization.
+- **C2** (E1) — the engine survives stop→start: `start()` builds a FRESH
+  `EngineThread` per start (held in `EngineThreadHolder`), guarded by a `starting`
+  reentrancy flag set before the first suspension point, and `stop()` calls the
+  new `outputs_registry_clear()` shim (empties `device_list`, NULLs sessions,
+  resets the callback register) so a later start begins clean.
+- **C3** (E1) — `EngineThread.stop()` deadlines its join (~3s): a callback wedged
+  in a blocking syscall no longer hangs `stop()` (and the engine actor) forever —
+  on expiry it logs loudly (stderr + os_log fault), sweeps pending continuations,
+  and deliberately LEAKS the thread/base. Wedged-thread + real rapid stop→start
+  behaviour still needs a gated live test.
+- **B6a** (Phase 3) — the mach→CLOCK_MONOTONIC pts offset is no longer a
+  process-lifetime `static let`: it lives per tap instance, reseeded on every
+  tap create/recreate, and every buffer runs a cheap signed-drift check that
+  resamples the offset if it diverges >1s (a sleep mid-tap self-heals with no
+  observer). Streaming surviving a real >1 min sleep still needs a gated live
+  test.
+- **B6b** (Phase 3) — the app's first sleep/wake handling: NSWorkspace
+  observers (app layer) drive a new backend seam; sleep gracefully removes
+  engine outputs WITHOUT clearing selection intent (events suppressed while
+  suspended so the reverse auto-swap can't fire), wake re-converges every
+  desired-on device (reseeding volume via the normal added edge). A
+  user-configurable wake watchdog (Settings › Audio, Never/1/2/5/10 min,
+  default 2) un-gates capture — un-muting the Mac — if speakers never return,
+  without touching intent; a late reconnect re-engages the gate. Live
+  sleep/wake proof pending.
+- **B9** (Phase 3) — discovery survives NWBrowser `.failed` (previously
+  terminal = discovery dead for the session): per-service-type browser
+  recreate with capped backoff (1s→30s, reset on `.ready`), stop-safe
+  cancellation of pending recreates; both stale "browser owns its own retry"
+  comments corrected. Live mDNSResponder-kill recovery proof pending.

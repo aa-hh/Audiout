@@ -222,6 +222,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.handleAppLaunched(bundleID: bundleID)
         }
 
+        // B6b: the app has ZERO sleep/wake awareness otherwise — sleep silently
+        // severs the RTSP/PTP sockets and the intent-keyed capture gate would keep
+        // the Mac muted forever if a receiver never returned. Proactively disconnect
+        // cleanly on sleep (intent preserved) and re-converge on wake; the backend
+        // arms a fallback watchdog (below) that un-mutes the Mac if nothing comes
+        // back. Core can't observe `NSWorkspace` notifications (AppKit), so the seam
+        // is driven from here. Never explicitly removed — AppDelegate's lifetime is
+        // the app's own, like the app-lifecycle observers above.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.backend.handleSystemWillSleep() }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.backend.handleSystemDidWake() }
+        // Seed the backend with the persisted wake-restore fallback (B6b) before it
+        // can ever wake; the Settings pane re-pushes on change.
+        pushWakeRestoreSetting()
+
         // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
         // burst the backend emits as it enumerates what's already there.
         subscribeToBackendEvents()
@@ -259,7 +277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             controller = SettingsWindowController(settings: settings,
                                                   excludedApps: excludedApps,
-                                                  latency: makeLatencySettingModel())
+                                                  latency: makeLatencySettingModel(),
+                                                  wakeRestore: makeWakeRestoreSettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
             settingsWindowController = controller
@@ -287,6 +306,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await configurable.applyStartBuffer(ms: ms)
             }
         )
+    }
+
+    /// The Settings › Audio wake-restore model (B6b). Reads the persisted minutes
+    /// and, on change, persists + re-pushes to the backend. Built unconditionally —
+    /// the setting is a universal preference; on backends without a capture gate the
+    /// pushed delay is simply a no-op.
+    @MainActor
+    private func makeWakeRestoreSettingModel() -> WakeAudioRestoreModel {
+        WakeAudioRestoreModel(
+            minuteOptions: AppSettings.wakeRestoreMinuteOptions,
+            initialMinutes: settings.wakeRestoreMinutes,
+            apply: { [weak self] minutes in
+                self?.settings.wakeRestoreMinutes = minutes
+                self?.pushWakeRestoreSetting()
+            })
+    }
+
+    /// Push the persisted wake-restore fallback into the backend (B6b). `0` minutes
+    /// ("Never") maps to `nil` (watchdog disabled); otherwise minutes → seconds.
+    @MainActor
+    private func pushWakeRestoreSetting() {
+        let minutes = settings.wakeRestoreMinutes
+        backend.setWakeAudioRestoreDelay(minutes <= 0 ? nil : TimeInterval(minutes * 60))
     }
 
     /// The excluded-apps list changed (Settings › Audio). Enforce the "excluded ⇒

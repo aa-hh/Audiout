@@ -305,6 +305,25 @@ outputs_callback_remove(struct output_device *device);
 output_status_cb
 outputs_callback_get(struct output_device *device);
 
+/* Clear ONE callback slot by its id (B5). Unlike outputs_callback_remove (which
+ * clears every slot for a device), this frees exactly the slot a timed-out /
+ * disarmed op left armed — so a leaked slot can't accumulate until
+ * outputs_callback_add exhausts all OUTPUTS_MAX_CALLBACKS slots and returns -1
+ * for every subsequent op. A no-op for an out-of-range id. Engine thread only
+ * (touches the shared register non-atomically, like the rest of this file). */
+void
+outputs_callback_clear(int callback_id);
+
+/* Empty the whole device registry (C2): walk device_list, NULL each device's
+ * session pointer (the sessions themselves are freed by airplay_deinit — this
+ * only drops the dangling registry references so a fresh start() begins clean),
+ * free every device, and reset the callback register + out-of-band state ring.
+ * Called from AirPlayEngine.stop() teardown AFTER airplay_deinit, so a later
+ * start() does not inherit stale device->session pointers or leaked callback
+ * slots. Engine thread only. */
+void
+outputs_registry_clear(void);
+
 /* Engine completion hook: fired (deferred, on evbase_player) once per delivered
  * outputs_cb, AFTER the output_status_cb, so the Swift/T-API-1 async waiter that
  * armed `callback_id` unblocks. `state` is terminal for the op that armed the id

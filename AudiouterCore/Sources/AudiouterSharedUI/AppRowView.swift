@@ -155,7 +155,7 @@ public final class AppRowView: NSView {
 
     /// The leading VU meter (task T4), mounted only when `showsMeter` is
     /// true — mirrors `DeviceRowView`'s `LevelMeterView`. No per-app level
-    /// signal exists yet (see `AudioutedSharedUI/AGENTS.md`), so nothing
+    /// signal exists yet (see `AudiouterSharedUI/AGENTS.md`), so nothing
     /// drives this automatically; a future per-stream metering seam calls
     /// ``setLevel(_:)`` directly.
     private let meterView = LevelMeterView()

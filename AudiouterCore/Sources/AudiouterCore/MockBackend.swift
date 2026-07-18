@@ -95,7 +95,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
     /// Bundle IDs the level timer should also fabricate `.appLevel` samples for
     /// (T7 offline fixture). `MockBackend` has no real per-app capture and
-    /// doesn't conform to `AppRouteConfiguring` (see `AudioutedCore/AGENTS.md`),
+    /// doesn't conform to `AppRouteConfiguring` (see `AudiouterCore/AGENTS.md`),
     /// so there's no live route table to read the list from — `test_setMeteredApps`
     /// is the only way this gets populated. Empty by default, so the existing
     /// device-only `.level` behaviour is unchanged until a caller opts in.

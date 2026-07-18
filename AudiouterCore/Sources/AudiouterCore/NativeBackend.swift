@@ -535,7 +535,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // collides with `perAppCapture`. Same injected `resolvePID`. Tests can
         // script it via `injectedMeteringCapture` (mirrors `injectedPerAppCapture`).
         self.meteringCapture = injectedMeteringCapture
-            ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudioutedMeter", muteBehavior: .unmuted)
+            ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudiouterMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff

@@ -153,6 +153,12 @@ let package = Package(
             name: "settings-snapshot",
             dependencies: ["AudioutedCore", "AudioutedSettingsUI"]
         ),
+        // Offscreen PNG renderer for the mixer window (group-creation design
+        // review) — see the product comment in window-snapshot/main.swift.
+        .executableTarget(
+            name: "window-snapshot",
+            dependencies: ["AudioutedCore", "AudioutedWindowUI"]
+        ),
         .testTarget(
             name: "AudioutedCoreTests",
             dependencies: [

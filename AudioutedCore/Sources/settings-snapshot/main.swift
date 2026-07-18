@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 //
 // settings-snapshot — offscreen PNG renderer for the Settings window (mirrors
 // `popover-snapshot`). The live window isn't visible to an agent shell — and

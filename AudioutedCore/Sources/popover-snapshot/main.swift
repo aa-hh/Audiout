@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 //
 // popover-snapshot — offscreen PNG renderer for the popover panel (the popover
 // layout overhaul's visual verification). The live popover isn't visible to an

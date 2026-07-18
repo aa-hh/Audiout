@@ -1,6 +1,6 @@
 # Click-to-sound latency: budget, knobs, and the gated re-verify checklist
 
-**Context (2026-07-17).** Gated-session measurement by Alec against the real
+**Context (2026-07-17).** Gated-session measurement by ahh against the real
 Sonos fleet: steady-state click-to-sound on `AIRPLAY_BACKEND=native` was
 **~3.5 s** (same for sound starting and stopping), measured after the session
 was established. Phase 0 measured OwnTone at ~2 s on the same fleet, so
@@ -103,7 +103,7 @@ should match).
    no "Reconnecting" state.
 5. **Below-the-shipped-floor reconnaissance (optional — informs a FUTURE
    lower option, does not gate this ship):** the offered floor is 1000 ms
-   (Alec, 2026-07-17: the receiver's cushion at 1000 ms is 750 ms, which
+   (ahh, 2026-07-17: the receiver's cushion at 1000 ms is 750 ms, which
    comfortably absorbs ordinary Wi-Fi disturbances — see the risk note below).
    To scout whether a lower option would ever be worth adding, use the env
    knob (still 300–5000, independent of the UI's 3 options):

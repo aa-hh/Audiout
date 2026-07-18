@@ -31,7 +31,7 @@ cases. Every launch, every user.
 |---|---|
 | No audio, green LED | Discovery raced onto an IPv6 link-local address; engine runs `ipv6=0`. Now IPv4-only + a 12s op timeout (a stalled op was leaking continuations and hanging quit). |
 | Powered-off Sonos read as "AirPlay 1 coming soon" | `_airplay` drops before `_raop` on shutdown, so it looked raop-only. Sticky-AP2 bit + `isAvailable`. |
-| Previous AirPlay device auto-streamed on launch | Persisted routing was auto-resumed. **Alec's decision: every launch defaults to `{current device}` = passthrough.** Saved groups still persist. |
+| Previous AirPlay device auto-streamed on launch | Persisted routing was auto-resumed. **ahh's decision: every launch defaults to `{current device}` = passthrough.** Saved groups still persist. |
 | **Passthrough was SILENT** | The tap is `.mutedWhenTapped` (correct while streaming) but ran **unconditionally from launch** — muting system audio and sending it nowhere. `isPassthrough` was documented as the gate for exactly this and was wired to **nothing**. Capture is now gated on the live AirPlay output set. |
 | **Current Device slider + mute did nothing** | The local device is display-only, so `setVolume`/`setMuted` hit the `outputIDs` guard and no-op'd. New `SystemOutputVolume` drives the real default output device, two-way. |
 | Devices invisible until popover reopened | The mid-open repaint path only walked existing rows. A device-set change now forces a rebuild + animated resize. |
@@ -62,14 +62,14 @@ posture). Known open items are tracked as separate tasks, not here:
   it up: the redirect union feeds the capture gate, so one redirect would start
   the single global tap and mute the whole Mac.
 - First-run permission setup flow (release-readiness, same bucket as the AP1
-  port — irrelevant for Alec, essential before anyone else runs this).
+  port — irrelevant for ahh, essential before anyone else runs this).
 - Default-output selector divergence: `NativeBackend` reads
   `kAudioHardwarePropertyDefaultOutputDevice` but `NativeCaptureCoordinator`
   listens on `...DefaultSystemOutputDevice` — different devices.
 
 ---
 
-## Resolved decisions (Alec, 2026-07-17) — authoritative
+## Resolved decisions (ahh, 2026-07-17) — authoritative
 
 - **D1 Scope:** NativeBackend end-to-end only. Multistream, synced-local
   output, EQ/auto-reconnect: deferred. **AP1 (raop.c) sender port: deferred to
@@ -97,7 +97,7 @@ posture). Known open items are tracked as separate tasks, not here:
   the future raop sender.
 - **D7 Live verification: ONE batched user-present gated session at the end**
   (multi-room 2-output sync → `AIRPLAY_BACKEND=native` end-to-end → volume
-  A/B → real-fleet discovery watch). EXCEPTION (Alec, post-approval): passive
+  A/B → real-fleet discovery watch). EXCEPTION (ahh, post-approval): passive
   Bonjour discovery scans against the live LAN are allowed during development
   — browsing is read-only (no root, no PTP, no audio). The LG TV may appear in
   scans but must NEVER be used as an output.
@@ -196,7 +196,7 @@ posture). Known open items are tracked as separate tasks, not here:
 **T-NB-PKGDEP-1 — Engine package dependency wiring**
 - files: `AudioutedCore/Package.swift` (sole editor).
 - what: Local path dependency on `AirPlayEngine` + product dep on the core
-  library target. Platform floor: engine is .v14 (tap API is 14.4+; Alec runs
+  library target. Platform floor: engine is .v14 (tap API is 14.4+; ahh runs
   14.4.1) — raise the core floor to .v14 if that is the minimal working
   configuration rather than fighting availability annotations; record the
   choice. Mock/OwnTone paths unaffected.
@@ -340,7 +340,7 @@ posture). Known open items are tracked as separate tasks, not here:
 PKGDEP → DISCOVERY ∥ CAPTURE → BACKEND → RESOLVER → RESOLVER-1b, with
 STATESTREAM a parallel hard prerequisite of BACKEND.
 
-## Gated session checklist (Alec present, ONE session, at the end)
+## Gated session checklist (ahh present, ONE session, at the end)
 
 1. Stop OwnTone (frees PTP 319/320); firewall allowlist per first-light script.
 2. Multi-room: engine-probe 2-output run (Sonos Move + Move 2), sync by ear.
@@ -355,7 +355,7 @@ STATESTREAM a parallel hard prerequisite of BACKEND.
 
 R1 in-app TCC (stable .app path via scripts/make-app.sh; documented in
 runbook) · R2 dual-service discovery classification (mitigated: live LAN
-scans during dev, per Alec) · R3 pts correctness (2-output gated run is the
+scans during dev, per ahh) · R3 pts correctness (2-output gated run is the
 real check) · R4 vendored-C reach (D5 ledger) · R5 platform floor (PKGDEP
 verifies) · R6 volume-curve fidelity (gated A/B) · R7 cross-plan resolver
 contention (none known in-flight) · R8 the serial engine-Swift chain is the

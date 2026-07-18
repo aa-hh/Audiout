@@ -504,7 +504,7 @@ machinery — none of it applies to an in-process engine.
 
 ---
 
-## Open questions for Alec
+## Open questions for ahh
 
 1. **`setOutputSet` partial-failure policy (§2.3, §4.5)**: when converging a
    group activation requires adding N outputs and one fails mid-way, should

@@ -1,12 +1,12 @@
 # PLAN: User-facing latency setting (Settings › Audio › Advanced) — IMPLEMENTED
 
-Status: **implemented 2026-07-17 on `claude/lucid-cori-044f0e`** (Alec
+Status: **implemented 2026-07-17 on `claude/lucid-cori-044f0e`** (ahh
 approved 2026-07-17: "makes sense to me"). Companion to the latency work in
 `AirPlayEngine/docs/latency-analysis.md` (commit 5313cc1): the sender start
 buffer is now configurable (engine knob + `AIRPLAY_START_BUFFER_MS` env) AND
 a user setting with a safe floor and an explicit apply step. Remaining:
 the gated by-ear checklist (latency-analysis.md, step 4 — the Settings
-apply-flow round trip) needs Alec + the real fleet.
+apply-flow round trip) needs ahh + the real fleet.
 
 **Relation to the earlier "no latency slider" decision (2026-07-17, settings
 window pass):** SoundSource's *Audio Processing latency slider* was explicitly
@@ -31,7 +31,7 @@ Audio buffer                             [ 1000 ms ▾ ]
                               [ Apply & Reconnect ]
 ```
 
-- **Numeric options, not named presets (Alec, 2026-07-17 mockup review —
+- **Numeric options, not named presets (ahh, 2026-07-17 mockup review —
   LOCALIZATION):** dropdown items are bare millisecond values ("1000 ms",
   via `NumberFormatter` for locale digit grouping) — named presets with
   embedded delay descriptions ("Balanced (about 2 seconds)") don't survive
@@ -50,7 +50,7 @@ Audio buffer                             [ 1000 ms ▾ ]
   *Assumes the receiver-applied share measured in the gated run. Values live
   as named constants in one place.
 
-- **User floor = 1000 ms** (Alec, 2026-07-17: dropped the 500 ms option).
+- **User floor = 1000 ms** (ahh, 2026-07-17: dropped the 500 ms option).
   1000 ms leaves receivers a 750 ms jitter buffer — comfortably safe on
   ordinary Wi-Fi (see risk note in §6). The gated floor sweep (via the env
   knob, which still accepts 300–5000) can justify ADDING a lower option
@@ -58,7 +58,7 @@ Audio buffer                             [ 1000 ms ▾ ]
   clamp at 300 ms (below ~250 the vendored sender rejects every session), so
   even a corrupted default can't produce a non-working value.
 
-- **Explicit CTA applies the change** (Alec, this thread): changing the popup
+- **Explicit CTA applies the change** (ahh, this thread): changing the popup
   arms the button; nothing changes until it's clicked.
   - Streaming → button reads **"Apply & Reconnect"**; clicking causes ~3–5 s
     of silence (session re-handshake + new buffer fill), then **streaming
@@ -137,7 +137,7 @@ and the engine thread are untouched.
 
 ## 6. Gated (user present, real fleet) + the 1000 ms risk assessment
 
-**Why 1000 ms as the lowest option is safe (Alec asked, 2026-07-17):** the
+**Why 1000 ms as the lowest option is safe (ahh asked, 2026-07-17):** the
 receiver's protection against network trouble is `start_buffer − 250 ms` of
 buffered audio — 750 ms at the 1000 ms option. Ordinary Wi-Fi disturbances
 (channel scans, interference bursts, contention with other traffic) stall

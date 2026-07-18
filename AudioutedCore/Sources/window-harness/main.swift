@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 //
 // window-harness — programmatic verification for the T-U4 mixer window (SPEC §9).
 //

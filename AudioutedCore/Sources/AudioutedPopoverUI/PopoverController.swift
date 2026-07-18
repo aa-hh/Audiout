@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedCore
@@ -570,7 +569,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Device rows
 
     private func makeDeviceRow(_ device: Device, indented: Bool, showsToggle: Bool = true) -> DeviceRowView {
-        // No accent-wash pill in the popover (2026-07-14 — Alec: no longer
+        // No accent-wash pill in the popover (2026-07-14 — ahh: no longer
         // needed to highlight multiple selected devices at once here; the
         // card already separates rows, and the icon tint + switch state still
         // say "on"). The mixer window keeps the wash (its default `true`).

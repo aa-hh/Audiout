@@ -3,7 +3,7 @@ import PackageDescription
 
 // Platform floor: raised from .v13 to .v14 for T-NB-PKGDEP-1. AirPlayEngine
 // (../AirPlayEngine/Package.swift) is .macOS(.v14) — its Core Audio process
-// tap capture (T-NB-CAPTURE-1) needs the tap API, which is 14.4+ (Alec runs
+// tap capture (T-NB-CAPTURE-1) needs the tap API, which is 14.4+ (ahh runs
 // 14.4.1) — and a SwiftPM package's platform floor cannot be lower than any
 // local dependency it links (Xcode/SwiftPM enforces the dependency's
 // deployment target as a floor on any target that depends on it, and will

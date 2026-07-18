@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import XCTest
 import AppKit
@@ -201,7 +200,7 @@ final class PopoverControllerTests: XCTestCase {
     /// appearance (the stale-highlight bug). After toggling a device OFF the row's
     /// model membership AND every visual property that encodes "selected/highlight"
     /// (icon accent tint, transient hover) must reset. The popover row never
-    /// paints a selected-background pill at all (2026-07-14 — Alec: removed the
+    /// paints a selected-background pill at all (2026-07-14 — ahh: removed the
     /// accent wash so multiple selected devices no longer highlight at once;
     /// the mixer window still paints it, covered by its own tests).
     func testDeselectResetsRowHighlight() async throws {

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 
@@ -191,5 +190,5 @@ public enum PopoverColumnGrid {
     // Every element keeps plain `centerYAnchor` — no per-element optical nudge.
     // (The volume sliders are stock `NSSlider`s as of 2026-07-17; the earlier
     // custom Control-Center slider carried a 1.75pt optical-rise tweak, removed
-    // with it when Alec reverted to default macOS slider styling.)
+    // with it when ahh reverted to default macOS slider styling.)
 }

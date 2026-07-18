@@ -108,7 +108,7 @@ public final class GroupController {
         self.store = store
         self.routingStore = routingStore
         self.groups = loadPersisted ? ((try? store.load()) ?? []) : []
-        // DECISION (Alec, 2026-07-17): the live Selected-Devices routing set is
+        // DECISION (ahh, 2026-07-17): the live Selected-Devices routing set is
         // NOT auto-resumed on launch. Every launch defaults to {current device}
         // = passthrough, so a previously-selected AirPlay device never
         // auto-streams when the app opens. Saved GROUPS still persist and stay
@@ -236,7 +236,7 @@ public final class GroupController {
     ///   set IS passthrough at the backend), so an empty set is a fiction the UI
     ///   then renders as nonsense: the Main Out master averages an empty member
     ///   set to 0 — the slider slams to zero on disconnect — and the volume keys
-    ///   have no member to visibly drive (Alec, live session 2026-07-17b: "when I
+    ///   have no member to visibly drive (ahh, live session 2026-07-17b: "when I
     ///   disconnect an airplay device, system audio out just goes straight down
     ///   to zero … when nothing is selected … only current device changes").
     ///   With {local} restored, the master tracks the Mac's own volume — which is
@@ -704,7 +704,7 @@ public final class GroupController {
 
     // MARK: System-volume mirror — the volume keys drive what's actually playing
     //
-    // THE BUG (Alec, live hardware session 2026-07-17): "when i use the volume keys
+    // THE BUG (ahh, live hardware session 2026-07-17): "when i use the volume keys
     // only the current device slider moves up and down not the selected devices".
     // The macOS volume keys move the system default output, which IS the local
     // "Current Device" row, and `NativeBackend`'s two-way sync faithfully moves that
@@ -745,7 +745,7 @@ public final class GroupController {
     /// (`isPassthrough == true`). Before this, a volume key in exactly that state hit
     /// `mirrorSystemVolumeToMainOut`'s old `!isPassthrough` guard and did nothing,
     /// leaving the redirected device's volume stuck while the Mac played silence
-    /// (Alec, live session 2026-07-17: "if nothing is connected to the audio out and
+    /// (ahh, live session 2026-07-17: "if nothing is connected to the audio out and
     /// I hit the volume buttons, the audio out volume doesn't change").
     ///
     /// For `.selectedDevices`, the local Mac is filtered out unconditionally (its

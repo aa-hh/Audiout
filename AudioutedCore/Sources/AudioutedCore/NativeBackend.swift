@@ -290,7 +290,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, @unchecked
                 // 1c. VOLUME-KEY MIRROR. Syncing the row above is necessary but not
                 //     sufficient: while streaming, the capture tap MUTES the local
                 //     output, so the keys move a slider for a device nobody can hear
-                //     while the AirPlay speakers ignore them (Alec, live session
+                //     while the AirPlay speakers ignore them (ahh, live session
                 //     2026-07-17). Republish the change so the routing brain can
                 //     mirror it onto whatever is actually playing.
                 //

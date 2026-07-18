@@ -132,7 +132,7 @@ Capturing system audio requires the **system-audio-capture** TCC permission.
   ```sh
   tccutil reset AudioCapture      # reset the grant for all apps, to re-test the prompt
   ```
-  **This task (T-0e-3/T-0f-2) rebuilt the CLI, so the grant is reset — Alec must
+  **This task (T-0e-3/T-0f-2) rebuilt the CLI, so the grant is reset — ahh must
   re-grant before the verification runs below.** The exact copy-paste re-grant +
   test commands live in `dev/notes/0e3-0f2-verify.md`.
 

@@ -144,7 +144,7 @@ rows in the popover with a "coming soon" explanation. See
 live-verification checklist (D7) — that gated session (multi-room 2-output
 sync, native end-to-end on a real speaker, volume A/B, real-fleet discovery
 watch, teardown stress) is the one piece of Phase 2b that still requires
-Alec present with real hardware; everything else is headless-verified.
+ahh present with real hardware; everything else is headless-verified.
 
 Deferred beyond Phase 2b (see the roadmap briefs in `dev/notes/p2b-*.md`,
 indexed in `dev/AGENTS.md`): the AP1 (`raop.c`) sender port (D6 — AP1-only

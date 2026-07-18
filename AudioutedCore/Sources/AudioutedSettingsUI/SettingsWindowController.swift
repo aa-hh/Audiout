@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedCore
@@ -7,7 +6,7 @@ import AudioutedCore
 /// The Settings window (the header gear's destination — previously a `// TODO:
 /// settings` stub).
 ///
-/// **One screen, not tabs** (design revision 2026-07-17 — Alec: "this feels
+/// **One screen, not tabs** (design revision 2026-07-17 — ahh: "this feels
 /// like it should maybe just be one screen at the moment"): with three
 /// single-control sections, a tab bar was pure navigation overhead, and it was
 /// also the proximate cause of a real bug — see below. General / Appearance /

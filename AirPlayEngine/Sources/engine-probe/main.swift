@@ -5,7 +5,7 @@
 // in sync: start the engine, feed each device's discovery descriptor
 // (discovery-in), addOutput each (await the RTSP/PTP setup completion), set
 // volume, pump ONE shared PCM file to all of them off a single advancing pts,
-// then stop. It is the artifact a human (Alec) runs LATER, in a GATED session —
+// then stop. It is the artifact a human (ahh) runs LATER, in a GATED session —
 // it is NOT run by the T-API-1 / T-ENG-MULTIROOM-CLI-1 build tasks.
 //
 // WHY GATED. A live run needs ALL of:

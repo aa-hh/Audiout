@@ -3,7 +3,7 @@
 How to build/run the native backend headlessly, how to grant it the in-app
 TCC permission it needs (system-audio-recording, for the Core Audio process
 tap), and the D7 gated-session checklist from `PLAN-PHASE-2B.md` for the one
-piece of Phase 2b that needs Alec present with real hardware.
+piece of Phase 2b that needs ahh present with real hardware.
 
 Companion docs: `AirPlayEngine/docs/first-light-report.md` (the engine's own
 gated live-test, six hosting bugs found+fixed, all now closed by Phase 2b),
@@ -90,7 +90,7 @@ open "./build/Audiouted.app"
 `scripts/make-app.sh` (documented in its own header comment) builds the
 `AudioutedApp` executable in release config, wraps it in a real
 `.app` bundle with a stable `CFBundleIdentifier`
-(`com.alechenderson.Audiouted`) and `LSUIElement=true` (menu-bar-only,
+(`com.audiouted.Audiouted`) and `LSUIElement=true` (menu-bar-only,
 no Dock icon), and ad-hoc codesigns it. Because the bundle id and signature
 are stable across rebuilds (same script, same output path), macOS remembers
 the TCC grant between runs — rebuild with `scripts/make-app.sh` again after
@@ -173,7 +173,7 @@ identity) rather than a fresh `swift run`.
 ## 5. D7 gated-session checklist
 
 Per `PLAN-PHASE-2B.md`'s "Gated session checklist" — **one batched,
-user-present session, Alec at the keyboard with real speakers on the LAN.**
+user-present session, ahh at the keyboard with real speakers on the LAN.**
 Everything else in Phase 2b was verified headlessly; this is the one
 live-hardware step left. Do NOT run PTP/live streaming outside this session
 (passive Bonjour *discovery* scans are the sole standing exception, already

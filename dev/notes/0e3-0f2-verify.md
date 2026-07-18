@@ -1,4 +1,4 @@
-# 0e3 + 0f2 — human verification (copy-paste, run in Alec's Terminal)
+# 0e3 + 0f2 — human verification (copy-paste, run in ahh's Terminal)
 
 These are the four human checks for T-0e-3 (per-app tap + exclude) and T-0f-2
 (tap → S16LE FIFO → OwnTone → fake receiver). **Run them at the machine, in a

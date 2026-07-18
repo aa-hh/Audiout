@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 
@@ -114,7 +113,7 @@ final class PopoverHeaderView: NSView {
     /// The chosen SF Symbol for "audio group" (task A). `hifispeaker.and.homepod.mini.badge.plus.fill`
     /// depicts multiple speaker devices with an "add" badge — the clearest
     /// "audio groups editor" metaphor of the candidates, but it's macOS-15+
-    /// only (resolves nil on this machine's macOS 14). Below macOS 15, Alec's
+    /// only (resolves nil on this machine's macOS 14). Below macOS 15, ahh's
     /// choice is `hifispeaker.and.homepod.fill` (available back to macOS 14 —
     /// verified on this machine); `rectangle.3.group` then `hifispeaker.2.fill`
     /// remain as further fallbacks, verified non-nil at runtime in

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import Foundation
 
@@ -57,7 +56,7 @@ public struct AppSettings {
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
     /// › Advanced "Audio buffer", PLAN-LATENCY-SETTING.md). Bare numeric values
-    /// by design (Alec, 2026-07-17): named presets with embedded delay text
+    /// by design (ahh, 2026-07-17): named presets with embedded delay text
     /// don't survive localization. 1000 is both the default and the floor —
     /// it leaves receivers a 750 ms jitter buffer, comfortably safe on
     /// ordinary Wi-Fi; 2250 is OwnTone-parity (the old behavior). The engine

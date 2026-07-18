@@ -37,7 +37,7 @@ Mute/solo/group are app-side concepts layered over the backend's flat output set
 ## B. OPEN QUESTIONS — needs confirmation
 
 These are genuine forks I did **not** resolve by assumption. Each has a
-recommendation the executor can default to if Alec doesn't weigh in.
+recommendation the executor can default to if ahh doesn't weigh in.
 
 **Q1 — App target: SwiftPM executable vs Xcode project.**
 A menu-bar AppKit app needs an `Info.plist` (`LSUIElement=1`, bundle id,
@@ -88,7 +88,7 @@ The coordinator must own capture start/stop + rate reporting.
   is the right Phase-1 choice, not a permanent one. The app already only targets
   macOS 14.4+ machines in practice (taps require it), so the "app must be 13"
   concern is about the *library graph*, not the runtime floor — call this out to
-  Alec.
+  ahh.
 
 **Q3 — Groups/presets persistence mechanism.**
 Need to persist named groups (name + member device-ids + per-member volume
@@ -120,7 +120,7 @@ mute or solo. The `Device` model has `isMuted`/`isSoloed`
   0f-pipe-brief.md notes zombie-session hazards on re-activation) — worse UX.
 - Recommendation: (a), volume-based mute (restore prior volume), selection left
   intact, to avoid re-handshake churn. Confirm the "0 volume vs deselect"
-  choice with Alec.
+  choice with ahh.
 
 **Q5 — Menu-mutation-while-open: how much to gate on the research spike.**
 SPEC §9 wants live insert/remove of `NSMenuItem`s for in-place group expansion,
@@ -175,7 +175,7 @@ fabricates RMS. OwnTone's API exposes no per-output live RMS.
 - (b) Omit meters for the real backend in Phase 1 (static/hidden), add per-stream
   metering with the native sender in Phase 2.
 - Recommendation: (a) — a single shared program-level meter; per-device metering
-  waits for the native sender. Confirm Alec is fine with all selected devices
+  waits for the native sender. Confirm ahh is fine with all selected devices
   showing the same meter in Phase 1.
 
 ---
@@ -183,7 +183,7 @@ fabricates RMS. OwnTone's API exposes no per-output live RMS.
 ## C. Task list
 
 Legend: `model` = haiku 4.5 | sonnet 5 | opus 4.8 · `effort` = low/med/high/xhigh ·
-`kind` per the required set. "USER-GATED" = needs Alec present (TCC dialog,
+`kind` per the required set. "USER-GATED" = needs ahh present (TCC dialog,
 listening, sudo/firewall). Line anchors are to files as they exist today.
 
 ### Research briefs (feed the code tasks — brief-then-transcribe)
@@ -499,7 +499,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 **Wave 5 (verification — USER-GATED, batched):**
 - T-V1 (sonnet/med, needs T-C1+T-C2+T-U1) can actually run once Wave-3 backend +
   T-U1 exist — pull it as early as the real path works, but it's a human gate so
-  batch it. T-V2 (sonnet/med, needs T-U2+T-U3+T-U4). Run both in ONE Alec GUI/
+  batch it. T-V2 (sonnet/med, needs T-U2+T-U3+T-U4). Run both in ONE ahh GUI/
   Terminal session to minimize TCC re-grants and context switches.
 
 **Wave 6:**
@@ -558,7 +558,7 @@ slack relative to those.
    shairport; true AirPlay-2 PTP sync / real per-device volume remain the
    PLAN-0e-0f.md "deferred real-hardware checkpoints" — Phase 1 "done" is
    explicitly the fake-receiver + mock bar, not real multi-room.
-7. **Deployment-target split (Q2).** If Alec picks the in-process library (Q2(b)),
+7. **Deployment-target split (Q2).** If ahh picks the in-process library (Q2(b)),
    the app target inherits `.macOS(14.4)` and Package.swift/target graph changes
    materially — re-scope T-C2 and T-U1 before starting.
 8. **Naming vs env value (T-C4).** SPEC §4 bans new OwnTone-named *public* API but
@@ -568,7 +568,7 @@ slack relative to those.
 
 ---
 
-## RESOLVED DECISIONS (Alec, 2026-07-13) — authoritative, supersedes the open questions above
+## RESOLVED DECISIONS (ahh, 2026-07-13) — authoritative, supersedes the open questions above
 
 - **Q1 App target:** SwiftPM executable + `.accessory` activation policy + bundle
   script producing a real double-clickable `.app`. No Xcode project.
@@ -582,16 +582,16 @@ slack relative to those.
 - **Q5 Menu mutation:** research brief first (T-R1), build to its verdict.
 - **Q6 Master math:** UI-agnostic GroupController in AudioutedCore, unit-tested.
 - **Q7 OwnTone lifecycle:** connect-only; the app never supervises the server.
-- **Q8 Meters: SKIPPED in Phase 1 entirely** (Alec's choice, differs from the
+- **Q8 Meters: SKIPPED in Phase 1 entirely** (ahh's choice, differs from the
   plan's recommendation — no meter UI until per-device meters can be real in v2).
-- **NEW (project-wide): the project is OPEN SOURCE, GPL-2.0-or-later** (Alec may
+- **NEW (project-wide): the project is OPEN SOURCE, GPL-2.0-or-later** (ahh may
   redistribute). Affects headers/LICENSE files as tasks touch code.
 
 ## WAVE 1 RESULTS + LATE DECISIONS (2026-07-13)
 
 - **T-R1 ✅** (dev/notes/p1-menu-brief.md): live NSMenu insert/remove WORKS (in-place
   expansion viable; fallback documented). Editable NSTextField in menus IMPOSSIBLE
-  (no keyboard events) → **Alec decided: QUICK-CREATE in menu (auto-named from
+  (no keyboard events) → **ahh decided: QUICK-CREATE in menu (auto-named from
   current setup), rename/membership editing in the main window** (SPEC §9 revised).
   T-U3 scope changes accordingly: menu gets a one-shot "Save current setup as
   group" action; the editor form moves into T-U4's window (edit pane).

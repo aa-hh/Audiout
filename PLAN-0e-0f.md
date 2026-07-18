@@ -39,7 +39,7 @@ in sync — with latency and 10-minute stability measured and written up.
 - **Package constraint:** `AudioutedCore/Package.swift` targets
   `.macOS(.v13)`; taps need 14.4. The capture CLI must be a SEPARATE tool with its
   own `.macOS(.v14)`+ deployment target, not added to the v13 core target.
-- **Existing mock/dummy system (Alec added 2026-07-13, commit 5b8521b).** TWO
+- **Existing mock/dummy system (ahh added 2026-07-13, commit 5b8521b).** TWO
   independent layers, and neither covers the 0e/0f audio path — important:
   - *In-app `MockBackend`* (`AudioutedCore/Sources/AudioutedCore/MockBackend.swift`)
     implements the `OutputBackend` protocol (`OutputBackend.swift`) with a fabricated
@@ -66,7 +66,7 @@ in sync — with latency and 10-minute stability measured and written up.
 ## Task list
 
 Legend: model = recommended agent · effort = low/med/high · P? = parallelizable.
-"USER-GATED" tasks need Alec physically present (password, TCC dialog, listening).
+"USER-GATED" tasks need ahh physically present (password, TCC dialog, listening).
 
 ### T-0d — Per-device volume via OwnTone JSON API  [checkbox]
 - Goal: confirm the per-output volume control primitive.
@@ -105,14 +105,14 @@ Legend: model = recommended agent · effort = low/med/high · P? = parallelizabl
   private-ish API; a wrong signature costs the whole prototype.
 
 ### T-0e-2 — Swift capture CLI: global (all-system) tap → PCM file + stdout
-**✅ PASSED 2026-07-13.** Built at `dev/audiocap/`, dependency-free. Alec verified
+**✅ PASSED 2026-07-13.** Built at `dev/audiocap/`, dependency-free. ahh verified
 NON-SILENT capture from Terminal (peak 0.36, RMS −30.8 dBFS, 10s, exact byte
 count). Observed tap ASBD on this machine: **44.1 kHz** Float32 LE *interleaved*
 stereo (rate tracks default output device — never hardcode). TCC: the grant
 attaches to the PARENT APP of the CLI (Terminal), prompts don't render from
-agent shells — human verification runs happen in Alec's own Terminal, and a
+agent shells — human verification runs happen in ahh's own Terminal, and a
 REBUILD RESETS THE GRANT (ad-hoc signing) → every task that edits the CLI ends
-with Alec re-running the verify command in Terminal. IOProc gotcha for later
+with ahh re-running the verify command in Terminal. IOProc gotcha for later
 tasks: index the AudioBufferList via `UnsafeMutableAudioBufferListPointer` on
 the ORIGINAL pointer — `inInputData.pointee` struct-copy yields nil mData.
 - Goal: prove all-system capture; produce the stdout stream 0f needs.
@@ -121,7 +121,7 @@ the ORIGINAL pointer — `inInputData.pointee` struct-copy yields nil mData.
   IOProc; write raw PCM to `--out file.pcm` and/or `--stdout`; print the tap ASBD
   (rate/format/channels) on start; clean teardown (Stop/Destroy, remove aggregate).
 - Deliverable: `dev/audiocap/` tool + a captured `.pcm` + documented ASBD.
-- Deps: T-0e-1. USER-GATED (first run triggers the TCC audio-capture dialog — Alec
+- Deps: T-0e-1. USER-GATED (first run triggers the TCC audio-capture dialog — ahh
   must approve; note exact dialog wording in the brief). NB: this gate is real
   hardware-free — capture works with ANY Mac audio playing (e.g. a local file);
   no speakers needed, so it can run before the OwnTone/speaker tasks are ready.
@@ -132,7 +132,7 @@ the ORIGINAL pointer — `inInputData.pointee` struct-copy yields nil mData.
   code, teardown/lifetime correctness, this is the spike's core risk.
 
 ### T-0e-3 — Per-app (single-process) tap variant
-**✅ PASSED 2026-07-13.** Alec-verified via the Goertzel tone tests
+**✅ PASSED 2026-07-13.** ahh-verified via the Goertzel tone tests
 (dev/notes/0e3-0f2-verify.md steps 1–2): `--pid` captured only the target
 process's tone; `--exclude` removed the target from the global tap. Per-app
 capture and process exclusion — the foundations of §9 routing and the
@@ -159,7 +159,7 @@ capture and process exclusion — the foundations of §9 routing and the
   documented API surface, no novel code.
 
 ### T-0f-2 — Format-bridge: tap PCM → S16LE pipe writer
-**✅ PASSED 2026-07-13.** Full chain verified by Alec via `dev/verify-0f2-e2e.sh`:
+**✅ PASSED 2026-07-13.** Full chain verified by ahh via `dev/verify-0f2-e2e.sh`:
 30 s system audio → global tap → Float32→S16LE (symmetric ×32767) → FIFO →
 OwnTone → fake shairport receiver; receiver-side PCM non-silent (RMS 0.011),
 byte-exact rate, 0 ring failures. Config-follows-tap applied
@@ -183,7 +183,7 @@ process can't and needn't be excluded).
 
 ### T-0f-3 — End-to-end wire-up + latency/stability measurement
 **✅ PASSED 2026-07-13** (fake-receiver form per the no-speakers revision).
-Alec ran `dev/verify-0f3-soak.sh`: full 10-minute soak, VERDICT: PASS —
+ahh ran `dev/verify-0f3-soak.sh`: full 10-minute soak, VERDICT: PASS —
 stable non-silent stream for the full duration, no underruns flagged, output
 stayed selected. Real-multi-room form remains deferred checkpoint 4.
 - Goal: THE spike payoff — Mac audio on all 3 speakers in sync, continuously.
@@ -289,14 +289,14 @@ T-TOGGLE-1, is slack.)
     setting, heavier than the spike needs now.
   - Recommendation (a); (a) and (c) can coexist later (env overrides default).
 
-## Resolved decisions (Alec, 2026-07-13)
+## Resolved decisions (ahh, 2026-07-13)
 
 - **Q1 — OwnTone location: `dev/owntone/` in the project, git-ignored.** OwnTone
   is a lab fixture: the final app vendors extracted *source* (airplay.c,
   libairptp, pair_ap), never the running server, so nothing outside the project
   should depend on it and cleanup is one folder deletion.
 - **Q2 — NO BlackHole fallback.** If process taps hit a wall, STOP and reassess
-  with Alec — do not validate 0f on a capture mechanism we won't ship. (Agents:
+  with ahh — do not validate 0f on a capture mechanism we won't ship. (Agents:
   do not install BlackHole or any virtual driver; a taps failure is a
   stop-and-report condition, not a route-around.)
 - **Q3 — Test source app: Spotify if installed, else Music.** Check at T-0e-3
@@ -312,7 +312,7 @@ T-TOGGLE-1, is slack.)
   builds the switch, not the real backend (that lands in 0f/Phase 1).
 - **Q6 — No TV in tests.** The LG TV on the current network is NOT to be used as
   a test output. Tests stay silent/local: mock backend + `dev/fake-speakers.sh`.
-- **Q7 — Speakers are gone for now, returning eventually (2026-07-13).** Alec no
+- **Q7 — Speakers are gone for now, returning eventually (2026-07-13).** ahh no
   longer has access to the Sonos Moves / AirPort Express — that is WHY the dummy
   setup exists. All real-hardware verification converts to DEFERRED checkpoints
   (below); the 0a–0c results stand as the AirPlay 2/PTP/Sonos/sync evidence.

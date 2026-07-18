@@ -29,7 +29,7 @@ output. You want a single app that:
 | Form factor | **Menu bar + full window** | Quick menu-bar panel; richer window for groups/EQ. |
 | Remote control | **Mac only** (no phone app) | No companion app / network server needed. Simpler. |
 | Device types | **AirPlay only** | No Bluetooth/Sonos-native/wired in v1. (Sonos speakers are used *via their AirPlay 2 support*, not the Sonos API.) |
-| Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | Alec may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
+| Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | ahh may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
 | Extra controls | Per-device **mute/solo**, **master volume**, **EQ/balance** | Mixer-style UI. |
 | Power features | **Per-app routing**, **auto-reconnect** | Route Spotify→kitchen while Zoom stays local; re-activate groups when devices reappear. |
 
@@ -277,7 +277,7 @@ validated the protocol but never ships (§4) — Phase 2 extracts `airplay.c` +
 `libairptp` + `pair_ap` + `evrtsp` into our own engine; no OwnTone references
 in the final product, naming included.
 
-**Changed circumstances:** Alec lost access to the test speakers mid-spike
+**Changed circumstances:** ahh lost access to the test speakers mid-spike
 (2026-07-13) — 0d/0f passed in fake-receiver form; 0b/0c had already passed on
 real Sonos + AirPort Express. **Deferred real-hardware checkpoints** (run when
 speakers return, before calling v1 done): audible per-device volume; multi-room
@@ -323,7 +323,7 @@ on real gear.
 
 ## 9. UI design — pure AppKit, documentation-grounded
 
-**Standing rule (from Alec, 2026-07-09): every UI element must be an actual
+**Standing rule (from ahh, 2026-07-09): every UI element must be an actual
 documented AppKit control, looked up at
 https://developer.apple.com/documentation/AppKit and used/styled exactly as its
 documentation and the macOS HIG specify.** Doc URLs below are
@@ -388,7 +388,7 @@ the mixer window. Menu structure, top to bottom:
 **Interaction / routing model (REVISED 2026-07-14 — SoundSource-inspired; this is
 the CORE model, superseding the 07-13 free-on/off version):**
 
-Design cues from Rogue Amoeba's SoundSource (Alec's reference, screenshots
+Design cues from Rogue Amoeba's SoundSource (ahh's reference, screenshots
 2026-07-14): sectioned card layout, rows of icon · name · volume slider+% ·
 trailing control, a device-selector dropdown as THE routing control.
 
@@ -404,7 +404,7 @@ trailing control, a device-selector dropdown as THE routing control.
    The Main Out **volume = proportional master of the current target**.
 2. **"Selected Devices" section** (below System): every discovered device, split
    into two subsections: **Current Device** (the Mac, by its real name) and
-   **AirPlay Devices**. Row: name · volume · **toggle switch** (Alec explicitly
+   **AirPlay Devices**. Row: name · volume · **toggle switch** (ahh explicitly
    prefers toggles, not checkmarks) = membership in the Selected Devices set.
    Toggles compose the set; routing is applied when Main Out targets Selected
    Devices (the default).
@@ -492,7 +492,7 @@ trailing control, a device-selector dropdown as THE routing control.
 The original in-menu editor (menu swaps to a form with a name `NSTextField`) is
 **not buildable**: Apple's docs state menu item views "receive all mouse
 events … but keyboard events are not supported" — no typing during menu
-tracking (see dev/notes/p1-menu-brief.md). Alec chose **quick-create**, REFINED 2026-07-13 after using the app (two gaps
+tracking (see dev/notes/p1-menu-brief.md). ahh chose **quick-create**, REFINED 2026-07-13 after using the app (two gaps
 found: no manual creation, and duplicate groups):
 
 - **Manual creation is the PRIMARY path, in the window.** A "New Group"
@@ -526,7 +526,7 @@ running audio app — icon + name from `NSWorkspace.shared.runningApplications` 
 each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 "Everything else" row sets the default destination (normally the active group).
 
-**Routing audio model (decided with Alec):**
+**Routing audio model (decided with ahh):**
 - **Overlaps mix.** Every speaker receives exactly one stream: the mix of all
   audio routed to any destination containing it. No exclusive claims, no
   "speaker busy" states. Requires per-app capture taps (Core Audio process

@@ -385,7 +385,7 @@ one GM clock, one engine process).
 
 ---
 
-## 7. Open questions for Alec (genuinely his calls)
+## 7. Open questions for ahh (genuinely his calls)
 
 - **Destination-set granularity vs. per-device streams.** The cheap model gives
   each *destination-set* one stream (speakers with identical app-membership

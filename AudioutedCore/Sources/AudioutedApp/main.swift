@@ -1,7 +1,6 @@
 // Audiouted — pure-AppKit menu-bar app entry point.
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 //
 // This is a menu-bar-only ("accessory") app: no Dock icon, no main menu bar,
 // no window on launch — just an NSStatusItem. Per RESOLVED Q1 the app is a

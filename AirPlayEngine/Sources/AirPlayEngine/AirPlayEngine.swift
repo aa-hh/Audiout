@@ -635,6 +635,26 @@ public actor AirPlayEngine {
 
         let terminal = try await startOp(id: id) { device, cbId in
             guard let stopFn = output_airplay.device_stop else { return -1 }
+            // CRASH GUARD (T5, EXC_BAD_ACCESS SIGSEGV at airplay.c:4271). The
+            // idempotency check above reads device->state, but state and
+            // device->session can disagree for a window: when a device
+            // disappears mid-flight (e.g. a per-app route is torn down while
+            // this removeOutput is in progress) session_cleanup zeroes
+            // device->session while device->state may still read
+            // STREAMING/CONNECTED. `airplay_device_stop` unconditionally does
+            // `session = device->session; session->callback_id = …` — a NULL
+            // session there dereferences offset 0x8 and crashes the engine
+            // thread. A NULL session means there is nothing left to stop, so
+            // short-circuit: returning <= 0 makes startOp resolve the op as
+            // `.stopped` via its N<=0 contract (no completion promised), exactly
+            // the terminal a completed stop would report. This guard runs on the
+            // engine thread — the same thread session_cleanup runs on — so it is
+            // atomic with respect to the teardown that nulls the session (a check
+            // back in removeOutput, on the actor, could still race). This is
+            // deliberately NOT applied to addOutput/device_start: `session_make`
+            // CREATES the session, so device->session is legitimately NULL before
+            // a start and guarding it there would break every connect.
+            guard device.pointee.session != nil else { return 0 }
             return stopFn(device, cbId)
         }
         knownOutputs[id] = terminal

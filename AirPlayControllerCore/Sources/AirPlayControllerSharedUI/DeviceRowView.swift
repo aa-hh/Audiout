@@ -279,8 +279,13 @@ public final class DeviceRowView: NSView {
         // now" and "can never be used (yet)" look consistently de-emphasized.
         alphaValue = isUnsupported ? 0.5 : 1.0
 
-        // On-icon status badge is idempotent and always driven off the state.
-        statusDotView.apply(device.connectionState)
+        // On-icon status badge: driven off connectionState. When the device has
+        // live per-app routes but is NOT in the whole-system output set, the
+        // badge shows a teal routing-active dot (T3) — visually distinct from
+        // the streaming-green (.connected) so a redirect-only row is never
+        // mistaken for a fully disconnected one.
+        let hasLiveRouting = !liveAppNames.isEmpty
+        statusDotView.apply(state: device.connectionState, routingActive: hasLiveRouting)
         // Single sublabel precedence ladder (failed → unavailable → routing →
         // none), evaluated here after `device`/`isSelectedInSet` are set so the
         // precedence is unambiguous.
@@ -719,6 +724,11 @@ public final class DeviceRowView: NSView {
     /// receiver (T-UI-AP1-1): dimmed, toggle disabled, click asks for the
     /// "coming soon" explanation.
     public var test_isUnsupported: Bool { isUnsupported }
+
+    /// Whether the routing-active teal indicator is currently showing on the
+    /// icon badge — true when the device has live per-app routes but is not in
+    /// the whole-system output set (T3). Delegates to the badge view.
+    public var test_isShowingRoutingIndicator: Bool { statusDotView.test_isShowingRoutingDot }
 
     /// Simulate a click on the row body (T-UI-AP1-1) — drives the same path a
     /// real `mouseDown:` on an unsupported row takes. No-op (like the real

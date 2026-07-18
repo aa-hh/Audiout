@@ -851,7 +851,8 @@ final class PopoverControllerTests: XCTestCase {
     /// "Current Device" section (the local device) and an "AirPlay Devices"
     /// section (the available non-local fleet). A freshly-added route selects
     /// the "No Redirect" sentinel and dims the slider; an explicit "Current
-    /// Device" pick does too (both mean "plays locally," decision 3).
+    /// Device" pick keeps the slider LIVE (Bug T2 — it's its own local stream),
+    /// so only "No Redirect" dims.
     func testAppRowDestinationMenuStructureAndLocalDimming() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
@@ -880,17 +881,18 @@ final class PopoverControllerTests: XCTestCase {
                        PopoverController.noRedirectDestinationID,
                        "a fresh route selects the sentinel No Redirect entry")
         XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), true,
-                       "decision 3 — the slider is dimmed while the app plays locally (No Redirect)")
+                       "the slider is dimmed on No Redirect (no independent stream to level)")
 
-        // Explicitly picking Current Device is a deliberate choice that dims
-        // identically — both are "plays locally."
+        // Bug T2: explicitly picking Current Device gives the app its OWN local
+        // stream (played on the Mac's built-in speakers), so its slider is LIVE —
+        // only No Redirect stays dimmed.
         let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
         row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"),
                        PopoverController.currentDeviceDestinationID,
                        "an explicit Current Device pick selects its own sentinel entry")
-        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), true,
-                       "decision 3 — the slider stays dimmed for the explicit Current Device pick")
+        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), false,
+                       "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
     }
 
     /// Selecting an AirPlay destination on a row calls through to
@@ -913,9 +915,12 @@ final class PopoverControllerTests: XCTestCase {
                        "redirected ⇒ the slider is enabled (decision 3)")
     }
 
-    /// Setting a row's volume calls through to `AppRoutingController.setVolume` and
-    /// repaints.
-    func testAppRowVolumeCallsThroughAndRepaints() async throws {
+    /// Setting a row's volume calls through to `AppRoutingController.setVolume`
+    /// (persisted). The handler deliberately does NOT `rebuild()`: a rebuild would
+    /// replace the `AppRowView` mid-drag and break the live NSSlider tracking loop
+    /// (the visible value tracks the slider directly during a drag). So this
+    /// asserts the model call-through, not a repaint.
+    func testAppRowVolumeCallsThrough() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
@@ -927,8 +932,6 @@ final class PopoverControllerTests: XCTestCase {
 
         XCTAssertEqual(appRouting.appRoutes.first?.volume, 42,
                        "the volume change reached AppRoutingController")
-        XCTAssertEqual(popover.test_appRow(for: "com.example.music")?.test_volume, 42,
-                       "the repainted row shows the new volume")
     }
 
     /// Removing a row calls through to `AppRoutingController.removeRoute` and

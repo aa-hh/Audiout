@@ -167,11 +167,14 @@ final class AppRowViewTests: XCTestCase {
         XCTAssertEqual(delegate.removedAppID, "com.example.app")
     }
 
-    // MARK: Slider dimming (LOCKED DECISION 3)
+    // MARK: Slider dimming (Bug T2 — only "No Redirect" dims)
 
-    func testSliderDimmedWhenDestinationIsCurrentDevice() {
+    /// Bug T2: "Current Device" is now its OWN independent local stream (played on
+    /// the Mac's built-in speakers), so its slider is LIVE, not dimmed.
+    func testSliderNotDimmedWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
-        XCTAssertTrue(row.test_isSliderDimmed, "slider must dim while destination is Current Device")
+        XCTAssertFalse(row.test_isSliderDimmed,
+                       "slider must be live while destination is Current Device (its own local stream)")
     }
 
     func testSliderNotDimmedWhenRedirected() {
@@ -179,18 +182,20 @@ final class AppRowViewTests: XCTestCase {
         XCTAssertFalse(row.test_isSliderDimmed, "slider must be enabled once redirected to an AirPlay device")
     }
 
-    /// LOCKED DECISION 3, extended: the slider dims for BOTH local states —
-    /// "No Redirect" (the new default) AND "Current Device" (an explicit
-    /// pick) — since both mean "plays locally, not redirected."
+    /// Only the standalone "No Redirect" state dims the slider — that's the one
+    /// state with no independent stream to level (the app just plays in the
+    /// whole-system mix).
     func testSliderDimmedWhenDestinationIsNoRedirect() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
         XCTAssertTrue(row.test_isSliderDimmed, "slider must dim while destination is No Redirect")
     }
 
-    func testSliderDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
+    /// Bug T2: with all three states present, "Current Device" keeps a LIVE slider
+    /// (its own local stream); only "No Redirect" dims.
+    func testSliderNotDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
         let (row, _) = makeRowWithThreeStates(selected: "local")
-        XCTAssertTrue(row.test_isSliderDimmed,
-                     "slider must dim while destination is Current Device even with No Redirect present")
+        XCTAssertFalse(row.test_isSliderDimmed,
+                       "slider must be live for Current Device even with No Redirect present")
     }
 
     func testSliderNotDimmedWhenRedirectedAmongThreeStates() {

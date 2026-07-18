@@ -878,6 +878,9 @@ public func makeBackend(
         nativeBackend.seedStartBufferMs(startBufferMs)
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(
             engine: engine, resolvePID: resolvePID)
+        // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
+        // the Mac's built-in speakers as independent, individually-levelable streams.
+        nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
         return nativeBackend
     }
 }

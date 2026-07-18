@@ -45,6 +45,10 @@ func describe(_ event: BackendEvent) -> String? {
         // Only `NativeBackend` emits this (T6 per-app routing); under `mock` it
         // never fires. Handled so the switch stays exhaustive.
         return "♪ routed apps \(deviceID) ← [\(appNames.joined(separator: ", "))]"
+    case .routedAppRunning(let bundleID, let isRunning):
+        // Only `NativeBackend` emits this (T4 relaunch fix); under `mock` it
+        // never fires. Handled so the switch stays exhaustive.
+        return "♪ app running  \(bundleID) isRunning:\(isRunning)"
     }
 }
 

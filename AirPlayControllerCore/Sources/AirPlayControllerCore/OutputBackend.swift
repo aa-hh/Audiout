@@ -62,6 +62,15 @@ public enum BackendEvent: Sendable, Equatable {
     /// - **A real move.** Never emitted when the volume didn't actually change
     ///   (e.g. only mute did).
     case systemVolumeChanged(volume: Int)
+    /// A routed app's process lifecycle changed — it quit (`isRunning == false`)
+    /// or relaunched (`isRunning == true`). Only emitted for apps that currently
+    /// have an active `.device(id:)` route in the backend's last route table;
+    /// non-routed apps' lifecycle events are silently ignored. The UI uses this
+    /// to show or clear an offline indicator on the app's row in the Applications
+    /// card (T4). Only ``NativeBackend`` emits it; `MockBackend` and
+    /// `OwnToneBackend` never do (they have no per-app capture lifecycle).
+    case routedAppRunning(bundleID: String, isRunning: Bool)
+
     /// The live per-app routing map for one destination device changed (T6):
     /// `appNames` are the display names of the apps whose audio is currently
     /// being streamed to `deviceID` through a per-app redirect, derived from the
@@ -178,4 +187,36 @@ public protocol AppRouteConfiguring: AnyObject {
     /// caller (observes `NSWorkspace.didTerminateApplicationNotification`) since
     /// Core can't observe that notification itself.
     func handleAppTerminated(bundleID: String)
+
+    /// Forward an app-launch notification (T4). `bundleID`'s process just
+    /// started — if it currently has a persisted `.device(id:)` route, this
+    /// clears the dead-bundle tracking, restarts its per-app capture, and
+    /// republishes the mixer topology so the route becomes live again. A no-op
+    /// if `bundleID` has no active `.device(id:)` route. The AppKit layer is
+    /// the only caller (observes `NSWorkspace.didLaunchApplicationNotification`).
+    /// Default empty body so non-NativeBackend conformers (`MockBackend`,
+    /// `OwnToneBackend`) compile without change — they have no per-app capture.
+    func handleAppLaunched(bundleID: String)
+
+    /// Set the LOCAL playback volume of a `.currentDevice`-routed app (Bug T2):
+    /// an app pinned to "Current Device" is captured and replayed on the Mac's
+    /// built-in speakers as an independent stream, and this levels that stream.
+    /// The popover slider calls it directly for a low-latency response; the same
+    /// value also flows through `updateAppRoutes` from the persisted route edit.
+    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID with no live local
+    /// stream (non-`.currentDevice`, or not yet capturing). Default empty body so
+    /// non-`NativeBackend` conformers compile without change — they have no local
+    /// per-app playback.
+    func setLocalPlaybackVolume(volume: Int, bundleID: String)
+}
+
+extension AppRouteConfiguring {
+    /// Default no-op so backends without per-app capture don't need to implement
+    /// this. Only `NativeBackend` overrides it with real restart logic.
+    public func handleAppLaunched(bundleID: String) {}
+
+    /// Default no-op so backends without local per-app playback don't need to
+    /// implement this. Only `NativeBackend` overrides it (drives
+    /// ``LocalPlaybackControlling``).
+    public func setLocalPlaybackVolume(volume: Int, bundleID: String) {}
 }

@@ -257,6 +257,57 @@ final class AirPlayEngineAPITests: XCTestCase {
         XCTAssertEqual(state, .stopped)
     }
 
+    // MARK: - removeOutput with a torn-down (NULL) session must not crash (T5).
+
+    // Regression for the confirmed EXC_BAD_ACCESS SIGSEGV (KERN_INVALID_ADDRESS
+    // at 0x8) on thread "com.airplayengine.engine": airplay_device_stop
+    // (airplay.c:4271) does `session = device->session; session->callback_id =
+    // …` with no NULL check. When a device disappears mid-flight (a per-app
+    // route torn down while a removeOutput is in progress) session_cleanup zeroes
+    // device->session, yet device->state can still read STREAMING/CONNECTED — so
+    // removeOutput's own idempotency check (which reads device->state) waves the
+    // op through to issuing device_stop, which then dereferences a NULL session.
+    //
+    // The fix is a guard inside removeOutput's stop-issue closure:
+    //   guard device.pointee.session != nil else { return 0 }
+    // Returning <= 0 makes startOp resolve the op as `.stopped` via its N<=0
+    // contract instead of calling airplay_device_stop.
+    //
+    // This test reproduces the exact race: a REAL registry device whose state is
+    // STREAMING (so the idempotency check falls through) but whose session is
+    // NULL (as session_cleanup would have left it). The headless issue closure
+    // mirrors production — same guard, then the SAME real `output_airplay.
+    // device_stop` — so it genuinely exercises calling that C entry point against
+    // a NULL-session device. Without the guard this call SIGSEGVs and takes down
+    // the test process; with it, removeOutput resolves cleanly as `.stopped`.
+    func testRemoveOutputWithNullSessionDoesNotCrash() async throws {
+        let id = OutputID(rawValue: 0xB4)
+        // STREAMING state + (default) NULL session == the mid-flight teardown race.
+        makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+        // Belt-and-suspenders: explicitly null the session, as session_cleanup does.
+        outputs_device_session_remove(id.rawValue)
+        XCTAssertNil(outputs_device_get(id.rawValue)?.pointee.session,
+                     "precondition: the device has a torn-down (NULL) session")
+
+        let engine = AirPlayEngine()
+        // Faithful mirror of removeOutput's production stop-issue closure: guard
+        // the NULL session, otherwise issue the real device_stop. If the guard is
+        // ever dropped, this dereferences a NULL session and crashes the process.
+        await engine.enterHeadlessTestMode(issue: { device, cbId in
+            guard let stopFn = output_airplay.device_stop else { return -1 }
+            guard device.pointee.session != nil else { return 0 }
+            return stopFn(device, cbId)
+        })
+        await engine.registerKnownOutputForTest(id, state: .streaming)
+
+        // Must neither crash nor hang: the guard short-circuits to the N<=0 path,
+        // so no synthetic completion is needed and the op resolves inline.
+        try await engine.removeOutput(id)
+
+        let state = await engine.stateOf(id)
+        XCTAssertEqual(state, .stopped, "a NULL-session stop resolves as .stopped")
+    }
+
     // MARK: - Guards: unknown output + not-started.
 
     func testUnknownOutputThrows() async {

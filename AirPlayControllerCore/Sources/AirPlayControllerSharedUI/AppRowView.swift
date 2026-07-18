@@ -85,14 +85,23 @@ public final class AppRowView: NSView {
         /// All destinations to populate the trailing popup with, in display order:
         /// the local "Current Device" entry(ies) first, then AirPlay devices.
         public let destinations: [Destination]
+        /// Whether the app's process is currently running (T4). When `false`, the
+        /// row shows a small offline badge (`exclamationmark.circle`) on the icon
+        /// and dims the name, so the user can see the route is saved but inactive.
+        /// The row remains fully interactive while offline (they can still change
+        /// the route destination). Defaults to `true` so existing callers and
+        /// tests that don't pass this field see no behavior change.
+        public let isRunning: Bool
         public init(appID: String, name: String, icon: NSImage?, volume: Int,
-                   selectedDestinationID: String, destinations: [Destination]) {
+                   selectedDestinationID: String, destinations: [Destination],
+                   isRunning: Bool = true) {
             self.appID = appID
             self.name = name
             self.icon = icon
             self.volume = volume
             self.selectedDestinationID = selectedDestinationID
             self.destinations = destinations
+            self.isRunning = isRunning
         }
     }
 
@@ -102,13 +111,22 @@ public final class AppRowView: NSView {
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
     private var destinations: [Destination] = []
-    /// True iff the selected destination is a local entry — either "No
-    /// Redirect" (the default/unset state) or "Current Device" (an explicit
-    /// pick) — LOCKED DECISION 3: the slider stays visible but dims/disables
-    /// in this state (the app isn't being redirected anywhere).
-    private var isLocal: Bool = true
+    /// True iff the selected destination is the standalone "No Redirect" entry
+    /// (`isStandalone`) — the neutral/unset state where the app just plays in the
+    /// whole-system mix. The slider stays visible but dims/disables ONLY in this
+    /// state: an app on "No Redirect" has no independent stream to level. Both
+    /// "Current Device" (Bug T2 — its own local built-in-speaker stream) and an
+    /// AirPlay device (its own remote stream) DO have an independent volume, so
+    /// the slider is live for them.
+    private var isNoRedirect: Bool = true
 
     private let iconView = NSImageView()
+    /// Small SF Symbol badge overlaid on the icon when the app is not running
+    /// (T4). Hidden by default; shown when `isRunning == false`. Uses
+    /// `exclamationmark.circle.fill` with a yellow-ish secondary tint so it
+    /// reads as "warning/offline" without being red/alarming — the route is
+    /// intact, the app just isn't running.
+    private let offlineBadge = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let slider = NSSlider()
     private let readoutLabel = NSTextField(labelWithString: "")
@@ -150,8 +168,11 @@ public final class AppRowView: NSView {
     public func apply(_ configuration: Configuration) {
         self.appID = configuration.appID
         self.destinations = configuration.destinations
-        self.isLocal = configuration.destinations.first { $0.id == configuration.selectedDestinationID }?.isLocal
-            ?? true
+        // Dim the slider ONLY for the standalone "No Redirect" entry. A missing
+        // selection (nothing matched) is treated as "No Redirect" (dimmed), the
+        // safe neutral default.
+        self.isNoRedirect = configuration.destinations
+            .first { $0.id == configuration.selectedDestinationID }?.isStandalone ?? true
         // `apply(_:)` (no selection param) is the "clear like hover used to be"
         // where the caller doesn't care about selection. `PopoverController`
         // (T3) re-asserts selection across a `rebuild()` by calling
@@ -166,10 +187,18 @@ public final class AppRowView: NSView {
             slider.integerValue = configuration.volume
             readoutLabel.stringValue = "\(configuration.volume)%"
         }
-        // LOCKED DECISION 3: always visible, dimmed/disabled while local — same
-        // dimming approach `DeviceRowView` uses for an unavailable/unselected row.
-        slider.isEnabled = !isLocal
-        readoutLabel.textColor = isLocal ? .tertiaryLabelColor : .secondaryLabelColor
+        // Always visible, dimmed/disabled ONLY on "No Redirect" — same dimming
+        // approach `DeviceRowView` uses for an unavailable/unselected row. "Current
+        // Device" (Bug T2) and AirPlay routes each have their own stream, so the
+        // slider is live for them.
+        slider.isEnabled = !isNoRedirect
+        readoutLabel.textColor = isNoRedirect ? .tertiaryLabelColor : .secondaryLabelColor
+
+        // T4 offline indicator: badge and dimmed icon/name when not running.
+        let isRunning = configuration.isRunning
+        offlineBadge.isHidden = isRunning
+        iconView.alphaValue = isRunning ? 1.0 : 0.5
+        nameLabel.textColor = isRunning ? .labelColor : .secondaryLabelColor
 
         rebuildDestinationMenu(selecting: configuration.selectedDestinationID)
         configureAccessibility()
@@ -302,7 +331,21 @@ public final class AppRowView: NSView {
         destinationPopUp.setContentHuggingPriority(.required, for: .horizontal)
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        // Offline badge (T4): small warning symbol overlaid in the icon's
+        // bottom-right corner. Hidden by default; shown when the routed app
+        // is not currently running. `.symbolConfiguration` uses the point
+        // size that best reads at the icon's 18 pt rendered size.
+        let badgeConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [.white, .systemYellow]))
+        offlineBadge.image = NSImage(
+            systemSymbolName: "exclamationmark.circle.fill",
+            accessibilityDescription: "Not running")?
+            .withSymbolConfiguration(badgeConfig)
+        offlineBadge.translatesAutoresizingMaskIntoConstraints = false
+        offlineBadge.isHidden = true   // visible only when !isRunning
+
         addSubview(iconView)
+        addSubview(offlineBadge)
         addSubview(nameLabel)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -322,6 +365,12 @@ public final class AppRowView: NSView {
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+
+            // Offline badge: pinned to icon's trailing/bottom corner (T4).
+            offlineBadge.trailingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 2),
+            offlineBadge.bottomAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 2),
+            offlineBadge.widthAnchor.constraint(equalToConstant: 11),
+            offlineBadge.heightAnchor.constraint(equalToConstant: 11),
 
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                constant: PopoverColumnGrid.iconToName),
@@ -592,9 +641,14 @@ public final class AppRowView: NSView {
 
     /// The currently displayed volume (structural assertions).
     public var test_volume: Int { slider.integerValue }
-    /// Whether the volume slider is currently dimmed/disabled (LOCKED DECISION 3
-    /// — true iff the destination is local: "No Redirect" or "Current Device").
+    /// Whether the volume slider is currently dimmed/disabled — true iff the
+    /// destination is the standalone "No Redirect" entry. "Current Device" (Bug
+    /// T2) and AirPlay routes each have an independent stream, so their slider is
+    /// live (not dimmed).
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
+    /// Whether the offline badge (T4) is currently visible — true when the
+    /// routed app's process is not running.
+    public var test_isOfflineBadgeVisible: Bool { !offlineBadge.isHidden }
     /// The full ordered list of titles in the destination menu: the standalone
     /// "No Redirect" entry, a separator (empty title), then the two disabled
     /// section headers ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.

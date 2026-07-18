@@ -82,6 +82,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// currently-selected, unmuted device.
     public var captureCoordinator: CaptureControlling?
 
+    /// The local-playback engine (Bug T2): renders every `.currentDevice`-routed
+    /// app's per-app capture on the Mac's BUILT-IN speakers as an independent
+    /// stream with its own volume. Wired by ``makeBackend(_:)`` (the real
+    /// ``LocalPlaybackEngine``); `nil` in tests and the UI-only smoke path (a
+    /// `.currentDevice` route is then inert, exactly as an AirPlay route is inert
+    /// with no `captureCoordinator`). A spy conforming to
+    /// ``LocalPlaybackControlling`` is injected in tests to assert the wiring with
+    /// no `AVAudioEngine` or audio hardware.
+    ///
+    /// Assigned once before ``start()`` (same discipline as `captureCoordinator`);
+    /// read on the tap delivery thread via `receive` and on `stateQueue`, never
+    /// mutated after wiring, so no synchronization on the reference is needed.
+    public var localPlaybackEngine: LocalPlaybackControlling?
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -220,6 +234,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// per-app captures to `start`/`stop`.
     private var routedBundleIDs: Set<String> = []
 
+    /// The bundle IDs most recently routed to `.currentDevice` (Bug T2): captured
+    /// by their own per-app tap (so excluded from the whole-system mix) and played
+    /// back locally on the Mac's built-in speakers via ``localPlaybackEngine`` as
+    /// an independent stream. `updateAppRoutes` diffs the new set against this.
+    /// Kept SEPARATE from `routedBundleIDs`: both drive a per-app tap, but a
+    /// device route feeds the ``routeMixer`` → AirPlay, whereas a local route feeds
+    /// ``localPlaybackEngine`` → built-in speakers. The per-app CAPTURE is started
+    /// for the UNION of the two (the tap is destination-agnostic).
+    private var localBundleIDs: Set<String> = []
+
     /// bundleID → its route's display name, so a `.routedApps` event can carry
     /// human-readable app names. Refreshed on every `updateAppRoutes`.
     private var routeDisplayNames: [String: String] = [:]
@@ -284,6 +308,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// never got permission. Cleared the moment the bundle ID stops being routed
     /// at all (`updateAppRoutes`) or starts `.capturing` again (a successful retry).
     private var deadBundleIDs: Set<String> = []
+
+    /// Routed bundle IDs that have reached `.capturing` at least once. Lets a
+    /// LATER `.capturing` transition be recognised as a RE-capture — i.e. the
+    /// per-app tap was torn down and rebuilt (a sample-rate/device change), which
+    /// puts a discontinuity into the input stream. After such a rebuild the
+    /// AirPlay RTP session for this app's device(s) is desynced from the receiver
+    /// and never self-heals (we keep writing real PCM but the receiver stays
+    /// silent), so a re-capture triggers a session reset (rebind). Cleared when
+    /// the bundle stops being routed or its capture stops.
+    private var everCapturedBundleIDs: Set<String> = []
 
     /// bundleID → how many bounded `.processNotYetAudible` retries have already
     /// fired (edge case 3). Reset on recovery (`.capturing`) or on losing the
@@ -384,9 +418,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         self.perAppCapture.onStateChange = { [weak self] bundleID, state in
             self?.routeMixer.handleStateChange(bundleID: bundleID, state: state)
             self?.handlePerAppCaptureHealthChange(bundleID: bundleID, state: state)
+            // Bug T2: a `.currentDevice` app reaching `.capturing` gets its own
+            // local player (its `TapFormat` is now known); leaving `.capturing`
+            // drops it. A no-op for `.device`-routed apps (guarded on
+            // `localBundleIDs`).
+            self?.handleLocalCaptureStateChange(bundleID: bundleID, state: state)
         }
         self.perAppCapture.onBuffer = { [weak self] bundleID, buffer in
+            // Fan every per-app buffer to BOTH consumers. Each ignores what isn't
+            // its own: the mixer drops a buffer for a bundle with no `.device`
+            // stream, and the local engine drops one for a bundle with no player —
+            // so a `.device` app's audio only reaches the mixer and a
+            // `.currentDevice` app's only reaches the local engine, with no shared
+            // set read on this hot delivery-thread path.
+            if AudioDiag.isEnabled {
+                // Report buffer PEAK, not just count: a process tap keeps
+                // delivering buffers at full cadence but SILENT (all-zero) after a
+                // sample-rate renegotiation — so a count-only meter (the earlier
+                // bug) looks healthy while the audio is gone. peak≈0 while the app
+                // is audibly playing == the documented silent-buffer condition.
+                AudioDiag.tick("perAppBuffer:\(bundleID)", detail: "peak=\(Self.diagFloatPeak(buffer))")
+            }
             self?.routeMixer.handleBuffer(bundleID: bundleID, buffer: buffer)
+            self?.localPlaybackEngine?.receive(buffer: buffer, for: bundleID)
         }
         routeMixer.onDestinationSetsChanged = { [weak self] sets in
             self?.handleDestinationSetsChanged(sets)
@@ -394,6 +448,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         routeMixer.onMixedBuffer = { [weak self] mixed in
             // `engine.write` is nonisolated + fire-and-forget — safe from the
             // mixer's queue with no hop. streamID is ≥ 1 (0 is the legacy path).
+            if AudioDiag.isEnabled {
+                // What actually reaches the AirPlay engine for a redirected app.
+                // peak≈0 here while the tap peak is non-zero == the mixer/convert
+                // path is dropping content; the stream binding (which device this
+                // stream is on) tells us if the engine session is still wired.
+                AudioDiag.tick("engineWrite:stream\(mixed.streamID)",
+                               detail: "s16peak=\(Self.diagS16Peak(mixed.pcm)) frames=\(mixed.frameCount)")
+            }
             self?.engine.write(
                 pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
         }
@@ -554,6 +616,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         // captures run, and a later `start()`/`updateAppRoutes` reuses the same graph.
         perAppCapture.stopAll()
         routeMixer.flush()
+        // Local playback (Bug T2): stop the built-in-output engine and drop every
+        // per-app player. Off `stateQueue` like the taps above (AVAudioEngine
+        // teardown); a later `start()`/`updateAppRoutes` re-adds players on demand.
+        localPlaybackEngine?.stop()
         discovery.onEvent = nil
         discovery.stop()
         // Drop the local row's two-way sync (the row itself is removed below).
@@ -608,6 +674,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             self.bindTail.cancel()
             self.bindTail = Task {}
             self.routedBundleIDs.removeAll()
+            self.localBundleIDs.removeAll()
             self.routeDisplayNames.removeAll()
             self.streamBindings.removeAll()
             self.routedAppNames.removeAll()
@@ -615,6 +682,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // a later start() begins with no bundle ID considered dead or mid-retry.
             self.lastRoutes.removeAll()
             self.deadBundleIDs.removeAll()
+            self.everCapturedBundleIDs.removeAll()
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
@@ -763,18 +831,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     ///     `onDestinationSetsChanged` synchronously iff the distinct app-sets changed
     ///     — that handler binds each destination device to its stream_id and emits
     ///     `.routedApps`.
-    ///  2. Starts a per-app capture for each newly-routed bundle ID and stops the
-    ///     capture for each de-routed one (`.noRedirect` / `.currentDevice` / removed).
-    ///  3. Syncs the whole-system tap's exclusion set (T4) so individually-routed
-    ///     apps don't double up into the system mix.
+    ///  2. Starts a per-app capture for each newly-captured bundle ID (routed to a
+    ///     `.device` OR to `.currentDevice`) and stops the capture for each app that
+    ///     dropped out of BOTH (back to `.noRedirect` / removed). The tap is
+    ///     destination-agnostic, so its lifecycle keys on the UNION of the two sets.
+    ///  3. For `.currentDevice` apps (Bug T2): renders each on the Mac's built-in
+    ///     speakers via ``localPlaybackEngine`` as an independent stream, and adds
+    ///     them to the whole-system tap's exclusion set so they don't ALSO play in
+    ///     the AirPlay mix.
+    ///  4. Syncs the whole-system tap's exclusion set (T4) so individually-routed
+    ///     (`.device`) AND `.currentDevice` apps don't double up into the system mix.
     ///
     /// Concurrency: the routed-bundle-ID diff and the display-name refresh happen
     /// under `stateQueue` (serialized against concurrent calls). Everything that can
-    /// BLOCK — `perAppCapture.start`/`stop` (Core Audio tap create/teardown) and the
-    /// mixer's own queue hop — runs OUTSIDE `stateQueue`, the same discipline the
-    /// capture gate keeps for `captureControlQueue`.
+    /// BLOCK — `perAppCapture.start`/`stop` (Core Audio tap create/teardown), the
+    /// `localPlaybackEngine` graph mutations, and the mixer's own queue hop — runs
+    /// OUTSIDE `stateQueue`, the same discipline the capture gate keeps for
+    /// `captureControlQueue`.
     public func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String> = []) {
-        let (toStart, toStop, mixerRoutes): (Set<String>, Set<String>, [AppRoute]) = stateQueue.sync {
+        let plan: UpdateRoutesPlan = stateQueue.sync {
             self.lastRoutes = routes
             self.routeDisplayNames = Dictionary(
                 routes.map { ($0.bundleID, $0.displayName) }, uniquingKeysWith: { _, new in new })
@@ -782,8 +857,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                 if case .device = route.destination { return route.bundleID }
                 return nil
             })
-            let previous = self.routedBundleIDs
+            // Bug T2: apps deliberately pinned to the local Mac ("Current Device").
+            let newLocal = Set(routes.compactMap { route -> String? in
+                route.destination == .currentDevice ? route.bundleID : nil
+            })
+            let previousRouted = self.routedBundleIDs
+            let previousLocal = self.localBundleIDs
             self.routedBundleIDs = newRouted
+            self.localBundleIDs = newLocal
 
             // T8: a bundle ID that isn't in the route table at all any more (fully
             // de-routed or its app-route removed) forgets any dead/retry tracking —
@@ -799,29 +880,141 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             for bundleID in self.pendingRetries.keys where !stillPresent.contains(bundleID) {
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             }
+            for bundleID in self.everCapturedBundleIDs where !stillPresent.contains(bundleID) {
+                self.everCapturedBundleIDs.remove(bundleID)
+            }
 
             // T8: the mixer only ever sees routes for bundle IDs that are actually
             // capturing — a `deadBundleIDs` entry (quit mid-stream, or a per-app tap
             // that's `.failed`) is excluded here so `.routedApps` / the engine stream
             // binding never claim a silent app is streaming.
             let mixerRoutes = routes.filter { !self.deadBundleIDs.contains($0.bundleID) }
-            return (newRouted.subtracting(previous), previous.subtracting(newRouted), mixerRoutes)
+
+            // The per-app tap is destination-agnostic — one tap serves whichever
+            // destination the app currently routes to — so its start/stop keys on
+            // the UNION of device- and local-routed apps. An app that merely SWITCHES
+            // between `.device` and `.currentDevice` stays in both unions and keeps
+            // its tap running (only the downstream consumer changes).
+            let previousUnion = previousRouted.union(previousLocal)
+            let newUnion = newRouted.union(newLocal)
+            return UpdateRoutesPlan(
+                mixerRoutes: mixerRoutes,
+                captureToStart: newUnion.subtracting(previousUnion),
+                captureToStop: previousUnion.subtracting(newUnion),
+                localRemoved: previousLocal.subtracting(newLocal),
+                localRoutes: routes.filter { $0.destination == .currentDevice },
+                localExcluded: newLocal)
         }
 
         // Topology recompute — synchronously fires `onDestinationSetsChanged`
         // (→ `handleDestinationSetsChanged`) if the distinct app-sets changed. Off
         // `stateQueue`: the mixer owns its own serial queue, and the handler re-enters
-        // `stateQueue` on its own (we are not holding it here).
-        routeMixer.updateRoutes(mixerRoutes)
+        // `stateQueue` on its own (we are not holding it here). Kept SYNCHRONOUS: it's
+        // pure in-memory topology math (no Core Audio), and it drives the engine
+        // stream binding (via async `bindTail` Tasks), so the redirect still starts
+        // connecting immediately.
+        routeMixer.updateRoutes(plan.mixerRoutes)
 
-        // Per-app capture lifecycle — OFF `stateQueue` (start/stop may block on Core
-        // Audio). `start`/`stop` are idempotent per bundle ID.
-        for bundleID in toStart { perAppCapture.start(bundleID: bundleID) }
-        for bundleID in toStop { perAppCapture.stop(bundleID: bundleID) }
+        // Everything below BLOCKS on Core Audio / AVAudioEngine (per-app tap
+        // create+`AudioDeviceStart`, the AVAudioEngine graph mutation, the
+        // whole-system tap recreate). `updateAppRoutes` is called on the MAIN THREAD
+        // (a popover destination pick → `onRoutesDidChange`, or an `NSWorkspace`
+        // launch/terminate notification), so running these inline froze the UI for
+        // the duration of `AudioDeviceStart`'s HAL round-trip. Hand them to the
+        // serial `captureControlQueue` (the same queue the whole-system capture gate
+        // uses) so they run OFF the main thread and stay ordered against each other
+        // and against the gate. `perAppCapture` / `localPlaybackEngine` are each
+        // independently thread-safe; `start`/`stop`/`addApp` are idempotent.
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
 
-        // Keep the whole-system tap excluding individually-routed + user-excluded
-        // apps (T4). No-op when no real capture coordinator is wired (tests/UI-smoke).
-        captureCoordinator?.updateRouting(appRoutes: routes, excludedBundleIDs: excludedBundleIDs)
+            // Per-app capture lifecycle. `start`/`stop` are idempotent per bundle ID.
+            for bundleID in plan.captureToStart { self.perAppCapture.start(bundleID: bundleID) }
+            for bundleID in plan.captureToStop { self.perAppCapture.stop(bundleID: bundleID) }
+
+            // Local playback (Bug T2):
+            //  - Drop players for apps that left `.currentDevice`.
+            //  - (Re)add + re-level every current `.currentDevice` app whose tap is
+            //    ALREADY capturing — this covers a `.device`→`.currentDevice` switch,
+            //    where the tap keeps running so no fresh `.capturing` transition fires
+            //    `handleLocalCaptureStateChange`. `addApp` is idempotent, so overlapping
+            //    with that handler (for apps whose tap starts fresh) is harmless.
+            for bundleID in plan.localRemoved { self.localPlaybackEngine?.removeApp(bundleID: bundleID) }
+            for route in plan.localRoutes {
+                if case .capturing(let format) = self.perAppCapture.state(for: route.bundleID) {
+                    try? self.localPlaybackEngine?.start()
+                    try? self.localPlaybackEngine?.addApp(
+                        bundleID: route.bundleID, tapFormat: format,
+                        volume: Float(route.volume) / 100.0)
+                }
+                self.localPlaybackEngine?.setVolume(Float(route.volume) / 100.0, for: route.bundleID)
+            }
+
+            // Keep the whole-system tap excluding individually-routed (`.device`) apps,
+            // `.currentDevice` apps (Bug T2 — they play via `localPlaybackEngine`, not
+            // the AirPlay mix), and user-excluded apps (T4). No-op when no real capture
+            // coordinator is wired (tests/UI-smoke).
+            self.captureCoordinator?.updateRouting(
+                appRoutes: routes, excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
+        }
+    }
+
+    /// The off-`stateQueue` work `updateAppRoutes` computes under the lock and then
+    /// executes without it — a named struct so the (now six-field) hand-off stays
+    /// readable.
+    private struct UpdateRoutesPlan {
+        let mixerRoutes: [AppRoute]
+        let captureToStart: Set<String>
+        let captureToStop: Set<String>
+        let localRemoved: Set<String>
+        let localRoutes: [AppRoute]
+        let localExcluded: Set<String>
+    }
+
+    /// React to a per-app capture's state transition for LOCAL (`.currentDevice`)
+    /// playback (Bug T2). A no-op unless `bundleID` is currently a `.currentDevice`
+    /// route. On `.capturing` (the tap's real `TapFormat` is now known) it starts
+    /// the local engine and adds the app's player at its route volume; on any
+    /// non-capturing terminal/transitional state it drops the player. Runs off
+    /// `stateQueue` (callback context); hops on only to read `localBundleIDs` /
+    /// `lastRoutes`. Distinct from `handlePerAppCaptureHealthChange`, which owns the
+    /// `.device`/mixer side's dead-bundle tracking.
+    private func handleLocalCaptureStateChange(
+        bundleID: String, state: PerAppCaptureCoordinator.State
+    ) {
+        switch state {
+        case .capturing(let format):
+            let volume: Float? = stateQueue.sync {
+                guard self.localBundleIDs.contains(bundleID) else { return nil }
+                let vol = self.lastRoutes.first { $0.bundleID == bundleID }?.volume ?? 100
+                return Float(vol) / 100.0
+            }
+            guard let volume else { return }
+            try? localPlaybackEngine?.start()
+            try? localPlaybackEngine?.addApp(bundleID: bundleID, tapFormat: format, volume: volume)
+        case .idle, .stopping, .failed:
+            // Capture stopped/failed. Only pull the player while the app is STILL a
+            // local route (a capture failure/hiccup, not a de-route): a de-route
+            // already removed it from `localBundleIDs` and `updateAppRoutes` dropped
+            // the player explicitly, so this skips then — no double-remove, and
+            // `removeApp` is idempotent regardless.
+            let isLocal = stateQueue.sync { self.localBundleIDs.contains(bundleID) }
+            guard isLocal else { return }
+            localPlaybackEngine?.removeApp(bundleID: bundleID)
+        case .resolvingProcess, .creatingTap:
+            // Tap is still starting up — nothing to render yet, nothing to drop.
+            break
+        }
+    }
+
+    /// Set a `.currentDevice`-routed app's LOCAL playback volume (Bug T2). The
+    /// low-latency path the popover slider drives directly (mirroring how a
+    /// `.device` app's volume rides the route table into the mixer); the same value
+    /// also arrives via `updateAppRoutes` from the persisted route edit. Maps the
+    /// UI's 0–100 int onto the player node's 0.0…1.0 contract. A no-op for a bundle
+    /// ID with no local player (non-`.currentDevice`, or not yet capturing).
+    public func setLocalPlaybackVolume(volume: Int, bundleID: String) {
+        localPlaybackEngine?.setVolume(Float(volume.clampedToVolume) / 100.0, for: bundleID)
     }
 
     /// React to a per-app capture's state transition (T8, edge case 3: a
@@ -842,13 +1035,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     ) {
         switch state {
         case .capturing:
-            let recovered: Bool = stateQueue.sync {
+            let (recovered, isRecapture): (Bool, Bool) = stateQueue.sync {
                 let wasDead = self.deadBundleIDs.remove(bundleID) != nil
                 self.retryCounts.removeValue(forKey: bundleID)
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
-                return wasDead
+                // First-ever capture inserts (isRecapture=false); a later capture
+                // (tap rebuilt) is already present (isRecapture=true).
+                let isRecapture = !self.everCapturedBundleIDs.insert(bundleID).inserted
+                return (wasDead, isRecapture)
             }
-            if recovered { republishMixerTopology() }
+            if recovered {
+                // Was excluded from the topology while dead; re-adding it rebinds
+                // the device anyway, so no separate session reset is needed.
+                republishMixerTopology()
+            } else if isRecapture {
+                // The tap was rebuilt with no death in between (a sample-rate
+                // change). The topology is unchanged, so the AirPlay session keeps
+                // its now-desynced RTP anchor unless we explicitly reset it.
+                resetAirPlaySessionForRoutedApp(bundleID: bundleID)
+            }
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
@@ -878,6 +1083,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// / the engine stream bindings — stays in sync with what's actually capturing.
     private func republishMixerTopology() {
         routeMixer.updateRoutes(effectiveMixerRoutes())
+    }
+
+    /// Reset the AirPlay RTP session for every device on `bundleID`'s stream by
+    /// rebinding it (removeOutput → addOutput = a fresh RTSP/RTP session with a
+    /// clean timeline anchor). Called when a routed app's per-app tap was rebuilt
+    /// (a sample-rate/device change), which leaves the receiver desynced and
+    /// permanently silent even though real PCM keeps flowing. `streamID(for:)`
+    /// reads the mixer's own queue, so it's fetched BEFORE taking `stateQueue`.
+    private func resetAirPlaySessionForRoutedApp(bundleID: String) {
+        guard let stream = routeMixer.streamID(for: bundleID) else { return }
+        let streamU = UInt32(stream)
+        stateQueue.sync {
+            var ops: [StreamBindOp] = []
+            for (deviceID, bound) in self.streamBindings where bound == streamU {
+                if let outputID = self.outputIDs[deviceID] {
+                    AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
+                    ops.append(.rebind(outputID, streamU))
+                }
+            }
+            self.enqueueBindOps(ops)
+        }
     }
 
     /// `lastRoutes` filtered to exclude any bundle ID currently in `deadBundleIDs`
@@ -933,6 +1159,46 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         perAppCapture.stop(bundleID: bundleID)
         let justDied: Bool = stateQueue.sync { self.deadBundleIDs.insert(bundleID).inserted }
         if justDied { republishMixerTopology() }
+        // Notify the UI that this routed app is no longer running so it can
+        // show an offline indicator on the row (T4). The route itself persists
+        // (PLAN §C) — only the live streaming state changes.
+        stateQueue.async { self.emit(.routedAppRunning(bundleID: bundleID, isRunning: false)) }
+    }
+
+    /// React to an app-launch notification forwarded from the AppKit boundary
+    /// (T4, bug fix: relaunching a routed app did not restart its capture).
+    /// `AppDelegate` observes `NSWorkspace.didLaunchApplicationNotification` and
+    /// calls this; Core can't observe AppKit notifications itself, mirroring the
+    /// `handleAppTerminated` / `resolvePID` injection pattern.
+    ///
+    /// Only acts when `bundleID` currently has an active `.device(id:)` route —
+    /// a non-routed app launch is silently ignored. On a match it:
+    ///  - Clears any dead/retry tracking left over from a prior quit
+    ///  - Restarts the per-app Core Audio capture tap (the previous one was
+    ///    torn down by `handleAppTerminated` when the process exited)
+    ///  - Republishes the mixer topology so `.routedApps` and the engine stream
+    ///    binding reflect the restarted app
+    ///  - Emits `.routedAppRunning(bundleID:isRunning:true)` so the UI can
+    ///    clear any offline indicator it had shown for this app
+    public func handleAppLaunched(bundleID: String) {
+        let hasRoute: Bool = stateQueue.sync {
+            guard self.routedBundleIDs.contains(bundleID) else { return false }
+            // Clear any dead/retry state from a prior quit (edge case 1 cleanup).
+            self.deadBundleIDs.remove(bundleID)
+            self.retryCounts.removeValue(forKey: bundleID)
+            self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
+            return true
+        }
+        guard hasRoute else { return }
+        // Restart the per-app capture tap for the relaunched process. This is
+        // the same call `updateAppRoutes` issues for newly-routed apps; calling
+        // it here means a relaunch self-heals without any route-table change.
+        perAppCapture.start(bundleID: bundleID)
+        // Republish the topology now that the bundle is no longer dead — the
+        // mixer will include it in the next `.routedApps` and engine-bind pass.
+        republishMixerTopology()
+        // Tell the UI the app is live again so it can remove the offline badge.
+        stateQueue.async { self.emit(.routedAppRunning(bundleID: bundleID, isRunning: true)) }
     }
 
     /// One per-app engine binding transition, computed under `stateQueue` and run on
@@ -949,6 +1215,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// mixer's serial queue; hops to `stateQueue` for the whole diff so the binding
     /// state, the `.routedApps` diff, and the `bindTail` submission order are all
     /// serialized against every other `stateQueue` mutation.
+    /// Max absolute Float32 sample across a captured buffer's first channel
+    /// (diagnostic only; taps deliver Float32). ~0 while an app is audibly
+    /// playing is the documented silent-buffer condition.
+    private static func diagFloatPeak(_ buffer: CapturedBuffer) -> String {
+        guard let data = buffer.channelData.first, data.count >= 4 else { return "n/a" }
+        var peak: Float = 0
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let floats = raw.bindMemory(to: Float.self)
+            for f in floats { let a = abs(f); if a > peak { peak = a } }
+        }
+        return String(format: "%.4f", peak)
+    }
+
+    /// Max absolute Int16 sample (0…32767) across interleaved S16LE PCM
+    /// (diagnostic only) — what the AirPlay engine actually receives per stream.
+    private static func diagS16Peak(_ pcm: Data) -> Int {
+        guard pcm.count >= 2 else { return 0 }
+        var peak: Int16 = 0
+        pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let ints = raw.bindMemory(to: Int16.self)
+            for v in ints { let a = v == Int16.min ? Int16.max : abs(v); if a > peak { peak = a } }
+        }
+        return Int(peak)
+    }
+
     private func handleDestinationSetsChanged(_ sets: [AppRouteMixer.DestinationSet]) {
         stateQueue.sync {
             // --- .routedApps diff (UI signal; independent of device discovery) ---
@@ -1014,11 +1305,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     private func performBindOp(_ op: StreamBindOp) async {
         switch op {
         case .bind(let outputID, let stream):
+            AudioDiag.log("engine BIND output=\(outputID) stream=\(stream)")
             try? await engine.addOutput(outputID, streamId: stream)
         case .rebind(let outputID, let stream):
+            AudioDiag.log("engine REBIND output=\(outputID) stream=\(stream)")
             try? await engine.removeOutput(outputID)
             try? await engine.addOutput(outputID, streamId: stream)
         case .unbind(let outputID):
+            AudioDiag.log("engine UNBIND output=\(outputID) (AirPlay session torn down)")
             try? await engine.removeOutput(outputID)
         }
     }

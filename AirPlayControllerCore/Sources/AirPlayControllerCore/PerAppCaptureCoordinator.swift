@@ -319,6 +319,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// (the app may have relaunched with a new pid since capture started) and
     /// recreate the tap + aggregate against the new device.
     private func handleDeviceChange(bundleID: String) {
+        AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FIRED (default output device changed)")
         let claim: (proceed: Bool, old: ProcessAudioTap?) = queue.sync {
             guard let slot = slots[bundleID], case .capturing = slot.state else { return (false, nil) }
             let old = slot.tap
@@ -326,10 +327,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             transition(slot, bundleID: bundleID, to: .creatingTap)
             return (true, old)
         }
-        guard claim.proceed else { return }
+        guard claim.proceed else {
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) SKIPPED (not capturing)")
+            return
+        }
         claim.old?.teardown()
 
         guard let pid = resolvePID(bundleID) else {
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FAILED: app not running (pid unresolved)")
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
                 transition(slot, bundleID: bundleID, to: .failed(.appNotRunning(bundleID: bundleID)))
@@ -343,6 +348,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try newTap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATED ok, new format \(format.sampleRate)/\(format.channels)ch")
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     newTap.teardown()
@@ -355,6 +361,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             newTap.teardown()
             let mapped: PerAppCaptureError = (error as? PerAppCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATE FAILED: \(mapped)")
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
                 slot.tap = nil
@@ -525,6 +532,10 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var asbd = AudioStreamBasicDescription()
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
+    /// The physical output device our aggregate is built on. Kept so we can
+    /// listen for ITS nominal-sample-rate changes (see `installSampleRateListener`).
+    private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
     init(name: String) { self.name = name }
 
@@ -539,6 +550,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try createAggregate(bundleID: bundleID)
             try startIOProc()
             installDefaultDeviceListener()
+            installSampleRateListener()
         } catch {
             // Any step after the tap/aggregate was created leaves live system
             // objects; tear them down before propagating so we never orphan a
@@ -634,6 +646,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         } catch {
             throw PerAppCaptureError.deviceLost(reason: String(describing: error))
         }
+        self.tappedOutputDeviceID = outputID
         let aggregateUID = UUID().uuidString
 
         let description: [String: Any] = [
@@ -768,10 +781,52 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         deviceChangeBlock = nil
     }
 
+    // MARK: Nominal-sample-rate listener (documented process-tap silent-buffer fix)
+    //
+    // A process tap keeps delivering buffers at full cadence but goes SILENT
+    // (all-zero PCM) when the tapped output device renegotiates its nominal
+    // sample rate (44.1 ↔ 48 kHz) — classically triggered by another app taking
+    // the mic and forcing voice-processing mode. This is a known, Apple-
+    // unresolved Core Audio behaviour (Developer Forums thread 825780); the only
+    // reliable recovery is a FULL teardown + rebuild of the tap AND aggregate,
+    // which `handleDeviceChange` already performs. The catch: this rate change
+    // happens with the default output device's UID UNCHANGED, so the
+    // `kAudioHardwarePropertyDefaultOutputDevice` (identity) listener never fires.
+    // Listening for the device's `kAudioDevicePropertyNominalSampleRate` catches
+    // it and drives the same rebuild via `onDefaultDeviceChanged`.
+    private func installSampleRateListener() {
+        guard tappedOutputDeviceID != kAudioObjectUnknown else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            AudioDiag.log("PAC nominal-sample-rate changed on tapped device — triggering rebuild")
+            self?.onDefaultDeviceChanged?()
+        }
+        self.sampleRateBlock = block
+        AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+    }
+
+    private func removeSampleRateListener() {
+        guard let block = sampleRateBlock, tappedOutputDeviceID != kAudioObjectUnknown else {
+            sampleRateBlock = nil
+            return
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+        sampleRateBlock = nil
+    }
+
     // MARK: Teardown (order matters: stop -> destroy IOProc -> destroy aggregate -> destroy tap)
 
     func teardown() {
         removeDefaultDeviceListener()
+        removeSampleRateListener()
+        tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
             _ = AudioDeviceStop(aggregateID, proc)
             _ = AudioDeviceDestroyIOProcID(aggregateID, proc)

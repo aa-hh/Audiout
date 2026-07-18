@@ -300,13 +300,45 @@ public final class AppRouteMixer: @unchecked Sendable {
         let emissions: [MixedBuffer] = queue.sync {
             guard let streamID = streamForBundle[bundleID],
                   let converter = converterForBundle[bundleID],
-                  let pcm = converter.convertToAirPlayPCM(buffer)
+                  let pcm = converter.convertToAirPlayPCM(buffer),
+                  !pcm.isEmpty
             else { return [] }
 
             let volume = volumeForBundle[bundleID] ?? 100
+            let contributorCount = currentSets.first(where: { $0.streamID == streamID })?.bundleIDs.count ?? 1
+
+            // SINGLE-contributor stream: pass the converted buffer STRAIGHT
+            // through with its own capture pts — identical to the shipping
+            // whole-system path (`NativeCaptureCoordinator.handleBuffer` →
+            // `engine.write(pcm:pts:)`). Deliberately NO frame-index timeline:
+            // audio must stay clocked by its own capture clock, not re-quantized
+            // onto a wall-clock-derived grid. That re-gridding (the timeline path
+            // below) turns the drift/jitter between the audio clock and the
+            // system clock into periodic gaps/overlaps — the "slowed / warbling"
+            // artifact — and it degrades badly the moment the output device
+            // changes sample rate (e.g. the mic engaging voice-processing mode),
+            // which is why it bit even a single redirected app. The engine's PTP
+            // timing and the tap aggregate's drift compensation own sync.
+            if contributorCount <= 1 {
+                // A stream that just dropped from 2 contributors back to 1 may
+                // have a stale accumulator — clear it so no held frames leak out.
+                timelines.removeValue(forKey: streamID)
+                let out = volume == 100
+                    ? pcm
+                    : Self.packClipped(Self.scaledStereoSamples(pcm, volumePercent: volume)[...])
+                guard !out.isEmpty else { return [] }
+                // S16LE stereo == 4 bytes per frame.
+                return [MixedBuffer(streamID: streamID, pcm: out,
+                                    frameCount: out.count / 4, pts: buffer.pts)]
+            }
+
+            // MULTI-contributor stream (2+ apps summed onto ONE device): the
+            // frame-indexed accumulator aligns independently-clocked taps by
+            // presentation time before summing. Known-imperfect and gated to the
+            // genuinely-shared case only; dual-stream mixing is a tracked
+            // follow-up (single-stream routing is the shipping priority).
             let scaled = Self.scaledStereoSamples(pcm, volumePercent: volume)
             guard !scaled.isEmpty else { return [] }
-
             let firstFrame = Self.frameIndex(of: buffer.pts)
             let timeline = timelines[streamID] ?? {
                 let t = MixTimeline()
@@ -421,6 +453,12 @@ private final class MixTimeline {
     private var startFrame: Int64 = 0
     private var acc: [Int32] = []          // interleaved L,R,L,R…  (2 * frames)
     private var hasData = false
+    /// True once any frame has been emitted from the CURRENT accumulator run
+    /// (reset when the run fully drains). While true, `startFrame` is a hard
+    /// floor: frames before it have already been sent, so a late member's
+    /// pre-`startFrame` contribution must be dropped, never re-inserted — see
+    /// ``add(firstFrame:stereo:)``.
+    private var hasEmitted = false
 
     private var frameCount: Int { acc.count / 2 }
     private var endFrame: Int64 { startFrame + Int64(frameCount) }
@@ -441,9 +479,18 @@ private final class MixTimeline {
             return
         }
 
-        // Extend the front (buffer starts before current head) — only reachable
-        // before anything has been emitted, since emission advances startFrame.
-        if firstFrame < startFrame {
+        // Extend the front (buffer starts before the current head) ONLY while
+        // nothing has been emitted from this run yet — a genuinely-earlier member
+        // joining a still-unflushed head. Once emission has advanced `startFrame`,
+        // the frames before it are already on the wire: a late member's
+        // pre-`startFrame` portion MUST be dropped (the skip logic below handles
+        // that), never re-inserted. Re-inserting them (the T1 bug) re-emits an
+        // already-sent range at a rewound pts — which, when two apps share a
+        // stream and one drains a buffer head before the other contributes,
+        // over-delivers frames (playback slows/stretches) and hands the receiver
+        // overlapping RTP timestamps. This restores this method's own contract:
+        // "Frames older than startFrame … are dropped."
+        if firstFrame < startFrame && !hasEmitted {
             let missing = Int(startFrame - firstFrame)
             acc.insert(contentsOf: [Int32](repeating: 0, count: missing * 2), at: 0)
             startFrame = firstFrame
@@ -500,7 +547,12 @@ private final class MixTimeline {
 
         acc.removeFirst(sampleCount)
         startFrame += Int64(frames)
-        if acc.isEmpty { hasData = false }
+        hasEmitted = true
+        // A fully-drained run resets the emitted floor: the next `add` starts a
+        // fresh head (its `firstFrame` is in the future relative to everything
+        // already sent), where a genuinely-earlier second member may again
+        // legitimately extend the front before this run's first emission.
+        if acc.isEmpty { hasData = false; hasEmitted = false }
         return emitted
     }
 }

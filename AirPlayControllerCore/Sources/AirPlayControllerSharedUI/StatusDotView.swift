@@ -39,6 +39,12 @@ final class StatusDotView: NSView {
     /// and whether the breathing animation should be installed.
     private var state: ConnectionState = .off
 
+    /// True when a per-app redirect is live on this device and the connection
+    /// state is `.off` (not in the whole-system output set). When set the badge
+    /// shows as a system-teal dot in place of the normally-hidden `.off` state,
+    /// visually distinguishing a redirect-only device from a fully disconnected one.
+    private var routingActive: Bool = false
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
@@ -51,17 +57,29 @@ final class StatusDotView: NSView {
     /// Point the badge at a connection state. Fully resets the layer (colour,
     /// visibility, animation) so a repeated `apply` after an unrelated re-render
     /// can never leave a stale breathing animation running under a since-changed
-    /// state.
+    /// state. Clears any routing-active override; use
+    /// ``apply(state:routingActive:)`` to set both together.
     func apply(_ state: ConnectionState) {
+        apply(state: state, routingActive: false)
+    }
+
+    /// Update the badge with both a connection state and a routing-active flag.
+    /// When `routingActive` is `true` and `state` is `.off`, shows a system-teal
+    /// dot indicating per-app audio is live on this device even though it is not
+    /// in the whole-system output set. Any other `state` takes precedence and the
+    /// routing flag is ignored visually (the device is already shown as active).
+    func apply(state: ConnectionState, routingActive: Bool) {
         self.state = state
+        self.routingActive = routingActive
         isHidden = !isVisibleForState
         updateLayerColors()
         reconcileBreathing()
     }
 
-    /// Whether the badge shows at all for the current state (`.off` hides it).
+    /// Whether the badge shows at all for the current state (`.off` hides it,
+    /// unless `routingActive` is set — then the routing-teal dot shows instead).
     private var isVisibleForState: Bool {
-        if case .off = state { return false }
+        if case .off = state { return routingActive }
         return true
     }
 
@@ -89,11 +107,19 @@ final class StatusDotView: NSView {
     /// change, not just at build time.
     private func updateLayerColors() {
         let fill: NSColor
-        switch state {
-        case .off:                        fill = .clear
-        case .connecting, .reconnecting:  fill = .secondaryLabelColor
-        case .connected:                  fill = .systemGreen
-        case .failed:                     fill = .systemOrange
+        // Routing-active override: when the device has live per-app routes but
+        // is NOT in the whole-system output set (state is .off), show a
+        // system-teal dot — visually distinct from the streaming-green (.connected)
+        // and the failure-amber (.failed) to convey "routing, not streaming".
+        if routingActive, case .off = state {
+            fill = .systemTeal
+        } else {
+            switch state {
+            case .off:                        fill = .clear
+            case .connecting, .reconnecting:  fill = .secondaryLabelColor
+            case .connected:                  fill = .systemGreen
+            case .failed:                     fill = .systemOrange
+            }
         }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             dotLayer.fillColor = fill.cgColor
@@ -174,4 +200,13 @@ final class StatusDotView: NSView {
     /// AND on screen AND Reduce Motion off) — lets tests assert the animation is
     /// present without reaching into Core Animation internals.
     var test_isBreathing: Bool { dotLayer.animation(forKey: Self.breathKey) != nil }
+
+    /// Whether the routing-active teal dot is currently shown — true when
+    /// `routingActive` is set AND the connection state is `.off` (the device is
+    /// not in the whole-system output set). Test hook for T3 assertions.
+    var test_isShowingRoutingDot: Bool {
+        guard routingActive else { return false }
+        if case .off = state { return true }
+        return false
+    }
 }

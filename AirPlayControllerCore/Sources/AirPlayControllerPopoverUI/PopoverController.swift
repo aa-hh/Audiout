@@ -146,6 +146,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// feeds into.
     private var liveRoutedAppNames: [String: [String]] = [:]
 
+    /// Bundle IDs of routed apps whose process is currently NOT running (T4).
+    /// Populated by `BackendEvent.routedAppRunning(isRunning: false)` and
+    /// cleared by `isRunning: true`. An app row with its bundle ID in this set
+    /// renders an offline indicator so the user knows the redirect is saved but
+    /// inactive. The row stays interactive — the user can still change the
+    /// route destination while the app is offline.
+    private var offlineBundleIDs: Set<String> = []
+
     /// Backs the Applications card's collapse default (PLAN §B decision:
     /// "Applications expanded iff ≥1 app is redirected" — T-5). Injected with a
     /// default so every existing call site (AppDelegate, popover-harness,
@@ -188,6 +196,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Called when the user taps the header's Settings button (task A). The app
     /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
+
+    /// Called when an Applications-card slider moves, so the app can push the new
+    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
+    /// for a low-latency response, in ADDITION to the persisted
+    /// `AppRoutingController.setVolume` edit. The app wires this to
+    /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
+    /// unconditionally (for every route kind): the backend no-ops it for a bundle
+    /// ID with no live local stream, so the popover needs no destination knowledge.
+    public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
     /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
     /// captured")? An excluded app is un-routable — dropped from the "+ Add
@@ -404,6 +421,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
+    /// Record a routed-app process-lifecycle change (T4, `BackendEvent.routedAppRunning`).
+    /// Called by the host (`AppDelegate`) directly — the signal has no home on
+    /// `Device` and can't ride `update(devices:)`. Stores the offline state and
+    /// triggers a rebuild so the app row's indicator refreshes. If the popover is
+    /// not currently shown, the rebuild is deferred to the next `update(devices:)`
+    /// via the standard `rebuild()` path that always runs off device events.
+    public func applyRoutedAppRunning(bundleID: String, isRunning: Bool) {
+        if isRunning {
+            offlineBundleIDs.remove(bundleID)
+        } else {
+            offlineBundleIDs.insert(bundleID)
+        }
+        // Rebuild in place (not a reopen) so this open's transient collapse state
+        // is preserved — same discipline as `applyRoutedApps`.
+        if popover.isShown {
+            rebuild()
+            panel.panelContentDidChangeHeight(animated: false)
+        }
+    }
+
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
     public var statusMasterVolume: Double {
@@ -469,6 +506,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         diagnosisPanelsByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
+
+        // Prune offline tracking for apps that no longer have a route (T4).
+        // A de-routed app can never come back as "online" via `handleAppLaunched`
+        // (which only acts on routed bundle IDs), so any stale entry here is
+        // dead weight and should not bleed onto a future route for the same id.
+        let currentRouteIDs = Set(appRouting.appRoutes.map(\.bundleID))
+        offlineBundleIDs = offlineBundleIDs.intersection(currentRouteIDs)
 
         let allDevices = orderedDevices()
 
@@ -583,7 +627,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// least one app is currently redirected. Exposed so the later task that
     /// wires the card (T-8) only needs to call `collapsedState(for:
     /// Self.applicationsCardTitle, default: !applicationsDefaultExpanded)`.
-    private var applicationsDefaultExpanded: Bool { appRouting.routedAppCount > 0 }
+    private var applicationsDefaultExpanded: Bool {
+        appRouting.appRoutes.contains { $0.destination != .noRedirect }
+    }
 
     /// Chevron/title click handler for a card (T-4 affordance): flips the
     /// TRANSIENT collapse state (never the default) and drives the panel's own
@@ -821,7 +867,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             icon: appIcon(for: route.bundleID),
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
-            destinations: appDestinations(devices: devices)),
+            destinations: appDestinations(devices: devices),
+            isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
@@ -1367,8 +1414,12 @@ extension PopoverController: MainOutRowView.Delegate {
 extension PopoverController: AppRowView.Delegate {
 
     public func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
+        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
+        // to the mixer/engine — no rebuild needed here; a rebuild would replace
+        // the AppRowView mid-drag and break the NSSlider tracking loop.
+        onSetLocalPlaybackVolume?(volume, appID)
         appRouting.setVolume(volume, for: appID)
-        rebuild()
     }
 
     public func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String) {
@@ -1460,5 +1511,15 @@ extension PopoverController: AppRowView.Delegate {
     public func test_deselectApp() {
         selectedAppBundleID = nil
         rebuild()
+    }
+
+    /// The set of bundle IDs currently tracked as offline (T4). Lets tests assert
+    /// that `applyRoutedAppRunning` updated the tracking set correctly.
+    public var test_offlineBundleIDs: Set<String> { offlineBundleIDs }
+
+    /// Whether `bundleID`'s row is currently showing the offline badge (T4).
+    /// `nil` if no such row exists in the Applications card.
+    public func test_isAppRowOffline(bundleID: String) -> Bool? {
+        appRowsByBundleID[bundleID]?.test_isOfflineBadgeVisible
     }
 }

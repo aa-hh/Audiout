@@ -2708,6 +2708,105 @@ final class NativeBackendTests: XCTestCase {
                        "device B must never be torn down by device A's app terminating")
     }
 
+    // MARK: T4 terminate → relaunch cycle
+
+    /// T4 bug fix: `handleAppTerminated` emits `.routedAppRunning(isRunning: false)`
+    /// so the UI can show an offline indicator, and `handleAppLaunched` emits
+    /// `.routedAppRunning(isRunning: true)` to clear it. End-to-end event assertion.
+    func testTerminateAndRelaunchEmitsRoutedAppRunningEvents() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Relaunch Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Install a route so the app is known to the backend as `.device(id:)`.
+        backend.updateAppRoutes([route("com.foo.music", name: "Music", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Step 1: app quits — expect .routedAppRunning(isRunning: false).
+        let terminateEvents = await collect(from: backend) { events in
+            events.contains {
+                if case .routedAppRunning(let id, let running) = $0 {
+                    return id == "com.foo.music" && !running
+                }
+                return false
+            }
+        } after: { backend.handleAppTerminated(bundleID: "com.foo.music") }
+
+        XCTAssertTrue(terminateEvents.contains {
+            if case .routedAppRunning(let id, let running) = $0 { return id == "com.foo.music" && !running }
+            return false
+        }, "handleAppTerminated must emit .routedAppRunning(isRunning: false)")
+
+        // Step 2: app relaunches — expect .routedAppRunning(isRunning: true).
+        let relaunchEvents = await collect(from: backend) { events in
+            events.contains {
+                if case .routedAppRunning(let id, let running) = $0 {
+                    return id == "com.foo.music" && running
+                }
+                return false
+            }
+        } after: { backend.handleAppLaunched(bundleID: "com.foo.music") }
+
+        XCTAssertTrue(relaunchEvents.contains {
+            if case .routedAppRunning(let id, let running) = $0 { return id == "com.foo.music" && running }
+            return false
+        }, "handleAppLaunched must emit .routedAppRunning(isRunning: true)")
+    }
+
+    /// T4 bug fix: after a terminate + relaunch, the backend restarts the per-app
+    /// capture tap so audio flows to the redirect target again without the user
+    /// touching the route table.
+    func testRelaunchRestartsCaptureAndRebindsDevice() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Restart Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.bar.player", name: "Player", toDevice: device.id)])
+        // Wait for the first bind.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        let firstBindCount = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+
+        // Terminate the app (tears down the tap and kills the stream binding).
+        backend.handleAppTerminated(bundleID: "com.bar.player")
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        // Relaunch: the backend must restart capture and re-bind the device.
+        backend.handleAppLaunched(bundleID: "com.bar.player")
+        await pollUntil {
+            engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount
+        }
+
+        let totalBinds = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+        XCTAssertGreaterThan(totalBinds, firstBindCount,
+                             "handleAppLaunched must re-bind the device after the relaunch")
+    }
+
+    /// T4 bug fix: `handleAppLaunched` is a no-op for a bundle ID that has no
+    /// active `.device(id:)` route — non-routed app launches must never perturb
+    /// the backend.
+    func testRelaunchOfNonRoutedAppIsNoOp() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // A route exists for com.foo but NOT for com.unrelated.
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        // com.foo's bind is issued asynchronously (bindTail Task); wait for it to
+        // settle so the baseline below is stable and not racing that bind.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        let streamCountBefore = engine.streamAddCalls.count
+        // Launching an unrouted app must be silent (no stream ops, no events).
+        backend.handleAppLaunched(bundleID: "com.unrelated.app")
+        // Give any async side effects time to propagate.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(engine.streamAddCalls.count, streamCountBefore,
+                       "a launch for a non-routed bundle ID must not issue any engine ops")
+    }
+
     /// T8 lifecycle edge case: `.processNotYetAudible` bounded retry, previously
     /// only exercised at the `PerAppCaptureCoordinator` level
     /// (`testProcessNotYetAudibleSurfacesErrorAndTearsDown`). This proves
@@ -2793,6 +2892,132 @@ final class NativeBackendTests: XCTestCase {
                       "driven through the REAL AppRoutingController -> NativeBackend chain, not a direct call")
         XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.foo.player" }?.destination, .noRedirect,
                        "the persisted route must fall back to .noRedirect")
+    }
+
+    // MARK: Local playback (Bug T2 — .currentDevice as an independent local stream)
+
+    /// A ``LocalPlaybackControlling`` double: records every call so a test can
+    /// assert the NativeBackend wiring without an `AVAudioEngine` or audio
+    /// hardware (mirrors `FakeCapture` for the whole-system tap seam).
+    private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _added: [(bundleID: String, volume: Float)] = []
+        private var _removed: [String] = []
+        private var _volumes: [(bundleID: String, volume: Float)] = []
+        private var _receiveCount = 0
+        private var _started = false
+
+        func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {
+            lock.withLock { _added.append((bundleID, volume)) }
+        }
+        func removeApp(bundleID: String) { lock.withLock { _removed.append(bundleID) } }
+        func setVolume(_ volume: Float, for bundleID: String) {
+            lock.withLock { _volumes.append((bundleID, volume)) }
+        }
+        func receive(buffer: CapturedBuffer, for bundleID: String) {
+            lock.withLock { _receiveCount += 1 }
+        }
+        func start() throws { lock.withLock { _started = true } }
+        func stop() { lock.withLock { _started = false } }
+
+        var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
+        var removedApps: [String] { lock.withLock { _removed } }
+        var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
+        var receiveCount: Int { lock.withLock { _receiveCount } }
+        var didStart: Bool { lock.withLock { _started } }
+        /// The volume the player for `bundleID` was most recently ADDED at.
+        func addedVolume(for bundleID: String) -> Float? {
+            lock.withLock { _added.last { $0.bundleID == bundleID }?.volume }
+        }
+    }
+
+    /// Routing an app to `.currentDevice` (Bug T2) must (1) exclude it from the
+    /// whole-system AirPlay tap — so it doesn't ALSO play in the AirPlay mix — and
+    /// (2) start its per-app capture and hand it to the local playback engine as
+    /// its own independent stream. Driven through the FULL `updateAppRoutes` call
+    /// against the REAL `NativeCaptureCoordinator` (exclusion observed end to end)
+    /// with a scripted per-app tap + a local-playback spy.
+    func testCurrentDeviceRouteExcludesAppFromSystemMixAndStartsLocalStream() async {
+        let resolvePID: @Sendable (String) -> pid_t? = { $0 == "com.local" ? 111 : nil }
+        // Per-app tap that always reaches `.capturing` (no real Core Audio).
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+
+        // Real whole-system coordinator over a recording tap, so its exclusion set
+        // is observable end to end (as opposed to a direct updateRouting call).
+        let systemTap = RecordingSystemTap()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { systemTap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
+            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+        backend.captureCoordinator = coordinator
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Bring up the whole-system capture (a Selected Device) so the tap is
+        // running and its exclusion set is observable on the recording tap.
+        let systemDevice = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "Whole System Speaker")
+        await startAndDiscover(backend, engine, discovery, systemDevice)
+        backend.setOutputSet([systemDevice.id])
+        await pollUntil { systemTap.createCount >= 1 }
+        XCTAssertEqual(systemTap.excludedPIDs, [], "nothing local yet -> the system mix must include every app")
+
+        // Route an app to .currentDevice (deliberately "play here, on the Mac").
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+
+        // 1) EXCLUDED from the whole-system AirPlay tap (so it plays locally, not
+        //    ALSO in the AirPlay mix).
+        await pollUntil { systemTap.excludedPIDs.contains(111) }
+        XCTAssertTrue(systemTap.excludedPIDs.contains(111),
+                      "a .currentDevice app's pid must be excluded from the whole-system tap")
+
+        // 2) Its per-app capture started …
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        // … and it was handed to the local playback engine as its own stream.
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.local" } }
+        XCTAssertTrue(localPlayback.addedApps.contains { $0.bundleID == "com.local" },
+                      "a .currentDevice app must be added to the local playback engine (its own stream)")
+        XCTAssertTrue(localPlayback.didStart,
+                      "the local playback engine must be started for the first .currentDevice app")
+        // The whole-system stream keeps streaming to its own device throughout.
+        XCTAssertTrue(engine.addedIDs.contains(systemDevice.outputID),
+                      "the whole-system stream must be unaffected by the local route")
+    }
+
+    /// A volume change for a `.currentDevice` app reaches the local playback engine
+    /// (Bug T2). The player is first ADDED at the route's own volume when its tap
+    /// starts capturing; a later `setLocalPlaybackVolume` (the popover slider's
+    /// low-latency path) maps the 0–100 int onto the engine's 0.0…1.0 contract.
+    func testSetLocalPlaybackVolumeReachesLocalEngine() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice, volume: 80),
+        ])
+
+        // Added at the route's own volume (80% -> 0.8) once its tap is capturing.
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.local" } }
+        XCTAssertEqual(localPlayback.addedVolume(for: "com.local") ?? -1, 0.8, accuracy: 0.001,
+                       "the local player must be added at the route's volume (80% -> 0.8)")
+
+        // A later slider-driven change reaches the engine as a 0.0…1.0 set.
+        backend.setLocalPlaybackVolume(volume: 40, bundleID: "com.local")
+        XCTAssertTrue(
+            localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
+            "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
     }
 
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {

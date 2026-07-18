@@ -62,6 +62,18 @@ final class AppRouteMixerTests: XCTestCase {
                               pts: timespec(tv_sec: sec, tv_nsec: 0))
     }
 
+    /// Build an S16LE interleaved-stereo ``CapturedBuffer`` of `count` identical
+    /// `(value, value)` frames whose first frame lands at the ABSOLUTE output
+    /// frame index `frame` (pts = ``AppRouteMixer/timestamp(ofFrame:)``). Lets a
+    /// test place a buffer at a precise sub-second frame offset — the realistic
+    /// case two independently-clocked taps produce (unlike the whole-second
+    /// helper above, whose buffers always align exactly on a 44100-frame grid).
+    private func s16BufferAtFrame(value: Int16, count: Int, atFrame frame: Int64) -> CapturedBuffer {
+        let buf = s16Buffer(frames: Array(repeating: (value, value), count: count), atSecond: 0)
+        return CapturedBuffer(channelData: buf.channelData, frameCount: count,
+                              pts: AppRouteMixer.timestamp(ofFrame: frame))
+    }
+
     /// Decode interleaved S16LE `Data` back to L/R pairs for assertions.
     private func pairs(_ data: Data) -> [(Int16, Int16)] {
         var out: [(Int16, Int16)] = []
@@ -219,6 +231,58 @@ final class AppRouteMixerTests: XCTestCase {
         XCTAssertTrue(sink.all.allSatisfy { $0.streamID == m.streamID(for: "a") })
     }
 
+    /// Regression for Bug T1 ("two apps routed -> audio extremely compressed or
+    /// slowed down"). Two apps sharing one stream deliver 500-frame buffers
+    /// covering the SAME real-time ranges, interleaved so app "a" always drains a
+    /// stream's head (advancing `startFrame` past the 441-frame hold window)
+    /// before app "b" delivers its contribution for that same range. The mixer
+    /// MUST NOT re-emit already-sent frames at a rewound pts: doing so
+    /// over-delivers frames (playback slows) and hands the receiver overlapping
+    /// RTP timestamps (audible corruption). A single stream driven by real time
+    /// must emit exactly one real-time's worth of frames with contiguous,
+    /// never-rewound presentation timestamps.
+    func testTwoInterleavedAppsNeitherOverDeliverNorRewindPTS() {
+        let m = mixer()
+        let sink = Sink()
+        m.onMixedBuffer = { sink.append($0) }
+
+        m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleStateChange(bundleID: "b", state: capturing())
+
+        let bufFrames = 500                   // > holdFrames (441): each buffer drains a head
+        let stride = Int64(bufFrames)
+        let start: Int64 = 44_100
+        let iterations = 10
+        var frame = start
+        for _ in 0..<iterations {
+            // "a" arrives first and drains; "b" then contributes the same range.
+            m.handleBuffer(bundleID: "a", buffer: s16BufferAtFrame(value: 100, count: bufFrames, atFrame: frame))
+            m.handleBuffer(bundleID: "b", buffer: s16BufferAtFrame(value: 10, count: bufFrames, atFrame: frame))
+            frame += stride
+        }
+        m.flush()
+
+        // 1. Presentation timestamps must be contiguous and strictly forward —
+        //    no emission may start before the previous one ended (that is the
+        //    duplicate/rewound-pts corruption).
+        var expectedNextFrame: Int64?
+        for emitted in sink.all {
+            let startFrame = AppRouteMixer.frameIndex(of: emitted.pts)
+            if let expected = expectedNextFrame {
+                XCTAssertEqual(startFrame, expected,
+                               "emissions must be contiguous; a rewound/overlapping pts is receiver corruption")
+            }
+            expectedNextFrame = startFrame + Int64(emitted.frameCount)
+        }
+
+        // 2. Exactly one real-time span of frames (no over-delivery == no slow-down).
+        let totalEmitted = sink.all.reduce(0) { $0 + $1.frameCount }
+        let realSpan = Int(frame - start)     // iterations * bufFrames
+        XCTAssertEqual(totalEmitted, realSpan,
+                       "two mixed apps must emit exactly one real-time's worth of frames, not more")
+    }
+
     func testClippingEngagesAtBoundaryWithoutWrapping() {
         let m = mixer()
         let sink = Sink()
@@ -328,7 +392,7 @@ final class AppRouteMixerTests: XCTestCase {
 
     // MARK: - pts alignment + emission behaviour
 
-    func testBuffersAtDifferentTimesLandAtCorrectFrameOffsets() {
+    func testSingleStreamPassesBuffersThroughVerbatimWithOwnPTS() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -336,32 +400,35 @@ final class AppRouteMixerTests: XCTestCase {
         m.updateRoutes([route("a", to: "dev1")])
         m.handleStateChange(bundleID: "a", state: capturing())
 
-        // Two buffers a full second apart -> the second lands 44100 frames later,
-        // so the flushed stream is 44101 frames long (1 + gap + 1).
+        // A single-contributor stream passes each converted buffer STRAIGHT
+        // through with its own capture pts — no wall-clock re-gridding, so NO
+        // synthetic silence gap between buffers (that re-gridding was the
+        // drift/warble bug). Two buffers a second apart yield two separate
+        // one-frame emissions, each keeping its own pts — NOT a 44101-frame
+        // gap-filled stream.
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(111, 111)], atSecond: 1))
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(222, 222)], atSecond: 2))
-        m.flush()
 
-        let all = pairs(sink.combined)
-        XCTAssertEqual(all.count, 44101)
-        XCTAssertEqual(all.first!.0, 111)
-        XCTAssertEqual(all[44100].0, 222)          // exactly one second later
-        XCTAssertEqual(all[1].0, 0, "the gap between the two buffers is silence")
-        XCTAssertEqual(sink.all.first!.pts.tv_sec, 1) // first emitted frame is at 1.0 s
+        XCTAssertEqual(sink.all.count, 2, "each buffer passes straight through")
+        XCTAssertEqual(pairs(sink.all[0].pcm).map(\.0), [111])
+        XCTAssertEqual(pairs(sink.all[1].pcm).map(\.0), [222])
+        XCTAssertEqual(sink.all[0].pts.tv_sec, 1, "buffer keeps its own capture pts")
+        XCTAssertEqual(sink.all[1].pts.tv_sec, 2)
+        XCTAssertEqual(pairs(sink.combined).count, 2, "no synthetic silence gap")
     }
 
-    func testNoOutputBeforeFlushWhenWithinHoldWindow() {
+    func testSingleStreamEmitsImmediatelyWithNoHoldWindow() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
         m.updateRoutes([route("a", to: "dev1")])
         m.handleStateChange(bundleID: "a", state: capturing())
 
-        // A single tiny buffer (< holdFrames) is held, not emitted, until flush.
+        // Pass-through: a single-contributor stream emits each buffer IMMEDIATELY
+        // — the hold window only applies to the 2+-app summing path, so the
+        // common single-redirect case carries no added latency.
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(1, 1), (2, 2)], atSecond: 1))
-        XCTAssertTrue(sink.isEmpty, "frames within the hold window aren't final yet")
-        m.flush()
-        XCTAssertEqual(pairs(sink.combined).count, 2)
+        XCTAssertEqual(pairs(sink.combined).count, 2, "single-stream buffer emits immediately")
     }
 
     func testFrameIndexRoundTrips() {

@@ -129,6 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
         popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
+        // Bug T2: an Applications-card slider drive on a `.currentDevice` app must
+        // reach its LOCAL playback stream immediately (low latency), not only after
+        // the persisted route round-trips through `updateAppRoutes`. No-ops on
+        // backends without per-app local playback (`MockBackend`/`OwnToneBackend`).
+        popoverController.onSetLocalPlaybackVolume = { [weak self] volume, bundleID in
+            (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
+                volume: volume, bundleID: bundleID)
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in
@@ -161,6 +169,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let bundleID = app.bundleIdentifier
             else { return }
             (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
+        }
+
+        // T4 (bug fix): a routed app that quit and relaunched got no capture
+        // restart — the persisted route stayed but the live tap was never
+        // re-established. Forward the launch so the backend can restart capture
+        // and clear the offline indicator the terminate observer raised.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication,
+                let bundleID = app.bundleIdentifier
+            else { return }
+            (self?.backend as? AppRouteConfiguring)?.handleAppLaunched(bundleID: bundleID)
         }
 
         // Subscribe BEFORE start() so we don't miss the initial `deviceAdded`
@@ -348,6 +373,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
             log("event: \(describe(event))")
+        case .routedAppRunning(let bundleID, let isRunning):
+            // T4 (bug fix): a routed app quit or relaunched — update the popover's
+            // offline indicator for its row. Falls through to the shared repaint
+            // so the row paint reflects the new state on the next cycle.
+            popoverController.applyRoutedAppRunning(bundleID: bundleID, isRunning: isRunning)
+            log("event: \(describe(event))")
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -378,6 +409,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
+        case .routedAppRunning(let bundleID, let isRunning):
+            return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         }
     }
 

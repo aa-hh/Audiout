@@ -90,11 +90,41 @@ plutil -insert NSAudioCaptureUsageDescription -string "$AUDIO_CAPTURE_USAGE" "$P
 # and a missing permission rationale is not something to discover in the wild.
 plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSAudioCaptureUsageDescription missing from Info.plist" >&2; exit 1; }
 
-# --- Codesign (ad-hoc) ----------------------------------------------------
+# --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2
 # swaps this for a real signing identity + notarization.
-echo "==> Ad-hoc codesigning"
-codesign --force --deep --sign - "$APP_BUNDLE"
-codesign --verify --verbose "$APP_BUNDLE"
+#
+# `--options runtime` (hardened runtime) is a SECURITY REQUIREMENT, not just a
+# distribution one: this app holds the "System Audio Recording" TCC grant, and
+# without the hardened runtime a local attacker could `DYLD_INSERT_LIBRARIES` a
+# dylib into the process and inherit that grant. The hardened runtime makes dyld
+# ignore DYLD_* env vars, closing that vector — as long as we withhold the
+# allow-dyld-environment-variables entitlement (we do). Library validation is
+# deliberately DISABLED in scripts/Audiouted.entitlements because the app links
+# Homebrew dylibs signed under a different Team ID (with it on, dyld aborts at
+# launch); the DYLD_INSERT protection does NOT depend on library validation. See
+# that file for the full rationale and the Phase 2 plan to re-enable it.
+#
+# NOT `--deep`: it is deprecated by Apple and signs nested code with the wrong
+# (inherited) options. The bundle currently has a single Mach-O; when helpers get
+# embedded, sign them explicitly inside-out before this line.
+echo "==> Ad-hoc codesigning (hardened runtime)"
+ENTITLEMENTS="$SCRIPT_DIR/Audiouted.entitlements"
+test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
+codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE"
+codesign --verify --strict --verbose "$APP_BUNDLE"
+# Assert the hardened runtime actually got applied — a signature silently missing
+# the runtime flag would reopen the injection surface above. Capture first, then
+# grep: piping straight into `grep -q` makes grep close the pipe early, codesign
+# takes SIGPIPE, and `set -o pipefail` would flag that as a spurious failure.
+SIG_INFO="$(codesign --display --verbose=2 "$APP_BUNDLE" 2>&1 || true)"
+printf '%s\n' "$SIG_INFO" | grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' || { echo "ERROR: hardened runtime flag not set on signature" >&2; exit 1; }
+# Assert the entitlements actually EMBEDDED. codesign exits 0 even when AMFI
+# rejects a malformed entitlements plist (it just drops them), which would ship a
+# hardened-runtime app with library validation still ON — and that app cannot
+# load its Homebrew dylibs, so it would crash at launch. Verify the load-bearing
+# key is present rather than trusting codesign's exit code.
+EMBEDDED_ENTS="$(codesign -d --entitlements - "$APP_BUNDLE" 2>/dev/null || true)"
+printf '%s' "$EMBEDDED_ENTS" | grep -q 'com.apple.security.cs.disable-library-validation' || { echo "ERROR: entitlements did not embed (AMFI likely rejected the plist) — app would fail to load Homebrew dylibs" >&2; exit 1; }
 
 echo "==> Done: $APP_BUNDLE"

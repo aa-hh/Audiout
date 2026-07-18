@@ -258,9 +258,31 @@ func run() -> Int32 {
     drain()
     checks.expect(!window.test_isPresentingCreateSheet, "cancelling clears the sheet")
 
-    // --- 9. Delete: removes the group, mixer returns, "Groups" section stays
+    // --- 9. Select a device: read-only detail pane, membership text correct,
+    //        `activeGroupID` untouched; deselecting returns the mixer pane.
+    print("\n[9] Select a device shows the read-only detail pane")
+    checks.expectEqual(controller.activeGroupID, nil,
+                       "sanity: no group active before selecting a device")
+    window.test_select(.device(id: candidateA))
+    drain()
+    checks.expect(window.test_isShowingDetail, "selecting a device shows the detail pane")
+    checks.expect(!window.test_isShowingEditor, "selecting a device does not show the editor")
+    checks.expectEqual(window.test_detail.test_shownDeviceID, candidateA,
+                       "detail pane is showing the selected device")
+    checks.expectEqual(window.test_detail.test_groupMembershipText, "Whole House",
+                       "detail pane's 'In groups:' text names the device's saved group")
+    checks.expectEqual(controller.activeGroupID, nil,
+                       "selecting a device in the sidebar does NOT activate any group")
+    window.test_select(nil)
+    drain()
+    checks.expect(!window.test_isShowingDetail, "deselecting clears the detail pane")
+    checks.expect(!window.test_isShowingEditor, "deselecting does not show the editor")
+    checks.expectEqual(window.test_mixer.test_rowDeviceIDs.count, 7,
+                       "the mixer pane returns showing all devices")
+
+    // --- 10. Delete: removes the group, mixer returns, "Groups" section stays
     //        (empty-state row comes back).
-    print("\n[9] Delete group → deleteGroup, mixer pane returns, 'Groups' section stays")
+    print("\n[10] Delete group → deleteGroup, mixer pane returns, 'Groups' section stays")
     window.test_select(.group(id: saved.id))
     drain()
     checks.expect(window.test_isShowingEditor, "editor shown before delete")

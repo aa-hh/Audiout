@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
 /// The "Groups" window (design revamp): a CONFIGURATION-ONLY host for viewing
 /// and editing saved groups. Viewing or editing a group here NEVER activates it
@@ -13,14 +14,21 @@ import AudioutedCore
 ///   `NSSlider` (the group-switcher presets popup was removed with the revamp —
 ///   nothing here switches the active group);
 /// - an `NSSplitViewController` whose sidebar item is a source-list
-///   `NSOutlineView` (`SidebarViewController`) and whose content item is the
-///   detail pane (`MixerViewController` for a mixer, or the group editor when a
-///   group is selected).
+///   `NSOutlineView` (`SidebarViewController`) and whose content item is swapped
+///   between three panes as the sidebar selection changes: `MixerViewController`
+///   (a device is deselected / nothing selected → all devices), the group editor
+///   (`GroupEditorViewController`, when a group is selected), and the read-only
+///   device detail pane (`DeviceDetailViewController`, when a device is selected).
 ///
 /// Group creation is a standard macOS sheet (`GroupCreationSheetController`)
 /// presented over the window, replacing the old in-pane unsaved-draft flow;
 /// creating a group never activates it either — the caller only selects the
 /// resolved group in the sidebar and opens its editor.
+///
+/// Device icons (per-device SF Symbol overrides) resolve through the injected
+/// `DeviceIconController`, shared with the sidebar, mixer, editor, creation
+/// sheet, and detail pane so every surface renders the same glyph; its
+/// `onChange` re-drives `refreshAll()` so a pick anywhere updates everywhere.
 ///
 /// Everything group/master/mute goes through the injected
 /// `GroupController` (UI-agnostic, unit-tested in core) — the window never does
@@ -40,14 +48,25 @@ public final class MixerWindowController: NSWindowController {
     /// groups, the proportional master, and mute.
     private let groupController: GroupController
 
+    /// Resolves/persists per-device icon overrides, shared with every child
+    /// pane so the sidebar, mixer rows, editor/creation checklists, and the
+    /// detail pane all render the same glyph for a device.
+    private let deviceIconController: DeviceIconController
+
     /// Latest device snapshot the app pushed via `update(devices:)`, keyed by id.
     private var devicesByID: [String: Device] = [:]
+
+    /// The device the detail pane is currently showing, so `refreshAll()` can
+    /// re-render it from a fresher snapshot (or fall back to the mixer when the
+    /// device has since disappeared). `nil` when the detail pane isn't showing.
+    private var shownDetailDeviceID: String?
 
     // Child controllers.
     private let splitViewController = NSSplitViewController()
     private let sidebarViewController: SidebarViewController
     private let mixerViewController: MixerViewController
     private let editorViewController: GroupEditorViewController
+    private let detailViewController: DeviceDetailViewController
     private let toolbarController: ToolbarController
 
     /// The content split item — its view controller is swapped between the
@@ -55,12 +74,22 @@ public final class MixerWindowController: NSWindowController {
     private let contentSplitItem: NSSplitViewItem
 
     public init(groupController: GroupController,
-               appRouting: AppRoutingController = AppRoutingController(loadPersisted: false)) {
+               appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
+               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
         self.groupController = groupController
+        self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
         self.mixerViewController = MixerViewController(groupController: groupController, appRouting: appRouting)
         self.editorViewController = GroupEditorViewController(groupController: groupController)
+        self.detailViewController = DeviceDetailViewController(groupController: groupController)
         self.toolbarController = ToolbarController()
+
+        // Share the one icon controller across every pane so a per-device
+        // override picked anywhere renders identically everywhere.
+        sidebarViewController.deviceIconController = deviceIconController
+        mixerViewController.deviceIconController = deviceIconController
+        editorViewController.deviceIconController = deviceIconController
+        detailViewController.deviceIconController = deviceIconController
 
         // Sidebar item — the documented `.sidebar(withViewController:)`
         // constructor applies source-list material/vibrancy + collapse behavior.
@@ -129,6 +158,14 @@ public final class MixerWindowController: NSWindowController {
         editorViewController.onDidEditGroup = { [weak self] in
             self?.refreshSidebarAndToolbar()
         }
+        // An icon override picked in any pane repaints every surface. Chain onto
+        // any existing observer rather than clobbering it — the controller is
+        // shared and another owner may already be listening.
+        let previousIconChange = deviceIconController.onChange
+        deviceIconController.onChange = { [weak self] in
+            previousIconChange?()
+            self?.refreshAll()
+        }
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -168,20 +205,40 @@ public final class MixerWindowController: NSWindowController {
             // audio — activation lives in the popover, not this window.
             showEditor(for: id)
             refreshSidebarAndToolbar()
-        case .device, .none:
+        case .device(let id):
+            // Selecting a device shows its read-only detail pane. CONFIG-ONLY:
+            // this never activates a group, changes routing, or moves audio.
+            showDetail(for: id)
+        case .none:
             showMixer(for: nil)
         }
+    }
+
+    /// Show the read-only detail pane for `deviceID`. Falls back to the mixer
+    /// pane when the id isn't in the current snapshot (a stale selection) so the
+    /// content area is never left on a device that no longer exists.
+    private func showDetail(for deviceID: String) {
+        guard let device = devicesByID[deviceID] else {
+            shownDetailDeviceID = nil
+            showMixer(for: nil)
+            return
+        }
+        shownDetailDeviceID = deviceID
+        detailViewController.show(device: device)
+        swapContent(to: detailViewController)
     }
 
     /// Show the mixer pane. `groupID == nil` → "all devices"; otherwise the
     /// group's members. (The window's mixer always shows all known devices so
     /// individual ungrouped speakers are reachable — SPEC §9.)
     private func showMixer(for groupID: String?) {
+        shownDetailDeviceID = nil
         mixerViewController.show(groupID: groupID, devices: orderedDevices())
         swapContent(to: mixerViewController)
     }
 
     private func showEditor(for groupID: String) {
+        shownDetailDeviceID = nil
         editorViewController.show(groupID: groupID, devices: orderedDevices())
         swapContent(to: editorViewController)
     }
@@ -202,7 +259,8 @@ public final class MixerWindowController: NSWindowController {
     /// controller via `test_createSheet` and drive `test_commit()`/`test_cancel()`
     /// directly (the controller's `finish` skips `dismiss` when unhosted).
     private func presentCreateSheet(preselected: [String]) {
-        let sheet = GroupCreationSheetController(groupController: groupController)
+        let sheet = GroupCreationSheetController(groupController: groupController,
+                                                deviceIconController: deviceIconController)
         sheet.configure(defaultName: "Group \(groupController.groups.count + 1)",
                         devices: orderedDevices(),
                         preselected: Set(preselected))
@@ -255,6 +313,14 @@ public final class MixerWindowController: NSWindowController {
             if let id = editorViewController.editingGroupID {
                 editorViewController.show(groupID: id, devices: devices)
             }
+        } else if currentContentItem.viewController === detailViewController {
+            // Re-render the detail pane from the fresher snapshot; if the shown
+            // device has since disappeared, fall back to the mixer pane.
+            if let id = shownDetailDeviceID, let device = devicesByID[id] {
+                detailViewController.refresh(device: device)
+            } else {
+                showMixer(for: nil)
+            }
         } else {
             mixerViewController.refresh(devices: devices)
         }
@@ -300,11 +366,17 @@ public final class MixerWindowController: NSWindowController {
     public var test_sidebar: SidebarViewController { sidebarViewController }
     public var test_mixer: MixerViewController { mixerViewController }
     public var test_editor: GroupEditorViewController { editorViewController }
+    public var test_detail: DeviceDetailViewController { detailViewController }
     public var test_toolbar: ToolbarController { toolbarController }
 
-    /// True when the editor pane is the visible content (vs the mixer pane).
+    /// True when the editor pane is the visible content (vs the mixer/detail pane).
     public var test_isShowingEditor: Bool {
         currentContentItem.viewController === editorViewController
+    }
+
+    /// True when the read-only device detail pane is the visible content.
+    public var test_isShowingDetail: Bool {
+        currentContentItem.viewController === detailViewController
     }
 
     /// Simulate the user selecting a sidebar row.

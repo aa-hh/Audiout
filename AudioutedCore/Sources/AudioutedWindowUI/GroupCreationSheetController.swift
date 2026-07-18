@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
 /// The "New Group" sheet (design revamp, SPEC.md §9 "Group setup"): group
 /// creation moves off the old in-pane unsaved draft
@@ -26,14 +27,25 @@ import AudioutedCore
 ///
 /// On Create: builds `memberVolumes` from each checked device's current volume
 /// (mirrors `GroupEditorViewController.commitDraft`) and calls
-/// `GroupController.createGroup(name:memberIDs:memberVolumes:)`, which dedups
-/// an identical member set onto the existing group rather than making a copy.
+/// `GroupController.createGroup(name:memberIDs:memberVolumes:iconSymbolName:)`,
+/// which dedups an identical member set onto the existing group rather than
+/// making a copy (and in that case leaves the existing group's icon alone).
 /// ``onComplete`` reports the outcome (`nil` on cancel); the caller decides
 /// whether to select the new/resolved group in the sidebar — this controller
 /// never activates it.
+///
+/// An icon well sits beside the Name field: a bordered square button showing
+/// ``Group/defaultIconSymbolName`` until the user picks something else via an
+/// anchored `IconPickerViewController` popover (same construction as the
+/// group editor's icon well). The chosen name (`nil` = default) is threaded
+/// through ``commit()`` into `createGroup`.
 public final class GroupCreationSheetController: NSViewController {
 
     private let groupController: GroupController
+    /// Resolves membership-row icons to any per-device override; `nil` when
+    /// the caller doesn't care to show overrides (rows fall back to each
+    /// device's kind-derived default).
+    private let deviceIconController: DeviceIconController?
 
     /// Fired once, either with the created/resolved group (`alreadyExisted`
     /// true when `createGroup` deduped onto an existing group instead of
@@ -46,12 +58,21 @@ public final class GroupCreationSheetController: NSViewController {
     /// grow the sheet past a reasonable size.
     private static let checklistMaxHeight: CGFloat = 220
 
+    /// Icon well square size (matches `IconPickerViewController`'s curated
+    /// grid cells so the well previews at the same scale as the grid it opens).
+    private static let iconWellSize: CGFloat = 32
+
     private let nameField = NSTextField(string: "")
+    private let iconWellButton = NSButton()
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let countLabel = NSTextField(labelWithString: "")
     private let cancelButton = NSButton()
     private let createButton = NSButton()
+
+    /// The user's chosen icon override, `nil` meaning "use the default group
+    /// icon" (``Group/defaultIconSymbolName``). Threaded into ``commit()``.
+    private var selectedIconSymbolName: String?
 
     /// Keeps the checklist scroll view exactly as tall as its rows (built
     /// lazily in `loadView` — the document view must exist first). See the
@@ -71,8 +92,9 @@ public final class GroupCreationSheetController: NSViewController {
     /// Checked device ids (a subset of `candidateDevices`).
     private var checkedIDs: Set<String> = []
 
-    public init(groupController: GroupController) {
+    public init(groupController: GroupController, deviceIconController: DeviceIconController? = nil) {
         self.groupController = groupController
+        self.deviceIconController = deviceIconController
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -83,6 +105,17 @@ public final class GroupCreationSheetController: NSViewController {
         nameField.placeholderString = "Group name"
         nameField.target = self
         nameField.action = #selector(nameFieldReturnPressed(_:))
+
+        iconWellButton.translatesAutoresizingMaskIntoConstraints = false
+        iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+        iconWellButton.heightAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+        iconWellButton.bezelStyle = .regularSquare
+        iconWellButton.isBordered = true
+        iconWellButton.imagePosition = .imageOnly
+        iconWellButton.toolTip = "Choose icon"
+        iconWellButton.target = self
+        iconWellButton.action = #selector(iconWellTapped(_:))
+        updateIconWell()
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -123,18 +156,21 @@ public final class GroupCreationSheetController: NSViewController {
         createButton.action = #selector(createTapped(_:))
 
         let container = NSView()
-        for v in [nameField, speakersLabel, scrollView, countLabel, cancelButton, createButton] {
+        for v in [iconWellButton, nameField, speakersLabel, scrollView, countLabel, cancelButton, createButton] {
             container.addSubview(v)
         }
 
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: Self.formWidth),
 
-            nameField.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-            nameField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            iconWellButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            iconWellButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+
+            nameField.centerYAnchor.constraint(equalTo: iconWellButton.centerYAnchor),
+            nameField.leadingAnchor.constraint(equalTo: iconWellButton.trailingAnchor, constant: 8),
             nameField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
-            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 16),
+            speakersLabel.topAnchor.constraint(equalTo: iconWellButton.bottomAnchor, constant: 16),
             speakersLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
 
             scrollView.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 6),
@@ -189,7 +225,9 @@ public final class GroupCreationSheetController: NSViewController {
         for v in stackView.arrangedSubviews { stackView.removeArrangedSubview(v); v.removeFromSuperview() }
         rowsByID.removeAll()
         for device in candidateDevices {
-            let row = MembershipRowView(device: device, checked: checkedIDs.contains(device.id))
+            let row = MembershipRowView(
+                device: device, checked: checkedIDs.contains(device.id),
+                iconSymbolName: deviceIconController?.symbolName(for: device))
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.handleToggle(deviceID: deviceID, isChecked: isChecked)
             }
@@ -238,6 +276,34 @@ public final class GroupCreationSheetController: NSViewController {
         cancel()
     }
 
+    @objc private func iconWellTapped(_ sender: NSButton) {
+        let picker = IconPickerViewController()
+        picker.configure(currentSymbolName: selectedIconSymbolName, defaultSymbolName: Group.defaultIconSymbolName)
+        picker.onPick = { [weak self] name in
+            self?.pickIcon(name)
+        }
+        present(picker, asPopoverRelativeTo: sender.bounds, of: sender,
+                preferredEdge: .maxY, behavior: .transient)
+    }
+
+    /// Apply a picked icon (`nil` = default) and refresh the well's glyph.
+    /// Shared by the real popover callback and ``test_pickIcon(_:)``.
+    private func pickIcon(_ name: String?) {
+        selectedIconSymbolName = name
+        updateIconWell()
+    }
+
+    /// Refresh the icon well's glyph from ``selectedIconSymbolName``, falling
+    /// back through ``DeviceIcon/resolve(_:default:)`` exactly like every
+    /// other icon-rendering site — a stale override never shows a blank glyph.
+    private func updateIconWell() {
+        let symbolName = DeviceIcon.resolve(selectedIconSymbolName, default: Group.defaultIconSymbolName)
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        image?.isTemplate = true
+        iconWellButton.image = image
+        iconWellButton.contentTintColor = .secondaryLabelColor
+    }
+
     /// Persist the checked candidates as a new group via
     /// ``GroupController/createGroup`` (which dedups by member set). Mirrors
     /// `GroupEditorViewController.commitDraft`'s volume-seeding: each member's
@@ -251,7 +317,8 @@ public final class GroupCreationSheetController: NSViewController {
             candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
         })
         guard let result = try? groupController.createGroup(
-            name: name, memberIDs: memberIDs, memberVolumes: memberVolumes
+            name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
+            iconSymbolName: selectedIconSymbolName
         ) else { return }
         finish((group: result.group, alreadyExisted: result.alreadyExisted))
     }
@@ -308,6 +375,18 @@ public final class GroupCreationSheetController: NSViewController {
 
     /// Simulate clicking Cancel.
     public func test_cancel() { cancel() }
+
+    /// The icon well's currently-resolved symbol name (``Group/defaultIconSymbolName``
+    /// until a pick overrides it, resolved through ``DeviceIcon/resolve(_:default:)``
+    /// exactly like the rendered glyph).
+    public var test_iconWellSymbolName: String {
+        DeviceIcon.resolve(selectedIconSymbolName, default: Group.defaultIconSymbolName)
+    }
+
+    /// Simulate picking an icon from the picker (`nil` = "use default icon"),
+    /// bypassing the popover exactly like `IconPickerViewController`'s own
+    /// `test_pickCurated`/`test_useDefault` hooks bypass presentation.
+    public func test_pickIcon(_ name: String?) { pickIcon(name) }
 }
 
 /// A flipped document view so the checklist scrolls from the top rather than

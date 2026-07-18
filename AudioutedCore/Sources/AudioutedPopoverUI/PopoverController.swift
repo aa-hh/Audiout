@@ -183,6 +183,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// unaffected.
     public var isAppExcluded: (String) -> Bool = { _ in false }
 
+    /// Resolves a per-device SF Symbol override for device rows (icon-picker
+    /// feature). Injected by the app; `nil` (the default) preserves current
+    /// behavior — every `DeviceRowView.apply` call site omits `iconSymbolName`
+    /// and falls back to `device.kind.symbolName` exactly as before. Setting
+    /// this also chains an `onChange` observer (below) that refreshes the
+    /// mounted device rows so an icon-picker edit shows up without a manual
+    /// popover reopen.
+    public var deviceIconController: DeviceIconController? {
+        didSet {
+            let previousOnChange = deviceIconController?.onChange
+            deviceIconController?.onChange = { [weak self] in
+                previousOnChange?()
+                self?.refreshDeviceRows()
+            }
+        }
+    }
+
     private let panel = PopoverPanelViewController()
 
     /// The single System-section Main Out row.
@@ -592,7 +609,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else {
             // No controller ⇒ nothing routable ⇒ not controllable.
             row.apply(device, selected: false, controllable: false,
-                      routedAppNames: appRouting.routedAppNames(for: device.id))
+                      routedAppNames: appRouting.routedAppNames(for: device.id),
+                      iconSymbolName: deviceIconController?.symbolName(for: device))
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -603,7 +621,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
                   blocked: blocked,
                   blockReason: blocked ? GroupController.localMixRefusalReason : nil,
-                  routedAppNames: appRouting.routedAppNames(for: device.id))
+                  routedAppNames: appRouting.routedAppNames(for: device.id),
+                  iconSymbolName: deviceIconController?.symbolName(for: device))
     }
 
     private func refreshDeviceRows() {

@@ -221,12 +221,19 @@ public final class DeviceRowView: NSView {
     ///     include the "System" token — the view synthesizes "System" itself from
     ///     `selected`. Drives the routing sublabel (see the precedence ladder in
     ///     ``resolveSublabel(routedAppNames:)``).
+    ///   - iconSymbolName: an explicit SF Symbol name override for the icon
+    ///     glyph, resolved through ``DeviceIcon/resolve(_:default:)`` (so an
+    ///     unknown/invalid name falls back to `device.kind.symbolName`).
+    ///     Defaults to `nil`, in which case the row behaves exactly as before —
+    ///     `device.kind.symbolName` is used directly. Existing callers all omit
+    ///     this, so their behavior is byte-for-byte unchanged.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
                       blocked: Bool = false,
                       blockReason: String? = nil,
-                      routedAppNames: [String] = []) {
+                      routedAppNames: [String] = [],
+                      iconSymbolName: String? = nil) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -246,8 +253,12 @@ public final class DeviceRowView: NSView {
             ? Self.unsupportedExplanation
             : ((showsToggle && blocked) ? blockReason : nil)
 
+        // `nil` (every existing caller) resolves straight to the kind default —
+        // `DeviceIcon.resolve` short-circuits on a `nil` override — so behavior
+        // is unchanged unless a caller passes an explicit override name.
+        let resolvedSymbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
         iconView.image = NSImage(
-            systemSymbolName: device.kind.symbolName,
+            systemSymbolName: resolvedSymbolName,
             accessibilityDescription: device.name
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,

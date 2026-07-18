@@ -3,6 +3,7 @@
 import XCTest
 import AppKit
 @testable import AudioutedCore
+@testable import AudioutedSharedUI
 @testable import AudioutedWindowUI
 
 /// Structural + integration coverage for the "Groups" window (design revamp,
@@ -59,6 +60,23 @@ final class MixerWindowControllerTests: XCTestCase {
         backend.start()
         await fulfillment(of: [expectation], timeout: 2)
         task.cancel()
+    }
+
+    /// Like `makeWindow()`, but also constructs and injects a
+    /// `DeviceIconController` (non-persisted, its own temp store) so a test
+    /// can drive icon overrides and assert they reach a shared mixer row.
+    private func makeWindowWithIconController() async throws
+        -> (MixerWindowController, GroupController, MockBackend, DeviceIconController) {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        let store = GroupStore(directory: tempDirectory())
+        let controller = GroupController(backend: backend, store: store, loadPersisted: false)
+        let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
+                                                   loadPersisted: false)
+        let window = MixerWindowController(groupController: controller, deviceIconController: iconController)
+        window.update(devices: backend.devices)
+        return (window, controller, backend, iconController)
     }
 
     private func tempDirectory() -> URL {
@@ -390,6 +408,182 @@ final class MixerWindowControllerTests: XCTestCase {
         await drain()
         XCTAssertEqual(backend.devices.first { $0.id == m0 }?.volume, 20)
         XCTAssertEqual(backend.devices.first { $0.id == m1 }?.volume, 40)
+    }
+
+    // MARK: Selecting a device → detail pane (config-only, never activation)
+
+    func testSelectingDeviceShowsDetailPaneWithMetadataAndGroupMembership() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        // Untouched by makeGroup1 below (which selects sonos-move + office,
+        // actually connecting them) — a clean "Not connected" / "None" case.
+        window.test_select(.device(id: "appletv-lr"))
+        await drain()
+
+        XCTAssertTrue(window.test_isShowingDetail)
+        XCTAssertFalse(window.test_isShowingEditor)
+        XCTAssertEqual(window.test_detail.test_shownDeviceID, "appletv-lr")
+        XCTAssertEqual(window.test_detail.test_metadataStrings["volume"], "60%")
+        XCTAssertEqual(window.test_detail.test_metadataStrings["available"], "Yes")
+        XCTAssertEqual(window.test_detail.test_metadataStrings["status"], "Not connected")
+        XCTAssertEqual(window.test_detail.test_groupMembershipText, "None",
+                       "appletv-lr isn't a member of any saved group")
+
+        let saved = try makeGroup1(controller)   // members: sonos-move, office
+        window.update(devices: backend.devices)
+
+        window.test_select(.device(id: "office"))
+        await drain()
+
+        XCTAssertTrue(window.test_isShowingDetail)
+        XCTAssertEqual(window.test_detail.test_shownDeviceID, "office")
+        XCTAssertEqual(window.test_detail.test_groupMembershipText, saved.name,
+                       "office is a Group 1 member")
+    }
+
+    func testDeselectingDeviceReturnsToMixer() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_select(.device(id: "office"))
+        await drain()
+        XCTAssertTrue(window.test_isShowingDetail)
+
+        window.test_select(nil)
+        await drain()
+
+        XCTAssertFalse(window.test_isShowingDetail)
+        XCTAssertEqual(window.test_mixer.test_rowDeviceIDs.count, 7, "deselection shows the full mixer")
+    }
+
+    func testSelectingUnknownDeviceIDFallsBackToMixer() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_select(.device(id: "does-not-exist"))
+        await drain()
+
+        XCTAssertFalse(window.test_isShowingDetail)
+        XCTAssertNil(window.test_detail.test_shownDeviceID, "the detail pane was never actually shown")
+    }
+
+    func testSelectingDeviceNeverActivatesAGroup() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        XCTAssertNil(controller.activeGroupID)
+
+        window.test_select(.device(id: saved.memberIDs[0]))
+        await drain()
+
+        XCTAssertTrue(window.test_isShowingDetail)
+        XCTAssertNil(controller.activeGroupID, "selecting a device in the sidebar never activates anything")
+    }
+
+    func testDetailPaneRefreshesLiveWhenDeviceSnapshotChanges() async throws {
+        let (window, _, backend) = try await makeWindow()
+        window.test_select(.device(id: "office"))
+        await drain()
+        XCTAssertEqual(window.test_detail.test_metadataStrings["volume"], "50%")
+
+        let updated = backend.devices.map { device -> Device in
+            var d = device
+            if d.id == "office" { d.volume = 77 }
+            return d
+        }
+        window.update(devices: updated)
+
+        XCTAssertTrue(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
+        XCTAssertEqual(window.test_detail.test_metadataStrings["volume"], "77%",
+                       "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+    }
+
+    func testRefreshAllFallsBackToMixerWhenShownDeviceDisappears() async throws {
+        let (window, _, backend) = try await makeWindow()
+        window.test_select(.device(id: "office"))
+        await drain()
+        XCTAssertTrue(window.test_isShowingDetail)
+
+        let devicesWithoutOffice = backend.devices.filter { $0.id != "office" }
+        window.update(devices: devicesWithoutOffice)
+
+        XCTAssertFalse(window.test_isShowingDetail,
+                       "refreshAll() falls back to the mixer once the shown device vanishes from the snapshot")
+    }
+
+    // MARK: Icon flows
+
+    func testEditorIconPickPersistsThroughSaveGroup() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        XCTAssertNil(controller.groups.first { $0.id == saved.id }?.iconSymbolName)
+
+        window.test_editor.test_pickIcon("airpods")
+
+        XCTAssertEqual(controller.groups.first { $0.id == saved.id }?.iconSymbolName, "airpods",
+                       "the editor's icon pick persists group.iconSymbolName through saveGroup")
+        XCTAssertEqual(window.test_editor.test_iconWellSymbolName, "airpods")
+    }
+
+    func testCreateSheetChosenIconLandsOnCreatedGroup() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try XCTUnwrap(window.test_createSheet)
+
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+        sheet.test_pickIcon("airpods")
+        sheet.test_commit()
+        await drain()
+
+        let group = try XCTUnwrap(controller.groups.first)
+        XCTAssertEqual(group.iconSymbolName, "airpods", "the sheet's chosen icon lands on the created group")
+    }
+
+    func testCreateSheetDedupDoesNotOverwriteExistingGroupsIcon() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
+        await drain()
+        var sheet = try XCTUnwrap(window.test_createSheet)
+        sheet.test_pickIcon("airpods")
+        sheet.test_commit()
+        await drain()
+        XCTAssertEqual(controller.groups.count, 1)
+        let firstID = controller.groups[0].id
+        XCTAssertEqual(controller.groups[0].iconSymbolName, "airpods")
+
+        // Same member set again (order swapped), a DIFFERENT icon picked —
+        // dedups onto the existing group, whose own icon must win
+        // (`GroupController.createGroup`'s documented dedup rule).
+        window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
+        await drain()
+        sheet = try XCTUnwrap(window.test_createSheet)
+        sheet.test_pickIcon("homepod.fill")
+        sheet.test_commit()
+        await drain()
+
+        XCTAssertEqual(controller.groups.count, 1, "no duplicate group for an identical member set")
+        XCTAssertEqual(controller.groups.first { $0.id == firstID }?.iconSymbolName, "airpods",
+                       "dedup resolves to the existing group and does NOT overwrite its icon")
+    }
+
+    func testDeviceIconControllerOverrideReachesMixerDeviceRow() async throws {
+        let (window, _, _, iconController) = try await makeWindowWithIconController()
+        let row = try XCTUnwrap(window.test_mixer.test_row(for: "office"))
+
+        iconController.setSymbolName("airpods", for: "office")
+        await drain()
+
+        let iconView = try XCTUnwrap(row.subviews.compactMap { $0 as? NSImageView }.first,
+                                     "DeviceRowView has exactly one NSImageView: its device glyph")
+        let config = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize, weight: .regular)
+        let overrideTiff = NSImage(systemSymbolName: "airpods", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)?.tiffRepresentation
+        let defaultTiff = NSImage(systemSymbolName: Device.Kind.generic.symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)?.tiffRepresentation
+
+        XCTAssertEqual(iconView.image?.tiffRepresentation, overrideTiff,
+                       "the icon override reaches the shared mixer DeviceRowView's rendered glyph")
+        XCTAssertNotEqual(iconView.image?.tiffRepresentation, defaultTiff,
+                          "sanity: the override actually changed the glyph from office's kind default")
     }
 }
 

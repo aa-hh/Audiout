@@ -14,6 +14,7 @@ AppKit row views shared by the popover (`AudioutedPopoverUI`) and the mixer wind
 - The device row's trailing control is an `NSButton` checkbox under a "Selected" header (membership in "Selected Devices"), not an `NSSwitch`; the column is not "Enabled".
 - `DeviceRowView.apply` takes `controllable` separate from `selected`: slider/mute enablement follows `controllable`, but the checkbox and the sublabel's "System" token follow `selected` alone.
 - The popover header's icon buttons are stock `NSButton` (`bezelStyle = .smallSquare`) — no custom hover-button class exists here.
+- `DeviceIcon` is the single resolution point for "what SF Symbol represents this device/group" — `DeviceIcon.resolve(_:default:)` falls back to the kind/group default when an override is `nil` or no longer resolves on this OS (`DeviceIcon.isValid`), so every row/detail/icon-well caller shares one staleness check instead of its own nil-check-plus-validate dance. `DeviceIconController` is the only place a per-device icon override is looked up or written (`AudioutedCore.DeviceIconStore` persists it); only the bare symbol name string is ever persisted, never a resolved image or a color.
 
 ## Map
 
@@ -23,3 +24,5 @@ AppKit row views shared by the popover (`AudioutedPopoverUI`) and the mixer wind
 | `StatusDotView` | On-icon connection-status badge driven off `Device.connectionState`. |
 | `PopoverColumnGrid` | Shared column-geometry constants. |
 | `AppRowView` | Popover-only per-app row; owns its own selection highlight and hover wash. |
+| `DeviceIcon` | Single resolution point (+ curated symbol list) for device/group icon names, with render-time fallback. |
+| `DeviceIconController` | Loads/persists per-device icon overrides via `AudioutedCore.DeviceIconStore`; the only read/write path for them. |

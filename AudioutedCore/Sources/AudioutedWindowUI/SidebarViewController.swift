@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
 /// What the user selected in the sidebar. Drives which detail pane the window
 /// shows (a group → its editor; a device / nothing → the mixer).
@@ -55,6 +56,11 @@ public final class SidebarViewController: NSViewController {
     /// selected device ids (SPEC.md §9 — "click on speakers and multiselect to
     /// create a group").
     public var onNewGroupFromSelection: (([String]) -> Void)?
+
+    /// Resolves per-device icon overrides (set via the icon picker) so sidebar
+    /// device rows show the same glyph as the popover/mixer. `nil` (the
+    /// default) falls back to `Device.Kind.symbolName` — old behavior.
+    public var deviceIconController: DeviceIconController?
 
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
@@ -378,10 +384,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
         case .emptyState(let text):
             return makeLabel(text, identifier: "emptyState", secondary: true)
         case .group(let group):
-            return makeIconLabel(symbol: "rectangle.3.group",
+            let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+            return makeIconLabel(symbol: symbol,
                                  text: group.name, identifier: "group")
         case .device(let device):
-            return makeIconLabel(symbol: device.kind.symbolName,
+            let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+            return makeIconLabel(symbol: symbol,
                                  text: device.name, identifier: "device",
                                  dimmed: !device.isAvailable)
         }

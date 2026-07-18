@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
 /// The group editor pane (design revamp: the Groups window is
 /// CONFIGURATION-ONLY — renaming, membership, and "Delete group…" live here,
@@ -25,6 +26,14 @@ import AudioutedCore
 /// `saveGroup`; the delete button calls `deleteGroup`. The parent window is
 /// notified via `onDidEditGroup` / `onDidDeleteGroup` so it can refresh the
 /// sidebar labels + toolbar presets.
+///
+/// Beside the Name field sits an icon well — a bordered square button showing
+/// `group.iconSymbolName` (resolved through `DeviceIcon.resolve`, so a stale
+/// override still renders the default rather than a blank glyph). Clicking it
+/// presents `IconPickerViewController` as an anchored popover; picking a
+/// symbol (or "use default") persists instantly through `saveGroup`, exactly
+/// like a rename — this window never gates a group edit behind a separate
+/// "Save" step.
 public final class GroupEditorViewController: NSViewController {
 
     /// Caps the form's content column width so long rows/fields don't stretch
@@ -32,6 +41,12 @@ public final class GroupEditorViewController: NSViewController {
     private static let contentMaxWidth: CGFloat = 400
 
     private let groupController: GroupController
+
+    /// Resolves/persists per-device icon overrides for `MembershipRowView`
+    /// rows. Optional and nil-tolerant (`../../AGENTS.md`'s "depends on the
+    /// model, never the reverse" — a host without one still renders default
+    /// device glyphs, just no per-device overrides).
+    public var deviceIconController: DeviceIconController?
 
     /// Called after a rename or membership change persisted (refresh sidebar +
     /// toolbar labels in place).
@@ -43,9 +58,22 @@ public final class GroupEditorViewController: NSViewController {
     public private(set) var editingGroupID: String?
 
     private let nameField = NSTextField(string: "")
+    private let iconWellButton = NSButton()
     private let membershipStack = NSStackView()
     private let deleteButton = NSButton()
     private let titleLabel = NSTextField(labelWithString: "Edit Group")
+
+    /// Square icon-well button side length (approved: "~28pt").
+    private static let iconWellSize: CGFloat = 28
+
+    /// Kept alive across a picker session so it can be dismissed/replaced;
+    /// nil when no picker is currently presented.
+    private var iconPickerPopover: NSPopover?
+
+    /// The symbol name last resolved into the icon well's image (mirrors
+    /// `iconWellButton.image`, but as the plain string a test can assert
+    /// against without relying on `NSImage`'s internal name-tracking).
+    private var iconWellSymbolName: String?
 
     /// Membership rows keyed by device id, so a test can read/drive them.
     private var rowsByID: [String: MembershipRowView] = [:]
@@ -80,6 +108,17 @@ public final class GroupEditorViewController: NSViewController {
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
 
+        iconWellButton.translatesAutoresizingMaskIntoConstraints = false
+        iconWellButton.bezelStyle = .regularSquare
+        iconWellButton.isBordered = true
+        iconWellButton.imagePosition = .imageOnly
+        iconWellButton.setButtonType(.momentaryPushIn)
+        iconWellButton.target = self
+        iconWellButton.action = #selector(iconWellTapped(_:))
+        iconWellButton.setAccessibilityLabel("Group icon")
+        iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+        iconWellButton.heightAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
         speakersLabel.textColor = .secondaryLabelColor
@@ -103,7 +142,7 @@ public final class GroupEditorViewController: NSViewController {
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [nameLabel, nameField, speakersLabel, membershipStack] {
+        for v in [nameLabel, nameField, iconWellButton, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
         for v in [titleLabel, column, deleteButton] {
@@ -125,9 +164,13 @@ public final class GroupEditorViewController: NSViewController {
 
             nameField.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
             nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            nameField.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            nameField.trailingAnchor.constraint(equalTo: iconWellButton.leadingAnchor, constant: -8),
+            nameField.centerYAnchor.constraint(equalTo: iconWellButton.centerYAnchor),
 
-            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 16),
+            iconWellButton.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
+            iconWellButton.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+
+            speakersLabel.topAnchor.constraint(equalTo: iconWellButton.bottomAnchor, constant: 16),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
 
             membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 8),
@@ -156,7 +199,19 @@ public final class GroupEditorViewController: NSViewController {
 
         titleLabel.stringValue = "Edit Group"
         nameField.stringValue = group.name
+        refreshIconWell(group: group)
         rebuildCandidates(memberSet: Set(group.memberIDs))
+    }
+
+    /// Refresh the icon well's image from `group.iconSymbolName`, resolved
+    /// through `DeviceIcon.resolve` so a stale/unrecognized override still
+    /// renders the default rather than a blank glyph.
+    private func refreshIconWell(group: Group) {
+        let symbolName = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+        iconWellSymbolName = symbolName
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        image?.isTemplate = true
+        iconWellButton.image = image
     }
 
     /// Recompute `candidateDevices` from `allDevices` — available devices,
@@ -173,7 +228,10 @@ public final class GroupEditorViewController: NSViewController {
         for v in membershipStack.arrangedSubviews { membershipStack.removeArrangedSubview(v); v.removeFromSuperview() }
         rowsByID.removeAll()
         for device in candidateDevices {
-            let row = MembershipRowView(device: device, checked: memberSet.contains(device.id))
+            let row = MembershipRowView(
+                device: device,
+                checked: memberSet.contains(device.id),
+                iconSymbolName: deviceIconController?.symbolName(for: device))
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
             }
@@ -217,6 +275,46 @@ public final class GroupEditorViewController: NSViewController {
         _ = try? groupController.saveGroup(group)
         // Rebuild: an unchecked unavailable device drops out of the list.
         rebuildCandidates(memberSet: Set(group.memberIDs))
+        onDidEditGroup?()
+    }
+
+    @objc private func iconWellTapped(_ sender: NSButton) {
+        presentIconPicker(anchoredTo: sender)
+    }
+
+    /// Build and present `IconPickerViewController` anchored to `anchor`,
+    /// wiring its `onPick` to ``pickIcon(_:)``. Guarded on `anchor.window !=
+    /// nil` (`PopoverController.presentUnsupportedExplanation`'s pattern) so a
+    /// headless test never needs a real `NSWindow` — ``test_pickIcon(_:)``
+    /// drives ``pickIcon(_:)`` directly instead.
+    private func presentIconPicker(anchoredTo anchor: NSView) {
+        guard let editingGroupID,
+              let group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
+
+        let picker = IconPickerViewController()
+        picker.configure(currentSymbolName: group.iconSymbolName, defaultSymbolName: Group.defaultIconSymbolName)
+        picker.onPick = { [weak self] name in
+            self?.pickIcon(name)
+        }
+
+        guard anchor.window != nil else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = picker
+        popover.contentSize = picker.view.fittingSize
+        iconPickerPopover = popover
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+    }
+
+    /// Persist `name` as the editing group's icon override (`nil` reverts to
+    /// the default) and refresh the well — instant-apply, like a rename.
+    private func pickIcon(_ name: String?) {
+        guard let editingGroupID,
+              var group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
+        guard group.iconSymbolName != name else { return }
+        group.iconSymbolName = name
+        _ = try? groupController.saveGroup(group)
+        refreshIconWell(group: group)
         onDidEditGroup?()
     }
 
@@ -268,6 +366,17 @@ public final class GroupEditorViewController: NSViewController {
     public func test_setMembership(_ member: Bool, for deviceID: String) {
         guard let row = rowsByID[deviceID], row.test_isChecked != member else { return }
         row.test_toggle()
+    }
+
+    /// The SF Symbol name currently resolved for the icon well's image, or
+    /// `nil` if it has none loaded yet (before `show`).
+    public var test_iconWellSymbolName: String? { iconWellSymbolName }
+
+    /// Simulate picking `name` from the icon picker (`nil` = "use default"),
+    /// bypassing the anchored popover — drives the exact same
+    /// ``pickIcon(_:)`` path `IconPickerViewController.onPick` would.
+    public func test_pickIcon(_ name: String?) {
+        pickIcon(name)
     }
 
     /// True when "Delete group…" is currently visible (always true — the

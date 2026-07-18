@@ -22,6 +22,8 @@ public final class MixerViewController: NSViewController {
     /// `MixerViewController(groupController:)` without one keep compiling.
     private let appRouting: AppRoutingController
 
+    public var deviceIconController: DeviceIconController?
+
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -118,7 +120,8 @@ public final class MixerViewController: NSViewController {
                   controllable: selected || !appRouting.routedAppNames(for: device.id).isEmpty,
                   blocked: blocked,
                   blockReason: blocked ? GroupController.localMixRefusalReason : nil,
-                  routedAppNames: appRouting.routedAppNames(for: device.id))
+                  routedAppNames: appRouting.routedAppNames(for: device.id),
+                  iconSymbolName: deviceIconController?.symbolName(for: device))
     }
 
     private func rebuild(devices: [Device]) {

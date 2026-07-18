@@ -32,6 +32,7 @@ public final class MembershipRowView: NSView {
 
     public private(set) var device: Device
     private var checked: Bool
+    private var iconSymbolName: String?
 
     private let checkbox = NSButton()
     private let iconView = NSImageView()
@@ -40,12 +41,13 @@ public final class MembershipRowView: NSView {
     /// ("Unavailable") — never a routing/status claim, just presence.
     private let unavailableLabel = NSTextField(labelWithString: "")
 
-    public init(device: Device, checked: Bool) {
+    public init(device: Device, checked: Bool, iconSymbolName: String? = nil) {
         self.device = device
         self.checked = checked
+        self.iconSymbolName = iconSymbolName
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: Self.rowHeight))
         buildSubviews()
-        apply(device: device, checked: checked)
+        apply(device: device, checked: checked, iconSymbolName: iconSymbolName)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -128,15 +130,17 @@ public final class MembershipRowView: NSView {
 
     /// Refresh the row to a new device snapshot and membership state. Doesn't
     /// fire `onToggle` — this is a host-driven refresh, not a user action.
-    public func apply(device: Device, checked: Bool) {
+    public func apply(device: Device, checked: Bool, iconSymbolName: String? = nil) {
         self.device = device
         self.checked = checked
+        self.iconSymbolName = iconSymbolName
 
         checkbox.state = checked ? .on : .off
         checkbox.isEnabled = true   // visibility policy is the host's job, not this row's
 
+        let symbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
         iconView.image = NSImage(
-            systemSymbolName: device.kind.symbolName,
+            systemSymbolName: symbolName,
             accessibilityDescription: device.name
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,

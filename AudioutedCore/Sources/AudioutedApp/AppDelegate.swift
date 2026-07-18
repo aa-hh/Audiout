@@ -5,6 +5,7 @@ import AudioutedCore
 import AudioutedPopoverUI
 import AudioutedWindowUI
 import AudioutedSettingsUI
+import AudioutedSharedUI
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
@@ -53,6 +54,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the popover) so the app can enforce the excluded-apps precedence — pruning
     /// a route when its app is excluded.
     private var appRouting: AppRoutingController!
+
+    /// Per-device icon overrides (T-14). One shared instance so an icon edited
+    /// in the mixer window's device detail pane reflects immediately in the
+    /// menu popover, and vice versa. Persists to Application Support alongside
+    /// `GroupStore` (mirrors how `AppRouteStore`/`ExcludedAppsStore` pick their
+    /// directory) — `loadPersisted: true` so overrides survive relaunch.
+    private let deviceIconController = DeviceIconController(loadPersisted: true)
 
     /// The excluded-apps denylist (Settings › Audio, "never captured"). Shared
     /// between the Settings window (edits it) and the popover (reads it to hide /
@@ -116,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }
         popoverController = PopoverController(appRouting: appRouting)
+        popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
         popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
@@ -146,7 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = mixerWindowController {
             controller = existing
         } else {
-            controller = MixerWindowController(groupController: groupController, appRouting: appRouting)
+            controller = MixerWindowController(groupController: groupController,
+                                               appRouting: appRouting,
+                                               deviceIconController: deviceIconController)
             mixerWindowController = controller
         }
         controller.update(devices: Array(devicesByID.values))

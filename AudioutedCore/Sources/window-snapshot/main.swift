@@ -15,11 +15,16 @@
 //                      directly instead)
 //   3. edit-group   — an existing (saved, unactivated) group selected in the
 //                      sidebar (Edit Group pane) — selecting never activates
+//   4. device-detail — a device (with a saved-group membership and an icon
+//                      OVERRIDE) selected in the sidebar; the hover scrim is
+//                      forced visible via `test_setOverlayVisible(true)` so
+//                      the approved custom-drawn element renders in the shot
 //
 // Run: `swift run window-snapshot [output-dir]`.
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 import AudioutedWindowUI
 
 func tempDir() -> URL {
@@ -145,7 +150,12 @@ func run() -> Int32 {
                                   emitsLevels: false, simulatesDropouts: false)
         let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
                                          loadPersisted: false)
-        let windowController = MixerWindowController(groupController: controller)
+        // Constructed explicitly (rather than relying on the default param) so
+        // state 4 can seed an icon override on the SAME controller instance
+        // every child pane shares.
+        let deviceIconController = DeviceIconController(loadPersisted: false)
+        let windowController = MixerWindowController(groupController: controller,
+                                                      deviceIconController: deviceIconController)
         backend.start()
         guard waitForFleet(backend, count: 7) else {
             print("SETUP FAIL: fleet did not fully discover"); return 2
@@ -182,6 +192,18 @@ func run() -> Int32 {
             windowController.test_select(.group(id: saved.id))
             drain()
             snapshotWindow(window, label: "3-edit-group", appearanceName: appearanceName, outDir: outDir)
+
+            // 4. Device detail: select a device that's a member of the saved
+            // group above (so "In groups:" renders non-empty) and carries an
+            // icon OVERRIDE, with the hover scrim forced visible so the
+            // approved custom-drawn element (`../../AGENTS.md`) shows up in
+            // the render.
+            deviceIconController.setSymbolName("homepod.2.fill", for: "sonos-move")
+            windowController.test_select(.device(id: "sonos-move"))
+            drain()
+            windowController.test_detail.test_setOverlayVisible(true)
+            drain()
+            snapshotWindow(window, label: "4-device-detail", appearanceName: appearanceName, outDir: outDir)
         }
     }
 

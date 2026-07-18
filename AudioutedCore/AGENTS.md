@@ -63,6 +63,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
+- `Group.iconSymbolName` is an optional bare SF Symbol name string, added
+  with no schema/version bump — `nil` decodes cleanly from any
+  pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
+  Resolution (including render-time fallback for a stale/unrecognized name)
+  lives in `AudioutedSharedUI.DeviceIcon`, not here.
 
 ## Map
 
@@ -74,6 +79,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `GroupController` | Routing brain: Selected Devices, Main Out, groups, redirect union. |
 | `AppRoutingController` | Per-app routing state/destinations. |
 | `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence. |
+| `DeviceIconStore` | Persists per-device icon overrides (bare SF Symbol name strings only) for `AudioutedSharedUI.DeviceIconController`. |
 | `BackendEvent` | Backend→UI push channel: add/remove/update/level/volume-changed. |
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |

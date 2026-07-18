@@ -22,27 +22,6 @@ lands, re-verify against source rather than trusting this line number.
 
 ## Section 1 — Fix when you touch this code
 
-### C6 — a device change during tap recreation is silently dropped
-
-**Site:** `AudioutedCore/Sources/AudioutedCore/NativeCaptureCoordinator.swift`
-`handleDeviceChange()`, guard at line 258 (`guard case .capturing = _state
-else { return (false, nil) }`).
-
-**Mechanism:** if a second default-device change arrives while the first is
-still mid-flight (state is `.creatingTap`, not `.capturing`), the guard's
-`false` branch drops it on the floor — there is no queued retry. Capture
-stays pinned to the stale device until some unrelated state transition
-happens to re-trigger a device read.
-
-**Fix sketch:** a `pendingDeviceChange` flag set when the guard rejects a
-change; the commit path in `handleDeviceChange()` checks and replays it
-after landing in `.capturing`.
-
-**Rough cost:** small — one flag plus a check at the existing commit point.
-
-When fixed: delete the STABILITY(C6) marker(s) at
-`NativeCaptureCoordinator.swift:258` and move this entry to Resolved.
-
 ### C7 — discovery re-resolve clears the failure gate with no backoff
 
 **Site:** `AudioutedCore/Sources/AudioutedCore/NativeBackend.swift`, the
@@ -249,6 +228,21 @@ marker in source. Don't add one; duplicating tracking here would just drift.
 
 ## Section 3 — Resolved by this merge
 
+- **C6** — a rebuild trigger arriving mid-rebuild is no longer silently
+  dropped. `NativeCaptureCoordinator` gained a queue-confined
+  `pendingDeviceChange` flag: `recreateTap()`'s claim guard sets it when a
+  trigger (a `handleDeviceChange()` device change, or an
+  `updateRouting(...)` exclusion change) lands while the coordinator is
+  already `.creatingTap`, and the successful commit path checks it and
+  replays a fresh `recreateTap()` once back in `.capturing` — coalescing
+  however many were dropped into a single retry. This is the whole-system
+  port of `PerAppCaptureCoordinator`'s per-slot fix (branch
+  `claude/play-pause-input-listening-218047`, 375c6bc). New unit test
+  `testDeviceChangeDuringRebuildIsCoalescedAndReplayed` (mirroring the
+  per-app test) covers it via a `FakeTap.onCreateAndStart` hook that fires a
+  second device change mid-rebuild. The STABILITY(C6) markers in
+  `NativeCaptureCoordinator.swift` now document the shipped fix rather than a
+  TODO.
 - **C5** — `NativeCaptureCoordinator.start()` no longer holds `queue` across
   `createAndStart`: restructured to claim-under-lock / create-off-lock /
   commit-under-lock (the shape `recreateTap()` uses), with the commit

@@ -96,6 +96,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var tap: SystemAudioTap?
     private var converter: PCMConverting?
 
+    /// STABILITY(C6) (whole-system port of `PerAppCaptureCoordinator`'s
+    /// per-slot flag): set when a rebuild trigger — a default-output-device
+    /// change (`handleDeviceChange()`), or an exclusion-list change
+    /// (`updateRouting(...)`) — arrives while we're already mid-rebuild
+    /// (`.creatingTap`), so it isn't silently dropped. The in-flight
+    /// `recreateTap()` replays a fresh rebuild once it lands back in
+    /// `.capturing`, coalescing however many were dropped into one retry.
+    /// Confined to `queue`. See dev/notes/stability-audit-2026-07-18.md §C6.
+    private var pendingDeviceChange = false
+
     /// The live union of routed-away (`.device` destination) and
     /// user-excluded bundle IDs, as last computed by
     /// ``updateRouting(appRoutes:excludedBundleIDs:)``. Confined to `queue`.
@@ -381,9 +391,20 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // Audio"). Holding `queue` across those HAL calls would head-of-line
         // block the `state` getter, a concurrent stop(), and every buffer's
         // `handleBuffer` (which reads the converter under the same lock).
-        // STABILITY(C6): a device change during tap recreation is silently dropped — see dev/notes/stability-audit-2026-07-18.md
+        // STABILITY(C6): if a rebuild trigger arrives while we're already
+        // mid-rebuild (`.creatingTap`), don't drop it — mark it pending so the
+        // in-flight rebuild replays a fresh `recreateTap()` once it lands back
+        // in `.capturing`. Rapid device/sample-rate bounces (44.1 -> 48 -> 44.1)
+        // mean the LAST notification can be the one that would otherwise be
+        // dropped, leaving the tap rebuilt against a stale device/rate. See
+        // dev/notes/stability-audit-2026-07-18.md §C6.
         let claim: (proceed: Bool, old: SystemAudioTap?, excludedPIDs: Set<pid_t>) = queue.sync {
-            guard case .capturing = _state else { return (false, nil, []) }
+            guard case .capturing = _state else {
+                if case .creatingTap = _state {
+                    pendingDeviceChange = true
+                }
+                return (false, nil, [])
+            }
             let t = self.tap
             self.tap = nil
             self.converter = nil          // stop forwarding buffers through the dying tap
@@ -403,7 +424,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         do {
             let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
             try Self.validate(format)
-            let orphan: SystemAudioTap? = queue.sync {
+            let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
                 guard case .creatingTap = _state else {
@@ -412,14 +433,22 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // takes `queue`, so teardown() — which blocks on in-flight IO —
                     // would deadlock if run inside queue.sync (the file's one rule:
                     // "teardown OUTSIDE the state lock").
-                    return newTap
+                    return (newTap, false)
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.transition(to: .capturing(format))
-                return nil
+                // STABILITY(C6): a rebuild trigger landed while we were rebuilding —
+                // replay it once now that we're capturing again, coalescing however
+                // many were dropped into a single retry.
+                let replay = pendingDeviceChange
+                pendingDeviceChange = false
+                return (nil, replay)
             }
-            orphan?.teardown()
+            commit.orphan?.teardown()
+            if commit.replay {
+                recreateTap()
+            }
         } catch {
             newTap.teardown()   // createAndStart already tears down internally; idempotent.
             let mapped: NativeCaptureError = (error as? NativeCaptureError)

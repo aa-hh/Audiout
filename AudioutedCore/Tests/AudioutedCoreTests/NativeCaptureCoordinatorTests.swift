@@ -37,8 +37,17 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         /// exclusion set without needing a real Core Audio process object.
         private(set) var lastExcludedPIDs: Set<pid_t> = []
 
+        /// Test-only hook invoked synchronously at the START of `createAndStart`
+        /// (before the scripted `startError`/return), i.e. while the coordinator
+        /// is `.creatingTap`. Lets a test inject a `fireDeviceChange()` call (or
+        /// anything else) DURING a rebuild, deterministically — no real
+        /// concurrency/timing needed since `createAndStart` runs synchronously on
+        /// the caller's thread in this fake. Mirrors ``FakeProcessTap``.
+        var onCreateAndStart: (() -> Void)?
+
         func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
             lock.lock(); createCount += 1; lastExcludedPIDs = excludedPIDs; lock.unlock()
+            onCreateAndStart?()
             if let startError { throw startError }
             lock.lock(); started = true; lock.unlock()
             return format
@@ -256,6 +265,46 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.fireDeviceChange()
         waitFor { if case .failed = coordinator.state { return true } else { return false } }
         XCTAssertEqual(coordinator.state, .failed(.deviceLost(reason: "gone")))
+    }
+
+    // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
+    // (.creatingTap) must be coalesced (pendingDeviceChange) and replayed once the rebuild
+    // lands in .capturing, not dropped. Whole-system port of PerAppCaptureCoordinator's fix.
+
+    func testDeviceChangeDuringRebuildIsCoalescedAndReplayed() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1)
+
+        // Arm the hook: the SECOND createAndStart (the rebuild triggered by the
+        // first fireDeviceChange below) fires a SECOND device-change notification
+        // while the coordinator is still mid-rebuild (state == .creatingTap, since
+        // this hook runs synchronously inside createAndStart, before the commit).
+        // That second notification must be coalesced (pendingDeviceChange = true),
+        // not dropped.
+        tap.onCreateAndStart = { [weak tap] in
+            guard let tap, tap.creates == 2 else { return }
+            tap.fireDeviceChange()
+        }
+
+        tap.fireDeviceChange() // first notification -> triggers rebuild (create #2)
+
+        // If the second (coalesced) notification were dropped, `creates` would
+        // stop at 2 once the rebuild lands in .capturing. A THIRD create proves
+        // the coalesced notification was replayed after the rebuild completed.
+        waitFor { tap.creates >= 3 }
+        XCTAssertGreaterThanOrEqual(
+            tap.creates, 3,
+            "a device-change notification arriving mid-rebuild (.creatingTap) must be "
+            + "coalesced and replayed once the rebuild lands in .capturing, not dropped")
+
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+
+        coordinator.stop()
     }
 
     // MARK: - T4: exclusion-list wiring (routed apps + user-excluded apps must

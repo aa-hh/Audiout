@@ -101,28 +101,6 @@ When fixed: delete the STABILITY(C8) marker(s) at `NativeBackend.swift:482`,
 `NativeBackend.swift:220`, and `GroupController.swift:167` and move this
 entry to Resolved.
 
-### D3 — per-buffer level fan-out amplifies every stall
-
-**Site:** `AudioutedCore/Sources/AudioutedCore/NativeBackend.swift`,
-`emitLevel(_:)` at lines 1544–1550 — an `async` hop onto `stateQueue`,
-followed by a `MainActor` emit, fired once per captured buffer (roughly
-86/s per device at the current tap format).
-
-**Mechanism:** each fan-out is cheap alone, but at 86/s per selected device
-it is by far the highest-frequency traffic on `stateQueue` and the
-`MainActor`. Any other work queued behind it (including the C8 sites above)
-inherits that cadence as its worst-case latency, and multiple selected
-devices multiply the rate directly.
-
-**Fix sketch:** coalesce level emission to display cadence (~25 Hz) —
-either a leading-edge/trailing-edge sampler in `emitLevel` or a downstream
-throttle before the `MainActor` hop.
-
-**Rough cost:** small — a rate limiter around one function.
-
-When fixed: delete the STABILITY(D3) marker(s) at
-`NativeBackend.swift:1544` and move this entry to Resolved.
-
 ### D4 — UI-thread stalls and stuck-drag state (several sub-items)
 
 **Sync persistence on main per gesture:**
@@ -295,6 +273,11 @@ marker in source. Don't add one; duplicating tracking here would just drift.
   diagnosable trace.
 - **D2** — an uncaught-exception handler now leaves a breadcrumb before the
   process dies.
+- **D3** — `emitLevel` now coalesces per-device `.level` emission to a ~25 Hz
+  leading-edge/trailing-edge sampler (`scheduleLevelEmit`/`flushPendingLevel`,
+  40ms window) instead of firing on every captured buffer (~86/s), cutting
+  the highest-frequency traffic on `stateQueue` while keeping meters visually
+  live and guaranteeing a burst's final value is always delivered.
 - **B8** — `PopoverController.update(devices:)` no longer rebuilds while the
   popover is closed: state is ingested, the view tree is left alone, and
   `rebuildForOpen()` (which runs on every open) rebuilds from current state.

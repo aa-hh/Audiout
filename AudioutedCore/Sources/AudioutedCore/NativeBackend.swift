@@ -2578,19 +2578,62 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         }
     }
 
-    // MARK: Level pass-through
+    // MARK: Level pass-through (D3: coalesced to ~25 Hz display cadence)
+
+    /// Display cadence for level emission (D3) — ~25 Hz, above the perception
+    /// threshold for a VU meter but far below the ~86/s raw capture-buffer rate.
+    private let levelEmitIntervalNanos: UInt64 = 40_000_000
+    /// Per-device leading-edge timestamp (`DispatchTime.now().uptimeNanoseconds`)
+    /// of the last emitted `.level` event.
+    private var lastLevelEmitNanos: [String: UInt64] = [:]
+    /// Per-device latest value seen while inside the coalescing window, delivered
+    /// by the trailing flush.
+    private var pendingLevel: [String: Float] = [:]
+    /// Ids with a trailing flush already scheduled, so a burst schedules at most
+    /// one `asyncAfter` per device.
+    private var levelFlushScheduled: Set<String> = []
 
     /// Fan a capture-side RMS sample out as `.level` for every currently-selected,
     /// unmuted device (the meter is a property of the captured audio, identical for
     /// every fanned-out device — playback-meter-research.md). On `stateQueue`.
-    // STABILITY(D3): per-buffer level fan-out amplifies every stall — see dev/notes/stability-audit-2026-07-18.md
     private func emitLevel(_ rms: Float) {
         stateQueue.async {
+            let now = DispatchTime.now().uptimeNanoseconds
             for id in self.order {
                 guard let device = self.known[id], device.isSelected, !device.isMuted else { continue }
-                self.emit(.level(id: id, rms: rms))
+                self.scheduleLevelEmit(id: id, rms: rms, now: now)
             }
         }
+    }
+
+    /// Leading-edge/trailing-edge sampler (D3): emits immediately if at least
+    /// `levelEmitIntervalNanos` has passed since this device's last emit;
+    /// otherwise remembers the latest value and lets an already-scheduled trailing
+    /// flush deliver it, so a burst's final value always lands and the meter never
+    /// freezes on a stale pre-quiet value. On `stateQueue`.
+    private func scheduleLevelEmit(id: String, rms: Float, now: UInt64) {   // on stateQueue
+        if let last = lastLevelEmitNanos[id], now - last < levelEmitIntervalNanos {
+            pendingLevel[id] = rms
+            guard levelFlushScheduled.insert(id).inserted else { return }
+            let remaining = levelEmitIntervalNanos - (now - last)
+            stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) { [weak self] in
+                self?.flushPendingLevel(id: id)
+            }
+            return
+        }
+        lastLevelEmitNanos[id] = now
+        pendingLevel.removeValue(forKey: id)
+        emit(.level(id: id, rms: rms))
+    }
+
+    /// Trailing flush for `scheduleLevelEmit` — delivers whatever value arrived
+    /// last during the coalescing window, if any (a leading-edge emit may have
+    /// already cleared it). On `stateQueue`.
+    private func flushPendingLevel(id: String) {   // on stateQueue
+        levelFlushScheduled.remove(id)
+        guard let rms = pendingLevel.removeValue(forKey: id) else { return }
+        lastLevelEmitNanos[id] = DispatchTime.now().uptimeNanoseconds
+        emit(.level(id: id, rms: rms))
     }
 
     // MARK: Emit

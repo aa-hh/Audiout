@@ -2218,6 +2218,72 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(capture.isCapturing)
     }
 
+    /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
+    /// display cadence) must be coalesced per device — not fanned out 1:1 as
+    /// `.level` events — while still guaranteeing the burst's final value lands
+    /// (the trailing-edge flush), so the meter never freezes on a stale value.
+    func testLevelEmissionIsCoalescedToDisplayCadence() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:45", name: "Meter Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.contains(device.outputID) }
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        // Collect .level events on our own stream (the shared `collect` helper
+        // filters .level out).
+        let stream = backend.makeEventStream()
+        actor LevelBox {
+            private(set) var levels: [Float] = []
+            func append(_ v: Float) { levels.append(v) }
+        }
+        let box = LevelBox()
+        let collector = Task {
+            for await event in stream {
+                if case .level(let id, let rms) = event, id == device.id {
+                    await box.append(rms)
+                }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        // Fire a burst: 40 callbacks over ~100ms (every ~2.5ms) — far above the
+        // 40ms/~25Hz coalescing window. Last value is a distinctive sentinel so we
+        // can confirm the trailing-edge flush delivers it.
+        let burstDuration: UInt64 = 100_000_000
+        let steps = 40
+        let finalValue: Float = 0.987
+        for i in 0..<steps {
+            let value: Float = i == steps - 1 ? finalValue : Float(i) / Float(steps)
+            capture.onLevel?(value)
+            try? await Task.sleep(nanoseconds: burstDuration / UInt64(steps))
+        }
+
+        // Give the trailing flush (scheduled up to ~40ms after the last coalesced
+        // leading edge) time to deliver the final value.
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        collector.cancel()
+
+        let levels = await box.levels
+        // Burst spans ~100ms at a 40ms cadence: the ideal count is ceil(100/40)+1
+        // = 4, generously bounded to allow for scheduler/timer jitter — the point
+        // is coalescing to well below 40 (one event per callback), not a razor's
+        // edge on exact timer firing.
+        XCTAssertLessThanOrEqual(levels.count, 8,
+            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks")
+        XCTAssertGreaterThan(levels.count, 0, "meter must still receive events")
+        XCTAssertEqual(levels.last, finalValue,
+            "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
+    }
+
     // MARK: Sleep/wake (B6b)
 
     /// Discover an AP2 device, select it, and wait until it's streaming (`added`).

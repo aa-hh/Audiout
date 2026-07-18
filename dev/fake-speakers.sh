@@ -38,7 +38,7 @@ mkdir -p "$RUN_DIR"
 #       System Settings ▸ General ▸ AirDrop & Handoff ▸ AirPlay Receiver → Off
 #   ⇒ This gives ONE real, discoverable AirPlay-1 target for sanity-checking the
 #     discovery/send path. For MULTIPLE devices, groups and sync, use the in-app
-#     MockBackend (AirPlayControllerCore) — that's the primary offline tool.
+#     MockBackend (AudioutedCore) — that's the primary offline tool.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # One speaker by default (see limitation above). Pass names to try more, but

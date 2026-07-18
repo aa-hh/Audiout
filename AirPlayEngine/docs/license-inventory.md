@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This inventory covers the actual license headers found in the OwnTone source extraction cluster (`dev/owntone-src/`). The project adopts **GPL-2.0-or-later** as the overall license for the AirPlay Controller engine and application. Within this:
+This inventory covers the actual license headers found in the OwnTone source extraction cluster (`dev/owntone-src/`). The project adopts **GPL-2.0-or-later** as the overall license for the Audiouted engine and application. Within this:
 
 - **GPL-2.0+ cluster** (airplay.c, airplay_events.c, rtp_common.c) forms the core sender engine.
 - **MIT components** (pair_ap, libairptp) retain their original headers and are compatible with GPL-2.0+.
@@ -108,7 +108,7 @@ This inventory covers the actual license headers found in the OwnTone source ext
 
 ## GPL-2.0-or-later Distribution Obligations
 
-When the AirPlayEngine (and the full AirPlay Controller app) is distributed under GPL-2.0-or-later, the following apply:
+When the AirPlayEngine (and the full Audiouted app) is distributed under GPL-2.0-or-later, the following apply:
 
 ### 1. Header Preservation
 - Every .c and .h file from the GPL cluster (airplay.c, airplay_events.c, rtp_common.c) **must retain its GPL-2.0+ header** in the distributed source.
@@ -122,9 +122,9 @@ When the AirPlayEngine (and the full AirPlay Controller app) is distributed unde
 
 ### 3. NOTICE / THIRD-PARTY File
 A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
-- **GPL-2.0-or-later** — AirPlayEngine + AirPlay Controller Core
-  - Copyright: Alec Henderson (or the named project holder)
-  - Source: AirPlay Controller repository
+- **GPL-2.0-or-later** — AirPlayEngine + Audiouted Core
+  - Copyright: The Audiouted authors (or the named project holder)
+  - Source: Audiouted repository
   - Includes OwnTone-derived code (airplay.c, rtp_common.c) — see individual files for original copyright.
 - **OwnTone GPL-2.0-or-later Components** (for historical record)
   - airplay.c — OwnTone Project
@@ -146,7 +146,7 @@ A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
   - MIT License (separable; PTP helper daemon can be shipped as standalone MIT binary)
 
 ### 4. Combined Work
-The **entire linked application** (AirPlay Controller + AirPlayEngine + system libraries) falls under GPL-2.0-or-later due to the GPL sender cluster. This is a **deliberate design choice per RESOLVED DECISION Q4**; no accident.
+The **entire linked application** (Audiouted + AirPlayEngine + system libraries) falls under GPL-2.0-or-later due to the GPL sender cluster. This is a **deliberate design choice per RESOLVED DECISION Q4**; no accident.
 
 The MIT and BSD components are compatible and do not "contaminate" the license — their original headers must be preserved, and their authors credited, but the GPL-2.0+ obligation covers the whole work.
 
@@ -166,10 +166,10 @@ It is **severable** under GPL-2.0 Section 3. The daemon can be redistributed und
 
 **File: `LICENSE`** (or `COPYING`)
 ```
-This file describes the licensing terms for the AirPlay Controller project
+This file describes the licensing terms for the Audiouted project
 and its components.
 
-AirPlay Controller AirPlayEngine is licensed under the GNU General Public
+Audiouted AirPlayEngine is licensed under the GNU General Public
 License, version 2 or later (GPL-2.0-or-later).
 
 See the LICENSE-COMPONENT.md or NOTICE file for detailed attribution and
@@ -180,9 +180,9 @@ component-specific licensing, including third-party code under MIT and BSD.
 ```markdown
 # Third-Party Licenses and Attribution
 
-## AirPlay Controller / AirPlayEngine
+## Audiouted / AirPlayEngine
 
-The AirPlay Controller project is licensed under **GPL-2.0-or-later**.
+The Audiouted project is licensed under **GPL-2.0-or-later**.
 See the top-level LICENSE or COPYING file for the full GPL v2 text.
 
 ### Component Licensing
@@ -243,7 +243,7 @@ For the full GPL-2.0 text, see the repository's top-level LICENSE or COPYING fil
 **Recommended directory structure for a distribution:**
 
 ```
-AirPlayController/
+Audiouted/
   LICENSE                    (GNU General Public License v2)
   COPYING                    (Full GPL-2.0 text)
   NOTICE                     (Third-party attribution, as above)

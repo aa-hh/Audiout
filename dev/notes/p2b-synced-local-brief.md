@@ -1,7 +1,7 @@
 # Synced local Core Audio endpoint — implementation brief (T-P2B)
 
 **The ask** (SPEC §8.1, PLAN-PHASE-2 "NEW REQUIREMENT"): in "play everywhere"
-mode, the Mac's own speakers become a first-class, PTP-synced AirPlay Controller
+mode, the Mac's own speakers become a first-class, PTP-synced Audiouted
 output — mute the live OS output (`muteBehavior = .mutedWhenTapped`, already
 proven in `dev/audiocap`) and render a DELAYED local copy sample-aligned with
 the remote AirPlay 2 receivers (raw local currently runs ~2s AHEAD of AirPlay's
@@ -593,7 +593,7 @@ the local output device's clock.
 
 ---
 
-## 12. Open questions for Alec (genuine decisions, not researchable)
+## 12. Open questions for ahh (genuine decisions, not researchable)
 
 - **Q1 — where does the fan-out to the local sink live?** Should the capture
   layer (today: `audiocap`/whatever replaces it as the native capture
@@ -617,6 +617,6 @@ the local output device's clock.
   (looser than professional multi-room-to-multi-room sync, since it's "Mac
   speakers next to you" vs. "Sonos in another room," where small timing
   differences are physically less noticeable than phase-cancellation-prone
-  same-room multi-speaker setups). If Alec wants tighter (or is fine with
+  same-room multi-speaker setups). If ahh wants tighter (or is fine with
   looser), that changes the drift-check threshold in §6/checklist item 9 and
   possibly whether v2 (§6) needs to be pulled forward.

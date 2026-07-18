@@ -1,4 +1,4 @@
-# AirPlay Controller
+# Audiouted
 
 ## Purpose
 
@@ -38,7 +38,7 @@ symbol you cannot find in source, believe the source and fix the doc.
 
 ## Folder Map
 
-- [AirPlayControllerCore/](AirPlayControllerCore/AGENTS.md) — the Swift package:
+- [AudioutedCore/](AudioutedCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
@@ -59,13 +59,13 @@ symbol you cannot find in source, believe the source and fix the doc.
   native backend opens real sockets and needs a TCC grant; treat it differently.
 - **The engine is a separate package on purpose.** It knows nothing about
   `Device`, groups, or the UI. Never add AirPlay-protocol logic to
-  `AirPlayControllerCore`, or `Device`/UI-shaped concepts to `AirPlayEngine`. It
+  `AudioutedCore`, or `Device`/UI-shaped concepts to `AirPlayEngine`. It
   is also a licensing boundary — it vendors GPL/MIT/BSD source.
 - **Vendored C stays byte-identical.** Fixes belong in the shims or the Swift
   hosting layer; any exception is ledgered in
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
-  `AirPlayControllerCore` library target imports no AppKit, and that is verified.
+  `AudioutedCore` library target imports no AppKit, and that is verified.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts.
 - **"Does this code exist anywhere?" needs more than `git grep`.**

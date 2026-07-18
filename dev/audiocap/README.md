@@ -4,7 +4,7 @@ A standalone SwiftPM executable that captures **all system audio** via a Core Au
 process tap (macOS 14.4+) and writes raw interleaved Float32 PCM to a file and/or
 stdout. This is the T-0e-2 spike tool; it feeds the 0f capture→OwnTone pipeline.
 
-It is deliberately **separate** from `AirPlayControllerCore` (which pins macOS 13).
+It is deliberately **separate** from `AudioutedCore` (which pins macOS 13).
 This package targets `.macOS("14.4")` because the tap API is 14.2+/14.4-public.
 
 ## Build
@@ -128,11 +128,11 @@ Capturing system audio requires the **system-audio-capture** TCC permission.
   identity is per-binary and can **reset after every `swift build`**. If capture goes
   silent right after a rebuild, re-approve. Its TCC identity is the binary name
   `audiocap`, *not* the `CFBundleIdentifier` — so `tccutil reset AudioCapture
-  com.airplaycontroller.audiocap` will fail; use the un-scoped reset:
+  com.audiouted.audiocap` will fail; use the un-scoped reset:
   ```sh
   tccutil reset AudioCapture      # reset the grant for all apps, to re-test the prompt
   ```
-  **This task (T-0e-3/T-0f-2) rebuilt the CLI, so the grant is reset — Alec must
+  **This task (T-0e-3/T-0f-2) rebuilt the CLI, so the grant is reset — ahh must
   re-grant before the verification runs below.** The exact copy-paste re-grant +
   test commands live in `dev/notes/0e3-0f2-verify.md`.
 

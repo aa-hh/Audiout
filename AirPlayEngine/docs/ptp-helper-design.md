@@ -143,7 +143,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.<team>.airplaycontroller.ptphelper</string>
+    <string>com.<team>.audiouted.ptphelper</string>
 
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>   <!-- path is relative to the app bundle -->
@@ -155,7 +155,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
     <true/>                                       <!-- see §2.4: restart-on-crash -->
 
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
-    <string>com.<team>.airplaycontroller</string>
+    <string>com.<team>.audiouted</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>                  <!-- low-latency: PTP is timing-sensitive -->
@@ -399,7 +399,7 @@ engine↔daemon IPC without touching 319/320 or the firewall.
 
 Until the SMAppService helper exists, run the built `airptpd` (or the engine's own
 in-process `airptp_daemon_bind`) under an **`osascript` admin-privilege prompt**
-with Alec present (RESOLVED DECISIONS; ptp-study §3 interim). This is the live-test
+with ahh present (RESOLVED DECISIONS; ptp-study §3 interim). This is the live-test
 stand-in for the signed launchd daemon and lets live two-host runs proceed before
 the packaging work lands.
 
@@ -458,7 +458,7 @@ the packaging work lands.
   Run it **twice**: (a) unelevated — expect `EACCES` (confirms the privilege
   requirement and that the probe works); (b) **elevated via an `osascript`
   admin-privilege dialog** (`do shell script "…" with administrator privileges`),
-  Alec present — this is the answer that matters.
+  ahh present — this is the answer that matters.
   Optional but cheap: also probe with `airptp_ports_override`-style high ports
   (30319/30320) unelevated to confirm the non-privileged CI path binds cleanly.
 - **acceptance / decision:**
@@ -476,7 +476,7 @@ the packaging work lands.
   first). · **blocks:** any helper implementation task.
 - **model:** sonnet 5 — small, bounded, empirical; the judgment is in reading the
   errno, not in code volume. · **effort:** low (~30 lines + one osascript run,
-  Alec present for the admin prompt).
+  ahh present for the admin prompt).
 - **verify:** `dev/notes/p2-ptp-bind-probe.md` states, per port, SUCCESS/errno
   under both unelevated and admin runs, names the macOS version, and gives the
   PASS/FAIL verdict + the design consequence.

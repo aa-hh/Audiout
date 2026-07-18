@@ -4,7 +4,7 @@
 T-HELPER-DESIGN-1) against real-world `SMAppService`/codesign/firewall/TCC
 behavior and fills the gap between "design is sound" (it is — the gating
 T-PTP-PROBE already passed, see `dev/notes/p2-ptp-bind-probe.md`) and "ships as
-a working signed daemon on Alec's Mac." It does not re-derive the privilege
+a working signed daemon on ahh's Mac." It does not re-derive the privilege
 boundary, IPC choice, or lifecycle design — those stand as written. Citations:
 `ptp-helper-design.md:NNN` for the existing design, URLs for web research,
 `SPEC.md`/`PLAN-PHASE-2.md` §refs for project decisions.
@@ -70,7 +70,7 @@ daemon with the same identity — no notarization-service infra, no team
 management, no App Store review. This is still by far the lightest signing
 tier that actually works, but the design doc should say so explicitly rather
 than imply "signed, whatever that costs" is free. **This is a real, small,
-recurring cost decision for Alec** (see Open Questions).
+recurring cost decision for ahh** (see Open Questions).
 
 ### 2. Bundle layout and build-phase mechanics (fills `ptp-helper-design.md` §2.2's gap)
 
@@ -95,8 +95,8 @@ a from-scratch embedded-LaunchDaemon walkthrough; cross-checked against
   Not a concern now (SMAppService is the only planned path) but worth a code
   comment so nobody "fixes" the plist later without realizing this.
 - `Label` in the plist **must match the plist's filename** (e.g.
-  `com.<team>.airplaycontroller.ptphelper.plist` ↔
-  `Label: com.<team>.airplaycontroller.ptphelper`) — standard launchd
+  `com.<team>.audiouted.ptphelper.plist` ↔
+  `Label: com.<team>.audiouted.ptphelper`) — standard launchd
   convention, and `SMAppService.daemon(plistName:)` takes the filename, not
   the Label, as its lookup key.
 - Since this project is a **SwiftPM package** (`AirPlayEngine/`) consumed by an
@@ -259,7 +259,7 @@ This is the most important new finding for tonight's observed symptom.
   app's deletion** — macOS persists the user's approval intent even after the
   app bundle is gone
   ([forums.apple.com/thread/736272](https://developer.apple.com/forums/thread/736272)).
-  For a personal tool this is a minor UX wart (a phantom "AirPlay Controller"
+  For a personal tool this is a minor UX wart (a phantom "Audiouted"
   entry in Login Items after a full uninstall), not a functional problem — the
   daemon itself is gone/unregistered, just the list entry lingers. Document
   this in a user-facing "how to fully remove" note rather than trying to
@@ -346,7 +346,7 @@ productionization decisions on top, in dependency order:
    doc undersells.** "Lightweight signing acceptable" (SPEC §6 pt 3) is true
    relative to notarized-App-Store-grade process, but false relative to zero
    cost — ad-hoc signing is confirmed **not** to work for `SMAppService`
-   daemons at all. Until Alec has a Developer ID cert, no helper build can be
+   daemons at all. Until ahh has a Developer ID cert, no helper build can be
    registered/tested in its real (non-`osascript`-interim) form. This is the
    single highest-leverage unblock for the rest of this brief.
 2. **Bundle-path sensitivity (translocation + non-`/Applications` launches)
@@ -374,7 +374,7 @@ productionization decisions on top, in dependency order:
 
 ## Concrete implementation checklist (dependency-ordered)
 
-- [ ] **Decide + obtain Developer ID Application certificate** (Alec —
+- [ ] **Decide + obtain Developer ID Application certificate** (ahh —
       Open Question §1). Blocks everything below that needs a real signed
       build.
 - [ ] **Confirm AirPlay Engine's eventual app target exists** (Phase 1 app
@@ -410,10 +410,10 @@ productionization decisions on top, in dependency order:
 
 ---
 
-## Open questions for Alec
+## Open questions for ahh
 
 1. **Developer ID Application certificate — get one now?** This is a genuine
-   cost/logistics decision only Alec can make: ~$99/yr, one Apple ID, no team
+   cost/logistics decision only ahh can make: ~$99/yr, one Apple ID, no team
    management needed for a solo project. Nothing past this brief's §1 finding
    can be tested in its real (non-interim-`osascript`) form without it. If
    the answer is "not yet," the interim `osascript`-elevated dev workflow

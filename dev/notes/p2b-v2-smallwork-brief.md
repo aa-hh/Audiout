@@ -20,7 +20,7 @@ live so it doesn't fight the user's own manual choices?
 ### Findings (with evidence)
 
 **Availability is already a first-class, event-driven concept.**
-`Device.isAvailable` (`AirPlayControllerCore/Sources/AirPlayControllerCore/Device.swift:46`)
+`Device.isAvailable` (`AudioutedCore/Sources/AudioutedCore/Device.swift:46`)
 is documented explicitly for this: *"A dropped device stays in the model
 (greyed out) rather than vanishing, so groups keep their membership."* The
 model was built with auto-reconnect in mind — it just isn't wired up yet.
@@ -251,7 +251,7 @@ live output set. Flag this explicitly as a follow-up once that brief lands
    emits the initial `deviceAdded` dump for all members; assert
    `activateGroup` semantics are applied once discovery settles.
 
-### Open questions for Alec
+### Open questions for ahh
 
 - Should auto-reconnect ever apply to `.selectedDevices` (ad hoc set), or
   is "only for saved groups" definitely correct per SPEC's wording ("a
@@ -422,7 +422,7 @@ Reasoning:
    real speakers are back in the loop; the mock rig can validate the code
    path (gain math, buffer shapes) but not perceptual correctness.
 
-### Open questions for Alec
+### Open questions for ahh
 
 - Is per-band parametric EQ actually in scope for v2, or is "balance only"
   the real v2 target with EQ pushed to a later phase? (SPEC.md:33 lists
@@ -438,14 +438,14 @@ Reasoning:
 
 ## Source references
 
-- `AirPlayControllerCore/Sources/AirPlayControllerCore/Device.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerCore/OutputBackend.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerCore/OwnToneBackend.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerCore/GroupController.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerCore/GroupStore.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerWindowUI/MixerViewController.swift`
-- `AirPlayControllerCore/Sources/AirPlayControllerWindowUI/MixerWindowController.swift`
-- `AirPlayControllerCore/Tests/AirPlayControllerCoreTests/GroupControllerTests.swift`
+- `AudioutedCore/Sources/AudioutedCore/Device.swift`
+- `AudioutedCore/Sources/AudioutedCore/OutputBackend.swift`
+- `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
+- `AudioutedCore/Sources/AudioutedCore/GroupController.swift`
+- `AudioutedCore/Sources/AudioutedCore/GroupStore.swift`
+- `AudioutedCore/Sources/AudioutedWindowUI/MixerViewController.swift`
+- `AudioutedCore/Sources/AudioutedWindowUI/MixerWindowController.swift`
+- `AudioutedCore/Tests/AudioutedCoreTests/GroupControllerTests.swift`
 - `SPEC.md` §3 (v2 feature list, lines 48-54), §4 (architecture + security
   principles, lines 63-145), §9 (device row / full window, lines 537-558)
 - `PLAN-PHASE-2.md` (engine seam status, lines 351, 396-399, 607)

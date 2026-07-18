@@ -5,7 +5,7 @@ two layers of "dummy," solving two different problems.
 
 | Layer | Lives in | Exercises | Does **not** exercise |
 |---|---|---|---|
-| **In-app mock backend** | `../AirPlayControllerCore` | All UI + control logic: discovery, multiple devices, groups/output-sets, per-device volume/mute/solo, level meters, drop/reconnect | The wire/audio path (by design) |
+| **In-app mock backend** | `../AudioutedCore` | All UI + control logic: discovery, multiple devices, groups/output-sets, per-device volume/mute/solo, level meters, drop/reconnect | The wire/audio path (by design) |
 | **shairport-sync fake speaker** | `fake-speakers.sh` | Real Bonjour discovery + AirPlay-1 send against a real receiver | AirPlay-2 **PTP sync**, Sonos quirks (need real hardware) |
 
 **The mock backend is the primary tool.** The shairport receiver is an optional
@@ -21,12 +21,12 @@ that's AirPlay-1-only, an Apple TV, a HomePod, a generic speaker) and behaves th
 way the real backend will: devices trickle in over ~2s, controls echo back as
 events, and — optionally — devices drop off and reconnect.
 
-The app links `AirPlayControllerCore` and talks only to the `OutputBackend`
+The app links `AudioutedCore` and talks only to the `OutputBackend`
 protocol, so switching mock ↔ real is one line (`makeBackend(.mock)` /
 `makeBackend(.ownTone)`).
 
 ```bash
-cd ../AirPlayControllerCore
+cd ../AudioutedCore
 swift test            # 5 tests covering discovery, clamping, output-set, no-op
 swift run mock-speakers-demo   # watch the backend behave, headless
 ```

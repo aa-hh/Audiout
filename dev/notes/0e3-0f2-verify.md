@@ -1,4 +1,4 @@
-# 0e3 + 0f2 — human verification (copy-paste, run in Alec's Terminal)
+# 0e3 + 0f2 — human verification (copy-paste, run in ahh's Terminal)
 
 These are the four human checks for T-0e-3 (per-app tap + exclude) and T-0f-2
 (tap → S16LE FIFO → OwnTone → fake receiver). **Run them at the machine, in a
@@ -14,7 +14,7 @@ Assumptions already true (set up by the build task):
 All commands assume you start from the repo root:
 
 ```sh
-cd "/Users/alechenderson/Projects/AirPlay Controller"
+cd "/Users/alechenderson/Projects/Audiouted"
 ```
 
 Set a shell shortcut used below:
@@ -61,7 +61,7 @@ Two `afplay` processes play two pure tones. Tap ONLY the 440 Hz one; the capture
 contain 440 Hz and NOT 880 Hz.
 
 ```sh
-cd "/Users/alechenderson/Projects/AirPlay Controller/dev/audiocap"
+cd "/Users/alechenderson/Projects/Audiouted/dev/audiocap"
 AC=".build/release/audiocap"
 
 # 1. Generate two 20 s pure-tone WAVs (once).
@@ -104,7 +104,7 @@ Same two tones. Global tap EXCLUDING the 440 Hz process; the capture must contai
 880 Hz and NOT 440 Hz. (This is the feedback-loop guard exercised for real.)
 
 ```sh
-cd "/Users/alechenderson/Projects/AirPlay Controller/dev/audiocap"
+cd "/Users/alechenderson/Projects/Audiouted/dev/audiocap"
 AC=".build/release/audiocap"
 
 ( while :; do afplay /tmp/tone440.wav; done ) & A440=$!
@@ -158,7 +158,7 @@ We launch shairport-sync directly (not via fake-speakers.sh) so its `stdout` bac
 goes to a **file** we can inspect, instead of /dev/null.
 
 ```sh
-cd "/Users/alechenderson/Projects/AirPlay Controller/dev"
+cd "/Users/alechenderson/Projects/Audiouted/dev"
 SHAIRPORT="$(command -v shairport-sync)"
 RUN=".run"; mkdir -p "$RUN"
 cat > "$RUN/verify-recv.conf" <<'EOF'
@@ -206,9 +206,9 @@ in Step 2 against an audible process. In the real app, exclusion targets must be
 resolved lazily — a process is only excludable once it starts playing audio.)
 
 ```sh
-cd "/Users/alechenderson/Projects/AirPlay Controller/dev/audiocap"
+cd "/Users/alechenderson/Projects/Audiouted/dev/audiocap"
 AC=".build/release/audiocap"
-FIFO="/Users/alechenderson/Projects/AirPlay Controller/dev/owntone/media/spike.fifo"
+FIFO="/Users/alechenderson/Projects/Audiouted/dev/owntone/media/spike.fifo"
 
 # Play known audio to capture (loop a tone or your music) for the duration:
 ( for i in $(seq 1 12); do afplay /tmp/tone440.wav; done ) & SRC=$!
@@ -250,7 +250,7 @@ tail -6 captures/e2e.log
 # Check it is non-silent = audio traveled tap -> FIFO -> OwnTone -> AirPlay receiver.
 python3 - <<'PY'
 import struct, math
-data = open("/Users/alechenderson/Projects/AirPlay Controller/dev/.run/verify-recv.pcm","rb").read()
+data = open("/Users/alechenderson/Projects/Audiouted/dev/.run/verify-recv.pcm","rb").read()
 n = len(data)//2
 if n == 0:
     print("receiver PCM EMPTY — no audio reached the receiver. FAIL"); raise SystemExit(1)

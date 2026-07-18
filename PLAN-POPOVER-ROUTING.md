@@ -1,6 +1,6 @@
 # PLAN — Popover per-app routing + collapsible sections + exact-fit sizing
 
-*2026-07-16. Decisions confirmed with Alec this date; supersedes the "Future (v2):
+*2026-07-16. Decisions confirmed with ahh this date; supersedes the "Future (v2):
 Applications section" note in SPEC.md §9. Task format follows PLAN-PHASE-1/2.*
 
 ## A. End state (one paragraph)
@@ -18,7 +18,7 @@ redirected — and manual toggles never persist. The `NSScrollView` is removed:
 the popover is exactly its content height, **no scrollbar ever**, and grows/
 shrinks with expansion state.
 
-## B. Resolved decisions (Alec, 2026-07-16) — authoritative
+## B. Resolved decisions (ahh, 2026-07-16) — authoritative
 
 1. **Scope: UI + model + persistence only.** Wired against `MockBackend`; no
    `OutputBackend` changes. Redirects persist and render but move no audio until
@@ -51,7 +51,7 @@ shrinks with expansion state.
 ## C. Task list
 
 **T-1 — `AppRoute` + `AppRouteStore`** *(sonnet / low)*
-New `Sources/AirPlayControllerCore/AppRouteStore.swift` mirroring
+New `Sources/AudioutedCore/AppRouteStore.swift` mirroring
 `RoutingStore.swift`: `AppRoute` (bundleID identity, displayName, destination
 `.currentDevice | .device(id:)` flattened for Codable, volume 0–100 default
 100), injectable directory, `app-routes.json`, schemaVersion 1, newer-schema →
@@ -59,7 +59,7 @@ treated missing. New `AppRouteStoreTests` (round-trip, missing file, future
 schema, clamp).
 
 **T-2 — `AppRoutingController`** *(sonnet / medium)*
-New `Sources/AirPlayControllerCore/AppRoutingController.swift`: holds
+New `Sources/AudioutedCore/AppRoutingController.swift`: holds
 `private(set) appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`,
 `routedAppCount` (destination != currentDevice), persists every mutation,
 `handleDeviceUnavailable(id:)` → resets affected routes to `.currentDevice`
@@ -91,13 +91,13 @@ Selected Devices expanded; Applications expanded iff
 state discarded on next open.
 
 **T-6 — `AppRowView` + Add row** *(sonnet / medium)*
-New `Sources/AirPlayControllerSharedUI/AppRowView.swift` on `PopoverColumnGrid`:
+New `Sources/AudioutedSharedUI/AppRowView.swift` on `PopoverColumnGrid`:
 icon · truncating name · `ControlCenterSlider` (dimmed when local, decision 3) ·
 % · sectioned popup (disabled-header style per `MainOutRowView`). Delegate:
 didSetVolume / didSelectDestination / didRemove (hover-revealed ✕,
 `HoverActionButton` idiom). Takes plain values — no dependency on Core's
 `AppRoute`. Plus the "+ Add application…" row (decision 6). `test_*` hooks +
-tests. **Truncation check at 623 pt: report, don't widen (Alec).**
+tests. **Truncation check at 623 pt: report, don't widen (ahh).**
 
 **T-7 — Running-app picker** *(sonnet / medium)*
 `PopoverController.swift` + injectable `RunningAppsProvider` (closure over
@@ -128,7 +128,7 @@ changes expected (new files land in existing targets).
 
 **T-12 — Docs** *(sonnet / low)*
 SPEC.md §9 (Applications section shipped; collapsible sections; exact-fit
-no-scroll sizing; decisions 1–8) + `AirPlayControllerCore/AGENTS.md`
+no-scroll sizing; decisions 1–8) + `AudioutedCore/AGENTS.md`
 (`AppRoutingController`, `AppRouteStore`).
 
 ## D. Parallelization — waves, hot files, critical path
@@ -152,16 +152,16 @@ Hot file: `PopoverController.swift` (T-3, T-5, T-7, T-8, T-10) — serialize.
    the `preferredContentSize` channel; clip + fade instead of hide; Reduce
    Motion + non-animated fallback path; animator proxies for retargetable rapid
    toggles; end-state size assertions in tests (smoothness verified live by
-   Alec).
+   ahh).
 2. **Hover monitors (T-4/T-6):** replicate `DeviceRowView`'s monitor discipline;
    collapsing must clear/park hover state on hidden rows.
-3. **623 pt width (T-6):** if app names over-truncate, flag to Alec — do not
+3. **623 pt width (T-6):** if app names over-truncate, flag to ahh — do not
    widen the panel.
-4. **Engine-honesty:** out of scope here (handled separately by Alec).
+4. **Engine-honesty:** out of scope here (handled separately by ahh).
    **RESOLVED 2026-07-17** — see the annotation on decision #1 above.
 
 ## F. Verification
 
-From `AirPlayControllerCore/`: `swift build`, `swift test`,
+From `AudioutedCore/`: `swift build`, `swift test`,
 `swift run popover-harness`, `swift run popover-snapshot` (PNGs must show no
 scrollbar sliver). Live look: `AIRPLAY_DEBUG_POPOVER_PNG` hook.

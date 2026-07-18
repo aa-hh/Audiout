@@ -11,7 +11,7 @@ collision, and the remaining hosting-hardening backlog — is fixed
 follow-ups" section). All fixes stayed inside `shims/`/`Sources/AirPlayEngine/`;
 no new vendored-C diffs were needed (`docs/VENDORED-DIFFS.md`). The engine now
 exposes an async device-state stream (`makeStateStream()`) that
-`AirPlayControllerCore`'s `NativeBackend` consumes — see
+`AudioutedCore`'s `NativeBackend` consumes — see
 `../dev/notes/p2b-nativebackend-runbook.md` for how to run the native backend
 end-to-end. The sections below (build status, shim inventory, package layout)
 describe the extraction/bring-up work that got the engine to first light;
@@ -22,7 +22,7 @@ A standalone SwiftPM package that extracts OwnTone's AirPlay 2 sender
 (`airplay.c` + `airplay_events.c` + `rtp_common.c` + `pair_ap` + `evrtsp` +
 `libairptp`) into an engine this project owns, names neutrally, and wraps in
 a Swift API — with **no OwnTone runtime dependency**. This is Phase 2 of the
-AirPlay Controller project; see `../PLAN-PHASE-2.md` for the full plan and
+Audiouted project; see `../PLAN-PHASE-2.md` for the full plan and
 `docs/seam-map.md` for the extraction blueprint this package follows.
 
 ## What this is
@@ -370,11 +370,11 @@ engine got built from scratch). All items below are DONE.
   "Known follow-ups"): **DONE.** Teardown SIGABRT, SIGPIPE, post-CONNECTED
   device-state stream, write-cadence diagnostics, libhash per-install seed,
   and the remaining hosting-hardening backlog are all fixed.
-- **Phase 2b native backend** (`AirPlayControllerCore`'s `NativeBackend`,
+- **Phase 2b native backend** (`AudioutedCore`'s `NativeBackend`,
   `NativeDiscovery`, `NativeCaptureCoordinator`, `AIRPLAY_BACKEND=native`):
   **DONE.** This engine package doesn't own that code — see
   `../dev/notes/p2b-nativebackend-runbook.md` and
-  `../AirPlayControllerCore/AGENTS.md` for how to run it.
+  `../AudioutedCore/AGENTS.md` for how to run it.
 - **What's actually next**: the D7 gated live-verification session (multi-room
   2-output sync, native end-to-end on a real speaker, volume A/B, real-fleet
   discovery watch, teardown stress — checklist in

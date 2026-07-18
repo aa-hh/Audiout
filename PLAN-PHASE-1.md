@@ -11,7 +11,7 @@ Grounded in: SPEC.md §3 (v1 vs v2 — per-app routing + EQ are **v2, out of sco
 here**), §4 (security + "no OwnTone references in final product"), §9 (the UI
 contract); PLAN-0e-0f.md (invariants); dev/notes/0e-taps-brief.md,
 dev/notes/0f-pipe-brief.md (API briefs); the existing code
-(`AirPlayControllerCore/`, `dev/audiocap/`, `dev/owntone/`).
+(`AudioutedCore/`, `dev/audiocap/`, `dev/owntone/`).
 
 ---
 
@@ -23,7 +23,7 @@ with an SF Symbol whose `variableValue` tracks master volume) opens a true
 group expansion, and an in-menu group editor; a second `NSSplitViewController`
 window gives the full sidebar+mixer with a unified toolbar and a presets
 `NSPopUpButton`. The UI talks only to the `OutputBackend` protocol
-(`AirPlayControllerCore/Sources/AirPlayControllerCore/OutputBackend.swift:31`),
+(`AudioutedCore/Sources/AudioutedCore/OutputBackend.swift:31`),
 so it is identical against `MockBackend` and the new real `OwnToneBackend`. The
 real backend drives OwnTone's JSON API (:3689) for outputs list/select/volume +
 queue/play/stop, subscribes to the :3688 websocket for push updates (re-GETting
@@ -37,7 +37,7 @@ Mute/solo/group are app-side concepts layered over the backend's flat output set
 ## B. OPEN QUESTIONS — needs confirmation
 
 These are genuine forks I did **not** resolve by assumption. Each has a
-recommendation the executor can default to if Alec doesn't weigh in.
+recommendation the executor can default to if ahh doesn't weigh in.
 
 **Q1 — App target: SwiftPM executable vs Xcode project.**
 A menu-bar AppKit app needs an `Info.plist` (`LSUIElement=1`, bundle id,
@@ -47,13 +47,13 @@ loose binary with no `.app` wrapper (the 0e brief §5 shows the `-sectcreate`
 plist hack, but that gives a plist, not a bundle — `LSUIElement`/status-item
 behavior and `NSApplication.setActivationPolicy(.accessory)` still need a real
 bundle).
-- (a, **recommended**) **New SwiftPM executable target** `AirPlayControllerApp`
-  in `AirPlayControllerCore/Package.swift`, run headlessly as an `.accessory`
+- (a, **recommended**) **New SwiftPM executable target** `AudioutedApp`
+  in `AudioutedCore/Package.swift`, run headlessly as an `.accessory`
   app via `NSApplication.shared.setActivationPolicy(.accessory)` in code (no
   `LSUIElement` plist needed for a menu-bar app that never wants a Dock icon),
   plus a small `make-app-bundle.sh` that wraps the built binary into a `.app`
   with an `Info.plist` for the TCC/signing story later. Keeps one build system,
-  one `swift build`, links `AirPlayControllerCore` directly, no `.xcodeproj` to
+  one `swift build`, links `AudioutedCore` directly, no `.xcodeproj` to
   maintain. Downside: bundle/signing is a hand-rolled script.
 - (b) **Xcode project** (`.xcodeproj` / `.xcworkspace`) referencing the SPM
   package. Native `Info.plist`/asset-catalog/signing/`LSUIElement` UI, but adds
@@ -65,7 +65,7 @@ bundle).
 
 **Q2 — Capture integration: subprocess vs in-process library.**
 The `audiocap` code (`dev/audiocap/`) targets `.macOS("14.4")`; the core targets
-`.macOS(.v13)` (`AirPlayControllerCore/Package.swift:6`, `dev/audiocap/Package.swift:9`).
+`.macOS(.v13)` (`AudioutedCore/Package.swift:6`, `dev/audiocap/Package.swift:9`).
 The coordinator must own capture start/stop + rate reporting.
 - (a, **recommended**) **Spawn `audiocap` as a subprocess** from the app
   (`Process`, `--pipe <fifo>`, parse the printed `pipe_sample_rate = N` line from
@@ -88,20 +88,20 @@ The coordinator must own capture start/stop + rate reporting.
   is the right Phase-1 choice, not a permanent one. The app already only targets
   macOS 14.4+ machines in practice (taps require it), so the "app must be 13"
   concern is about the *library graph*, not the runtime floor — call this out to
-  Alec.
+  ahh.
 
 **Q3 — Groups/presets persistence mechanism.**
 Need to persist named groups (name + member device-ids + per-member volume
 snapshot) and remember the active group.
 - (a, **recommended**) **A versioned JSON file** at
-  `~/Library/Application Support/AirPlayController/groups.json`, loaded/saved via
+  `~/Library/Application Support/Audiouted/groups.json`, loaded/saved via
   `Codable`. Human-readable, diffable, easy to seed in tests, survives app
   rebuilds, trivially migratable. Store the schema `version` for forward-compat.
 - (b) `UserDefaults` (suite keyed). Zero file plumbing, but opaque, awkward for
   nested arrays, and tied to the bundle-id domain (which changes if we rename off
   "OwnTone"/bundle churn).
 - (c) A plist file. Between the two; no real advantage over JSON here.
-- Recommendation: (a). Keep the store in `AirPlayControllerCore` (a `GroupStore`
+- Recommendation: (a). Keep the store in `AudioutedCore` (a `GroupStore`
   type) so it is UI-agnostic and unit-testable without AppKit.
 
 **Q4 — Mute/solo semantics against OwnTone (no native mute/solo in the API).**
@@ -120,7 +120,7 @@ mute or solo. The `Device` model has `isMuted`/`isSoloed`
   0f-pipe-brief.md notes zombie-session hazards on re-activation) — worse UX.
 - Recommendation: (a), volume-based mute (restore prior volume), selection left
   intact, to avoid re-handshake churn. Confirm the "0 volume vs deselect"
-  choice with Alec.
+  choice with ahh.
 
 **Q5 — Menu-mutation-while-open: how much to gate on the research spike.**
 SPEC §9 wants live insert/remove of `NSMenuItem`s for in-place group expansion,
@@ -139,7 +139,7 @@ SPEC §9 wants live insert/remove of `NSMenuItem`s for in-place group expansion,
 The group master both *drives* members proportionally (ratio snapshot at drag
 start) and *echoes* the members' average. Where does that arithmetic live?
 - (a, **recommended**) In a UI-agnostic `GroupController`/mixer-model type in
-  `AirPlayControllerCore`, unit-tested (proportional scaling, clamp-at-100,
+  `AudioutedCore`, unit-tested (proportional scaling, clamp-at-100,
   average echo) with **no** AppKit, so both the menu slider and the window
   toolbar slider share one implementation and one test suite.
 - (b) In each AppKit view controller. Duplicated logic, two places to get the
@@ -175,7 +175,7 @@ fabricates RMS. OwnTone's API exposes no per-output live RMS.
 - (b) Omit meters for the real backend in Phase 1 (static/hidden), add per-stream
   metering with the native sender in Phase 2.
 - Recommendation: (a) — a single shared program-level meter; per-device metering
-  waits for the native sender. Confirm Alec is fine with all selected devices
+  waits for the native sender. Confirm ahh is fine with all selected devices
   showing the same meter in Phase 1.
 
 ---
@@ -183,7 +183,7 @@ fabricates RMS. OwnTone's API exposes no per-output live RMS.
 ## C. Task list
 
 Legend: `model` = haiku 4.5 | sonnet 5 | opus 4.8 · `effort` = low/med/high/xhigh ·
-`kind` per the required set. "USER-GATED" = needs Alec present (TCC dialog,
+`kind` per the required set. "USER-GATED" = needs ahh present (TCC dialog,
 listening, sudo/firewall). Line anchors are to files as they exist today.
 
 ### Research briefs (feed the code tasks — brief-then-transcribe)
@@ -231,10 +231,10 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 - verify: brief lists every endpoint the backend calls with method+path+body+
   response code, and a websocket-message worked example.
 
-### AirPlayControllerCore (UI-agnostic, testable)
+### AudioutedCore (UI-agnostic, testable)
 
 **T-C1 — Real `OwnToneBackend`: JSON API control + state**
-- files: `AirPlayControllerCore/Sources/AirPlayControllerCore/OwnToneBackend.swift`
+- files: `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
   (replace the stub body, keep the type name for now — see T-C4 rename),
   NEW `.../OwnToneClient.swift` (URLSession JSON client), NEW
   `.../OwnToneWebSocketMonitor.swift` (URLSessionWebSocketTask on :3688)
@@ -258,7 +258,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   T-V1). `swift test` green.
 
 **T-C2 — Capture coordinator: audiocap→FIFO lifecycle + rate reconciliation**
-- files: NEW `AirPlayControllerCore/Sources/AirPlayControllerCore/CaptureCoordinator.swift`
+- files: NEW `AudioutedCore/Sources/AudioutedCore/CaptureCoordinator.swift`
 - what: Own the capture→playback lifecycle above the backend (Q2(a)
   subprocess model): spawn `audiocap --pipe <fifo>` (`Process`), parse the printed
   `pipe_sample_rate = N` from stderr (main.swift:328), enforce config-follows-tap
@@ -295,7 +295,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   members. `swift test` green.
 
 **T-C4 — Neutral backend naming seam (no new OwnTone-named PUBLIC API)**
-- files: `AirPlayControllerCore/Sources/AirPlayControllerCore/OwnToneBackend.swift`
+- files: `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
   (+ any new files from T-C1), `dev/README.md`
 - what: SPEC §4 forbids new OwnTone-named public API. Introduce a neutral public
   protocol-facing name for the real backend (e.g. `NativeBackend` /
@@ -315,8 +315,8 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 ### AppKit app (pure AppKit, SPEC §9)
 
 **T-U1 — App target skeleton + backend wiring + status item**
-- files: NEW `AirPlayControllerApp/` executable target (Q1(a)) added to
-  `AirPlayControllerCore/Package.swift:14` (targets/products), NEW
+- files: NEW `AudioutedApp/` executable target (Q1(a)) added to
+  `AudioutedCore/Package.swift:14` (targets/products), NEW
   `.../AppDelegate.swift`, `.../main.swift`, NEW `make-app-bundle.sh`
 - what: `NSApplication` + `AppDelegate`, `setActivationPolicy(.accessory)`
   (menu-bar-only, no Dock icon — Q1), create the status item via
@@ -333,11 +333,11 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 - recommended_effort: high.
 - verify: `swift build` produces the executable; running it (mock default) shows
   the status item with a volume-reactive symbol; `swift test` still green.
-- HOT FILE: `AirPlayControllerCore/Package.swift` (shared with T-C* only via
+- HOT FILE: `AudioutedCore/Package.swift` (shared with T-C* only via
   target additions — see waves).
 
 **T-U2 — Menu: device + group rows, sliders/mute/solo, in-place expansion**
-- files: NEW `AirPlayControllerApp/Menu/` (`MenuController.swift`,
+- files: NEW `AudioutedApp/Menu/` (`MenuController.swift`,
   `DeviceRowView.swift`, `GroupRowView.swift`), consumes T-R1's verdict
 - what: Build the `NSMenu` per SPEC §9 "Groups in the menu": groups section (one
   row/group: chevron `NSButton` SF Symbol `chevron.right`/`.down`, name, numeric
@@ -359,8 +359,8 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   (output set switches). Against mock (default), no speakers needed.
 
 **T-U3 — In-menu group editor (name field + checkboxes, create/edit/delete)**
-- files: NEW `AirPlayControllerApp/Menu/GroupEditorView.swift`, edits
-  `AirPlayControllerApp/Menu/MenuController.swift` (swap-in-place editor mode)
+- files: NEW `AudioutedApp/Menu/GroupEditorView.swift`, edits
+  `AudioutedApp/Menu/MenuController.swift` (swap-in-place editor mode)
 - what: SPEC §9 "Group setup in the menu": "New group…" + per-row hover pencil
   enter an in-place editor swapping the menu content — back arrow + title,
   group-name `NSTextField` (placeholder example name, editable-in-menu per T-R1),
@@ -376,7 +376,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   edit membership; delete; "save current setup" round-trips through GroupStore.
 
 **T-U4 — Full window: NSSplitViewController sidebar + NSStackView mixer + toolbar + presets**
-- files: NEW `AirPlayControllerApp/Window/` (`MixerWindowController.swift`,
+- files: NEW `AudioutedApp/Window/` (`MixerWindowController.swift`,
   `SidebarViewController.swift`, `MixerViewController.swift`,
   `ToolbarController.swift`)
 - what: SPEC §9 "Full window": `NSWindow` `toolbarStyle=.unified` +
@@ -434,7 +434,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 **T-D1 — SPEC + README + memory updates for Phase 1 close-out**
 - files: `SPEC.md` (§5 Phase-1 status, §9 note the menu-mutation verdict + the
   neutral backend name), `dev/README.md` (real backend now works; how to run the
-  app), `AirPlayControllerCore/MEMORY.md`-index pointer if warranted
+  app), `AudioutedCore/MEMORY.md`-index pointer if warranted
 - what: Fold Phase 1 results in: the resolved open questions, the app-target
   decision (Q1), capture-integration decision (Q2), persistence (Q3), the naming
   seam (T-C4), and pointers to the new briefs/scripts. HOT FILE `SPEC.md` — sole
@@ -450,13 +450,13 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 ## D. Parallelization — waves, hot files, critical path
 
 **Hot files / shared resources (one writer at a time):**
-- `AirPlayControllerCore/Package.swift` — touched by T-U1 (add app target) and
+- `AudioutedCore/Package.swift` — touched by T-U1 (add app target) and
   potentially T-C2/T-C3 (new files need target membership under the existing
-  `AirPlayControllerCore` target — actually only new *targets* touch it; new
+  `AudioutedCore` target — actually only new *targets* touch it; new
   *files* in the existing target do NOT edit Package.swift). Net: **only T-U1
   edits Package.swift** for the app target. Serialize any other Package.swift
   edit behind T-U1.
-- `AirPlayControllerApp/Menu/MenuController.swift` — T-U2 creates it, T-U3 edits
+- `AudioutedApp/Menu/MenuController.swift` — T-U2 creates it, T-U3 edits
   it. **Serialize T-U3 after T-U2.**
 - `OwnToneBackend.swift` (+ new client/coordinator files) — the backend hot set,
   written by T-C1 (implement), referenced by T-C2 (coordinator), renamed by T-C4.
@@ -499,7 +499,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 **Wave 5 (verification — USER-GATED, batched):**
 - T-V1 (sonnet/med, needs T-C1+T-C2+T-U1) can actually run once Wave-3 backend +
   T-U1 exist — pull it as early as the real path works, but it's a human gate so
-  batch it. T-V2 (sonnet/med, needs T-U2+T-U3+T-U4). Run both in ONE Alec GUI/
+  batch it. T-V2 (sonnet/med, needs T-U2+T-U3+T-U4). Run both in ONE ahh GUI/
   Terminal session to minimize TCC re-grants and context switches.
 
 **Wave 6:**
@@ -516,11 +516,11 @@ slack relative to those.
 
 ## E. Test + docs / registry impact
 
-- **New unit tests (in `AirPlayControllerCoreTests`, keep the existing 10 green):**
+- **New unit tests (in `AudioutedCoreTests`, keep the existing 10 green):**
   T-C1 (URLProtocol-stubbed backend → BackendEvent assertions), T-C2 (rate-parse +
   explicit-playback command order, stubbed client), T-C3 (persistence round-trip,
   proportional scaling/clamp, average-echo, activate→setOutputSet). No AppKit in
-  any unit test (all model/backend logic lives in `AirPlayControllerCore`).
+  any unit test (all model/backend logic lives in `AudioutedCore`).
 - **Existing tests:** `MockBackendTests` (5) + `BackendKindResolutionTests` (5)
   must stay green through T-C4's rename and the resolver staying intact.
 - **Scripted verifications:** T-V1 (`dev/verify-1-realpath.sh`, extends the
@@ -528,7 +528,7 @@ slack relative to those.
 - **Docs/registry:** `dev/README.md` (real backend + how to run the app),
   `SPEC.md` §5/§9 (T-D1), the two new briefs in `dev/notes/`, and the
   `AIRPLAY_BACKEND` toggle wording if T-C4 adds a neutral alias.
-- **Package.swift:** one edit (T-U1) adds the `AirPlayControllerApp` executable
+- **Package.swift:** one edit (T-U1) adds the `AudioutedApp` executable
   target/product. New files in the existing library target need NO Package.swift
   edit (SPM globs Sources/).
 
@@ -558,7 +558,7 @@ slack relative to those.
    shairport; true AirPlay-2 PTP sync / real per-device volume remain the
    PLAN-0e-0f.md "deferred real-hardware checkpoints" — Phase 1 "done" is
    explicitly the fake-receiver + mock bar, not real multi-room.
-7. **Deployment-target split (Q2).** If Alec picks the in-process library (Q2(b)),
+7. **Deployment-target split (Q2).** If ahh picks the in-process library (Q2(b)),
    the app target inherits `.macOS(14.4)` and Package.swift/target graph changes
    materially — re-scope T-C2 and T-U1 before starting.
 8. **Naming vs env value (T-C4).** SPEC §4 bans new OwnTone-named *public* API but
@@ -568,7 +568,7 @@ slack relative to those.
 
 ---
 
-## RESOLVED DECISIONS (Alec, 2026-07-13) — authoritative, supersedes the open questions above
+## RESOLVED DECISIONS (ahh, 2026-07-13) — authoritative, supersedes the open questions above
 
 - **Q1 App target:** SwiftPM executable + `.accessory` activation policy + bundle
   script producing a real double-clickable `.app`. No Xcode project.
@@ -580,18 +580,18 @@ slack relative to those.
 - **Q4 Mute/solo:** volume-based at the protocol level (mute = volume 0 with
   prior value remembered; solo = mute others; unmute restores). Backend-agnostic.
 - **Q5 Menu mutation:** research brief first (T-R1), build to its verdict.
-- **Q6 Master math:** UI-agnostic GroupController in AirPlayControllerCore, unit-tested.
+- **Q6 Master math:** UI-agnostic GroupController in AudioutedCore, unit-tested.
 - **Q7 OwnTone lifecycle:** connect-only; the app never supervises the server.
-- **Q8 Meters: SKIPPED in Phase 1 entirely** (Alec's choice, differs from the
+- **Q8 Meters: SKIPPED in Phase 1 entirely** (ahh's choice, differs from the
   plan's recommendation — no meter UI until per-device meters can be real in v2).
-- **NEW (project-wide): the project is OPEN SOURCE, GPL-2.0-or-later** (Alec may
+- **NEW (project-wide): the project is OPEN SOURCE, GPL-2.0-or-later** (ahh may
   redistribute). Affects headers/LICENSE files as tasks touch code.
 
 ## WAVE 1 RESULTS + LATE DECISIONS (2026-07-13)
 
 - **T-R1 ✅** (dev/notes/p1-menu-brief.md): live NSMenu insert/remove WORKS (in-place
   expansion viable; fallback documented). Editable NSTextField in menus IMPOSSIBLE
-  (no keyboard events) → **Alec decided: QUICK-CREATE in menu (auto-named from
+  (no keyboard events) → **ahh decided: QUICK-CREATE in menu (auto-named from
   current setup), rename/membership editing in the main window** (SPEC §9 revised).
   T-U3 scope changes accordingly: menu gets a one-shot "Save current setup as
   group" action; the editor form moves into T-U4's window (edit pane).
@@ -606,8 +606,8 @@ slack relative to those.
 
 ## WAVE 2/3 RESULTS (2026-07-13)
 - **T-C1 ✅** real OwnToneBackend: poll-primary (websocket best-effort), zombie recovery via re-select + coordinator replayHook, unreachable→unavailable+auto-recover. 8 tests. Names kept internal for T-C4 rename.
-- **T-U1 ✅** app skeleton: AirPlayControllerApp executable target, real .app bundle (LSUIElement, ad-hoc signed, launches/quits clean), status item, mock-first.
-- **T-U2 ✅** the menu: pure-AppKit dropdown, LIVE in-place group expansion (no fallback needed), shared DeviceRowView, quick-create action. Menu factored into AirPlayControllerMenuUI library target (testable). 45 tests + 28-check harness.
+- **T-U1 ✅** app skeleton: AudioutedApp executable target, real .app bundle (LSUIElement, ad-hoc signed, launches/quits clean), status item, mock-first.
+- **T-U2 ✅** the menu: pure-AppKit dropdown, LIVE in-place group expansion (no fallback needed), shared DeviceRowView, quick-create action. Menu factored into AudioutedMenuUI library target (testable). 45 tests + 28-check harness.
 - **T-U3 ABSORBED**: quick-create landed in T-U2's menu; the group EDITOR (rename/membership) moves into T-U4's window. No separate T-U3.
 - Remaining: T-C2 (capture coordinator), T-U4 (window + group editor), T-C4 (neutral rename), T-V1/T-V2 (verify, USER-GATED), T-D1 (docs).
 

@@ -166,7 +166,7 @@ if let button = statusItem.button {
 ```
 
 This diverges from SPEC §9's "swaps in place to an editor … group-name
-`NSTextField`" — flag to Alec: the checkbox list *can* live in-menu, but **text
+`NSTextField`" — flag to ahh: the checkbox list *can* live in-menu, but **text
 entry must move to a popover**. Non-text swap-in-place editing (back arrow, the
 checkbox "Speakers" list, Cancel/Save as custom-view rows with buttons) is
 achievable via §1's live mutation; only the name field is the blocker. Simplest

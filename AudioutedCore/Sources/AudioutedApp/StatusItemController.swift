@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import AppKit
+
+/// Owns the menu-bar status item.
+///
+/// Follows the brief (`dev/notes/p1-menu-brief.md` §4) and SPEC §9 exactly:
+/// - never init `NSStatusItem` directly — use `statusItem(withLength:)`;
+/// - customize ONLY via `.button` (the item's `.view`/`.title`/`.image` are
+///   deprecated);
+/// - the button image is an SF Symbol `speaker.wave.3.fill` whose `variableValue`
+///   tracks master volume (the waves fill with level);
+/// - the image is template-rendered so it's correct in a dark/light menu bar.
+///
+/// SPEC §9 revised (NSMenu → NSPopover): the dropdown is now an `NSPopover`, so
+/// the button's *action* toggles the popover (rather than assigning `.menu`,
+/// which would auto-open a menu). The action closure is wired in
+/// `onButtonClicked`.
+final class StatusItemController {
+
+    private let statusItem: NSStatusItem
+    private var masterVolume: Double = 0
+
+    /// Invoked when the user clicks the status button — the app toggles the
+    /// popover relative to `button`.
+    var onButtonClicked: ((NSStatusBarButton) -> Void)?
+
+    init() {
+        // Variable length so the button sizes to its content (brief §4).
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        renderButtonImage()
+        wireButtonAction()
+    }
+
+    /// The status button (for anchoring the popover). Non-nil once the item is
+    /// in the menu bar.
+    var button: NSStatusBarButton? { statusItem.button }
+
+    private func wireButtonAction() {
+        guard let button = statusItem.button else { return }
+        button.target = self
+        button.action = #selector(buttonClicked(_:))
+    }
+
+    @objc private func buttonClicked(_ sender: NSStatusBarButton) {
+        onButtonClicked?(sender)
+    }
+
+    /// Update the master-volume level (0…1) the status symbol reflects, then
+    /// rebuild the button image with the new `variableValue`. Rebuilding is the
+    /// documented way to change an SF Symbol's variable value (brief gotcha #9).
+    func updateMasterVolume(_ level: Double) {
+        let clamped = min(1, max(0, level))
+        guard clamped != masterVolume else { return }
+        masterVolume = clamped
+        renderButtonImage()
+    }
+
+    private func renderButtonImage() {
+        guard let button = statusItem.button else { return }
+        let image = NSImage(
+            systemSymbolName: "speaker.wave.3.fill",
+            variableValue: masterVolume,
+            accessibilityDescription: "AirPlay volume"
+        )
+        image?.isTemplate = true   // correct rendering in dark/light menu bar
+        button.image = image
+    }
+}

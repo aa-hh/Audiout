@@ -3,7 +3,7 @@
 ## Purpose
 
 A standalone SwiftPM package (sibling of, not a target inside,
-`AirPlayControllerCore`) vendoring OwnTone's AirPlay 2 sender under
+`AudioutedCore`) vendoring OwnTone's AirPlay 2 sender under
 `Sources/CAirPlayEngine/`, wrapped in a neutral Swift `async`/`await` API.
 Separate on purpose: it knows nothing about `Device`, groups, or the UI — a
 session-primitives actor, not app logic — and it is a **licensing boundary**,

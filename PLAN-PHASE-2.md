@@ -26,7 +26,7 @@ gated sessions as an interim measure until the SMAppService helper ships
 (`dev/notes/p2b-nativebackend-runbook.md` §3).
 
 Still deferred, deliberately: the AP1 (`raop`) sender, synced local output, and
-per-app capture streams. AP1-only is ~0% of Alec's fleet but ~20-30% of active
+per-app capture streams. AP1-only is ~0% of ahh's fleet but ~20-30% of active
 receivers generally — a prerequisite for any broad public release, not for
 personal use.
 
@@ -66,7 +66,7 @@ real-hardware checkpoint.
     cheap Linux box / Raspberry Pi / spare Mac on the LAN as the receiver; the
     engine (with its PTP) runs on the dev Mac. Sidesteps the single-host 319/320
     war entirely and is the only setup that exercises *real* PTP timing. Needs one
-    extra device (confirm Alec has/will get a Pi or second machine).
+    extra device (confirm ahh has/will get a Pi or second machine).
   - (b) **Linux VM / Docker receiver** on the same Mac with a bridged/macvlan NIC
     so nqptp binds 319/320 *inside the guest* (host still reserves them, but the
     guest has its own stack). Verify multicast/PTP crosses the bridge — often
@@ -109,10 +109,10 @@ real-hardware checkpoint.
   - (a, **recommended**) A **new top-level SwiftPM package** `AirPlayEngine/`
     (its own `Package.swift`, `.macOS(.v14)`) with a C target
     (`CAirPlayEngine`, the vendored sources + a module map) and a Swift target
-    wrapping it; `AirPlayControllerCore` depends on it only via the
+    wrapping it; `AudioutedCore` depends on it only via the
     `NativeBackend`. Keeps the extracted GPL C isolated in one package, keeps the
     v13 core lib clean, and lets the engine build/test independently.
-  - (b) Add a `CAirPlayEngine` target *inside* `AirPlayControllerCore/Package.swift`.
+  - (b) Add a `CAirPlayEngine` target *inside* `AudioutedCore/Package.swift`.
     Simpler wiring, but drags brew/C build flags + GPL sources into the core lib
     and forces its platform up to v14.
   - (c) Build the C cluster as a **standalone static lib via Makefile/CMake**
@@ -126,7 +126,7 @@ real-hardware checkpoint.
 
 - **Q4 — GPL licensing posture (personal, non-distributed).** airplay.c /
   airplay_events.c / rtp_common.c are **GPL-2.0+**; pair_ap + libairptp are
-  **MIT**; evrtsp is **BSD (Provos/Blaché)**. For Alec's personal, non-distributed
+  **MIT**; evrtsp is **BSD (Provos/Blaché)**. For ahh's personal, non-distributed
   tool, GPL imposes no obligation (no distribution = no trigger). But it caps
   future options. Confirm intent:
   - (a, **recommended**) **Personal use only, never distribute** — GPL is a
@@ -353,7 +353,7 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
   helper does NOT do (no audio, no RTSP, clock-only — like nqptp), install/signing/
   firewall-allowlist story (Phase-0 lessons: sign + firewall-register at install;
   restart after allowlist), and the interim **dev launch via osascript admin
-  dialog** (Alec present) used until the helper exists. Keep it small enough to
+  dialog** (ahh present) used until the helper exists. Keep it small enough to
   audit line-by-line (SPEC.md §4.1).
 - kind: design · depends_on: T-PTP-1
 - model: opus 4.8 — the one privileged surface in the whole product; the design
@@ -409,9 +409,9 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
 ### Wave 4 — Land behind the OutputBackend seam
 
 **T-BACKEND-1 — `NativeBackend : OutputBackend` + `AIRPLAY_BACKEND=native`**
-- files: `AirPlayControllerCore/Sources/AirPlayControllerCore/NativeBackend.swift`
-  (new); `AirPlayControllerCore/Sources/AirPlayControllerCore/OwnToneBackend.swift`
-  (edit `BackendKind` + `makeBackend`); `AirPlayControllerCore/Package.swift` (add
+- files: `AudioutedCore/Sources/AudioutedCore/NativeBackend.swift`
+  (new); `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
+  (edit `BackendKind` + `makeBackend`); `AudioutedCore/Package.swift` (add
   dependency on the `AirPlayEngine` package); `dev/README.md` (document `native`).
 - what: Implement `OutputBackend` (devices/start/stop/makeEventStream/setVolume/
   setMuted/setSoloed/setOutputSet — OutputBackend.swift:31-59) on top of
@@ -436,7 +436,7 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
   `native` value (haiku, low) — same file, serialize after T-BACKEND-1's enum edit.
 
 **T-CLEANUP-1 — Retire the interim OwnTone scaffolding (GATED on `native` proven)**
-- files: delete `AirPlayControllerCore/Sources/AirPlayControllerCore/OwnToneBackend.swift`'s
+- files: delete `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`'s
   `OwnToneBackend` type + the `.ownTone` `BackendKind` case + `owntone` env value +
   its `makeBackend` case; delete `dev/owntone/` (git-ignored spike server) and its
   `AIRPLAY_BACKEND=owntone` docs in `dev/README.md`. HOT FILE: `OwnToneBackend.swift`
@@ -447,12 +447,12 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
   for the removed `.ownTone` case; keep `.mock` + `.native`.
 - kind: pure-delete (with small import/enum fallout) · depends_on: T-BACKEND-1
   (native must be proven first), T-HARNESS-2 (don't delete the spike server until
-  the native path passes). GATED — Alec confirms native is trusted before deleting.
+  the native path passes). GATED — ahh confirms native is trusted before deleting.
 - model: sonnet 5 — a cross-cutting deletion with enum/test/doc fallout across the
   resolver seam; small but not haiku-blind (must keep resolution + tests green).
 - effort: med.
 - verify: `swift build` + `swift test` green with no `OwnTone`/`owntone` symbols
-  remaining (`grep -ri owntone AirPlayControllerCore/Sources` empty); app still
+  remaining (`grep -ri owntone AudioutedCore/Sources` empty); app still
   resolves `mock`/`native`.
 
 **T-DOC-P2 — Phase-2 close-out: SPEC + NOTICE + engine README**
@@ -477,10 +477,10 @@ Phase-0 build tree at the ephemeral scratchpad was used to ground this plan).
 - `AirPlayEngine/Sources/CAirPlayEngine/` (sources + shims) — **T-BUILD-1 and
   T-SHIM-1 edit the same dir; treat as ONE workstream / one agent. Do not run
   concurrently.**
-- `AirPlayControllerCore/.../OwnToneBackend.swift` — T-BACKEND-1 AND T-CLEANUP-1
+- `AudioutedCore/.../OwnToneBackend.swift` — T-BACKEND-1 AND T-CLEANUP-1
   (this plan) edit it; **serialize (T-BACKEND-1 first, then T-CLEANUP-1)**.
   Cross-plan contention risk with Phase 1's resolver work → coordinate.
-- `AirPlayControllerCore/.../BackendKindResolutionTests.swift` — T-BACKEND-1b after
+- `AudioutedCore/.../BackendKindResolutionTests.swift` — T-BACKEND-1b after
   T-BACKEND-1.
 - `SPEC.md` — T-DOC-P2 only.
 - `.gitignore` (root) — appended by T-SRC-1 and T-PKG-1; tiny, serialize or
@@ -560,16 +560,16 @@ research, CLI) is slack that can proceed alongside.
 
 ---
 
-## RESOLVED DECISIONS (Alec, 2026-07-13) — authoritative, supersedes the open questions above
+## RESOLVED DECISIONS (ahh, 2026-07-13) — authoritative, supersedes the open questions above
 
-- **Q1 PTP verification: TWO-HOST receiver harness.** Alec HAS a second machine —
+- **Q1 PTP verification: TWO-HOST receiver harness.** ahh HAS a second machine —
   it runs shairport-sync in AirPlay-2 mode (+ nqptp) as the test receiver. Full
   PTP send verification without speakers. Harness tasks should target this;
   identify the machine's OS at harness-setup time.
 - **Q2 ALAC:** link ffmpeg first; evaluate vendoring Apple's ALAC encoder later.
 - **Q3 Engine placement:** new SwiftPM package `AirPlayEngine/` at repo root.
 - **Q4 License posture: OPEN SOURCE, GPL-2.0-or-later for the project** (changed
-  from "personal use only" — Alec may redistribute). Vendored GPL sender cluster
+  from "personal use only" — ahh may redistribute). Vendored GPL sender cluster
   is therefore fine; keep MIT (libairptp, pair_ap) and BSD (evrtsp) files
   separately marked with their original headers; add a LICENSE file task-level
   note. The tiny SMAppService PTP helper ships MIT.
@@ -577,7 +577,7 @@ research, CLI) is slack that can proceed alongside.
 - **Q6 Metadata/db/artwork:** cut — no-op stubs.
 - **Q7 Pairing:** vendor both pair_ap modules; verify transient path now.
 
-## NEW REQUIREMENT (Alec, 2026-07-13) — synced local Core Audio endpoint
+## NEW REQUIREMENT (ahh, 2026-07-13) — synced local Core Audio endpoint
 
 The engine's Swift API (T-API-1) and NativeBackend (T-BACKEND-1) must support a
 **local Mac speaker as a first-class, PTP-SYNCED output** alongside the AirPlay
@@ -619,7 +619,7 @@ Wire evbase_player + dispatcher_init + completion hook→async Swift, config via
 conffile_set_*, output_airplay.init, discovery feed, session lifecycle (add
 output / volume / write PCM). BUILD + headless tests only. A LIVE session is a
 SEPARATE gated step: needs a real receiver (Cinema/Pool) AND OwnTone stopped
-(PTP port 319/320 contention) AND Alec present. Runtime unknowns to validate
+(PTP port 319/320 contention) AND ahh present. Runtime unknowns to validate
 then: R-A count under real retry, R-B write cadence, R-C ALAC acceptance, PTP
 if-scope.
 
@@ -640,7 +640,7 @@ OutputBackend) + the synced localOutput Core Audio sink.
 The transient network with Cinema/Pool is gone (only the excluded LG TV remains
 visible). The engine-probe first-light test needs a real AirPlay 2 receiver;
 options, in preference order: (1) an opportunistic window with real AP2 hardware
-(probe CLI is ready to run in minutes), (2) Alec's second machine as a
+(probe CLI is ready to run in minutes), (2) ahh's second machine as a
 shairport-sync AP2 receiver (docs/receiver-harness-guide.md is ready — machine
 identity/OS still unconfirmed; must be Linux/Pi, a second Mac cannot do it),
 (3) speakers returning. NOTE: the fake AP1 shairport receiver is NOT valid for

@@ -2864,7 +2864,7 @@ final class NativeBackendTests: XCTestCase {
     /// (stop -> re-add) to a fresh stream containing only the surviving app —
     /// not simply unbind — and `.routedApps` must drop the terminated app's name
     /// while keeping the survivor's.
-    func testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream() async {
+    func testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream() async throws {
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:80", name: "Shared Speaker")
@@ -2881,7 +2881,10 @@ final class NativeBackendTests: XCTestCase {
                 self.route("com.bar", name: "Bar", toDevice: device.id),
             ])
         }
-        let firstStream = engine.streamAddCalls.first { $0.0 == device.outputID }!.1
+        // `.routedApps` is emitted on stateQueue but the engine bind runs later on
+        // the bindTail FIFO, so the event alone doesn't imply the addOutput landed.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        let firstStream = try XCTUnwrap(engine.streamAddCalls.first { $0.0 == device.outputID }).1
 
         // Foo's process quits mid-stream.
         let afterTermination = await collect(from: backend) { events in

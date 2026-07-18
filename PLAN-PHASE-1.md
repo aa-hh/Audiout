@@ -11,7 +11,7 @@ Grounded in: SPEC.md §3 (v1 vs v2 — per-app routing + EQ are **v2, out of sco
 here**), §4 (security + "no OwnTone references in final product"), §9 (the UI
 contract); PLAN-0e-0f.md (invariants); dev/notes/0e-taps-brief.md,
 dev/notes/0f-pipe-brief.md (API briefs); the existing code
-(`AudioutedCore/`, `dev/audiocap/`, `dev/owntone/`).
+(`AudiouterCore/`, `dev/audiocap/`, `dev/owntone/`).
 
 ---
 
@@ -23,7 +23,7 @@ with an SF Symbol whose `variableValue` tracks master volume) opens a true
 group expansion, and an in-menu group editor; a second `NSSplitViewController`
 window gives the full sidebar+mixer with a unified toolbar and a presets
 `NSPopUpButton`. The UI talks only to the `OutputBackend` protocol
-(`AudioutedCore/Sources/AudioutedCore/OutputBackend.swift:31`),
+(`AudiouterCore/Sources/AudiouterCore/OutputBackend.swift:31`),
 so it is identical against `MockBackend` and the new real `OwnToneBackend`. The
 real backend drives OwnTone's JSON API (:3689) for outputs list/select/volume +
 queue/play/stop, subscribes to the :3688 websocket for push updates (re-GETting
@@ -47,13 +47,13 @@ loose binary with no `.app` wrapper (the 0e brief §5 shows the `-sectcreate`
 plist hack, but that gives a plist, not a bundle — `LSUIElement`/status-item
 behavior and `NSApplication.setActivationPolicy(.accessory)` still need a real
 bundle).
-- (a, **recommended**) **New SwiftPM executable target** `AudioutedApp`
-  in `AudioutedCore/Package.swift`, run headlessly as an `.accessory`
+- (a, **recommended**) **New SwiftPM executable target** `AudiouterApp`
+  in `AudiouterCore/Package.swift`, run headlessly as an `.accessory`
   app via `NSApplication.shared.setActivationPolicy(.accessory)` in code (no
   `LSUIElement` plist needed for a menu-bar app that never wants a Dock icon),
   plus a small `make-app-bundle.sh` that wraps the built binary into a `.app`
   with an `Info.plist` for the TCC/signing story later. Keeps one build system,
-  one `swift build`, links `AudioutedCore` directly, no `.xcodeproj` to
+  one `swift build`, links `AudiouterCore` directly, no `.xcodeproj` to
   maintain. Downside: bundle/signing is a hand-rolled script.
 - (b) **Xcode project** (`.xcodeproj` / `.xcworkspace`) referencing the SPM
   package. Native `Info.plist`/asset-catalog/signing/`LSUIElement` UI, but adds
@@ -65,7 +65,7 @@ bundle).
 
 **Q2 — Capture integration: subprocess vs in-process library.**
 The `audiocap` code (`dev/audiocap/`) targets `.macOS("14.4")`; the core targets
-`.macOS(.v13)` (`AudioutedCore/Package.swift:6`, `dev/audiocap/Package.swift:9`).
+`.macOS(.v13)` (`AudiouterCore/Package.swift:6`, `dev/audiocap/Package.swift:9`).
 The coordinator must own capture start/stop + rate reporting.
 - (a, **recommended**) **Spawn `audiocap` as a subprocess** from the app
   (`Process`, `--pipe <fifo>`, parse the printed `pipe_sample_rate = N` line from
@@ -94,14 +94,14 @@ The coordinator must own capture start/stop + rate reporting.
 Need to persist named groups (name + member device-ids + per-member volume
 snapshot) and remember the active group.
 - (a, **recommended**) **A versioned JSON file** at
-  `~/Library/Application Support/Audiouted/groups.json`, loaded/saved via
+  `~/Library/Application Support/Audiouter/groups.json`, loaded/saved via
   `Codable`. Human-readable, diffable, easy to seed in tests, survives app
   rebuilds, trivially migratable. Store the schema `version` for forward-compat.
 - (b) `UserDefaults` (suite keyed). Zero file plumbing, but opaque, awkward for
   nested arrays, and tied to the bundle-id domain (which changes if we rename off
   "OwnTone"/bundle churn).
 - (c) A plist file. Between the two; no real advantage over JSON here.
-- Recommendation: (a). Keep the store in `AudioutedCore` (a `GroupStore`
+- Recommendation: (a). Keep the store in `AudiouterCore` (a `GroupStore`
   type) so it is UI-agnostic and unit-testable without AppKit.
 
 **Q4 — Mute/solo semantics against OwnTone (no native mute/solo in the API).**
@@ -139,7 +139,7 @@ SPEC §9 wants live insert/remove of `NSMenuItem`s for in-place group expansion,
 The group master both *drives* members proportionally (ratio snapshot at drag
 start) and *echoes* the members' average. Where does that arithmetic live?
 - (a, **recommended**) In a UI-agnostic `GroupController`/mixer-model type in
-  `AudioutedCore`, unit-tested (proportional scaling, clamp-at-100,
+  `AudiouterCore`, unit-tested (proportional scaling, clamp-at-100,
   average echo) with **no** AppKit, so both the menu slider and the window
   toolbar slider share one implementation and one test suite.
 - (b) In each AppKit view controller. Duplicated logic, two places to get the
@@ -231,10 +231,10 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 - verify: brief lists every endpoint the backend calls with method+path+body+
   response code, and a websocket-message worked example.
 
-### AudioutedCore (UI-agnostic, testable)
+### AudiouterCore (UI-agnostic, testable)
 
 **T-C1 — Real `OwnToneBackend`: JSON API control + state**
-- files: `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
+- files: `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift`
   (replace the stub body, keep the type name for now — see T-C4 rename),
   NEW `.../OwnToneClient.swift` (URLSession JSON client), NEW
   `.../OwnToneWebSocketMonitor.swift` (URLSessionWebSocketTask on :3688)
@@ -258,7 +258,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   T-V1). `swift test` green.
 
 **T-C2 — Capture coordinator: audiocap→FIFO lifecycle + rate reconciliation**
-- files: NEW `AudioutedCore/Sources/AudioutedCore/CaptureCoordinator.swift`
+- files: NEW `AudiouterCore/Sources/AudiouterCore/CaptureCoordinator.swift`
 - what: Own the capture→playback lifecycle above the backend (Q2(a)
   subprocess model): spawn `audiocap --pipe <fifo>` (`Process`), parse the printed
   `pipe_sample_rate = N` from stderr (main.swift:328), enforce config-follows-tap
@@ -295,7 +295,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   members. `swift test` green.
 
 **T-C4 — Neutral backend naming seam (no new OwnTone-named PUBLIC API)**
-- files: `AudioutedCore/Sources/AudioutedCore/OwnToneBackend.swift`
+- files: `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift`
   (+ any new files from T-C1), `dev/README.md`
 - what: SPEC §4 forbids new OwnTone-named public API. Introduce a neutral public
   protocol-facing name for the real backend (e.g. `NativeBackend` /
@@ -315,8 +315,8 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 ### AppKit app (pure AppKit, SPEC §9)
 
 **T-U1 — App target skeleton + backend wiring + status item**
-- files: NEW `AudioutedApp/` executable target (Q1(a)) added to
-  `AudioutedCore/Package.swift:14` (targets/products), NEW
+- files: NEW `AudiouterApp/` executable target (Q1(a)) added to
+  `AudiouterCore/Package.swift:14` (targets/products), NEW
   `.../AppDelegate.swift`, `.../main.swift`, NEW `make-app-bundle.sh`
 - what: `NSApplication` + `AppDelegate`, `setActivationPolicy(.accessory)`
   (menu-bar-only, no Dock icon — Q1), create the status item via
@@ -333,11 +333,11 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 - recommended_effort: high.
 - verify: `swift build` produces the executable; running it (mock default) shows
   the status item with a volume-reactive symbol; `swift test` still green.
-- HOT FILE: `AudioutedCore/Package.swift` (shared with T-C* only via
+- HOT FILE: `AudiouterCore/Package.swift` (shared with T-C* only via
   target additions — see waves).
 
 **T-U2 — Menu: device + group rows, sliders/mute/solo, in-place expansion**
-- files: NEW `AudioutedApp/Menu/` (`MenuController.swift`,
+- files: NEW `AudiouterApp/Menu/` (`MenuController.swift`,
   `DeviceRowView.swift`, `GroupRowView.swift`), consumes T-R1's verdict
 - what: Build the `NSMenu` per SPEC §9 "Groups in the menu": groups section (one
   row/group: chevron `NSButton` SF Symbol `chevron.right`/`.down`, name, numeric
@@ -359,8 +359,8 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   (output set switches). Against mock (default), no speakers needed.
 
 **T-U3 — In-menu group editor (name field + checkboxes, create/edit/delete)**
-- files: NEW `AudioutedApp/Menu/GroupEditorView.swift`, edits
-  `AudioutedApp/Menu/MenuController.swift` (swap-in-place editor mode)
+- files: NEW `AudiouterApp/Menu/GroupEditorView.swift`, edits
+  `AudiouterApp/Menu/MenuController.swift` (swap-in-place editor mode)
 - what: SPEC §9 "Group setup in the menu": "New group…" + per-row hover pencil
   enter an in-place editor swapping the menu content — back arrow + title,
   group-name `NSTextField` (placeholder example name, editable-in-menu per T-R1),
@@ -376,7 +376,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
   edit membership; delete; "save current setup" round-trips through GroupStore.
 
 **T-U4 — Full window: NSSplitViewController sidebar + NSStackView mixer + toolbar + presets**
-- files: NEW `AudioutedApp/Window/` (`MixerWindowController.swift`,
+- files: NEW `AudiouterApp/Window/` (`MixerWindowController.swift`,
   `SidebarViewController.swift`, `MixerViewController.swift`,
   `ToolbarController.swift`)
 - what: SPEC §9 "Full window": `NSWindow` `toolbarStyle=.unified` +
@@ -434,7 +434,7 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 **T-D1 — SPEC + README + memory updates for Phase 1 close-out**
 - files: `SPEC.md` (§5 Phase-1 status, §9 note the menu-mutation verdict + the
   neutral backend name), `dev/README.md` (real backend now works; how to run the
-  app), `AudioutedCore/MEMORY.md`-index pointer if warranted
+  app), `AudiouterCore/MEMORY.md`-index pointer if warranted
 - what: Fold Phase 1 results in: the resolved open questions, the app-target
   decision (Q1), capture-integration decision (Q2), persistence (Q3), the naming
   seam (T-C4), and pointers to the new briefs/scripts. HOT FILE `SPEC.md` — sole
@@ -450,13 +450,13 @@ listening, sudo/firewall). Line anchors are to files as they exist today.
 ## D. Parallelization — waves, hot files, critical path
 
 **Hot files / shared resources (one writer at a time):**
-- `AudioutedCore/Package.swift` — touched by T-U1 (add app target) and
+- `AudiouterCore/Package.swift` — touched by T-U1 (add app target) and
   potentially T-C2/T-C3 (new files need target membership under the existing
-  `AudioutedCore` target — actually only new *targets* touch it; new
+  `AudiouterCore` target — actually only new *targets* touch it; new
   *files* in the existing target do NOT edit Package.swift). Net: **only T-U1
   edits Package.swift** for the app target. Serialize any other Package.swift
   edit behind T-U1.
-- `AudioutedApp/Menu/MenuController.swift` — T-U2 creates it, T-U3 edits
+- `AudiouterApp/Menu/MenuController.swift` — T-U2 creates it, T-U3 edits
   it. **Serialize T-U3 after T-U2.**
 - `OwnToneBackend.swift` (+ new client/coordinator files) — the backend hot set,
   written by T-C1 (implement), referenced by T-C2 (coordinator), renamed by T-C4.
@@ -516,11 +516,11 @@ slack relative to those.
 
 ## E. Test + docs / registry impact
 
-- **New unit tests (in `AudioutedCoreTests`, keep the existing 10 green):**
+- **New unit tests (in `AudiouterCoreTests`, keep the existing 10 green):**
   T-C1 (URLProtocol-stubbed backend → BackendEvent assertions), T-C2 (rate-parse +
   explicit-playback command order, stubbed client), T-C3 (persistence round-trip,
   proportional scaling/clamp, average-echo, activate→setOutputSet). No AppKit in
-  any unit test (all model/backend logic lives in `AudioutedCore`).
+  any unit test (all model/backend logic lives in `AudiouterCore`).
 - **Existing tests:** `MockBackendTests` (5) + `BackendKindResolutionTests` (5)
   must stay green through T-C4's rename and the resolver staying intact.
 - **Scripted verifications:** T-V1 (`dev/verify-1-realpath.sh`, extends the
@@ -528,7 +528,7 @@ slack relative to those.
 - **Docs/registry:** `dev/README.md` (real backend + how to run the app),
   `SPEC.md` §5/§9 (T-D1), the two new briefs in `dev/notes/`, and the
   `AIRPLAY_BACKEND` toggle wording if T-C4 adds a neutral alias.
-- **Package.swift:** one edit (T-U1) adds the `AudioutedApp` executable
+- **Package.swift:** one edit (T-U1) adds the `AudiouterApp` executable
   target/product. New files in the existing library target need NO Package.swift
   edit (SPM globs Sources/).
 
@@ -580,7 +580,7 @@ slack relative to those.
 - **Q4 Mute/solo:** volume-based at the protocol level (mute = volume 0 with
   prior value remembered; solo = mute others; unmute restores). Backend-agnostic.
 - **Q5 Menu mutation:** research brief first (T-R1), build to its verdict.
-- **Q6 Master math:** UI-agnostic GroupController in AudioutedCore, unit-tested.
+- **Q6 Master math:** UI-agnostic GroupController in AudiouterCore, unit-tested.
 - **Q7 OwnTone lifecycle:** connect-only; the app never supervises the server.
 - **Q8 Meters: SKIPPED in Phase 1 entirely** (ahh's choice, differs from the
   plan's recommendation — no meter UI until per-device meters can be real in v2).
@@ -606,8 +606,8 @@ slack relative to those.
 
 ## WAVE 2/3 RESULTS (2026-07-13)
 - **T-C1 ✅** real OwnToneBackend: poll-primary (websocket best-effort), zombie recovery via re-select + coordinator replayHook, unreachable→unavailable+auto-recover. 8 tests. Names kept internal for T-C4 rename.
-- **T-U1 ✅** app skeleton: AudioutedApp executable target, real .app bundle (LSUIElement, ad-hoc signed, launches/quits clean), status item, mock-first.
-- **T-U2 ✅** the menu: pure-AppKit dropdown, LIVE in-place group expansion (no fallback needed), shared DeviceRowView, quick-create action. Menu factored into AudioutedMenuUI library target (testable). 45 tests + 28-check harness.
+- **T-U1 ✅** app skeleton: AudiouterApp executable target, real .app bundle (LSUIElement, ad-hoc signed, launches/quits clean), status item, mock-first.
+- **T-U2 ✅** the menu: pure-AppKit dropdown, LIVE in-place group expansion (no fallback needed), shared DeviceRowView, quick-create action. Menu factored into AudiouterMenuUI library target (testable). 45 tests + 28-check harness.
 - **T-U3 ABSORBED**: quick-create landed in T-U2's menu; the group EDITOR (rename/membership) moves into T-U4's window. No separate T-U3.
 - Remaining: T-C2 (capture coordinator), T-U4 (window + group editor), T-C4 (neutral rename), T-V1/T-V2 (verify, USER-GATED), T-D1 (docs).
 

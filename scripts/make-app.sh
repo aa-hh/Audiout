@@ -1,11 +1,11 @@
 #!/bin/bash
-# make-app.sh — wrap the AudioutedApp SwiftPM binary into a real,
+# make-app.sh — wrap the AudiouterApp SwiftPM binary into a real,
 # double-clickable macOS .app bundle and ad-hoc codesign it.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
-# Xcode project). This produces "Audiouted.app" with an Info.plist
+# Xcode project). This produces "Audiouter.app" with an Info.plist
 # (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and an
 # ad-hoc signature so Gatekeeper lets it launch locally.
 #
@@ -15,9 +15,9 @@
 set -euo pipefail
 
 # --- Config ---------------------------------------------------------------
-APP_NAME="Audiouted"
-EXECUTABLE="AudioutedApp"
-BUNDLE_ID="com.audiouted.Audiouted"
+APP_NAME="Audiouter"
+EXECUTABLE="AudiouterApp"
+BUNDLE_ID="com.audiouter.Audiouter"
 MIN_MACOS="13.0"
 # Human-readable marketing version and monotonic build number.
 APP_VERSION="0.1.0"
@@ -26,13 +26,13 @@ BUILD_NUMBER="1"
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
 # deciding, so it has to do the whole job.
-AUDIO_CAPTURE_USAGE="Audiouted needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
 
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$REPO_ROOT/AudioutedCore"
+PACKAGE_DIR="$REPO_ROOT/AudiouterCore"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
@@ -100,7 +100,7 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 # dylib into the process and inherit that grant. The hardened runtime makes dyld
 # ignore DYLD_* env vars, closing that vector — as long as we withhold the
 # allow-dyld-environment-variables entitlement (we do). Library validation is
-# deliberately DISABLED in scripts/Audiouted.entitlements because the app links
+# deliberately DISABLED in scripts/Audiouter.entitlements because the app links
 # Homebrew dylibs signed under a different Team ID (with it on, dyld aborts at
 # launch); the DYLD_INSERT protection does NOT depend on library validation. See
 # that file for the full rationale and the Phase 2 plan to re-enable it.
@@ -109,7 +109,7 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 # (inherited) options. The bundle currently has a single Mach-O; when helpers get
 # embedded, sign them explicitly inside-out before this line.
 echo "==> Ad-hoc codesigning (hardened runtime)"
-ENTITLEMENTS="$SCRIPT_DIR/Audiouted.entitlements"
+ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
 codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE"
 codesign --verify --strict --verbose "$APP_BUNDLE"

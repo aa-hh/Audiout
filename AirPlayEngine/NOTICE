@@ -88,6 +88,6 @@ This project combines:
 
 All components retain their original copyright notices and license text
 in the vendored source tree (`Sources/CAirPlayEngine/`). The combined
-linked work (AirPlayEngine + AudioutedCore + the app) is
+linked work (AirPlayEngine + AudiouterCore + the app) is
 GPL-2.0-or-later, per RESOLVED DECISIONS Q4 in `../PLAN-PHASE-2.md`. For
 the full GPL-2.0 text, see `COPYING` in this directory.

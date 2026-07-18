@@ -13,7 +13,7 @@ table for the new model.
 
 *2026-07-16. Approved by ahh. This is the single source of truth for the
 connection-status build. Implementation agents: read this whole file, plus the
-repo AGENTS.md and `AudioutedCore/AGENTS.md`, before touching code.*
+repo AGENTS.md and `AudiouterCore/AGENTS.md`, before touching code.*
 
 ## 0. Problem + approved design (context)
 
@@ -77,7 +77,7 @@ stays `setOutputSet`. No new `OutputBackend` protocol methods.
 
 ## 2. Core types (T1 — exact API)
 
-New file `AudioutedCore/Sources/AudioutedCore/ConnectionState.swift`:
+New file `AudiouterCore/Sources/AudiouterCore/ConnectionState.swift`:
 
 ```swift
 /// Live connection lifecycle of a device the app is (or was) routing to.
@@ -189,7 +189,7 @@ stub; diagnosis replacement (inject a fake `ConnectionDiagnosing`).
 
 ## 4. Diagnostics service (T3)
 
-New file `AudioutedCore/Sources/AudioutedCore/ConnectionDiagnostics.swift`.
+New file `AudiouterCore/Sources/AudiouterCore/ConnectionDiagnostics.swift`.
 `public struct NetworkConnectionDiagnostics: ConnectionDiagnosing` with
 injectable probe seams so unit tests never touch the network:
 
@@ -298,7 +298,7 @@ resolve-from-environment helper used by whoever constructs the mock.
 
 ## 7. Popover integration (T6 panel view, T7 wiring)
 
-### 7.1 `ConnectionDiagnosisView` (T6 — new file in AudioutedPopoverUI)
+### 7.1 `ConnectionDiagnosisView` (T6 — new file in AudiouterPopoverUI)
 Inset panel matching the mockup: warning-tinted rounded background
 (`NSColor.systemOrange.withAlphaComponent(0.12)`, radius 7, inset to align with
 the name column), containing: headline (`boldSystemFont(ofSize: 11)`), wrapping
@@ -352,7 +352,7 @@ as group expansion (see `GroupRowView`/panel expansion code).
 - Docs: SPEC.md §9 device-row table gains the status slot/sublabel/diagnosis
   panel rows + a short "Connection status & diagnostics (2026-07-16)" note
   (state machine, honest-toggle rule, sticky-failed, retry policy);
-  `AudioutedCore/AGENTS.md` updated if it describes the row anatomy or
+  `AudiouterCore/AGENTS.md` updated if it describes the row anatomy or
   backend event semantics.
 
 ## 9. Task ownership / file map (do not cross)
@@ -368,7 +368,7 @@ as group expansion (see `GroupRowView`/panel expansion code).
 | T7 | `PopoverController.swift`, `PopoverPanelViewController.swift`, `makeBackend` in `OwnToneBackend.swift`, `AppDelegate.swift` (if wiring needed), `PopoverControllerTests.swift`, `popover-harness` | — (integration owns the seams) |
 | T8 | `popover-snapshot`, SPEC.md, AGENTS.md files, PLAN notes | implementation files (report, don't fix) |
 
-Build/test from `AudioutedCore/`: `swift build`, `swift test`,
+Build/test from `AudiouterCore/`: `swift build`, `swift test`,
 `swift run popover-harness`. Never launch the real OwnTone server; never touch
 `dev/owntone/` state. GPL headers: match neighbouring files (SharedUI/PopoverUI
 files carry the SPDX header; core files currently don't — follow the directory's

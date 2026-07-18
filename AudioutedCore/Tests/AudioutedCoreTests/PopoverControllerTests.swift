@@ -37,6 +37,11 @@ final class PopoverControllerTests: XCTestCase {
         }
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
+        // A closed popover no longer rebuilds on `update(devices:)` (audit B8);
+        // the view tree is this suite's rendering surface, so run every test
+        // as if the popover were shown. Closed-state behavior has its own
+        // dedicated tests below.
+        popover.test_isShownOverride = true
         popover.update(devices: backend.devices)
         return (popover, controller, backend)
     }
@@ -315,6 +320,11 @@ final class PopoverControllerTests: XCTestCase {
         let popover = PopoverController()
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
+        // A closed popover no longer rebuilds on `update(devices:)` (audit B8);
+        // the view tree is this suite's rendering surface, so run every test
+        // as if the popover were shown. Closed-state behavior has its own
+        // dedicated tests below.
+        popover.test_isShownOverride = true
         popover.update(devices: backend.devices)
         return (popover, controller, backend)
     }
@@ -750,6 +760,42 @@ final class PopoverControllerTests: XCTestCase {
 
         XCTAssertNotNil(popover.test_deviceRow(for: "another-speaker"),
                         "device added while the popover is open still gets a row")
+    }
+
+    // MARK: Audit B8 — no rebuild while the popover is closed
+
+    /// While the popover is CLOSED, `update(devices:)` must not rebuild the
+    /// panel — under volume-key repeat while streaming, every backend event
+    /// echoing through here was a hidden full rebuild on the main thread.
+    func testUpdateWhileClosedDoesNotRebuild() async throws {
+        let (popover, _, backend) = try await makePopover()
+        popover.test_isShownOverride = false   // back to real closed-state semantics
+
+        let baseline = popover.test_rebuildCount
+        for _ in 0..<20 { popover.update(devices: backend.devices) }
+        XCTAssertEqual(popover.test_rebuildCount, baseline,
+                       "a closed popover ingests snapshots without rebuilding the view tree")
+    }
+
+    /// State ingested while closed must still render correctly on the next
+    /// open — `rebuildForOpen()` rebuilds from current state, so nothing is
+    /// lost by skipping the closed-state rebuilds.
+    func testStateIngestedWhileClosedRendersOnNextOpen() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let baselineCount = popover.test_deviceSectionRowCount
+        popover.test_isShownOverride = false
+
+        var devices = backend.devices
+        devices.append(Device(id: "closed-add", name: "Closed Add", kind: .generic))
+        popover.update(devices: devices)
+        XCTAssertNil(popover.test_deviceRow(for: "closed-add"),
+                     "no row is built while closed")
+
+        popover.test_simulateOpen()
+        XCTAssertNotNil(popover.test_deviceRow(for: "closed-add"),
+                        "the device ingested while closed has a row on the next open")
+        XCTAssertEqual(popover.test_deviceSectionRowCount, baselineCount + 1,
+                       "the open rebuild reflects the full closed-state snapshot")
     }
 
     // MARK: T-7 — running-app picker (PLAN decision 6)
@@ -1201,11 +1247,11 @@ final class PopoverControllerTests: XCTestCase {
                                                            runningAppsProvider: routedApps)
 
         // Intent alone (no live signal yet): the row shows the configured app name.
-        // `update(devices:)` fully rebuilds the row set while the popover is
-        // closed (every one of these tests' state, per `PopoverController.update`),
-        // so each check below re-fetches the row rather than holding a
-        // reference across a call — a held reference would go stale the moment
-        // rebuild() swaps in a fresh `DeviceRowView` instance.
+        // `update(devices:)` can fully rebuild the row set (route or device-set
+        // change under the shown-path semantics these tests run with), so each
+        // check below re-fetches the row rather than holding a reference across
+        // a call — a held reference would go stale the moment rebuild() swaps
+        // in a fresh `DeviceRowView` instance.
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
                        "intent-based label before any live signal arrives")
 

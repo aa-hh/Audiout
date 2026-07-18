@@ -47,6 +47,9 @@ final class DeviceRowUnsupportedTests: XCTestCase {
         let popover = PopoverController()
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
+        // Shown-path repaint semantics — a closed popover no longer rebuilds
+        // on `update(devices:)` (audit B8); see PopoverControllerTests.
+        popover.test_isShownOverride = true
         popover.update(devices: backend.devices)
         return (popover, controller, backend)
     }

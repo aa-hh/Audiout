@@ -304,10 +304,6 @@ duplicating tracking here would just drift.
 - **B7** — RESOLVED by the per-app-routing landing (the app-row volume
   handler now explicitly avoids the per-tick rebuild; its comment documents
   why). No further work needed.
-- **B8** — `PopoverController.swift`, rebuild while the popover is hidden —
-  `update(devices:)`'s not-shown branch still runs a full rebuild per
-  backend event; under volume-key repeat while streaming that is a hidden
-  rebuild storm on the main thread. Still open post-per-app-landing.
 - **B3–B6, B9, C1–C3** — phase-2/3 backlog items from the same audit pass;
   tracked in the scheduling system, not restated here to avoid two sources
   of truth.
@@ -321,6 +317,11 @@ duplicating tracking here would just drift.
   diagnosable trace.
 - **D2** — an uncaught-exception handler now leaves a breadcrumb before the
   process dies.
+- **B8** — `PopoverController.update(devices:)` no longer rebuilds while the
+  popover is closed: state is ingested, the view tree is left alone, and
+  `rebuildForOpen()` (which runs on every open) rebuilds from current state.
+  Headless tests exercise the shown-path repaint via `test_isShownOverride`;
+  closed-state no-rebuild + correct-on-next-open have dedicated tests.
 - **A1 (partial)** — an Objective-C exception shim was built on `main`;
   adoption in the per-app-routing branch is still pending. See
   `dev/notes/objc-exception-shim-handoff.md` for the handoff.

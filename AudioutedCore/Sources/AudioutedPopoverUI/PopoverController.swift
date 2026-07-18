@@ -385,7 +385,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // change (not just a route change) must force the same full rebuild path.
         // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
-        if popover.isShown {
+        if isEffectivelyShown {
             if routesChanged || deviceSetChanged {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
@@ -394,9 +394,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 refreshMainOutRow()
                 reconcileDiagnosisPanels(animated: true)
             }
-        } else {
-            rebuild()
         }
+        // Not shown: deliberately NO rebuild. Every open goes through
+        // `rebuildForOpen()` (see `toggle(relativeTo:)`), which rebuilds the whole
+        // panel from the state ingested above — a closed popover never needs a
+        // live view tree, and nothing reads it while closed (`statusMasterVolume`
+        // reads `groupController` directly). Rebuilding here made every backend
+        // event a hidden full rebuild storm under volume-key repeat (audit B8).
     }
 
     /// Store the latest CONFIRMED per-device streaming map (T9,
@@ -435,7 +439,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
         // Rebuild in place (not a reopen) so this open's transient collapse state
         // is preserved — same discipline as `applyRoutedApps`.
-        if popover.isShown {
+        if isEffectivelyShown {
             rebuild()
             panel.panelContentDidChangeHeight(animated: false)
         }
@@ -449,6 +453,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     // MARK: Show / hide
+
+    /// Headless test seam: an `NSPopover` can never actually show under `swift
+    /// test`, so tests flip this to exercise the shown-path repaint semantics
+    /// (the view tree IS the test suite's rendering surface). Production code
+    /// never sets it. `toggle(relativeTo:)` and `setPopoverAnimates` still key
+    /// off the real `popover.isShown` — this only affects repaint routing.
+    public var test_isShownOverride = false
+    private var isEffectivelyShown: Bool { popover.isShown || test_isShownOverride }
+
+    /// Total `rebuild()` calls, for tests asserting a closed popover does NOT
+    /// rebuild per backend event (audit B8).
+    public private(set) var test_rebuildCount = 0
 
     public func toggle(relativeTo button: NSStatusBarButton) {
         if popover.isShown {
@@ -499,6 +515,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Build
 
     public func rebuild() {
+        test_rebuildCount += 1
         deviceRowsByID.removeAll()
         // The mounted panel views die with their rows; the open-panel INTENT
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —

@@ -194,15 +194,18 @@ public final class ControlPanelWindowController: NSWindowController {
 
         if let anchor = anchorRect {
             let gap: CGFloat = ControlPanelBackingView.beakHeight + 2
-            var origin = NSPoint(x: anchor.maxX - size.width,
+            // CENTER on the anchor's midX, exactly like `NSPopover.show(relativeTo:
+            // of:preferredEdge:)` does — this is what actually replaces the popover
+            // at its real on-screen position (design feedback 2026-07-18b: pinning
+            // to the SCREEN's right edge only looked correct in the one screenshot
+            // where the icon happened to sit right at the screen edge; for any
+            // other icon position it drifted the panel away from where the
+            // popover really was). Clamped below so it still stays fully on
+            // screen if the icon sits near an edge.
+            var origin = NSPoint(x: anchor.midX - size.width / 2,
                                  y: anchor.minY - gap - size.height)
             if let screen = panel.screen ?? NSScreen.main {
                 let vf = screen.visibleFrame
-                // Match the popover's placement: right edge near the SCREEN edge
-                // (not pinned to the icon), body extending left — so the surface
-                // doesn't jump horizontally when it replaces the popover. The
-                // beak still points at the icon via `beakFraction` below.
-                origin.x = vf.maxX - size.width - 12
                 origin.x = min(max(vf.minX + 8, origin.x), vf.maxX - size.width - 8)
                 origin.y = max(vf.minY + 8, origin.y)
                 // Leave room for the backing window's beak strip ABOVE the

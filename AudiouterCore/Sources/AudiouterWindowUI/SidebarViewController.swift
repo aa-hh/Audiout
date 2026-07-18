@@ -98,7 +98,13 @@ public final class SidebarViewController: NSViewController {
         // full-width rows, and section-header styling.
         outlineView.style = .sourceList
         outlineView.floatsGroupRows = false
-        outlineView.rowSizeStyle = .default
+        // Medium row/icon size (design feedback 2026-07-18: `.default` felt
+        // visually small next to the detail pane's large header icon).
+        // `NSTableView.RowSizeStyle` alone only changes row HEIGHT — the icon
+        // column's own width/height constraint (`Self.iconSize` below) still
+        // has to be bumped to match, or the taller row just adds empty
+        // padding around a still-small glyph.
+        outlineView.rowSizeStyle = .medium
         outlineView.autosaveExpandedItems = false
         // Multi-select so the user can cmd/shift-click several speakers and make
         // a group from exactly those (SPEC.md §9). Headers stay non-selectable
@@ -387,7 +393,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         guard let node = item as? Node else { return nil }
         switch node.payload {
         case .header(let title):
-            return makeLabel(title, identifier: "header", secondary: true)
+            return makeHeaderLabel(title)
         case .emptyState(let text):
             return makeLabel(text, identifier: "emptyState", secondary: true)
         case .group(let group):
@@ -420,16 +426,71 @@ extension SidebarViewController: NSOutlineViewDelegate {
         return cell
     }
 
+    /// Section header cell ("Groups" / "Devices") — a DIFFERENT cell shape
+    /// from `makeLabel`/`newCell` on purpose (design feedback 2026-07-18c):
+    /// Finder's own sidebar headers sit flush-left with the ICON column
+    /// below them, not indented to the item TEXT column, and render slightly
+    /// bolder than a plain label. Reusing `newCell`'s icon+text layout (text
+    /// anchored past `imageView.trailingAnchor`) was what misaligned this —
+    /// headers need their own cell with the text pinned straight to
+    /// `cell.leadingAnchor`. The empty-state placeholder is NOT a header (it
+    /// occupies an ITEM row position under "Groups") and correctly keeps
+    /// `makeLabel`/`newCell`'s indentation — do not route it through this.
+    private func makeHeaderLabel(_ text: String) -> NSTableCellView {
+        let id = NSUserInterfaceItemIdentifier("header")
+        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
+            ?? Self.newHeaderCell(identifier: id)
+        cell.textField?.stringValue = text
+        return cell
+    }
+
+    private static func newHeaderCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.identifier = identifier
+
+        let textField = NSTextField(labelWithString: "")
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        // Matches Finder's own sidebar section-header weight — a plain
+        // `NSTextField(labelWithString:)` label reads noticeably thinner.
+        textField.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        textField.textColor = .secondaryLabelColor
+        textField.lineBreakMode = .byTruncatingTail
+        cell.addSubview(textField)
+        cell.textField = textField
+
+        NSLayoutConstraint.activate([
+            // Flush with the ICON column start below it — NOT offset past an
+            // icon width like an item row's text (that offset is what made
+            // "Devices" read as indented relative to the device icons under it).
+            textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
     private func makeIconLabel(symbol: String, text: String, identifier: String, dimmed: Bool = false) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier(identifier)
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
             ?? Self.newCell(identifier: id)
         cell.imageView?.isHidden = false
-        cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
+        // Force flat monochrome rendering (design feedback 2026-07-18: some SF
+        // Symbols default to a lighter hierarchical secondary tone, which read
+        // as an unwanted "highlight" on the glyph) — a single, controlled dark
+        // fill instead, via `.isTemplate` + an explicit `contentTintColor`.
+        image?.isTemplate = true
+        cell.imageView?.image = image
+        cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : .labelColor
         cell.textField?.stringValue = text
         cell.textField?.textColor = dimmed ? .disabledControlTextColor : .labelColor
         return cell
     }
+
+    /// Icon side length matching the outline view's `.medium` `rowSizeStyle`
+    /// (design feedback 2026-07-18: 18pt read as visually small next to the
+    /// detail pane's large header icon).
+    private static let iconSize: CGFloat = 22
 
     private static func newCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
         let cell = NSTableCellView()
@@ -449,10 +510,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         NSLayoutConstraint.activate([
             imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 18),
-            imageView.heightAnchor.constraint(equalToConstant: 18),
+            imageView.widthAnchor.constraint(equalToConstant: iconSize),
+            imageView.heightAnchor.constraint(equalToConstant: iconSize),
 
-            textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 6),
+            textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
             textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])

@@ -36,6 +36,18 @@ final class PopoverPanelViewController: NSViewController {
         let label: String
         /// Tapped handler.
         let action: () -> Void
+        /// Whether the accessory button starts enabled (F1 support — a card's
+        /// accessory can go inert in place, later, via
+        /// `setAccessoryEnabled(title:enabled:)`, without rebuilding the card).
+        /// Defaults to `true` so existing call sites are unaffected.
+        let isEnabled: Bool
+
+        init(symbol: String, label: String, action: @escaping () -> Void, isEnabled: Bool = true) {
+            self.symbol = symbol
+            self.label = label
+            self.action = action
+            self.isEnabled = isEnabled
+        }
     }
 
     weak var controller: PopoverController?
@@ -55,6 +67,16 @@ final class PopoverPanelViewController: NSViewController {
     private var cardsByHeader: [String: CardView] = [:]
     /// Chevron buttons keyed by section title (for symbol flips + assertions).
     private var chevronsByHeader: [String: NSButton] = [:]
+    /// Whole-header-row click recognizers keyed by section title (C4 — the
+    /// entire `headerWrap` row is a collapse click target, not just the
+    /// chevron + title; kept for the `test_fireHeaderClick` hook).
+    private var headerClickRecognizersByHeader: [String: NSClickGestureRecognizer] = [:]
+    /// Header accessory buttons keyed by section title (F1 — so the host can
+    /// enable/disable one in place via `setAccessoryEnabled` without a rebuild).
+    private var accessoryButtonsByHeader: [String: NSButton] = [:]
+    /// Card-note labels (`addCardNote`) keyed by section title, in add order
+    /// (A1 test hook).
+    private var notesByHeader: [String: [NSTextField]] = [:]
     /// The SF Symbol name currently assigned to each chevron (there's no public
     /// getter for an `NSImage`'s symbol name pre-macOS-14, so we track it for the
     /// chevron-flip test hook — set wherever the chevron image is assigned).
@@ -215,6 +237,9 @@ final class PopoverPanelViewController: NSViewController {
         chevronsByHeader.removeAll()
         chevronSymbolByHeader.removeAll()
         pendingCollapsed.removeAll()
+        headerClickRecognizersByHeader.removeAll()
+        accessoryButtonsByHeader.removeAll()
+        notesByHeader.removeAll()
     }
 
     /// Start a new section **card** whose FIRST element is a single combined
@@ -238,12 +263,21 @@ final class PopoverPanelViewController: NSViewController {
     /// of the module header (task D — the Groups section's "+" / New group). The
     /// button's `accessibilityLabel`/`toolTip` are set from `accessory.label`.
     ///
-    /// **Collapsible cards (T-4, PLAN-POPOVER-ROUTING.md decision 5 + §E risk 1).**
-    /// When `collapsible` is true the header row gains a leading disclosure chevron
+    /// **Collapsible cards (T-4, PLAN-POPOVER-ROUTING.md decision 5 + §E risk 1;
+    /// whole-header click target — C4 LOCKED DECISION, 2026-07-18).** When
+    /// `collapsible` is true the header row gains a leading disclosure chevron
     /// (`chevron.down` expanded / `chevron.right` collapsed, per `GroupRowView`'s
-    /// precedent) placed LEFT of the section title, and BOTH the chevron and the
-    /// title label become click targets that call `onToggle` (the rest of the
-    /// header — column headers, accessory — stays inert). `collapsed` is the
+    /// precedent) placed LEFT of the section title, and the ENTIRE `headerWrap`
+    /// row — chevron, title, AND the column-header labels — is a click target
+    /// that calls `onToggle`: an `NSClickGestureRecognizer` on `headerWrap` itself
+    /// forwards to the same closure the chevron's target/action uses. The
+    /// chevron keeps its own working click (a button subview claims its own
+    /// click before an ancestor's gesture recognizer ever sees it, so it isn't
+    /// double-toggled), and the trailing accessory stays the one INERT control
+    /// for the same reason — it's a button too, so its tap is consumed before
+    /// reaching `headerWrap`'s recognizer. Column headers, by contrast, are
+    /// plain (non-control) labels, so a click there falls through to the
+    /// recognizer and DOES toggle — accepted, not a bug. `collapsed` is the
     /// INITIAL state: the card body is laid out collapsed (height 0, hidden) with
     /// no animation. The parameters default so existing (non-collapsible) call
     /// sites compile and behave exactly as before. The host owns the collapse
@@ -301,12 +335,6 @@ final class PopoverPanelViewController: NSViewController {
             ])
             titleLeadingAnchor = chevron.trailingAnchor
             titleLeadingConstant = 4
-
-            // The title label is ALSO a click target (decision 5). A label isn't a
-            // control, so a click-recognizer forwards its click to the same toggle.
-            let click = NSClickGestureRecognizer(target: onChevron,
-                                                 action: #selector(ClosureActionTarget.fire))
-            label.addGestureRecognizer(click)
             chevronsByHeader[header] = chevron
             assignChevron(chevron, collapsed: collapsed, for: header)
         } else {
@@ -344,16 +372,19 @@ final class PopoverPanelViewController: NSViewController {
         }
 
         if let accessory {
-            // Dead code: nothing currently constructs a `HeaderAccessory`, so this
-            // path never runs. Kept building for whenever a caller adopts it;
-            // styled with the same stock bezel (`bezelStyle = .smallSquare`) as
-            // the header icon buttons (`PopoverHeaderView`).
+            // The trailing header accessory (task D — the Groups "+"; F1 — the
+            // button is kept alive and keyed by header title so the host can
+            // enable/disable it in place later via `setAccessoryEnabled`, without
+            // rebuilding the card). Styled with the same stock bezel
+            // (`bezelStyle = .smallSquare`) as the header icon buttons
+            // (`PopoverHeaderView`).
             let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .smallSquare
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.contentTintColor = .secondaryLabelColor
+            button.isEnabled = accessory.isEnabled
             // System-rendered template SF Symbol (task D — `plus`), verified
             // non-nil with a graceful fallback.
             for name in [accessory.symbol, "plus"] {
@@ -381,6 +412,24 @@ final class PopoverPanelViewController: NSViewController {
                 button.widthAnchor.constraint(equalToConstant: 24),
                 button.heightAnchor.constraint(equalToConstant: 22),
             ])
+            accessoryButtonsByHeader[header] = button
+        }
+
+        // C4 LOCKED DECISION: the whole `headerWrap` row is the collapse click
+        // target (see the doc comment above), not just the chevron + title. One
+        // `NSClickGestureRecognizer` on `headerWrap` forwards to `onToggle`; the
+        // chevron and accessory buttons above claim their own clicks first (an
+        // ancestor's gesture recognizer does not intercept a click that lands on
+        // an `NSButton` subview), so neither is double-toggled and the accessory
+        // never toggles the card.
+        if collapsible {
+            let onHeaderClick = ClosureActionTarget { onToggle?() }
+            let headerClick = NSClickGestureRecognizer(target: onHeaderClick,
+                                                        action: #selector(ClosureActionTarget.fire))
+            headerWrap.addGestureRecognizer(headerClick)
+            objc_setAssociatedObject(headerWrap, &Self.actionTargetKey, onHeaderClick,
+                                     .OBJC_ASSOCIATION_RETAIN)
+            headerClickRecognizersByHeader[header] = headerClick
         }
 
         card.addRow(headerWrap)
@@ -397,6 +446,14 @@ final class PopoverPanelViewController: NSViewController {
         // synchronously (non-animated) once the body exists — the header alone has
         // nothing to collapse yet.
         if collapsible { pendingCollapsed[header] = collapsed }
+    }
+
+    /// Enable/disable the header accessory button for `title` in place (F1 — a
+    /// card's accessory, e.g. the Groups "+", can go inert while its action's
+    /// precondition isn't met), without rebuilding the card. No-op if `title`
+    /// has no accessory button.
+    func setAccessoryEnabled(title: String, enabled: Bool) {
+        accessoryButtonsByHeader[title]?.isEnabled = enabled
     }
 
     /// Add a content row (Main Out row, group header, device row) into the
@@ -538,12 +595,15 @@ final class PopoverPanelViewController: NSViewController {
     }
 
     /// Add a small subsection header ("Current Device" / "AirPlay Devices")
-    /// INSIDE the current card (SPEC §9b split).
+    /// INSIDE the current card (SPEC §9b split). Tertiary label color (V10,
+    /// 2026-07-18): a grouping label sits one step below the uppercase column
+    /// headers (`makeColumnHeaderLabel`, still secondary), so it reads as a
+    /// quieter sub-level in the hierarchy rather than competing with them.
     func addSubsectionHeader(_ title: String) {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        label.textColor = .secondaryLabelColor
+        label.textColor = .tertiaryLabelColor
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
@@ -553,6 +613,36 @@ final class PopoverPanelViewController: NSViewController {
             label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
         ])
         addRow(wrapper)
+    }
+
+    /// Render a small single-line annotation row INSIDE the current card — e.g.
+    /// the Devices card's "Inactive — Audio Out is using '<group>'" dormancy
+    /// annotation (A1; the host supplies `text`). Mounted with `card.addRow`, a
+    /// HEADER row, NOT `addRow`'s collapsible body — so the note stays visible
+    /// even when the card's body collapses. No-op if there's no current card.
+    func addCardNote(_ text: String) {
+        guard let card = currentCard else { return }
+        let label = NSTextField(labelWithString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .tertiaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(label)
+        NSLayoutConstraint.activate([
+            wrapper.heightAnchor.constraint(equalToConstant: 18),
+            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor,
+                                           constant: PopoverColumnGrid.leadingInset),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
+                                            constant: -PopoverColumnGrid.leadingInset),
+            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+        ])
+        card.addRow(wrapper)
+        if let header = cardsByHeader.first(where: { $0.value === card })?.key {
+            notesByHeader[header, default: []].append(label)
+        }
     }
 
     /// Wire the header bar's three icon buttons (task A + the Quit button that
@@ -605,12 +695,58 @@ final class PopoverPanelViewController: NSViewController {
     func test_cardChevronSymbolName(title: String) -> String? {
         chevronSymbolByHeader[title]
     }
+
+    // MARK: Whole-header click test hooks (C4)
+
+    /// Fire the whole-header-row collapse click for `title` exactly as a real
+    /// click landing anywhere on the header row OTHER than a button (chevron or
+    /// accessory) would — drives the `NSClickGestureRecognizer` added in
+    /// `beginCard` via its own target/action. Returns whether `title` has a
+    /// collapsible header (and so a recognizer) to fire.
+    @discardableResult
+    func test_fireHeaderClick(title: String) -> Bool {
+        guard let recognizer = headerClickRecognizersByHeader[title],
+              let action = recognizer.action,
+              let target = recognizer.target as? NSObjectProtocol else { return false }
+        target.perform(action)
+        return true
+    }
+
+    // MARK: Header accessory test hooks (F1)
+
+    /// Whether the header accessory button for `title` is currently enabled.
+    /// `nil` if `title` has no accessory button.
+    func test_accessoryEnabled(title: String) -> Bool? {
+        accessoryButtonsByHeader[title]?.isEnabled
+    }
+
+    /// Fire the header accessory button's own action for `title`, the same way a
+    /// real click on it would — proves an accessory click reaches ONLY the
+    /// accessory's action, never the card's `onToggle` (C4 requirement (b)).
+    /// Returns whether `title` has an accessory button to fire.
+    @discardableResult
+    func test_fireAccessoryAction(title: String) -> Bool {
+        guard let button = accessoryButtonsByHeader[title],
+              let action = button.action,
+              let target = button.target as? NSObjectProtocol else { return false }
+        target.perform(action)
+        return true
+    }
+
+    // MARK: Card-note test hooks (A1)
+
+    /// The note labels added via `addCardNote` for `title`, in add order. Empty
+    /// if none were added or `title` isn't a card.
+    func test_cardNotes(title: String) -> [NSTextField] {
+        notesByHeader[title] ?? []
+    }
 }
 
 /// A tiny reference target that forwards a target/action click (a chevron button
-/// tap or a title-label click gesture) to a stored closure — the disclosure
-/// toggle. Retained via an associated object on its owning control so it lives as
-/// long as the control (T-4; the closure captures the controller's `onToggle`).
+/// tap, the whole-header-row click gesture, or an accessory button tap) to a
+/// stored closure — the disclosure toggle or the accessory's own handler.
+/// Retained via an associated object on its owning control so it lives as long
+/// as the control (T-4; the closure captures the controller's `onToggle`).
 private final class ClosureActionTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }

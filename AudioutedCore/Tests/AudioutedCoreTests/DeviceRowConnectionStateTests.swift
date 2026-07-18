@@ -313,4 +313,123 @@ final class DeviceRowConnectionStateTests: XCTestCase {
         XCTAssertTrue(row.test_isEnabledOn)
         XCTAssertEqual(row.test_statusText, "System · Safari")
     }
+
+    // MARK: V1 — mute tint (accent while muted, secondary otherwise)
+
+    func testMuteTintIsAccentWhenMutedViaApply() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: true)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        XCTAssertEqual(row.test_muteTintColor, .controlAccentColor, "apply() lands the accent tint while muted")
+    }
+
+    func testMuteTintIsSecondaryWhenUnmutedViaApply() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        XCTAssertEqual(row.test_muteTintColor, .secondaryLabelColor, "unmuted reads as the neutral secondary tint")
+    }
+
+    func testMuteTintUpdatesInstantlyOnLiveClick() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+        XCTAssertEqual(row.test_muteTintColor, .secondaryLabelColor)
+
+        // `test_toggleMute` drives the exact same path a real click does
+        // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
+        // — the tint must update WITHOUT waiting for a host-driven `apply`.
+        row.test_toggleMute(true)
+        XCTAssertEqual(row.test_muteTintColor, .controlAccentColor, "a live click updates the tint instantly")
+
+        row.test_toggleMute(false)
+        XCTAssertEqual(row.test_muteTintColor, .secondaryLabelColor, "toggling back off reverts the tint instantly")
+    }
+
+    // MARK: V7 — the `%` readout dims with the slider's disabled state
+
+    func testReadoutDimsWhenSliderDisabled() {
+        // Not controllable ⇒ slider disabled ⇒ readout should read tertiary.
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false, controllable: false)
+
+        XCTAssertFalse(row.test_isSliderEnabled)
+        XCTAssertEqual(row.test_readoutColor, .tertiaryLabelColor, "readout dims alongside a disabled slider")
+    }
+
+    func testReadoutIsSecondaryWhenSliderEnabled() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        XCTAssertTrue(row.test_isSliderEnabled)
+        XCTAssertEqual(row.test_readoutColor, .secondaryLabelColor, "readout is the normal secondary color when enabled")
+    }
+
+    // MARK: V12 — a blocked toggle greys the device name
+
+    func testBlockedToggleGreysDeviceName() {
+        let device = Device(id: "local", name: "This Mac", kind: .localMac)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false, blocked: true, blockReason: "blocked")
+
+        XCTAssertEqual(row.test_nameColor, .tertiaryLabelColor,
+                       "a blocked row's name greys out consistently with its disabled toggle")
+    }
+
+    // MARK: A5 — slider stays live while muted (mute ≠ frozen volume)
+
+    func testSliderStaysEnabledWhileMuted() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: true)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        XCTAssertTrue(row.test_isSliderEnabled, "a muted device's slider stays draggable")
+    }
+
+    // MARK: A1 — selectionDimmed dims the checkbox without disabling it
+
+    func testSelectionDimmedDimsCheckboxButKeepsItInteractive() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false, selectionDimmed: true)
+
+        XCTAssertTrue(row.test_isSelectionDimmed, "the checkbox renders dimmed")
+        XCTAssertFalse(row.test_isEnabledOn)
+
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.test_toggleEnabled(true)
+        XCTAssertEqual(delegate.toggledOn, true, "still fully interactive while dimmed — decision: dim, don't disable")
+    }
+
+    func testSelectionNotDimmedByDefault() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false)
+
+        XCTAssertFalse(row.test_isSelectionDimmed, "existing callers that omit selectionDimmed are unaffected")
+    }
+
+    // MARK: A4 — flashRow(), gated on Reduce Motion
+
+    func testFlashRowMatchesReduceMotionSetting() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false)
+        XCTAssertFalse(row.test_isFlashing, "no flash before flashRow() is called")
+
+        row.test_flashRow()
+
+        // The guard inside `flashRow()` is `!accessibilityDisplayShouldReduceMotion`
+        // — assert the hook's outcome matches that same live system flag, which
+        // is exactly the branch under test (no way to force the OS setting from
+        // a headless unit test, so this pins the mapping rather than one outcome).
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        XCTAssertEqual(row.test_isFlashing, !reduceMotion,
+                       "flashRow() is a no-op under Reduce Motion, and fires otherwise")
+    }
 }

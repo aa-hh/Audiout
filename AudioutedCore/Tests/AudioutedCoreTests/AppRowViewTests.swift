@@ -17,6 +17,7 @@ final class AppRowViewTests: XCTestCase {
         var removedAppID: String?
         var selectRequestedAppID: String?
         var selectRequestCount = 0
+        var lastMove: (appID: String, direction: AppRowView.MoveDirection)?
 
         func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
             lastVolume = (appID, volume)
@@ -30,6 +31,9 @@ final class AppRowViewTests: XCTestCase {
         func appRow(_ row: AppRowView, didRequestSelect appID: String) {
             selectRequestedAppID = appID
             selectRequestCount += 1
+        }
+        func appRow(_ row: AppRowView, didRequestMoveSelection direction: AppRowView.MoveDirection, for appID: String) {
+            lastMove = (appID, direction)
         }
     }
 
@@ -304,6 +308,190 @@ final class AppRowViewTests: XCTestCase {
         row.test_pressBackspace()
         XCTAssertEqual(delegate.removedAppID, "com.example.app",
                        "Backspace (keyCode 51) must fire didRemoveFor via the real key path")
+    }
+
+    // MARK: Keyboard selection movement (V14) — Up/Down arrow on the selected row
+
+    func testPressUpArrowFiresDidRequestMoveSelectionUpViaRealKeyPath() {
+        let (row, delegate) = makeRow()
+        row.test_pressUpArrow()
+        XCTAssertEqual(delegate.lastMove?.appID, "com.example.app",
+                       "Up arrow must fire didRequestMoveSelection via the real key path")
+        XCTAssertEqual(delegate.lastMove?.direction, .up)
+    }
+
+    func testPressDownArrowFiresDidRequestMoveSelectionDownViaRealKeyPath() {
+        let (row, delegate) = makeRow()
+        row.test_pressDownArrow()
+        XCTAssertEqual(delegate.lastMove?.appID, "com.example.app",
+                       "Down arrow must fire didRequestMoveSelection via the real key path")
+        XCTAssertEqual(delegate.lastMove?.direction, .down)
+    }
+
+    /// A `Delegate` conformer that doesn't implement `didRequestMoveSelection`
+    /// must still compile and simply no-op — proves the default extension.
+    private final class LegacyDelegate: AppRowView.Delegate {
+        var removedAppID: String?
+        func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {}
+        func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String) {}
+        func appRow(_ row: AppRowView, didRemoveFor appID: String) { removedAppID = appID }
+        func appRow(_ row: AppRowView, didRequestSelect appID: String) {}
+    }
+
+    func testLegacyDelegateWithoutMoveSelectionCompilesAndNoOps() {
+        let row = AppRowView()
+        let legacy = LegacyDelegate()
+        row.delegate = legacy
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: "local", destinations: makeDestinations()
+        ))
+        row.test_pressUpArrow()
+        row.test_pressDownArrow()
+        row.test_remove()
+        XCTAssertEqual(legacy.removedAppID, "com.example.app",
+                       "the default no-op must not interfere with other delegate calls")
+    }
+
+    // MARK: Row density unification (V6)
+
+    func testRowHeightMatchesUnifiedBodyRowHeight() {
+        XCTAssertEqual(AppRowView.rowHeight, PopoverColumnGrid.bodyRowHeight,
+                       "AppRowView's density unifies with DeviceRowView per PopoverColumnGrid.bodyRowHeight")
+    }
+
+    // MARK: Unified hover/selection wash tokens (V3/V8)
+
+    func testNoHighlightWhenNeitherSelectedNorHovered() {
+        let (row, _) = makeRow()
+        XCTAssertNil(row.test_highlightAlpha)
+    }
+
+    func testSelectionWashUsesUnifiedSelectionAlpha() {
+        let (row, _) = makeRow()
+        row.test_setSelected(true)
+        XCTAssertEqual(row.test_highlightAlpha, PopoverColumnGrid.rowSelectionWashAlpha)
+    }
+
+    func testHoverWashUsesUnifiedHoverAlpha() {
+        let (row, _) = makeRow()
+        row.test_setHovered(true)
+        XCTAssertEqual(row.test_highlightAlpha, PopoverColumnGrid.rowHoverWashAlpha)
+    }
+
+    func testSelectionWashTakesPriorityOverHoverWash() {
+        let (row, _) = makeRow()
+        row.test_setSelected(true)
+        row.test_setHovered(true)
+        XCTAssertEqual(row.test_highlightAlpha, PopoverColumnGrid.rowSelectionWashAlpha,
+                       "selection must win when both selected and hovered")
+    }
+
+    // MARK: Readout tertiary/secondary colour (V7)
+
+    func testReadoutIsTertiaryWhenDestinationIsNoRedirect() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        XCTAssertEqual(row.test_readoutTextColor, .tertiaryLabelColor,
+                       "the % readout must dim to tertiary while No Redirect is selected")
+    }
+
+    func testReadoutIsSecondaryWhenDestinationIsCurrentDevice() {
+        let (row, _) = makeRow(selected: "local")
+        XCTAssertEqual(row.test_readoutTextColor, .secondaryLabelColor)
+    }
+
+    func testReadoutIsSecondaryWhenRedirected() {
+        let (row, _) = makeRow(selected: "device-1")
+        XCTAssertEqual(row.test_readoutTextColor, .secondaryLabelColor)
+    }
+
+    // MARK: Destination subtitle microcopy (A3)
+
+    private func makeSubtitledDestinations() -> [AppRowView.Destination] {
+        [
+            AppRowView.Destination(id: "no-redirect", title: "No Redirect", isLocal: true,
+                                   symbolName: nil, isStandalone: true,
+                                   subtitle: "Plays in the whole-system mix"),
+            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+                                   symbolName: "laptopcomputer", subtitle: "Plays on this Mac"),
+            AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
+                                   symbolName: "airplayaudio"),
+        ]
+    }
+
+    private func makeRowWithSubtitles(selected: String = "local") -> (AppRowView, RecordingDelegate) {
+        let row = AppRowView()
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: selected, destinations: makeSubtitledDestinations()
+        ))
+        return (row, delegate)
+    }
+
+    func testSubtitleSetsToolTipOnDestinationPopUpMenuItem() {
+        let (row, _) = makeRowWithSubtitles()
+        XCTAssertEqual(row.test_destinationPopUpMenuItem(forDestinationID: "local")?.toolTip,
+                       "Plays on this Mac")
+        XCTAssertEqual(row.test_destinationPopUpMenuItem(forDestinationID: "no-redirect")?.toolTip,
+                       "Plays in the whole-system mix")
+    }
+
+    func testEntryWithoutSubtitleHasNoToolTipOrAttributedTitle() {
+        let (row, _) = makeRowWithSubtitles()
+        let item = row.test_destinationPopUpMenuItem(forDestinationID: "device-1")
+        XCTAssertNil(item?.toolTip)
+        XCTAssertNil(item?.attributedTitle)
+    }
+
+    func testDestinationPopUpMenuItemKeepsPlainTitleEvenWithSubtitle() {
+        // The trailing popup mirrors its SELECTED item's attributedTitle for
+        // its own collapsed display, so items feeding it must never get one —
+        // otherwise a multi-line title+subtitle would corrupt the popup's own
+        // (closed) label.
+        let (row, _) = makeRowWithSubtitles()
+        let item = row.test_destinationPopUpMenuItem(forDestinationID: "local")
+        XCTAssertNil(item?.attributedTitle,
+                     "the popup's own menu items must stay plain-titled")
+        XCTAssertEqual(item?.title, "Current Device")
+    }
+
+    func testRouteToContextSubmenuRendersAttributedSubtitle() {
+        // The "Route to" context-menu submenu never collapses into a button,
+        // so it's free to show the subtitle as a second attributed line.
+        let (row, _) = makeRowWithSubtitles()
+        let item = row.test_routeToMenuItem(forDestinationID: "local")
+        XCTAssertNotNil(item?.attributedTitle,
+                        "the context menu's Route to submenu may render an attributed subtitle")
+        XCTAssertEqual(item?.attributedTitle?.string, "Current Device\nPlays on this Mac")
+        XCTAssertEqual(item?.toolTip, "Plays on this Mac")
+    }
+
+    func testRouteToContextSubmenuEntryWithoutSubtitleStaysPlain() {
+        let (row, _) = makeRowWithSubtitles()
+        let item = row.test_routeToMenuItem(forDestinationID: "device-1")
+        XCTAssertNil(item?.attributedTitle)
+        XCTAssertNil(item?.toolTip)
+    }
+
+    // MARK: Cursor (C3) — pointingHand over the selectable body dead-zone
+
+    func testCursorRectsCoverBodyDeadZone() {
+        let (row, _) = makeRow()
+        let rects = row.test_selectableCursorRects()
+        let bodyPoint = NSPoint(x: PopoverColumnGrid.leadingInset + 4, y: AppRowView.rowHeight / 2)
+        XCTAssertTrue(rects.contains { $0.contains(bodyPoint) },
+                     "the icon/name dead-zone must get the pointingHand cursor")
+    }
+
+    func testCursorRectsExcludeSliderColumn() {
+        let (row, _) = makeRow()
+        let rects = row.test_selectableCursorRects()
+        let sliderColumnPoint = NSPoint(x: row.bounds.width - PopoverColumnGrid.sliderTrailing - 10,
+                                        y: AppRowView.rowHeight / 2)
+        XCTAssertFalse(rects.contains { $0.contains(sliderColumnPoint) },
+                       "the slider's own column must not get the row's pointingHand cursor")
     }
 
 }

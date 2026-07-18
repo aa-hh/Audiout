@@ -69,7 +69,10 @@ public final class DeviceRowView: NSView {
     /// before the status sublabel — brief §6 sanctions bumping this constant
     /// once a second text line needs the room, which it does: two 10pt lines
     /// plus their line gap don't fit 38pt without crowding the slider/switch).
-    public static let rowHeight: CGFloat = 42
+    /// Now sourced from `PopoverColumnGrid.bodyRowHeight` (2026-07-18 unification
+    /// with `AppRowView`'s row height) rather than a private literal — both row
+    /// types share one body-row dimension.
+    public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
     // (See `DeviceRowView.Delegate` extension at file end for the
     // `didToggleEnabled` default no-op.)
@@ -216,6 +219,11 @@ public final class DeviceRowView: NSView {
     ///   - blocked: whether the membership toggle should be disabled (Phase-1
     ///     local-mix block) — greyed with `blockReason` as a tooltip.
     ///   - blockReason: tooltip text shown when `blocked` is true.
+    ///   - selectionDimmed: dims the "Selected Devices" checkbox (alpha ~0.4)
+    ///     without disabling it — DECISION: a dimmed row's checkbox stays fully
+    ///     interactive; this is a visual de-emphasis only (e.g. a filtered/greyed
+    ///     list context), never a disablement. Defaults to `false` so existing
+    ///     callers are unaffected.
     ///   - routedAppNames: the bypassed-app display names routed to THIS device
     ///     (the routing set's app tokens only, in stable route order). Does NOT
     ///     include the "System" token — the view synthesizes "System" itself from
@@ -238,6 +246,7 @@ public final class DeviceRowView: NSView {
                       controllable: Bool = false,
                       blocked: Bool = false,
                       blockReason: String? = nil,
+                      selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = []) {
         self.device = device
@@ -258,6 +267,9 @@ public final class DeviceRowView: NSView {
         enableCheckbox.toolTip = isUnsupported
             ? Self.unsupportedExplanation
             : ((showsToggle && blocked) ? blockReason : nil)
+        // A1: dim, don't disable — `isEnabled` above is untouched by
+        // `selectionDimmed`, only the alpha is.
+        enableCheckbox.alphaValue = selectionDimmed ? Self.selectionDimmedAlpha : 1.0
 
         iconView.image = NSImage(
             systemSymbolName: device.kind.symbolName,
@@ -304,17 +316,42 @@ public final class DeviceRowView: NSView {
         // backend never `addOutput`s it, so it's never actually an output — that
         // veto outranks `controllable` (a stale app route can name an AP1-only
         // device, which would otherwise hand it a live-looking slider).
-        slider.isEnabled = device.isAvailable && controllable && !device.isMuted && !isUnsupported
+        //
+        // A5: mute ≠ frozen volume — a muted device's slider stays draggable
+        // (dropped the old `!device.isMuted` term) so the user can set the level
+        // they'll hear the moment they unmute, instead of the slider going dark
+        // the instant they mute.
+        slider.isEnabled = device.isAvailable && controllable && !isUnsupported
         muteButton.isEnabled = device.isAvailable && controllable && !isUnsupported
         muteButton.state = device.isMuted ? .on : .off
+        updateMuteTint()
+        // V7: the `%` readout dims in lockstep with the slider's enabled state —
+        // a disabled/unavailable slider reads as fully de-emphasized, not just
+        // its track.
+        readoutLabel.textColor = slider.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
 
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
 
+    /// Updates the mute button's tint colour for the current `muteButton.state`
+    /// (V1) — `.on` (muted) reads as an accent-tinted glyph, `.off` as the
+    /// neutral secondary tint. Mirrors `MainOutRowView.updateMuteTint()`: the
+    /// glyph itself never changes (no alternate/slash image), only its tint.
+    /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
+    /// both paths land the same tint instantly.
+    private func updateMuteTint() {
+        muteButton.contentTintColor = muteButton.state == .on ? .controlAccentColor : .secondaryLabelColor
+    }
+
     /// The "coming soon" explanation text (T-UI-AP1-1, PLAN-PHASE-2B D6) — used
     /// both as the disabled-toggle tooltip and as the transient popover's body.
     public static let unsupportedExplanation = "AirPlay 1 support is coming soon."
+
+    /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
+    /// (A1) — a visual de-emphasis, not a disablement (the checkbox stays
+    /// `isEnabled` and interactive at this alpha).
+    private static let selectionDimmedAlpha: CGFloat = 0.4
 
     /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
     private static let routingTokenSeparator = " · "
@@ -616,6 +653,10 @@ public final class DeviceRowView: NSView {
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
+        // AppKit has already flipped `sender.state` (pushOnPushOff) by the time
+        // the action fires, so this lands the tint instantly on a live click
+        // rather than waiting for the next host-driven `apply`.
+        updateMuteTint()
         delegate?.deviceRow(self, didToggleMute: sender.state == .on, for: device.id)
     }
 
@@ -636,11 +677,14 @@ public final class DeviceRowView: NSView {
     }
 
     /// The name/label colour for the current state: menu highlight wins, then a
-    /// dropped device greys out, then a not-selected device de-emphasizes (it's
-    /// not in the Selected Devices set), then normal.
+    /// dropped device greys out, then a blocked toggle (Phase-1 local-mix block)
+    /// greys the name too (V12 — the row reads consistently de-emphasized while
+    /// its membership control can't be touched), then a not-selected device
+    /// de-emphasizes (it's not in the Selected Devices set), then normal.
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
         if !device.isAvailable { return .disabledControlTextColor }
+        if isToggleBlocked { return .tertiaryLabelColor }
         return isSelectedInSet ? .labelColor : .secondaryLabelColor
     }
 
@@ -656,8 +700,13 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didSetVolume: volume, for: device.id)
     }
 
-    /// Simulate the user toggling this row's mute button.
+    /// Simulate the user toggling this row's mute button — flips
+    /// `muteButton.state` and lands the V1 tint via `updateMuteTint()` exactly
+    /// as a real click does (AppKit flips the `pushOnPushOff` state before
+    /// `muteToggled(_:)` fires), then drives the same delegate path.
     public func test_toggleMute(_ muted: Bool) {
+        muteButton.state = muted ? .on : .off
+        updateMuteTint()
         delegate?.deviceRow(self, didToggleMute: muted, for: device.id)
     }
 
@@ -720,6 +769,32 @@ public final class DeviceRowView: NSView {
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
+    /// The mute button's current tint (V1) — `.controlAccentColor` while muted,
+    /// `.secondaryLabelColor` otherwise. The glyph itself never changes; only
+    /// this tint does.
+    public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
+
+    /// The `%` readout's current text colour (V7) — dims to `.tertiaryLabelColor`
+    /// in lockstep with the slider's disabled state, `.secondaryLabelColor`
+    /// otherwise.
+    public var test_readoutColor: NSColor? { readoutLabel.textColor }
+
+    /// Whether the volume slider is currently enabled (A5) — stays enabled while
+    /// the device is muted (mute ≠ frozen volume); only availability/
+    /// controllability/unsupported-ness gate it.
+    public var test_isSliderEnabled: Bool { slider.isEnabled }
+
+    /// Whether the "Selected Devices" checkbox is currently rendered dimmed (A1)
+    /// — a visual de-emphasis (alpha ~0.4) that does NOT disable the control;
+    /// pair with `test_isEnabledOn`/clicking to confirm it's still interactive.
+    public var test_isSelectionDimmed: Bool { enableCheckbox.alphaValue < 1.0 }
+
+    /// The device name label's current colour (``rowTextColor``) — asserts the
+    /// V12 blocked-name branch (`.tertiaryLabelColor`) alongside the ordinary
+    /// available/selected states. `apply` already stamps this, so no `draw(_:)`
+    /// call is needed to read it.
+    public var test_nameColor: NSColor? { nameLabel.textColor }
+
     /// Whether this row is currently rendered as an unsupported AP1-only
     /// receiver (T-UI-AP1-1): dimmed, toggle disabled, click asks for the
     /// "coming soon" explanation.
@@ -752,6 +827,26 @@ public final class DeviceRowView: NSView {
 
     public override func mouseEntered(with event: NSEvent) { setHovered(true) }
     public override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// C3: a pointing-hand cursor over the NAME label only (its click toggles
+    /// membership, ``nameClicked(_:)``) — scoped to `nameLabel.frame`, not the
+    /// whole row, so the slider/mute/checkbox keep the standard arrow. Standard
+    /// AppKit `resetCursorRects`/`addCursorRect`; no interaction with the hover
+    /// `NSTrackingArea` above (cursor rects and tracking areas are independent
+    /// AppKit mechanisms).
+    public override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(nameLabel.frame, cursor: .pointingHand)
+    }
+
+    /// Cursor rects are frame-snapshotted by AppKit, not live — re-establish
+    /// them whenever layout can have moved `nameLabel` (e.g. the row toggling
+    /// between single-line and two-line sublabel layouts shifts the name's
+    /// vertical position, though not its rect in this row's fixed-width layout).
+    public override func layout() {
+        super.layout()
+        window?.invalidateCursorRects(for: self)
+    }
 
     /// A click anywhere on an unsupported (AP1-only) row asks the host to
     /// present the "coming soon" explanation (T-UI-AP1-1). Supported rows fall
@@ -841,16 +936,77 @@ public final class DeviceRowView: NSView {
             let rect = bounds.insetBy(dx: 5, dy: 2)
             let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
             if isSelectedInSet && paintsSelectionBackground {
-                NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
+                NSColor.controlAccentColor.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
                 path.fill()
             } else if isHovered {
-                NSColor.selectedContentBackgroundColor.withAlphaComponent(0.10).setFill()
+                NSColor.selectedContentBackgroundColor.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
                 path.fill()
             }
         }
         nameLabel.textColor = rowTextColor
         super.draw(dirtyRect)
     }
+
+    // MARK: Attention flash (A4)
+
+    /// Dedicated layer for the one-shot attention pulse, inserted at the BOTTOM
+    /// of this view's sublayers (same visual position as the `draw(_:)`
+    /// hover/selection wash above — behind every subview) so a flash reads as a
+    /// background pulse behind the controls, never an opaque cover over them.
+    /// Kept entirely separate from `isHovered`/`isSelectedInSet`: animating this
+    /// layer never touches those flags or calls `setNeedsDisplay`, so a flash
+    /// can never corrupt the persistent hover/selection state (the same
+    /// transient-vs-persistent discipline documented on `isHovered` above).
+    private lazy var flashLayer: CALayer = {
+        let layer = CALayer()
+        layer.backgroundColor = NSColor.controlAccentColor.cgColor
+        layer.opacity = 0
+        layer.cornerRadius = PopoverColumnGrid.selectionHighlightCornerRadius
+        return layer
+    }()
+
+    private static let flashAnimationKey = "deviceRow.flash"
+
+    /// Fire a one-shot attention pulse (A4) — e.g. so a host can draw the eye to
+    /// a row that just changed for a reason other than the user directly acting
+    /// on it. A single opacity keyframe up-and-back over ~0.5s, via
+    /// `CAKeyframeAnimation` (mirrors `StatusDotView`'s Core-Animation idiom).
+    /// A no-op under Reduce Motion — the row simply never flashes rather than
+    /// jumping straight to some static "flashed" look that would itself read as
+    /// a persistent state change.
+    public func flashRow() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard let hostLayer = layer else { return }
+        if flashLayer.superlayer == nil {
+            hostLayer.insertSublayer(flashLayer, at: 0)
+        }
+        flashLayer.frame = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                          dy: PopoverColumnGrid.selectionHighlightInsetY)
+        flashLayer.opacity = 0
+
+        let pulse = CAKeyframeAnimation(keyPath: "opacity")
+        pulse.values = [0, 1, 0]
+        pulse.keyTimes = [0, 0.4, 1]
+        pulse.duration = 0.5
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        let layerToClear = flashLayer
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak layerToClear] in
+            layerToClear?.removeFromSuperlayer()
+        }
+        flashLayer.add(pulse, forKey: Self.flashAnimationKey)
+        CATransaction.commit()
+    }
+
+    /// Whether the attention pulse (A4) is currently mid-flash — lets tests
+    /// assert `flashRow()` fired without a real Core Animation run loop pumping
+    /// (the animation is present on the layer's model the instant it's added,
+    /// same as `StatusDotView.test_isBreathing`).
+    public var test_isFlashing: Bool { flashLayer.animation(forKey: Self.flashAnimationKey) != nil }
+
+    /// Simulate a host asking this row to flash (A4 test hook).
+    public func test_flashRow() { flashRow() }
 
     /// Whether the row is currently painting its selected-row background. A
     /// deselected row MUST report `false` — the visual property that encodes the

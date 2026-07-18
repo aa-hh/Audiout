@@ -44,6 +44,21 @@ public final class AppRowView: NSView {
         /// the next `apply` tells it. The host re-pushes selection into every row
         /// recreated by a `PopoverController.rebuild()`.
         func appRow(_ row: AppRowView, didRequestSelect appID: String)
+        /// The user pressed the Up/Down arrow key while this row was the first
+        /// responder (dispatched via the `moveUp(_:)`/`moveDown(_:)`
+        /// `NSStandardKeyBindingResponding` overrides below — the same
+        /// dispatch family as `deleteForward`/`deleteBackward`), requesting the
+        /// list's single selection move to the previous/next row. This view has
+        /// no notion of "which row is next" — the HOST owns list order — so it
+        /// only reports intent; a default no-op is provided below so existing
+        /// conformers keep compiling without adopting this.
+        func appRow(_ row: AppRowView, didRequestMoveSelection direction: MoveDirection, for appID: String)
+    }
+
+    /// Which way `moveUp(_:)`/`moveDown(_:)` requests the selection move.
+    public enum MoveDirection: Equatable {
+        case up
+        case down
     }
 
     /// One entry in the destination popup: the standalone "No Redirect" entry,
@@ -64,10 +79,18 @@ public final class AppRowView: NSView {
         /// both named sections). Every other entry (including "Current
         /// Device") leaves this `false`.
         public let isStandalone: Bool
+        /// Optional secondary line of copy shown under `title` in the
+        /// destination menu (e.g. clarifying what "No Redirect" or "Current
+        /// Device" means) and as the menu item's tooltip. `nil` renders exactly
+        /// as before — a single-line plain title. This view never invents this
+        /// copy; the HOST supplies it (a later task passes real strings for the
+        /// standalone "No Redirect" and local "Current Device" entries).
+        public let subtitle: String?
         public init(id: String, title: String, isLocal: Bool, symbolName: String? = nil,
-                   isStandalone: Bool = false) {
+                   isStandalone: Bool = false, subtitle: String? = nil) {
             self.id = id; self.title = title; self.isLocal = isLocal; self.symbolName = symbolName
             self.isStandalone = isStandalone
+            self.subtitle = subtitle
         }
     }
 
@@ -104,8 +127,11 @@ public final class AppRowView: NSView {
         }
     }
 
-    /// Same comfortable Control-Center row density as `DeviceRowView`.
-    public static let rowHeight: CGFloat = 38
+    /// Shares `DeviceRowView`'s body-row height (`PopoverColumnGrid.bodyRowHeight`)
+    /// — a deliberate density unification: this row used to stand alone at 38pt,
+    /// now it renders at the same 42pt as every other popover row so the whole
+    /// list reads as one cohesive density instead of two interleaved ones.
+    public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
@@ -216,8 +242,15 @@ public final class AppRowView: NSView {
     }
 
     private func rebuildDestinationMenu(selecting selectedID: String) {
+        // `allowsAttributedSubtitle: false` — this menu is assigned directly to
+        // `destinationPopUp`, and `NSPopUpButton` mirrors its SELECTED item's
+        // `attributedTitle` for the button's own (collapsed) display. A
+        // multi-line title+subtitle there would corrupt the popup's own label,
+        // so this instance keeps every item's title plain; the subtitle still
+        // reaches the user via `toolTip`.
         let (menu, currentItem) = buildDestinationMenu(
-            selecting: selectedID, action: #selector(destinationChanged(_:)))
+            selecting: selectedID, action: #selector(destinationChanged(_:)),
+            allowsAttributedSubtitle: false)
         destinationPopUp.menu = menu
         if let currentItem { destinationPopUp.select(currentItem) }
     }
@@ -232,8 +265,15 @@ public final class AppRowView: NSView {
     /// section), then a separator, then the same two sections as before
     /// (LOCKED DECISION 4 — no Groups): "Current Device", then "AirPlay
     /// Devices".
+    ///
+    /// - Parameter allowsAttributedSubtitle: whether an entry's `subtitle`
+    ///   (A3) may render as a second attributed line under the title. Pass
+    ///   `false` for a menu that gets assigned to an `NSPopUpButton` directly
+    ///   (its collapsed button mirrors the selected item's `attributedTitle`);
+    ///   a menu-only context (e.g. the context menu's "Route to" submenu,
+    ///   which never collapses into a button) can pass `true`.
     private func buildDestinationMenu(
-        selecting selectedID: String, action: Selector
+        selecting selectedID: String, action: Selector, allowsAttributedSubtitle: Bool = true
     ) -> (menu: NSMenu, currentItem: NSMenuItem?) {
         let menu = NSMenu()
         var currentItem: NSMenuItem?
@@ -252,7 +292,9 @@ public final class AppRowView: NSView {
 
         func addEntries(_ entries: [Destination]) {
             for entry in entries {
-                let item = menuItem(for: entry, isCurrent: entry.id == selectedID, action: action)
+                let item = menuItem(
+                    for: entry, isCurrent: entry.id == selectedID, action: action,
+                    allowsAttributedSubtitle: allowsAttributedSubtitle)
                 menu.addItem(item)
                 if entry.id == selectedID { currentItem = item }
             }
@@ -281,7 +323,14 @@ public final class AppRowView: NSView {
         return (menu, currentItem)
     }
 
-    private func menuItem(for entry: Destination, isCurrent: Bool, action: Selector) -> NSMenuItem {
+    /// - Parameter allowsAttributedSubtitle: see `buildDestinationMenu`'s
+    ///   parameter of the same name — `false` keeps `entry.title` as the sole,
+    ///   plain title (still setting `toolTip` from `subtitle`); `true` also
+    ///   renders `subtitle` as a second attributed line under the title (A3
+    ///   destination microcopy).
+    private func menuItem(
+        for entry: Destination, isCurrent: Bool, action: Selector, allowsAttributedSubtitle: Bool = true
+    ) -> NSMenuItem {
         let item = NSMenuItem(title: entry.title, action: action, keyEquivalent: "")
         item.target = self
         item.state = isCurrent ? .on : .off
@@ -290,6 +339,22 @@ public final class AppRowView: NSView {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
                 .withSymbolConfiguration(config)
+        }
+        if let subtitle = entry.subtitle {
+            item.toolTip = subtitle
+            if allowsAttributedSubtitle {
+                let attributedTitle = NSMutableAttributedString(
+                    string: entry.title,
+                    attributes: [.font: NSFont.menuFont(ofSize: 0)])
+                attributedTitle.append(NSAttributedString(string: "\n"))
+                attributedTitle.append(NSAttributedString(
+                    string: subtitle,
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ]))
+                item.attributedTitle = attributedTitle
+            }
         }
         return item
     }
@@ -398,21 +463,27 @@ public final class AppRowView: NSView {
 
     // MARK: Drawing
 
-    public override func draw(_ dirtyRect: NSRect) {
-        // Row highlight. Selection and hover use DIFFERENT colours so they read
-        // distinctly: selection is a translucent ACCENT wash; hover is a
-        // NEUTRAL grey wash (shown only when NOT selected). Neither uses the
-        // full emphasized `selectedContentBackgroundColor`, which would obscure
-        // the row's slider / readout / destination popup.
-        let highlight: NSColor?
+    /// Row highlight colour, `nil` when neither selected nor hovered.
+    /// Selection and hover use DIFFERENT colours so they read distinctly:
+    /// selection is a translucent ACCENT wash; hover is a translucent NEUTRAL
+    /// wash (shown only when NOT selected) — both at the unified alphas
+    /// `DeviceRowView` shares via `PopoverColumnGrid`, so the two row types
+    /// present the same interactive-state styling. Neither uses a fully
+    /// opaque system background, which would obscure the row's slider /
+    /// readout / destination popup. Factored out of `draw(_:)` so offscreen
+    /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
+    private var currentHighlightColor: NSColor? {
         if isSelected {
-            highlight = NSColor.controlAccentColor.withAlphaComponent(0.18)
+            return NSColor.controlAccentColor.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            highlight = NSColor.unemphasizedSelectedContentBackgroundColor
+            return NSColor.selectedContentBackgroundColor.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
-            highlight = nil
+            return nil
         }
-        if let highlight {
+    }
+
+    public override func draw(_ dirtyRect: NSRect) {
+        if let highlight = currentHighlightColor {
             let rect = bounds.insetBy(
                 dx: PopoverColumnGrid.selectionHighlightInsetX,
                 dy: PopoverColumnGrid.selectionHighlightInsetY)
@@ -460,8 +531,11 @@ public final class AppRowView: NSView {
         let menu = NSMenu()
 
         let routeToItem = NSMenuItem(title: "Route to", action: nil, keyEquivalent: "")
+        // This submenu never collapses into a button (unlike `destinationPopUp`),
+        // so it's free to render a subtitle as attributed secondary text (A3).
         let (routeToMenu, _) = buildDestinationMenu(
-            selecting: currentSelectedDestinationID(), action: #selector(destinationChanged(_:)))
+            selecting: currentSelectedDestinationID(), action: #selector(destinationChanged(_:)),
+            allowsAttributedSubtitle: true)
         routeToItem.submenu = routeToMenu
         menu.addItem(routeToItem)
 
@@ -555,6 +629,27 @@ public final class AppRowView: NSView {
     public func test_setHovered(_ hovered: Bool) { isHovered = hovered }
     public var test_isHovered: Bool { isHovered }
 
+    /// The alpha component of the row-highlight colour `draw(_:)` currently
+    /// computes — `nil` when neither selected nor hovered. Distinguishes the
+    /// selection wash from the hover wash since their unified alphas
+    /// (`PopoverColumnGrid.rowSelectionWashAlpha`/`rowHoverWashAlpha`) differ.
+    /// Exposed because offscreen tests can't rasterize `draw(_:)`'s output to
+    /// inspect the painted pixels directly.
+    public var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
+
+    /// The destination `%` readout's current text colour (V7: tertiary while
+    /// "No Redirect", secondary otherwise).
+    public var test_readoutTextColor: NSColor? { readoutLabel.textColor }
+
+    /// The cursor-rect regions `resetCursorRects()` marks `.pointingHand`
+    /// (C3) — exposed since AppKit doesn't expose a live cursor-rect list and
+    /// a headless/offscreen view never receives a real `resetCursorRects()`
+    /// call from the window server.
+    public func test_selectableCursorRects() -> [NSRect] {
+        layoutSubtreeIfNeeded()
+        return selectableCursorRects()
+    }
+
     // MARK: Keyboard removal (T6)
     //
     // Delete is a responder-chain accelerator only (house convention — the
@@ -576,6 +671,26 @@ public final class AppRowView: NSView {
 
     public override func deleteBackward(_ sender: Any?) {
         delegate?.appRow(self, didRemoveFor: appID)
+    }
+
+    // MARK: Keyboard selection movement (V14)
+    //
+    // Same dispatch family as `deleteForward`/`deleteBackward` above: AppKit
+    // routes the Up/Down arrow keys to the standard `moveUp:`/`moveDown:`
+    // action methods on the first responder via `NSStandardKeyBindingResponding`
+    // BEFORE `keyDown` would see them as raw key events, so these are
+    // implemented as those action overrides. This view has no notion of "the
+    // previous/next row" — only the HOST (which owns the Applications list
+    // order) can resolve that — so these purely forward intent through the
+    // delegate; a default no-op conformance means every existing `Delegate`
+    // still compiles.
+
+    public override func moveUp(_ sender: Any?) {
+        delegate?.appRow(self, didRequestMoveSelection: .up, for: appID)
+    }
+
+    public override func moveDown(_ sender: Any?) {
+        delegate?.appRow(self, didRequestMoveSelection: .down, for: appID)
     }
 
     private func requestSelectIfInDeadZone(with event: NSEvent) {
@@ -604,6 +719,46 @@ public final class AppRowView: NSView {
         if slider.frame.contains(point) { return false }
         if destinationPopUp.frame.contains(point) { return false }
         return bounds.contains(point)
+    }
+
+    // MARK: Cursor (C3)
+    //
+    // The selectable body dead-zone (icon/name/background) shows a pointing
+    // hand, signalling "clicking here selects this row" — the same region
+    // `isInSelectableDeadZone` treats as selectable. The slider and
+    // destination popup keep whatever cursor they establish themselves (a
+    // subview that never overrides `resetCursorRects` inherits its nearest
+    // ancestor's cursor rects, so those frames must be explicitly carved out
+    // here rather than trusting AppKit to leave them alone).
+
+    public override func resetCursorRects() {
+        super.resetCursorRects()
+        for rect in selectableCursorRects() {
+            addCursorRect(rect, cursor: .pointingHand)
+        }
+    }
+
+    /// The dead-zone split into non-overlapping full-height column strips,
+    /// carving out `slider.frame`/`destinationPopUp.frame` — mirrors
+    /// `isInSelectableDeadZone`'s x-axis exclusion (a strip's full row height
+    /// is a deliberate approximation; the slider/popup don't span the full
+    /// row height, so a point directly above/below one at the same x is
+    /// selectable per `isInSelectableDeadZone` but not cursor-rect-covered
+    /// here — an acceptable trade for a much simpler rect union).
+    private func selectableCursorRects() -> [NSRect] {
+        let excluded = [slider.frame, destinationPopUp.frame].sorted { $0.minX < $1.minX }
+        var rects: [NSRect] = []
+        var cursorX = bounds.minX
+        for rect in excluded {
+            if rect.minX > cursorX {
+                rects.append(NSRect(x: cursorX, y: bounds.minY, width: rect.minX - cursorX, height: bounds.height))
+            }
+            cursorX = max(cursorX, rect.maxX)
+        }
+        if cursorX < bounds.maxX {
+            rects.append(NSRect(x: cursorX, y: bounds.minY, width: bounds.maxX - cursorX, height: bounds.height))
+        }
+        return rects
     }
 
     // MARK: Accessibility
@@ -657,6 +812,28 @@ public final class AppRowView: NSView {
     /// The currently checkmarked destination id.
     public var test_selectedDestinationID: String? {
         destinationPopUp.selectedItem?.representedObject as? String
+    }
+
+    // MARK: Test-support hooks — destination subtitle (A3)
+
+    /// The real `NSMenuItem` for `destinationID` in the trailing destination
+    /// popup's OWN menu. Exposed so tests can assert its title/attributedTitle
+    /// stay plain even when `subtitle` is set — `NSPopUpButton` mirrors its
+    /// selected item's `attributedTitle` for its own collapsed display, so this
+    /// menu's items must never carry one.
+    public func test_destinationPopUpMenuItem(forDestinationID id: String) -> NSMenuItem? {
+        destinationPopUp.menu?.items.first { ($0.representedObject as? String) == id }
+    }
+
+    /// The real `NSMenuItem` for `destinationID` inside the context menu's
+    /// "Route to" submenu (built by `test_contextMenu()`) — this submenu never
+    /// collapses into a button, so it's free to carry an attributed
+    /// title+subtitle (A3).
+    public func test_routeToMenuItem(forDestinationID id: String) -> NSMenuItem? {
+        guard let routeToItem = test_contextMenu().items.first, let submenu = routeToItem.submenu else {
+            return nil
+        }
+        return submenu.items.first { ($0.representedObject as? String) == id }
     }
     // MARK: Test-support hooks — context menu (T5)
 
@@ -741,6 +918,20 @@ public final class AppRowView: NSView {
         doCommand(by: #selector(NSResponder.deleteBackward(_:)))
     }
 
+    /// Simulate pressing the Up arrow on this row via the real key path —
+    /// see `test_pressDelete`'s doc for why `doCommand(by:)` is used. Fires
+    /// `Delegate.appRow(_:didRequestMoveSelection:.up:for:)`.
+    public func test_pressUpArrow() {
+        doCommand(by: #selector(NSResponder.moveUp(_:)))
+    }
+
+    /// Simulate pressing the Down arrow on this row via the real key path —
+    /// see `test_pressDelete`'s doc for why `doCommand(by:)` is used. Fires
+    /// `Delegate.appRow(_:didRequestMoveSelection:.down:for:)`.
+    public func test_pressDownArrow() {
+        doCommand(by: #selector(NSResponder.moveDown(_:)))
+    }
+
     /// A synthetic left-mouse-down `NSEvent` at `point` in this view's own
     /// coordinate space. Works without a live window — `locationInWindow` is
     /// only ever consumed by this view via `convert(_:from:)`, which degrades
@@ -757,5 +948,15 @@ public final class AppRowView: NSView {
             clickCount: 1,
             pressure: 1)!
     }
+}
+
+/// Default no-op for `didRequestMoveSelection` so every existing `Delegate`
+/// conformer keeps compiling without adopting the new V14 keyboard-move
+/// callback. Hosts that want arrow-key selection movement implement it
+/// explicitly, same opt-in shape as any other protocol default.
+extension AppRowView.Delegate {
+    public func appRow(
+        _ row: AppRowView, didRequestMoveSelection direction: AppRowView.MoveDirection, for appID: String
+    ) {}
 }
 

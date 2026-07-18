@@ -88,6 +88,19 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// Fake start buffer for the `LatencyConfigurable` conformance (on `queue`).
     private var fakeStartBufferMs: Int = AppSettings.defaultStartBufferMs
 
+    /// The popover-visibility gate (T-GATE, `MeteringControlling`). `false` until
+    /// `setMeteringActive(true)` first fires — the level timer stays off until
+    /// then, mirroring the native path's default-inactive metering.
+    private var meteringActive = false
+
+    /// Bundle IDs the level timer should also fabricate `.appLevel` samples for
+    /// (T7 offline fixture). `MockBackend` has no real per-app capture and
+    /// doesn't conform to `AppRouteConfiguring` (see `AudioutedCore/AGENTS.md`),
+    /// so there's no live route table to read the list from — `test_setMeteredApps`
+    /// is the only way this gets populated. Empty by default, so the existing
+    /// device-only `.level` behaviour is unchanged until a caller opts in.
+    private var meteredAppBundleIDs: [String] = []
+
     /// - Parameters:
     ///   - fleet: the devices to fabricate. Defaults to ``Array/demoFleet``.
     ///   - staggerDiscovery: reveal devices over ~2s instead of all at once,
@@ -158,7 +171,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                 }
             }
 
-            if self.emitsLevels { self.startLevelTimer() }
+            if self.emitsLevels && self.meteringActive { self.startLevelTimer() }
             if self.simulatesDropouts { self.startDropoutTimer() }
 
             if let observer = self.outputObserver {
@@ -175,6 +188,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     public func stop() {
         queue.async {
             self.started = false
+            self.meteringActive = false
             self.levelTimer?.cancel(); self.levelTimer = nil
             self.dropoutTimer?.cancel(); self.dropoutTimer = nil
             let ids = Array(self.live.keys)
@@ -239,6 +253,32 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// capability).
     public func test_emitRoutedApps(deviceID: String, appNames: [String]) {
         queue.async { self.emit(.routedApps(deviceID: deviceID, appNames: appNames)) }
+    }
+
+    // MARK: T7 offline fixtures — per-app level meters
+
+    /// Fire a single `.appLevel` event as if a per-app meter just sampled
+    /// `bundleID`'s stream. `MockBackend` has no real per-app capture of its
+    /// own — only `NativeBackend` computes genuine per-app RMS — so this is
+    /// purely a scripted fixture: it lets `popover-harness`/`popover-snapshot`/
+    /// tests demonstrate the Applications-row meters offline, with no live
+    /// audio anywhere. Fire-and-forget, matching `test_emitRoutedApps` and
+    /// every other mock mutation (`test_` prefix marks it as a fixture hook,
+    /// not a real capability).
+    public func test_emitAppLevel(bundleID: String, rms: Float) {
+        queue.async { self.emit(.appLevel(bundleID: bundleID, rms: rms)) }
+    }
+
+    /// Register the bundle IDs the level timer should continuously fabricate
+    /// `.appLevel` samples for, in addition to its existing per-device `.level`
+    /// samples — so a live mock run (`emitsLevels: true` + metering active)
+    /// animates the Applications-row meters for every listed app, independent
+    /// of which device (if any) it's routed to. Replaces the previous list
+    /// wholesale; pass `[]` to stop. Gated by the exact same
+    /// `meteringActive`/`emitsLevels` flags as the device timer (see
+    /// `setMeteringActive`) — there's no separate on/off switch for apps.
+    public func test_setMeteredApps(_ bundleIDs: [String]) {
+        queue.async { self.meteredAppBundleIDs = bundleIDs }
     }
 
     // MARK: Scripted connect choreography (all run on `queue`)
@@ -381,12 +421,26 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     private func emitLevels() {
         tick &+= 1
         for device in live.values where device.isPlaying {
-            // A gentle wobble around the device's volume so meters look alive.
+            // A gentle wobble that is a SOURCE/program level — independent of the
+            // device's volume slider, matching the native backend's pre-volume
+            // metering (a low volume must NOT empty the bar; the meter shows how
+            // loud the material is, not the attenuated output). A per-device seed
+            // keeps the bars from all moving in lockstep.
             let seed = Double(abs(device.id.hashValue) % 1000) / 1000.0
             let phase = Double(tick) * 0.35 + seed * 6.28
-            let base = Double(device.volume) / 100.0
-            let rms = base * (0.55 + 0.45 * abs(sin(phase)))
+            let rms = 0.55 + 0.45 * abs(sin(phase))
             emit(.level(id: device.id, rms: Float(min(1, max(0, rms)))))
+        }
+        // T7: same gentle wobble for every app registered via
+        // `test_setMeteredApps`, keyed off the bundle ID instead of a device —
+        // apps have no `volume` in this mock, so there's no per-device base to
+        // scale by, just a per-app phase offset so the bars don't all move in
+        // lockstep.
+        for bundleID in meteredAppBundleIDs {
+            let seed = Double(abs(bundleID.hashValue) % 1000) / 1000.0
+            let phase = Double(tick) * 0.35 + seed * 6.28
+            let rms = 0.5 + 0.45 * abs(sin(phase))
+            emit(.appLevel(bundleID: bundleID, rms: Float(min(1, max(0, rms)))))
         }
     }
 
@@ -549,5 +603,27 @@ extension MockBackend: LatencyConfigurable {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         queue.sync { fakeStartBufferMs = ms }
+    }
+}
+
+// MARK: - MeteringControlling (T-GATE)
+
+/// Starts/stops the fake level timer on the popover-visibility gate, mirroring
+/// how the native path gates its RMS computation — so a headless test asserting
+/// "no `.level` while metering is inactive" behaves the same against either
+/// backend.
+extension MockBackend: MeteringControlling {
+
+    public func setMeteringActive(_ active: Bool) {
+        queue.async {
+            guard self.meteringActive != active else { return }
+            self.meteringActive = active
+            guard self.started, self.emitsLevels else { return }
+            if active {
+                self.startLevelTimer()
+            } else {
+                self.levelTimer?.cancel(); self.levelTimer = nil
+            }
+        }
     }
 }

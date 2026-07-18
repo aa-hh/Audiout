@@ -29,6 +29,7 @@
 import AppKit
 import AudioutedCore
 import AudioutedPopoverUI
+import AudioutedSharedUI
 
 @MainActor
 func waitForFleet(_ backend: MockBackend, count: Int, timeout: TimeInterval = 3) -> Bool {
@@ -142,6 +143,180 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let url = outDir.appendingPathComponent("popover-\(label).png")
     renderPNG(view: panelView, to: url)
     window.contentView = NSView()   // detach so the next run gets a fresh panel
+}
+
+/// Recursively collects every subview of type `T` under `root` (depth-first,
+/// pre-order) — used by ``snapshotMeters`` to reach into the assembled row
+/// views for their `LevelMeterView` children without either row type needing
+/// a new public accessor (T7 is scoped to this file only).
+func findViews<T: NSView>(of type: T.Type, in root: NSView) -> [T] {
+    var result: [T] = []
+    for sub in root.subviews {
+        if let match = sub as? T { result.append(match) }
+        result.append(contentsOf: findViews(of: type, in: sub))
+    }
+    return result
+}
+
+/// T7: meter-ON popover render (offline proof for task T-METER). Builds the
+/// same panel as ``snapshot(appearanceName:label:outDir:)`` — same fleet,
+/// same three selected devices, same expanded Applications card — then feeds
+/// fixed per-device RMS readings through `PopoverController.test_pushLevel`
+/// and settles each row's `LevelMeterView` synchronously via
+/// `test_setDisplayedLevel` (T1) so the PNG never depends on a live
+/// `CVDisplayLink` frame arriving before capture. "office" and "sonos-move"
+/// render visible green bars (playing); "homepod-bed" is pushed a zero level
+/// so its bar renders blank, standing in for a muted/deselected row.
+///
+/// T8: also seeds THREE Applications-card rows across the three
+/// `AppRouteDestination` cases — "Music" → `.device(id: "office")` (routed,
+/// active/undimmed slider), "Safari" → `.currentDevice` (explicit local pick,
+/// dimmed slider), "Podcasts" → `.noRedirect` (the neutral default, also
+/// dimmed) — so every destination state is represented in one panel. Every
+/// row is built with `showsMeter: true` (`PopoverController.makeAppRow`
+/// always passes that), so all three get a distinct RMS pushed via
+/// `test_pushAppLevel` and are settled synchronously via `findViews` +
+/// `test_setDisplayedLevel`, mirroring the device-row settling below
+/// belt-and-suspenders (push AND settle, no reliance on the async mock
+/// timer).
+@MainActor
+func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    // T8: three app rows spanning all three `AppRouteDestination` cases —
+    // `.device(id:)` (routed away, active slider), `.currentDevice` (explicit
+    // local pick, dimmed slider), `.noRedirect` (neutral default, also
+    // dimmed) — so the Applications card proves every destination state at
+    // once.
+    let musicBundleID = "com.apple.Music"
+    let safariBundleID = "com.apple.Safari"
+    let podcastsBundleID = "com.apple.podcasts"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+    appRouting.setVolume(70, for: musicBundleID)
+    appRouting.addRoute(bundleID: safariBundleID, displayName: "Safari")
+    appRouting.setDestination(.currentDevice, for: safariBundleID)
+    appRouting.setVolume(55, for: safariBundleID)
+    appRouting.addRoute(bundleID: podcastsBundleID, displayName: "Podcasts")
+    // Podcasts stays on `.noRedirect` — the default for a freshly-added route,
+    // no explicit `setDestination` call needed.
+
+    let runningApps = [
+        RunningAppInfo(bundleID: musicBundleID, displayName: "Music", icon: nil),
+        RunningAppInfo(bundleID: safariBundleID, displayName: "Safari", icon: nil),
+        RunningAppInfo(bundleID: podcastsBundleID, displayName: "Podcasts", icon: nil),
+    ]
+    let popover = PopoverController(appRouting: appRouting, runningAppsProvider: { runningApps })
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "sonos-move", on: true)
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()
+
+    // Fixed per-device levels (task T-METER's mix): two visibly playing rows,
+    // one silent/muted-looking row. "office" also drives Main Out (T4a: Main
+    // Out shares the selected devices' level feed).
+    let levels: [String: Float] = [
+        "office": 0.82,
+        "homepod-bed": 0.0,
+        "sonos-move": 0.47,
+    ]
+    for (id, rms) in levels {
+        popover.test_pushLevel(rms, for: id)
+    }
+
+    // T8: distinct per-app levels, one per seeded route above — proves the
+    // Applications card's leading VU meters render independently of each
+    // row's destination/dimming state.
+    let appLevels: [String: Float] = [
+        musicBundleID: 0.72,
+        safariBundleID: 0.38,
+        podcastsBundleID: 0.18,
+    ]
+    for (bundleID, rms) in appLevels {
+        popover.test_pushAppLevel(rms, for: bundleID)
+    }
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+
+    // Settle every meter synchronously — no reliance on the async
+    // MockBackend `emitsLevels` timer or a live CVDisplayLink tick, per T7.
+    for row in findViews(of: DeviceRowView.self, in: panelView) {
+        let target = CGFloat(levels[row.device.id] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: row) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+    for mainOutRow in findViews(of: MainOutRowView.self, in: panelView) {
+        let target = CGFloat(levels["office"] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: mainOutRow) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+    for appRow in findViews(of: AppRowView.self, in: panelView) {
+        let target = CGFloat(appLevels[appRow.appID] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: appRow) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame,
+                          styleMask: [.borderless],
+                          backing: .buffered,
+                          defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    // Re-settle after the layout/drain pass — `layout()` and any stray
+    // display-link tick both call `redrawFill()` off the same `displayed`
+    // value, so this is belt-and-suspenders against a frame slipping in.
+    for row in findViews(of: DeviceRowView.self, in: panelView) {
+        let target = CGFloat(levels[row.device.id] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: row) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+    for mainOutRow in findViews(of: MainOutRowView.self, in: panelView) {
+        let target = CGFloat(levels["office"] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: mainOutRow) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+    for appRow in findViews(of: AppRowView.self, in: panelView) {
+        let target = CGFloat(appLevels[appRow.appID] ?? 0)
+        for meter in findViews(of: LevelMeterView.self, in: appRow) {
+            meter.test_setDisplayedLevel(target)
+        }
+    }
+
+    let url = outDir.appendingPathComponent("popover-meters-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
 }
 
 /// A small fleet with one row per `ConnectionState` case, for the
@@ -352,6 +527,8 @@ func run() -> Int32 {
 
     snapshot(appearanceName: .aqua, label: "light", outDir: outDir)
     snapshot(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+    snapshotMeters(appearanceName: .aqua, label: "light", outDir: outDir)
+    snapshotMeters(appearanceName: .darkAqua, label: "dark", outDir: outDir)
 
     print("Done.")
     return 0

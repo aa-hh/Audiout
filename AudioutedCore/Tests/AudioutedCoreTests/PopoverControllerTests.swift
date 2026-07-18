@@ -1240,6 +1240,60 @@ final class PopoverControllerTests: XCTestCase {
                        "≥1 redirected app ⇒ Applications starts expanded")
     }
 
+    // MARK: Live level dispatch (task T8, extends the T5 meter wiring)
+
+    /// `test_pushLevel` (the `isShown`-gate-free twin of `updateLevel`) reaches
+    /// the target device row's meter — asserted via `DeviceRowView.test_meterLevel`,
+    /// the headless read-back the shared symbol contract adds for exactly this.
+    func testPushLevelUpdatesTargetRowMeter() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_pushLevel(0.55, for: "local-mac")
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_meterLevel(), 0.55)
+    }
+
+    /// `popoverDidClose` zeroes every device row's meter (the reopen-never-shows-
+    /// a-stale-bar discipline documented at the call site).
+    func testPopoverDidCloseZeroesAllDeviceRowMeters() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_pushLevel(0.7, for: "local-mac")
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_meterLevel(), 0.7)
+
+        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_meterLevel(), 0,
+                       "closing the popover must reset every row's meter, not just the one just pushed to")
+    }
+
+    // MARK: Live level dispatch (task T5, Applications-row meters)
+
+    /// `test_pushAppLevel` (the `isShown`-gate-free twin of `updateAppLevel`)
+    /// reaches the target app row's meter — asserted via `AppRowView.test_meterLevel`,
+    /// mirroring the device-row coverage above.
+    func testPushAppLevelUpdatesTargetRowMeter() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        popover.test_pushAppLevel(0.55, for: "com.example.music")
+        XCTAssertEqual(popover.test_appRow(for: "com.example.music")?.test_meterLevel(), 0.55)
+    }
+
+    /// `popoverDidClose` zeroes every app row's meter too (not just device rows
+    /// and Main Out), so a reopen never shows a stale app-row bar either.
+    func testPopoverDidCloseZeroesAllAppRowMeters() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        popover.test_pushAppLevel(0.7, for: "com.example.music")
+        XCTAssertEqual(popover.test_appRow(for: "com.example.music")?.test_meterLevel(), 0.7)
+
+        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        XCTAssertEqual(popover.test_appRow(for: "com.example.music")?.test_meterLevel(), 0,
+                       "closing the popover must reset every app row's meter, not just the one just pushed to")
+    }
+
     // MARK: T9 — live per-device streaming indicator (`BackendEvent.routedApps`)
     //
     // `applyRoutedApps` stores the CONFIRMED live map that `AppDelegate` feeds

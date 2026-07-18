@@ -285,14 +285,16 @@ final class NativeBackendTests: XCTestCase {
     private func makeBackend(
         systemVolume: SystemVolumeControlling = FakeSystemVolume(),
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
-        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
+        injectedMeteringCapture: PerAppCaptureCoordinator? = nil
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery,
             systemVolume: systemVolume, resolvePID: resolvePID,
-            injectedPerAppCapture: injectedPerAppCapture)
+            injectedPerAppCapture: injectedPerAppCapture,
+            injectedMeteringCapture: injectedMeteringCapture)
         return (backend, engine, discovery)
     }
 
@@ -2218,6 +2220,60 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(capture.isCapturing)
     }
 
+    /// T-GATE: `NativeBackend.setMeteringActive` forwards to the capture
+    /// coordinator, and a level fired while inactive must never reach the
+    /// backend's event stream — the whole point of the gate is that the RMS
+    /// work stays switched off (here: the fake never even calls `onLevel`) while
+    /// the popover is closed.
+    func testNoLevelEmittedWhileMeteringInactive() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:55", name: "Gate Test")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        // Default state: metering inactive until explicitly turned on.
+        XCTAssertFalse(capture.meteringActive, "metering must default to inactive")
+        capture.fireLevelIfActive(0.5)
+
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let collector = Task {
+            for await event in stream { _ = await box.append(event) }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        capture.fireLevelIfActive(0.5)   // still inactive — must be a no-op
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        var seen = await box.snapshot()
+        XCTAssertFalse(seen.contains { if case .level = $0 { return true } else { return false } },
+                        "no .level may be emitted while metering is inactive")
+
+        // Flip it on: NativeBackend must forward to the coordinator.
+        (backend as MeteringControlling).setMeteringActive(true)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(capture.meteringActive, "setMeteringActive(true) must reach the coordinator")
+        capture.fireLevelIfActive(0.5)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        seen = await box.snapshot()
+        XCTAssertTrue(seen.contains { if case .level = $0 { return true } else { return false } },
+                       "a level fired while active must reach the event stream")
+
+        collector.cancel()
+
+        // stop() must leave metering inactive (teardown discipline).
+        backend.stop()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertFalse(capture.meteringActive, "stop() must leave metering inactive")
+    }
+
     /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
     /// display cadence) must be coalesced per device — not fanned out 1:1 as
     /// `.level` events — while still guaranteeing the burst's final value lands
@@ -2235,6 +2291,9 @@ final class NativeBackendTests: XCTestCase {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
+        // This backend's `emitLevel` is metering-gated, so turn metering ON for
+        // levels to flow at all (the gate defaults off).
+        (backend as MeteringControlling).setMeteringActive(true)
         await pollUntil { engine.addedIDs.contains(device.outputID) }
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
@@ -2455,6 +2514,7 @@ final class NativeBackendTests: XCTestCase {
         private let lock = NSLock()
         private var _onLevel: (@Sendable (Float) -> Void)?
         private var _ops: [String] = []
+        private var _meteringActive = false
 
         var onLevel: (@Sendable (_ rms: Float) -> Void)? {
             get { lock.withLock { _onLevel } }
@@ -2462,12 +2522,22 @@ final class NativeBackendTests: XCTestCase {
         }
         func start() { lock.withLock { _ops.append("start") } }
         func stop() { lock.withLock { _ops.append("stop") } }
+        func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
 
         /// Every start/stop, in the order they executed.
         var ops: [String] { lock.withLock { _ops } }
         /// Whether the tap is running right now — i.e. exactly when the real
         /// `.mutedWhenTapped` tap has the Mac's speakers muted.
         var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+        /// The last value passed to `setMeteringActive`, `false` until called.
+        var meteringActive: Bool { lock.withLock { _meteringActive } }
+        /// Fire `onLevel` as the real coordinator would — but only if metering is
+        /// active, mirroring `NativeCaptureCoordinator.handleBuffer`'s gate so this
+        /// fake is a faithful stand-in for the T-GATE test below.
+        func fireLevelIfActive(_ rms: Float) {
+            let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
+            if active { handler?(rms) }
+        }
     }
 
     // MARK: Per-app routing (T6)
@@ -3152,6 +3222,10 @@ final class NativeBackendTests: XCTestCase {
         }
         func start() throws { lock.withLock { _started = true } }
         func stop() { lock.withLock { _started = false } }
+        var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
+        private var _meteringActive = false
+        func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+        var meteringActive: Bool { lock.withLock { _meteringActive } }
 
         var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
         var removedApps: [String] { lock.withLock { _removed } }
@@ -3251,6 +3325,307 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    // MARK: - Metering: three real level sources (T3)
+
+    /// Records `.level`/`.appLevel` events (the two the other `collect` helpers
+    /// deliberately skip) with sync accessors so `pollUntil` can inspect them.
+    private final class LevelSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _device: [(id: String, rms: Float)] = []
+        private var _app: [(bundleID: String, rms: Float)] = []
+        func record(_ e: BackendEvent) {
+            switch e {
+            case .level(let id, let rms): lock.withLock { _device.append((id, rms)) }
+            case .appLevel(let b, let rms): lock.withLock { _app.append((b, rms)) }
+            default: break
+            }
+        }
+        /// The most recent `.level` for `id`, or nil if none seen.
+        func lastDeviceLevel(_ id: String) -> Float? { lock.withLock { _device.last { $0.id == id }?.rms } }
+        /// Whether any `.appLevel` has been seen for `bundleID`.
+        func hasAppLevel(_ bundleID: String) -> Bool { lock.withLock { _app.contains { $0.bundleID == bundleID } } }
+        /// The most recent `.appLevel` for `bundleID`, or nil.
+        func lastAppLevel(_ bundleID: String) -> Float? { lock.withLock { _app.last { $0.bundleID == bundleID }?.rms } }
+    }
+
+    /// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
+    private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
+        let sink = LevelSink()
+        let stream = backend.makeEventStream()
+        let task = Task { for await event in stream { sink.record(event) } }
+        return (sink, task)
+    }
+
+    /// A per-app capture over `BundleTaggingTap`s that self-register so a test can
+    /// push content into a specific bundle's tap — same shape the cross-stream
+    /// leakage test uses, factored out for the metering tests.
+    private func registeringPerAppCapture(
+        muteBehavior: TapMuteBehavior, into registry: TapRegistry
+    ) -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: {
+                let tap = BundleTaggingTap()
+                tap.onRegister = { bundleID in registry.register(bundleID, tap) }
+                return tap
+            },
+            resolvePID: { _ in 4242 },
+            muteBehavior: muteBehavior)
+    }
+
+    /// A CapturedBuffer whose RAW bytes are Float32 samples all equal to
+    /// `amplitude` — so `NativeCaptureCoordinator.rmsOfFloat32` (the metering-only
+    /// source's RMS) yields exactly `amplitude`. Used to drive `meteringCapture`
+    /// deterministically (its RMS reads Float32, unlike the S16 stream path).
+    private func float32Buffer(amplitude: Float, frames: Int, atSecond sec: Int) -> CapturedBuffer {
+        let samples = [Float32](repeating: amplitude, count: frames * 2 /* stereo */)
+        let data = samples.withUnsafeBytes { Data($0) }
+        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
+    }
+
+    /// T3: a device that is ONLY a per-app redirect target (never a Selected
+    /// Device, so `isSelected == false`) still gets a `.level` — driven by the RMS
+    /// of the per-app stream bound to it. Pre-T3 the sole `.level` source was the
+    /// whole-system tap fanned to selected devices, so a redirect-only device's
+    /// meter was permanently dead; now `onMixedBuffer` → `emitStreamLevel` feeds it.
+    func testRedirectOnlyDeviceReceivesLevelFromItsStream() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Redirect Only")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setMeteringActive(true)
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.foo") else {
+            return XCTFail("the routed app's per-app tap must have registered")
+        }
+
+        // Precondition: the redirect target is NOT a Selected Device.
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.isSelected, false,
+                       "a redirect target must not be in the output set (AGENTS.md)")
+
+        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+
+        await pollUntil { (sink.lastDeviceLevel(device.id) ?? 0) > 0 }
+        XCTAssertGreaterThan(sink.lastDeviceLevel(device.id) ?? 0, 0,
+                             "a redirect-only device must receive a .level from its per-app stream")
+    }
+
+    /// T3: a device fed by BOTH the whole-system mix (it's a Selected Device) AND a
+    /// per-app stream (it's also a redirect target) reports the MAX of the two
+    /// contributions — the documented product decision. Proven in both directions:
+    /// system-high beats a present stream, and when the system drops the stream
+    /// drives the meter.
+    func testDeviceFedBySystemAndStreamReportsMax() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Both Sources")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Make it a Selected Device (system contribution) …
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        backend.setMeteringActive(true)
+        await pollUntil { capture.meteringActive }
+
+        // … AND a per-app redirect target (stream contribution).
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        let stream = engine.streamAddCalls.first { $0.0 == device.outputID }!.1
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.foo") else {
+            return XCTFail("the routed app's per-app tap must have registered")
+        }
+
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        // Phase A — system HIGH (0.95) over a present stream (0xAA ≈ 0.667):
+        // the device level is the system value (the max), and the stream RMS is
+        // now cached (a write reached the engine).
+        capture.fireLevelIfActive(0.95)
+        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        await pollUntil { engine.rawWriteCalls.contains { $0.streamId == stream } }
+        await pollUntil { (sink.lastDeviceLevel(device.id) ?? 0) > 0.9 }
+        XCTAssertGreaterThan(sink.lastDeviceLevel(device.id) ?? 0, 0.9,
+                             "system 0.95 must win over the ~0.667 stream (MAX)")
+
+        // Phase B — system drops to 0: the cached stream RMS now drives the meter,
+        // proving the MAX flips to the stream side rather than sticking at 0.95.
+        capture.fireLevelIfActive(0.0)
+        await pollUntil {
+            let l = sink.lastDeviceLevel(device.id) ?? 0
+            return l > 0.4 && l < 0.9
+        }
+        let settled = sink.lastDeviceLevel(device.id) ?? 0
+        XCTAssertTrue(settled > 0.4 && settled < 0.9,
+                      "with system at 0 the stream (~0.667) must drive the level — MAX(0, stream)")
+    }
+
+    /// T3: unbinding a device's per-app stream (a destination-set change) emits a
+    /// FINAL combined `.level` for it — dropping to its system contribution, here 0
+    /// because it's unselected — so a torn-down stream can't leave a stuck meter.
+    func testUnbindingStreamZeroesDeviceLevel() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Unbind Target")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setMeteringActive(true)
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.foo") else {
+            return XCTFail("the routed app's per-app tap must have registered")
+        }
+        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        await pollUntil { (sink.lastDeviceLevel(device.id) ?? 0) > 0 }
+
+        // Fully de-route the app: the device unbinds its stream.
+        backend.updateAppRoutes([])
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        // The device's meter must settle back to 0 (no stream, not selected).
+        await pollUntil { sink.lastDeviceLevel(device.id) == 0 }
+        XCTAssertEqual(sink.lastDeviceLevel(device.id), 0,
+                       "a torn-down stream must emit a final .level of 0, not leave a stuck bar")
+    }
+
+    /// T3: `.appLevel` for a `.noRedirect` LISTED app comes from a dedicated
+    /// metering-only tap that is started ONLY while metering is active. Nothing is
+    /// captured (and no `.appLevel` fires) while metering is off; turning it on
+    /// starts the tap and the app's raw RMS flows as `.appLevel`.
+    func testNoRedirectAppLevelOnlyWhileMeteringActive() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        // Listed but metering INACTIVE: no metering-only tap, no .appLevel.
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        if case .idle = metering.state(for: "com.plain") {} else {
+            XCTFail("no metering-only tap may start while metering is inactive")
+        }
+        XCTAssertNil(registry.tap(for: "com.plain"), "no tap should exist for com.plain yet")
+        XCTAssertFalse(sink.hasAppLevel("com.plain"), "no .appLevel may fire while metering is inactive")
+
+        // Turn metering on: its metering-only tap starts and reaches capturing.
+        backend.setMeteringActive(true)
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.plain") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.plain") else {
+            return XCTFail("the metering-only tap must register once metering is active")
+        }
+        tap.push(float32Buffer(amplitude: 0.5, frames: 512, atSecond: 1))
+
+        await pollUntil { sink.hasAppLevel("com.plain") }
+        XCTAssertGreaterThan(sink.lastAppLevel("com.plain") ?? 0, 0,
+                             "a .noRedirect listed app must emit .appLevel from its metering-only tap")
+    }
+
+    /// T3 PRIVACY: a user-EXCLUDED app is NEVER metered — no metering-only tap is
+    /// started and no `.appLevel` fires for it — even while it is a listed
+    /// `.noRedirect` app and metering is active. A non-excluded sibling proves
+    /// metering is otherwise working, and excluding an app that WAS being metered
+    /// stops its tap immediately.
+    func testExcludedAppIsNeverMetered() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        backend.setMeteringActive(true)
+        backend.updateAppRoutes(
+            [AppRoute(bundleID: "com.ok", displayName: "OK"),
+             AppRoute(bundleID: "com.secret", displayName: "Secret")],
+            excludedBundleIDs: ["com.secret"])
+
+        // The non-excluded app IS metered …
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.ok") { return true }; return false
+        }
+        // … the excluded app is NEVER even started.
+        if case .idle = metering.state(for: "com.secret") {} else {
+            XCTFail("an excluded app must never have a metering-only tap started")
+        }
+        XCTAssertNil(registry.tap(for: "com.secret"), "no tap may be created for an excluded app")
+
+        // Push into the non-excluded app; assert its .appLevel fires and the
+        // excluded app's never does.
+        registry.tap(for: "com.ok")?.push(float32Buffer(amplitude: 0.5, frames: 512, atSecond: 1))
+        await pollUntil { sink.hasAppLevel("com.ok") }
+        XCTAssertFalse(sink.hasAppLevel("com.secret"),
+                       "PRIVACY: an excluded app must never emit .appLevel")
+
+        // Excluding the app that WAS being metered stops its tap immediately.
+        backend.updateAppRoutes(
+            [AppRoute(bundleID: "com.ok", displayName: "OK"),
+             AppRoute(bundleID: "com.secret", displayName: "Secret")],
+            excludedBundleIDs: ["com.ok", "com.secret"])
+        await pollUntil {
+            if case .idle = metering.state(for: "com.ok") { return true }; return false
+        }
+    }
+
+    /// T3: turning metering OFF stops every metering-only tap (teardown discipline
+    /// — a closed popover has nobody to render the app meter for).
+    func testMeteringOnlyTapsStopWhenMeteringDeactivated() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+
+        backend.setMeteringActive(true)
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.plain") { return true }; return false
+        }
+
+        backend.setMeteringActive(false)
+        await pollUntil {
+            if case .idle = metering.state(for: "com.plain") { return true }; return false
+        }
+        if case .idle = metering.state(for: "com.plain") {} else {
+            XCTFail("metering-only taps must stop when metering is deactivated")
+        }
     }
 
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {

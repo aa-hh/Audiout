@@ -106,6 +106,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Confined to `queue`. See dev/notes/stability-audit-2026-07-18.md §C6.
     private var pendingDeviceChange = false
 
+    /// Whether RMS should be computed and handed to `onLevel` (T-GATE). `false`
+    /// until ``setMeteringActive(_:)`` first flips it on — the popover isn't shown
+    /// yet at coordinator construction, so there's nobody to render a meter for.
+    /// Confined to `queue`, same as every other piece of state here.
+    private var meteringActive = false
+
     /// The live union of routed-away (`.device` destination) and
     /// user-excluded bundle IDs, as last computed by
     /// ``updateRouting(appRoutes:excludedBundleIDs:)``. Confined to `queue`.
@@ -276,6 +282,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Gate RMS computation/emission on or off (T-GATE). Independent of
+    /// `start()`/`stop()`: this is the popover-visibility gate, not the capture
+    /// gate — the tap may be running (a real AP2 output is selected) while
+    /// metering stays off (the popover is closed), and vice versa is harmless
+    /// (metering active with the tap idle just means nothing fires yet).
+    public func setMeteringActive(_ active: Bool) {
+        queue.async { self.meteringActive = active }
+    }
+
     /// Recompute the live exclusion set for the system-mix tap (T4): every
     /// routed-away bundle ID — `appRoutes` entries whose destination is
     /// `.device(id:)` — UNION every user-excluded bundle ID (Settings ›
@@ -349,7 +364,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func handleBuffer(_ buffer: CapturedBuffer) {
         // Read the converter under the state lock (cheap — a pointer read) but do
         // the actual conversion OUTSIDE it so a slow convert can't stall stop().
-        let converter = queue.sync { self.converter }
+        // `meteringActive` rides along on the same read (T-GATE) — no separate
+        // lock acquisition per buffer.
+        let (converter, metering) = queue.sync { (self.converter, self.meteringActive) }
         guard let converter else { return }
 
         guard let pcm = converter.convertToAirPlayPCM(buffer) else { return }
@@ -359,8 +376,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         sink.write(pcm: pcm, pts: buffer.pts)
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
-        // the meter feature (identical for every fanned-out device).
-        if let onLevel {
+        // the meter feature (identical for every fanned-out device) — but only
+        // while metering is active (T-GATE): the popover is closed, so skip the
+        // RMS pass entirely rather than compute a sample nobody reads.
+        if metering, let onLevel {
             onLevel(Self.rmsOfS16LE(pcm))
         }
     }
@@ -477,6 +496,46 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 sumSquares += v * v
             }
         }
+        return Float((sumSquares / Double(sampleCount)).squareRoot())
+    }
+
+    /// Root-mean-square level of a captured tap buffer's RAW Float32 samples,
+    /// normalized to 0.0...1.0 (a real tap's Float32 samples are nominally
+    /// -1.0...1.0 already, so no scaling is applied beyond squaring). Cheap and
+    /// allocation-free — walks each channel's raw bytes directly via
+    /// `withUnsafeBytes`/`bindMemory`, no intermediate `Data`/array — matching
+    /// `rmsOfS16LE`'s discipline. Used for the per-app (T10) meter, whose taps
+    /// (``PerAppCaptureCoordinator``/``LocalPlaybackEngine``) deliver tap-native
+    /// Float32, same as the whole-system tap.
+    ///
+    /// Handles BOTH of ``CapturedBuffer/channelData``'s layouts identically:
+    /// planar (one `Data` per channel — `channelData.count > 1`, the common case
+    /// for a stereo tap: `isInterleaved == false`) and interleaved
+    /// (`channelData.count == 1`, one buffer holding every channel's samples back
+    /// to back). Every entry's raw Float32 samples are pooled into one running
+    /// sum-of-squares over the TOTAL sample count across all entries — for planar
+    /// input that is "all channels combined"; for interleaved input the single
+    /// entry already contains every channel's samples, so the same pooling gives
+    /// the equivalent combined level. There is no per-entry channel count to
+    /// average by (``CapturedBuffer`` does not carry channel count), so this is a
+    /// single pooled RMS across every sample the buffer holds, not a per-channel
+    /// average — the right combined level for a meter either way.
+    static func rmsOfFloat32(_ buffer: CapturedBuffer) -> Float {
+        var sumSquares: Double = 0
+        var sampleCount = 0
+        for data in buffer.channelData {
+            let count = data.count / MemoryLayout<Float32>.size
+            guard count > 0 else { continue }
+            data.withUnsafeBytes { raw in
+                let p = raw.bindMemory(to: Float32.self)
+                for i in 0..<count {
+                    let v = Double(p[i])
+                    sumSquares += v * v
+                }
+            }
+            sampleCount += count
+        }
+        guard sampleCount > 0 else { return 0 }
         return Float((sumSquares / Double(sampleCount)).squareRoot())
     }
 

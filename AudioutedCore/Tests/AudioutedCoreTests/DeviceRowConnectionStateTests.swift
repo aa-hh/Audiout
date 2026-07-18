@@ -432,4 +432,49 @@ final class DeviceRowConnectionStateTests: XCTestCase {
         XCTAssertEqual(row.test_isFlashing, !reduceMotion,
                        "flashRow() is a no-op under Reduce Motion, and fires otherwise")
     }
+
+    // MARK: Leading VU meter (task T8, extends the T3/T5 shared symbol contract)
+
+    /// `setLevel` on a meter-enabled row reaches the meter and is readable back
+    /// via `test_meterLevel`.
+    func testSetLevelOnMeterEnabledRowIsReflectedByTestMeterLevel() {
+        let row = DeviceRowView(device: makeDevice(), showsMeter: true)
+        row.setLevel(0.42)
+        XCTAssertEqual(row.test_meterLevel(), 0.42)
+    }
+
+    /// `showsMeter: false` (the mixer window/`GroupRowView` default) makes
+    /// `setLevel` a no-op — `test_meterLevel` stays 0.
+    func testSetLevelOnNonMeterRowIsANoOp() {
+        let row = DeviceRowView(device: makeDevice(), showsMeter: false)
+        row.setLevel(0.9)
+        XCTAssertEqual(row.test_meterLevel(), 0, "a row built without a meter must never report a live level")
+    }
+
+    /// `apply(...)` for a device that is no longer "playing" (unavailable,
+    /// deselected, or muted) resets the meter to 0 even if a level was pushed
+    /// moments before — the stale-bar guard documented at the `apply` call site.
+    func testApplyWithNotPlayingDeviceResetsMeterToZero() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device, showsMeter: true)
+        row.setLevel(0.75)
+        XCTAssertEqual(row.test_meterLevel(), 0.75)
+
+        // Muted ⇒ not playing, even though still selected/available.
+        var muted = device
+        muted.isMuted = true
+        row.apply(muted, selected: true)
+        XCTAssertEqual(row.test_meterLevel(), 0, "a muted device's meter must reset, not keep showing the last level")
+    }
+
+    func testApplyWithDeselectedDeviceResetsMeterToZero() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device, showsMeter: true)
+        row.apply(device, selected: true)
+        row.setLevel(0.6)
+        XCTAssertEqual(row.test_meterLevel(), 0.6)
+
+        row.apply(device, selected: false)
+        XCTAssertEqual(row.test_meterLevel(), 0, "a deselected device's meter must reset")
+    }
 }

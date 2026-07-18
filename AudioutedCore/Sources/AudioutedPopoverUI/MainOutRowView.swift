@@ -65,6 +65,10 @@ public final class MainOutRowView: NSView {
 
     public weak var delegate: Delegate?
 
+    /// Leading VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
+    /// Main Out shares the same level as the device meters for now, until
+    /// true per-output metering exists).
+    private let meterView = LevelMeterView()
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
     private let iconView = NSImageView()
@@ -160,10 +164,24 @@ public final class MainOutRowView: NSView {
         configureAccessibility()
     }
 
+    /// Push a live RMS reading to the master meter (task T4a). Main Out shares
+    /// the same level feed as the device rows for now.
+    public func setLevel(_ rms: Float) {
+        meterView.setLevel(rms)
+    }
+
+    /// Zero the master meter with no animation (popover-close discipline —
+    /// PopoverController calls this so a reopen never shows a stale bar).
+    public func resetLevel() {
+        meterView.reset()
+    }
+
     // MARK: Build
 
     private func buildSubviews() {
         wantsLayer = true
+
+        meterView.translatesAutoresizingMaskIntoConstraints = false
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
         // ahh's requested icon `hifispeaker.arrow.forward.fill` was introduced in
@@ -247,6 +265,7 @@ public final class MainOutRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        addSubview(meterView)
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(muteButton)
@@ -254,16 +273,25 @@ public final class MainOutRowView: NSView {
         addSubview(readoutLabel)
         addSubview(destinationPopUp)
 
-        // Laid out against the shared column grid (task B). The icon leads; the
-        // slider, `%` readout and the named dropdown (the trailing control) are
-        // all anchored off the TRAILING edge so they line up with the device and
-        // group rows. The dropdown gets a comfortable fixed width so a named
-        // target fits and truncates gracefully.
+        // Laid out against the shared column grid (task B). The meter leads
+        // (task T4a — live master meter, same column the device rows reserve);
+        // the icon is repointed off `PopoverColumnGrid.firstElementLeading` so
+        // it lines up with the device rows below it. The slider, `%` readout
+        // and the named dropdown (the trailing control) are all anchored off
+        // the TRAILING edge so they line up with the device and group rows.
+        // The dropdown gets a comfortable fixed width so a named target fits
+        // and truncates gracefully.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
+            meterView.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                               constant: PopoverColumnGrid.leadingInset),
+            meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
+            meterView.heightAnchor.constraint(equalToConstant: 22),
+
             iconView.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                              constant: PopoverColumnGrid.leadingInset),
+                                              constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),

@@ -71,6 +71,24 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   contract turns a second concurrent call into a clobbered/leaked waiter for the
   first, which is what caused a live regression (leaked `startOp` continuations,
   eventual disconnect) before this guard existed.
+- **Metering is THREE real sources, all on the same event channel, all
+  popover-scoped (T3).** `setMeteringActive` fans the popover-visibility gate to
+  the whole-system `captureCoordinator`, the `routeMixer`, AND the
+  `localPlaybackEngine`, and drives the metering-only tap lifecycle below. Each
+  device's `.level` is the MAX of its whole-system-tap contribution (only if it's
+  a Selected Device, unmuted) and the loudest PRE-volume SOURCE level among the
+  apps `.device`-routed to it (`latestAppLevel`) — a device fed by both shows the
+  larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
+  a low slider never empties a bar. Each listed app's `.appLevel` comes from exactly
+  one source by route kind: `.device` → `routeMixer.onAppLevel` (PRE-volume source),
+  `.currentDevice` → `localPlaybackEngine.onAppLevel` (PRE-volume, emitted raw),
+  `.noRedirect` → `meteringCapture`, a SEPARATE `.unmuted` per-app tap that exists
+  only to measure listed apps with no other capture and feeds neither the mixer
+  nor the engine. PRIVACY: a user-excluded app is NEVER metered — the
+  metering-only target set is `listed − routed − local − excluded`, re-reconciled
+  inside `updateAppRoutes` whenever routes/excluded change, and an app that
+  becomes excluded has its metering tap stopped immediately. The metering-only
+  taps NEVER start/stop the primary routing coordinators' taps.
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
   Saved groups still persist and re-apply.
@@ -98,7 +116,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `AppRouteConfiguring` | Optional backend capability (T6/T7): `updateAppRoutes` streams a routed app to its device. `NativeBackend` only. |
 | `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence. |
 | `DeviceIconStore` | Persists per-device icon overrides (bare SF Symbol name strings only) for `AudioutedSharedUI.DeviceIconController`. |
-| `BackendEvent` | Backend→UI push channel: add/remove/update/level/volume-changed/routedApps. |
+| `BackendEvent` | Backend→UI push channel: add/remove/update/level/app-level/volume-changed/routedApps. |
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |
 | `OwnToneBackend` | HTTP-polling backend against OwnTone; superseded. |

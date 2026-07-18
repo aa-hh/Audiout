@@ -57,6 +57,29 @@ public protocol LocalPlaybackControlling: AnyObject, Sendable {
     func start() throws
     /// Stop the audio engine and drop every player.
     func stop()
+
+    /// Fired with one app's raw (PRE-volume) captured RMS (0.0…1.0) while
+    /// metering is active — the per-app analogue of the whole-system tap's
+    /// `onLevel`. ``NativeBackend`` forwards it as ``BackendEvent/appLevel`` for a
+    /// `.currentDevice`-routed app. PRE-volume by product decision (see the
+    /// concrete engine): the Current-Device app bar shows what was captured, not
+    /// the level the player will render it at. A STORED requirement (not
+    /// defaultable via an extension), so every conformer declares it — the
+    /// fallback/spy conformers just hold the closure.
+    var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)? { get set }
+
+    /// Gate per-app RMS computation/emission on or off (T3/T-GATE) — independent
+    /// of `start()`/`stop()`, mirroring
+    /// ``NativeCaptureCoordinator/setMeteringActive(_:)``. Default no-op (below)
+    /// so a conformer that doesn't meter compiles unchanged; the concrete
+    /// ``LocalPlaybackEngine`` provides the real one.
+    func setMeteringActive(_ active: Bool)
+}
+
+extension LocalPlaybackControlling {
+    /// Default no-op (T3) so a conformer that doesn't meter compiles unchanged;
+    /// the concrete ``LocalPlaybackEngine`` overrides it with the real gate.
+    public func setMeteringActive(_ active: Bool) {}
 }
 
 /// Ways local playback setup can fail.
@@ -155,8 +178,24 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private var nodes: [String: AppNode] = [:]
     private var engineRunning = false
     private var configuredDevice = false
+    /// Whether per-app RMS metering should be computed and forwarded via
+    /// ``onAppLevel`` (T10 — the Current-Device app-bar meter). Guarded by
+    /// `stateLock`, exactly like `nodes`/`engineRunning`/`configuredDevice` — NO
+    /// new lock is introduced for metering. `false` until
+    /// ``setMeteringActive(_:)`` first flips it on (mirrors
+    /// `NativeCaptureCoordinator.meteringActive`: the popover isn't necessarily
+    /// visible yet when an app's local player is first added).
+    private var meteringActive = false
     /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
     private var configChangeObserver: NSObjectProtocol?
+
+    /// Fired synchronously from ``receive(buffer:for:)`` with one app's raw
+    /// captured RMS level (0.0...1.0), while metering is active. PRE-VOLUME by
+    /// product decision: computed on the tap's raw captured buffer, never scaled
+    /// by `AVAudioPlayerNode.volume` — the Current-Device app bar shows what was
+    /// captured, not what the player will render it at. Called on the tap's
+    /// delivery thread (same thread as `receive`); keep the handler cheap.
+    public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
 
     public init() {
         // AVAudioEngine STOPS itself on a configuration change — and one fires
@@ -267,6 +306,15 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         }
     }
 
+    /// Gate per-app RMS computation/emission on or off (T10), mirroring
+    /// ``NativeCaptureCoordinator/setMeteringActive(_:)`` for the whole-system
+    /// meter. Safe to call from any thread: `meteringActive` is guarded by the
+    /// same `stateLock` as `engineRunning`/`configuredDevice` — a brief,
+    /// non-blocking write, never a new lock on the RT `receive(buffer:for:)` path.
+    public func setMeteringActive(_ active: Bool) {
+        stateLock.withLock { meteringActive = active }
+    }
+
     // MARK: Per-app players
 
     public func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {
@@ -365,20 +413,32 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     public func receive(buffer: CapturedBuffer, for bundleID: String) {
         // Real-time IO thread: take the state lock NON-blockingly and snapshot
-        // the node, then schedule outside it. The state lock is only ever held
-        // for microseconds (and never across an engine call), so this try()
-        // essentially always succeeds; a momentary miss just drops the buffer.
-        // scheduleBuffer/makeBuffer are thread-safe and stay outside the lock.
+        // the node PLUS the metering flag together (T10 rides the same try() —
+        // no second lock acquisition per buffer), then work outside it. The
+        // state lock is only ever held for microseconds (and never across an
+        // engine call), so this try() essentially always succeeds; a momentary
+        // miss just drops the buffer. scheduleBuffer/makeBuffer are thread-safe
+        // and stay outside the lock.
         let node: AppNode?
+        let metering: Bool
         if stateLock.try() {
             defer { stateLock.unlock() }
             node = engineRunning ? nodes[bundleID] : nil
+            metering = meteringActive
         } else {
             return
         }
         guard let node else {
             if AudioDiag.isEnabled { Self.tickDrop(bundleID) }
             return
+        }
+        // Per-app RMS metering (T10, Current-Device app bar): PRE-VOLUME by
+        // product decision — raw captured level, computed on `buffer` BEFORE any
+        // format conversion and never scaled by `node.player.volume`. A cheap
+        // add-on skipped ENTIRELY when metering is inactive or nobody is
+        // listening — no allocation, no new lock, no change to scheduling below.
+        if metering, let onAppLevel {
+            onAppLevel(bundleID, NativeCaptureCoordinator.rmsOfFloat32(buffer))
         }
         // Build the raw buffer in the tap's own (source) format, then bridge to
         // the deinterleaved connection format the player node was linked with.
@@ -538,12 +598,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 /// is an inert no-op.
 public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sendable {
     public init() {}
+    public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
     public func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {}
     public func removeApp(bundleID: String) {}
     public func setVolume(_ volume: Float, for bundleID: String) {}
     public func receive(buffer: CapturedBuffer, for bundleID: String) {}
     public func start() throws {}
     public func stop() {}
+    public func setMeteringActive(_ active: Bool) {}
 }
 
 #endif

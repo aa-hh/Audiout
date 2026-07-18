@@ -28,6 +28,11 @@ public enum BackendEvent: Sendable, Equatable {
     /// (`NSLevelIndicator`, display-only — SPEC.md §9). Emitted only for
     /// selected, unmuted devices while "playing."
     case level(id: String, rms: Float)
+    /// A cheap RMS level sample (0…1) for one routed app's per-app level meter,
+    /// keyed by bundle ID instead of device ID — the per-APP analogue of
+    /// ``level``, which is device-keyed. Drives the Applications-row meters
+    /// (as opposed to `.level`'s device-row meters).
+    case appLevel(bundleID: String, rms: Float)
     /// The Mac's system output volume was changed from **outside this app** —
     /// the volume keys, the Sound menu, another app — while the default output
     /// device stayed put. The one event here that isn't about a `Device`.
@@ -201,6 +206,22 @@ public protocol LatencyConfigurable: AnyObject {
     /// the re-add pass has completed (per-device failures follow the D4
     /// best-effort rule: marked unavailable, the rest proceed).
     func applyStartBuffer(ms: Int) async
+}
+
+/// The optional metering-active capability (T-GATE, playback-meter-research.md).
+/// A backend that computes RMS just to feed `.level` adopts this so the work can
+/// be switched off while nobody's watching a meter — `PopoverController` flips it
+/// on `popoverDidShow`/`popoverDidClose` via `backend as? MeteringControlling`, so
+/// a backend without the concept (`OwnToneBackend`) never sees the call.
+/// Deliberately NOT part of ``OutputBackend``, mirroring ``LatencyConfigurable``:
+/// the base seam stays capability-free.
+public protocol MeteringControlling: AnyObject {
+
+    /// Start or stop computing/emitting `.level` samples. `false` (inactive) is
+    /// the default until the popover is first shown, and teardown/`stop()` must
+    /// leave it `false` again — a closed popover has nobody to render a meter for,
+    /// so there's no reason to keep spending a per-buffer RMS pass on it.
+    func setMeteringActive(_ active: Bool)
 }
 
 /// The optional per-app routing capability (T6/T7). A backend that can stream a

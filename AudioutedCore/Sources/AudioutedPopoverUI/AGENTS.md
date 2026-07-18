@@ -15,6 +15,10 @@ The menu-bar popover UI (pure AppKit). `PopoverController` owns the `NSPopover`,
 - `ConnectionDiagnosisView` never touches `NSPasteboard`; the host writes on `onCopyDetails`.
 - `selectedAppBundleID` is host-owned, transient. All three removal entry points (± footer, "Remove from list", Delete/Backspace) must funnel through `removeApp(bundleID:)`.
 - The Applications card's add/remove control is `ApplicationsFooterView` (± `NSSegmentedControl`), replacing the old "+ Add application…" row.
+- `PopoverController.updateLevel(_ rms:, for id:)` is the live push path from `AppDelegate`'s `.level` handling: it early-returns when the popover `isShown` is false, so a backend still emitting behind a closed popover doesn't do wasted view work. `test_pushLevel(_:for:)` is the same dispatch WITHOUT the `isShown` gate, for headless snapshots/tests that never actually show the popover. Both route to `deviceRowsByID[id]?.setLevel(rms)` and, for the Main Out id, `mainOutRow.setLevel(rms)`.
+- `PopoverController.updateAppLevel(_ rms:, for bundleID:)` mirrors `updateLevel(_:for:)` for the Applications card: same `isShown` gate, same gate-free test twin (`test_pushAppLevel(_:for:)`), both routing to `appRowsByBundleID[bundleID]?.setLevel(rms)`. Unlike a device level, an app level never feeds `mainOutRow` — Main Out mirrors the selected DEVICE's level, not any one app's contribution. `makeAppRow` constructs its `AppRowView(showsMeter: true)` so the row actually has a meter to push into.
+- Closing the popover zeroes every meter rather than leaving a stale bar: the close path calls `resetLevel()` on every row in `deviceRowsByID`, on `mainOutRow`, and on every row in `appRowsByBundleID`.
+- Metering itself is gated off the wall-clock cost of RMS computation while the popover is closed: `PopoverController` drives `(backend as? MeteringControlling)?.setMeteringActive(_:)` — on when the popover opens, off when it closes — so the backend only computes RMS (and only runs the metering-only taps) while there's a UI to show it to.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 
 ## Map
@@ -24,7 +28,7 @@ The menu-bar popover UI (pure AppKit). `PopoverController` owns the `NSPopover`,
 | `PopoverController` | Orchestrator: `NSPopover`, cards, `Device` ingestion. |
 | `PopoverPanelViewController` | Card container: build/collapse by header title. |
 | `CardView` | Rounded module: header rows + collapsible body. |
-| `MainOutRowView` | System row — slider, mute, destination dropdown. |
+| `MainOutRowView` | System row — slider, mute, destination dropdown, leading `LevelMeterView`. |
 | `ConnectionDiagnosisView` | "Couldn't connect" panel under a failed row. |
 | `PopoverHeaderView` | Top bar: title + groups / settings / quit. |
 | `GroupRowView` | Group's master row; built for the window, unused here. |

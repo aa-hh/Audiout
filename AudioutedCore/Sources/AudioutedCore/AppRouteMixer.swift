@@ -101,6 +101,13 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// on the mixer's serial queue.
     public var onMixedBuffer: (@Sendable (MixedBuffer) -> Void)?
 
+    /// Fired once per handled buffer, while metering is active, with the PRE-
+    /// volume SOURCE RMS (0…1) of the ONE app whose buffer was just handled — how
+    /// loud that app is actually playing, NOT scaled by its routing-volume slider
+    /// (the meter shows the program level, not the attenuated output). Not the
+    /// summed mix. Called on the mixer's serial queue. See ``setMeteringActive(_:)``.
+    public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
+
     // MARK: Tunables
 
     /// The engine's fixed output format. All mixing happens in these units.
@@ -158,6 +165,13 @@ public final class AppRouteMixer: @unchecked Sendable {
 
     /// streamID → its running mix timeline.
     private var timelines: [Int: MixTimeline] = [:]
+
+    /// Whether per-app POST-volume RMS should be computed and handed to
+    /// ``onAppLevel`` (T2 — the per-app-routed meter). `false` until
+    /// ``setMeteringActive(_:)`` first flips it on, so the common case (no
+    /// meter shown) costs nothing extra in the mixing hot path. Confined to
+    /// `queue`, same as every other piece of state here.
+    private var meteringActive = false
 
     // MARK: Init
 
@@ -272,6 +286,14 @@ public final class AppRouteMixer: @unchecked Sendable {
             .sorted { $0.streamID < $1.streamID }
     }
 
+    /// Gate per-app RMS computation/emission on or off (T2). Independent of
+    /// routing/capture: apps may be actively routed and mixing while metering
+    /// stays off (no meter shown), and vice versa is harmless (metering active
+    /// with nothing routed just means ``onAppLevel`` never fires).
+    public func setMeteringActive(_ active: Bool) {
+        queue.async { self.meteringActive = active }
+    }
+
     // MARK: Capture wiring
 
     /// Observe a per-app tap's state so the mixer learns each app's real
@@ -297,14 +319,21 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// frame-indexed timeline, and emit whatever prefix is now old enough to be
     /// final. Safe to call concurrently from several taps' IOProc threads.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
-        let emissions: [MixedBuffer] = queue.sync {
+        let (emissions, level): ([MixedBuffer], Float?) = queue.sync {
             guard let streamID = streamForBundle[bundleID],
                   let converter = converterForBundle[bundleID],
                   let pcm = converter.convertToAirPlayPCM(buffer),
                   !pcm.isEmpty
-            else { return [] }
+            else { return ([], nil) }
 
             let volume = volumeForBundle[bundleID] ?? 100
+            // The per-app meter is a SOURCE/program level: RMS the PRE-volume
+            // converted buffer (`pcm`), so the bar reflects how loud the app is
+            // actually playing, independent of its routing-volume slider — the
+            // meter shows the source, not the attenuated output (Alec's meter
+            // feedback: a low slider used to leave the bar stuck near-empty even
+            // when the source was loud). Skipped entirely unless a meter listens.
+            let level: Float? = meteringActive ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil
             let contributorCount = currentSets.first(where: { $0.streamID == streamID })?.bundleIDs.count ?? 1
 
             // SINGLE-contributor stream: pass the converted buffer STRAIGHT
@@ -326,10 +355,11 @@ public final class AppRouteMixer: @unchecked Sendable {
                 let out = volume == 100
                     ? pcm
                     : Self.packClipped(Self.scaledStereoSamples(pcm, volumePercent: volume)[...])
-                guard !out.isEmpty else { return [] }
-                // S16LE stereo == 4 bytes per frame.
-                return [MixedBuffer(streamID: streamID, pcm: out,
-                                    frameCount: out.count / 4, pts: buffer.pts)]
+                guard !out.isEmpty else { return ([], nil) }
+                // S16LE stereo == 4 bytes per frame. (`level` above is the app's
+                // pre-volume source RMS, shared by both stream shapes.)
+                return ([MixedBuffer(streamID: streamID, pcm: out,
+                                     frameCount: out.count / 4, pts: buffer.pts)], level)
             }
 
             // MULTI-contributor stream (2+ apps summed onto ONE device): the
@@ -338,7 +368,7 @@ public final class AppRouteMixer: @unchecked Sendable {
             // genuinely-shared case only; dual-stream mixing is a tracked
             // follow-up (single-stream routing is the shipping priority).
             let scaled = Self.scaledStereoSamples(pcm, volumePercent: volume)
-            guard !scaled.isEmpty else { return [] }
+            guard !scaled.isEmpty else { return ([], nil) }
             let firstFrame = Self.frameIndex(of: buffer.pts)
             let timeline = timelines[streamID] ?? {
                 let t = MixTimeline()
@@ -346,12 +376,13 @@ public final class AppRouteMixer: @unchecked Sendable {
                 return t
             }()
             timeline.add(firstFrame: firstFrame, stereo: scaled)
-            return timeline.drainReady(
+            return (timeline.drainReady(
                 streamID: streamID,
                 holdFrames: Self.holdFrames,
-                maxPendingFrames: Self.maxPendingFrames)
+                maxPendingFrames: Self.maxPendingFrames), level)
         }
         for emission in emissions { onMixedBuffer?(emission) }
+        if let level { onAppLevel?(bundleID, level) }
     }
 
     /// Emit every stream's still-pending mixed audio immediately (end-of-run,

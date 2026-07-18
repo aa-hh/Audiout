@@ -40,6 +40,17 @@ final class AppRouteMixerTests: XCTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
+    /// Thread-safe collector for the `@Sendable` per-app level callback.
+    private final class LevelSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var levels: [(bundleID: String, rms: Float)] = []
+        func append(_ bundleID: String, _ rms: Float) {
+            lock.lock(); levels.append((bundleID, rms)); lock.unlock()
+        }
+        var all: [(bundleID: String, rms: Float)] { lock.lock(); defer { lock.unlock() }; return levels }
+        var isEmpty: Bool { all.isEmpty }
+    }
+
     private func mixer() -> AppRouteMixer {
         AppRouteMixer(makeConverter: { _ in IdentityConverter() })
     }
@@ -463,5 +474,83 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(7, 7)], atSecond: 1))
         m.flush()
         XCTAssertTrue(sink.isEmpty)
+    }
+
+    // MARK: - 6. Per-app POST-volume metering (T2)
+
+    /// Single-contributor helper: routes "a" alone to "dev1" at `volume`,
+    /// feeds one fixed buffer, and returns the RMS reported to `onAppLevel`.
+    /// `setMeteringActive` is submitted to the mixer's serial queue before
+    /// `handleBuffer` is (both from this same thread), so by FIFO ordering on
+    /// that serial queue the flag is guaranteed live before the buffer lands.
+    private func singleContributorLevel(forVolume volume: Int) -> Float {
+        let m = mixer()
+        let levels = LevelSink()
+        m.onAppLevel = { levels.append($0, $1) }
+        m.setMeteringActive(true)
+
+        m.updateRoutes([route("a", to: "dev1", volume: volume)])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(16000, -16000), (12000, -12000)], atSecond: 1))
+
+        return levels.all.last!.rms
+    }
+
+    func testMeteringOnFiresPlausibleSourceRMSForSingleContributor() {
+        let level = singleContributorLevel(forVolume: 100)
+        XCTAssertGreaterThan(level, 0, "a non-silent buffer must report a non-zero RMS")
+        XCTAssertLessThanOrEqual(level, 1.0, "RMS is normalized to 0...1")
+    }
+
+    /// Proves the reported level is a SOURCE/program level (PRE-volume): the app's
+    /// routing-volume slider must NOT change it, so a low slider can't leave the
+    /// bar stuck near-empty while the source is loud (Alec's meter feedback).
+    func testMeteringReportsSourceLevelIndependentOfRoutingVolume() {
+        let fullVolume = singleContributorLevel(forVolume: 100)
+        let halfVolume = singleContributorLevel(forVolume: 50)
+        let mutedVolume = singleContributorLevel(forVolume: 0)
+
+        XCTAssertEqual(halfVolume, fullVolume, accuracy: 0.0001,
+            "halving the routing volume must NOT change the reported source RMS")
+        XCTAssertEqual(mutedVolume, fullVolume, accuracy: 0.0001,
+            "even a 0% routing volume still reports the app's true source level")
+    }
+
+    func testMeteringOffNeverFiresAppLevel() {
+        let m = mixer()
+        let levels = LevelSink()
+        m.onAppLevel = { levels.append($0, $1) }
+        // Metering defaults to off; setMeteringActive is never called.
+        m.updateRoutes([route("a", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(16000, 16000)], atSecond: 1))
+        m.flush()
+        XCTAssertTrue(levels.isEmpty, "onAppLevel must not fire while metering is inactive (default state)")
+    }
+
+    /// Two apps sharing one device's stream (the multi-contributor path) must each
+    /// report THEIR OWN source RMS, not a value derived from the summed mix -- a
+    /// loud "a" and a quiet "b" (distinct source buffers) must yield distinct
+    /// levels keyed to their own bundle IDs.
+    func testMeteringOnMultiContributorFiresPerAppNotMixedSum() {
+        let m = mixer()
+        let levels = LevelSink()
+        m.onAppLevel = { levels.append($0, $1) }
+        m.setMeteringActive(true)
+
+        m.updateRoutes([route("a", to: "dev1", volume: 100), route("b", to: "dev1", volume: 100)])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleStateChange(bundleID: "b", state: capturing())
+
+        m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(20000, 20000)], atSecond: 1))
+        m.handleBuffer(bundleID: "b", buffer: s16Buffer(frames: [(1000, 1000)], atSecond: 1))
+
+        let recorded = levels.all
+        XCTAssertEqual(recorded.count, 2, "each app's own buffer must fire its own onAppLevel call")
+        let aLevel = recorded.first { $0.bundleID == "a" }!.rms
+        let bLevel = recorded.first { $0.bundleID == "b" }!.rms
+        XCTAssertGreaterThan(aLevel, bLevel,
+            "the louder app's OWN source RMS must be reported per bundle ID -- if levels came from " +
+            "the summed accumulator instead of each app's own buffer, both would report the same value")
     }
 }

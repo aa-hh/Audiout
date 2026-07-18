@@ -494,4 +494,40 @@ final class AppRowViewTests: XCTestCase {
                        "the slider's own column must not get the row's pointingHand cursor")
     }
 
+    // MARK: Leading VU meter (task T4, mirrors DeviceRowView's showsMeter)
+
+    /// `setLevel` on a meter-enabled row reaches the meter and is readable
+    /// back via `test_meterLevel` — mirrors
+    /// `DeviceRowConnectionStateTests.testSetLevelOnMeterEnabledRowIsReflectedByTestMeterLevel`.
+    func testSetLevelOnMeterEnabledRowIsReflectedByTestMeterLevel() {
+        let row = AppRowView(showsMeter: true)
+        row.setLevel(0.42)
+        XCTAssertEqual(row.test_meterLevel(), 0.42)
+    }
+
+    /// `showsMeter: false` (the default — every existing caller) makes
+    /// `setLevel` a no-op and leaves the icon at its unchanged leading
+    /// position (the reserved meter-column width the grid already accounts
+    /// for via `firstElementLeading(indented:)`).
+    func testSetLevelOnNonMeterRowIsANoOp() {
+        let row = AppRowView()
+        row.setLevel(0.9)
+        XCTAssertEqual(row.test_meterLevel(), 0, "a row built without a meter must never report a live level")
+    }
+
+    /// `resetLevel()` zeroes a previously pushed level back to 0.
+    func testResetLevelZeroesAPushedLevel() {
+        let row = AppRowView(showsMeter: true)
+        row.setLevel(0.6)
+        XCTAssertEqual(row.test_meterLevel(), 0.6)
+        row.resetLevel()
+        XCTAssertEqual(row.test_meterLevel(), 0, "resetLevel must zero the meter")
+    }
+
+    /// `resetLevel()` on a non-meter row stays a no-op (mirrors `setLevel`).
+    func testResetLevelOnNonMeterRowIsANoOp() {
+        let row = AppRowView()
+        row.resetLevel()
+        XCTAssertEqual(row.test_meterLevel(), 0)
+    }
 }

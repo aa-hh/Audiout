@@ -172,6 +172,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
         popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
+        // Metering-active gate (T-GATE): only compute/emit `.level` while the
+        // popover is actually open. `backend as? MeteringControlling` is nil for
+        // backends without the capability (`OwnToneBackend`), so this is a no-op
+        // there — mirrors the `LatencyConfigurable` optional-capability pattern.
+        popoverController.onMeteringActiveChange = { [weak self] active in
+            (self?.backend as? MeteringControlling)?.setMeteringActive(active)
+        }
         // Bug T2: an Applications-card slider drive on a `.currentDevice` app must
         // reach its LOCAL playback stream immediately (low latency), not only after
         // the persisted route round-trips through `updateAppRoutes`. No-ops on
@@ -462,6 +469,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastLevelLog = Date()
                 log("level: \(id) rms \(rms)")
             }
+            popoverController.updateLevel(rms, for: id)
+            return
+        case .appLevel(let bundleID, let rms):
+            popoverController.updateAppLevel(rms, for: bundleID)
             return
         case .systemVolumeChanged(let volume):
             // The volume keys move the system output = the local "Current Device",
@@ -521,6 +532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "deviceRemoved(\(id))"
         case .level(let id, let rms):
             return "level(\(id), \(rms))"
+        case .appLevel(let bundleID, let rms):
+            return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
             return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
         case .routedApps(let deviceID, let appNames):

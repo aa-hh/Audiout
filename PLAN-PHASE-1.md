@@ -584,6 +584,12 @@ slack relative to those.
 - **Q7 OwnTone lifecycle:** connect-only; the app never supervises the server.
 - **Q8 Meters: SKIPPED in Phase 1 entirely** (ahh's choice, differs from the
   plan's recommendation — no meter UI until per-device meters can be real in v2).
+  **RE-ENABLED (2026-07, intentional reversal):** the native backend now
+  computes real per-tap RMS (`NativeCaptureCoordinator`) and fans it out via
+  the existing `BackendEvent.level(id:rms:)`/`NativeBackend.emitLevel`, so the
+  "per-device meters can be real" bar from the original SKIP note is met —
+  meters shipped as a leading `LevelMeterView` column driven by that live
+  signal, gated off while the popover is closed (`setMeteringActive`).
 - **NEW (project-wide): the project is OPEN SOURCE, GPL-2.0-or-later** (ahh may
   redistribute). Affects headers/LICENSE files as tasks touch code.
 

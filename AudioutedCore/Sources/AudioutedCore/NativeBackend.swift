@@ -41,7 +41,7 @@ import AirPlayEngine
 /// `isAvailable = false`, and are **NEVER** `addOutput`-ed (the engine is an
 /// AP2-only sender). The future raop (AP1) sender slots in behind
 /// ``AirPlay1Sending`` — see the seam comment at the bottom of this file.
-public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteConfiguring, @unchecked Sendable {
+public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringControlling, AppRouteConfiguring, @unchecked Sendable {
 
     // MARK: Injected dependencies (protocols so tests are hermetic)
 
@@ -121,6 +121,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// Combines the per-app captures into per-destination mixed streams and owns the
     /// stable device⟷stream_id topology. Pure computation (no Core Audio/engine).
     private let routeMixer: AppRouteMixer
+
+    /// A dedicated per-app capture used ONLY to meter listed apps that are NOT
+    /// otherwise captured (`.noRedirect`) — the third `.appLevel` source (T3).
+    /// Built `.unmuted` (unlike `perAppCapture`, which is `.mutedWhenTapped` for
+    /// actual routing) so it never silences an app it's merely measuring; its
+    /// buffers become `.appLevel` and NOTHING else — it feeds neither the mixer
+    /// nor the engine. Started/stopped by the popover-scoped metering gate
+    /// (`setMeteringActive`) + reconciled by `updateAppRoutes`; it NEVER touches
+    /// the primary routing coordinator's taps. See the Metering (T3) section.
+    private let meteringCapture: PerAppCaptureCoordinator
 
     // MARK: State (all confined to `stateQueue`)
 
@@ -385,6 +395,49 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// touched for any other reason).
     private let processNotYetAudibleMaxRetries: Int
 
+    // MARK: Metering (T3 — three real level sources through the event channel)
+    //
+    // Replaces the old single whole-system RMS fanned identically to every device.
+    // Three real sources now feed the meters, all through the same `BackendEvent`
+    // channel, all popover-scoped (gated on `meteringActive`, flipped by
+    // `setMeteringActive`):
+    //   - Per-device `.level` = MAX(the whole-system-tap RMS iff the device is a
+    //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
+    //     apps `.device`-routed to it). A device fed by both shows the larger
+    //     (product decision). Every meter input is a SOURCE/program level — never
+    //     scaled by a routing/output volume (Alec: a low slider must not empty a bar).
+    //   - Per-app `.appLevel` for EVERY listed app, all PRE-volume source levels,
+    //     one source by route kind:
+    //       `.device`        -> `routeMixer.onAppLevel`          (pre-volume source)
+    //       `.currentDevice` -> `localPlaybackEngine.onAppLevel` (pre-volume, raw)
+    //       `.noRedirect`    -> `meteringCapture` (a dedicated `.unmuted` tap)
+
+    /// Whether a meter is currently being shown (popover open). Gates every
+    /// `.level`/`.appLevel` emission and the metering-only tap lifecycle;
+    /// forwarded to `captureCoordinator`/`routeMixer`/`localPlaybackEngine` (each
+    /// gates its own RMS pass on it). Confined to `stateQueue`.
+    private var meteringActive = false
+
+    /// The most recent whole-system-tap RMS (stream_id 0) — a device's system
+    /// contribution when it is a Selected Device (unmuted). On `stateQueue`.
+    private var latestSystemRMS: Float = 0
+
+    /// bundleID -> its most recent PRE-volume SOURCE RMS. A redirect target's
+    /// meter contribution is the loudest source routed to it (NOT the attenuated
+    /// mix), so a low routing-volume slider no longer empties the bar. Cleared on
+    /// `stop()`; a stale entry for an un-routed app is simply never aggregated (the
+    /// per-device sum reads only currently-`.device`-routed apps). On `stateQueue`.
+    private var latestAppLevel: [String: Float] = [:]
+
+    /// The excluded-apps denylist last handed to `updateAppRoutes` — retained so
+    /// the metering-only target set can subtract it (PRIVACY: an excluded app is
+    /// NEVER metered) and re-reconcile when the denylist changes. On `stateQueue`.
+    private var lastExcludedBundleIDs: Set<String> = []
+
+    /// The bundle IDs that currently have a metering-only tap running — the live
+    /// truth `meteringTapDiffLocked()` diffs against. On `stateQueue`.
+    private var meteringTapTargets: Set<String> = []
+
     // MARK: Init
 
     /// Public seam: the real native backend over the in-process ``AirPlayEngine``
@@ -439,6 +492,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
+        injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
         processNotYetAudibleMaxRetries: Int = 5
     ) {
@@ -446,6 +500,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         self.discovery = discoverySource
         self.systemVolume = systemVolume
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
+        // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
+        // built `.unmuted` and with a distinct aggregate-device name so it never
+        // collides with `perAppCapture`. Same injected `resolvePID`. Tests can
+        // script it via `injectedMeteringCapture` (mirrors `injectedPerAppCapture`).
+        self.meteringCapture = injectedMeteringCapture
+            ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudioutedMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
         self.processNotYetAudibleMaxRetries = processNotYetAudibleMaxRetries
@@ -500,6 +560,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             }
             self?.engine.write(
                 pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            // The per-device meter is driven by the apps' PRE-volume SOURCE levels
+            // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
+            // metering-related is read off the mix here.
+        }
+        // Per-app meter, source 1/3: `.device`-routed apps (PRE-volume SOURCE RMS
+        // from the mixer). The mixer gates `onAppLevel` on its OWN `meteringActive`,
+        // so this fires only while a meter is shown.
+        routeMixer.onAppLevel = { [weak self] bundleID, rms in
+            self?.emitAppLevel(bundleID: bundleID, rms: rms)
+        }
+        // Per-app meter, source 3/3: listed apps with no other capture
+        // (`.noRedirect`), metered by the dedicated `.unmuted` `meteringCapture`.
+        // Compute the raw Float32 RMS on the delivery thread, then hop to emit
+        // (gated on metering — a buffer racing a just-stopped tap is dropped).
+        meteringCapture.onBuffer = { [weak self] bundleID, buffer in
+            guard let self else { return }
+            let rms = NativeCaptureCoordinator.rmsOfFloat32(buffer)
+            self.emitAppLevel(bundleID: bundleID, rms: rms)
         }
     }
 
@@ -657,6 +735,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             //    real AP2 output is actually selected. `onLevel` is harmless to
             //    wire early: it only fires while the tap is running.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
+
+            // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
+            // Wired here like `onLevel` (the engine is assigned before `start()`);
+            // it only fires while metering is active (the engine gates its own RMS
+            // pass) and emits the PRE-volume raw RMS unchanged. Hop to `stateQueue`.
+            self.localPlaybackEngine?.onAppLevel = { [weak self] bundleID, rms in
+                self?.emitAppLevel(bundleID: bundleID, rms: rms)
+            }
         }
     }
 
@@ -669,6 +755,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        captureCoordinator?.setMeteringActive(false)
+        // Metering (T3): leave every metering source switched off (teardown
+        // discipline — a closed backend has nobody to render a meter for) and stop
+        // every metering-only tap. `meteringCapture.stopAll()` is off `stateQueue`
+        // (Core Audio teardown), matching the taps below. The whole-system tap is
+        // NOT stopped eagerly here — the ordered `captureControlQueue` stop below is
+        // the documented final word (C1: an eager caller-thread stop blocked quit).
+        routeMixer.setMeteringActive(false)
+        localPlaybackEngine?.onAppLevel = nil
+        localPlaybackEngine?.setMeteringActive(false)
+        meteringCapture.stopAll()
         // Per-app routing (T6): stop every process tap and drain the mixer. Both are
         // off `stateQueue` (teardown may block on Core Audio), matching the
         // whole-system tap's stop above. Callbacks stay wired — they only fire while
@@ -758,6 +855,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
             self.bufferReAdding.removeAll()
+            // Metering (T3): a later start() re-decides from a clean slate — no
+            // stale system/stream RMS, metering off, no metering-only targets.
+            self.meteringActive = false
+            self.latestSystemRMS = 0
+            self.latestAppLevel.removeAll()
+            self.lastExcludedBundleIDs.removeAll()
+            self.meteringTapTargets.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -947,6 +1051,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     public func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String> = []) {
         let plan: UpdateRoutesPlan = stateQueue.sync {
             self.lastRoutes = routes
+            // Retained so the metering-only target set can subtract it and so a
+            // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
+            self.lastExcludedBundleIDs = excludedBundleIDs
             self.routeDisplayNames = Dictionary(
                 routes.map { ($0.bundleID, $0.displayName) }, uniquingKeysWith: { _, new in new })
             let newRouted = Set(routes.compactMap { route -> String? in
@@ -993,13 +1100,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // its tap running (only the downstream consumer changes).
             let previousUnion = previousRouted.union(previousLocal)
             let newUnion = newRouted.union(newLocal)
+            // T3: re-reconcile the metering-only taps against the new route/excluded
+            // table (routed/local/excluded were all just updated above). Empty when
+            // metering is inactive. NEVER touches the primary `perAppCapture` taps.
+            let meteringDiff = self.meteringTapDiffLocked()
             return UpdateRoutesPlan(
                 mixerRoutes: mixerRoutes,
                 captureToStart: newUnion.subtracting(previousUnion),
                 captureToStop: previousUnion.subtracting(newUnion),
                 localRemoved: previousLocal.subtracting(newLocal),
                 localRoutes: routes.filter { $0.destination == .currentDevice },
-                localExcluded: newLocal)
+                localExcluded: newLocal,
+                meteringToStart: meteringDiff.start,
+                meteringToStop: meteringDiff.stop)
         }
 
         // Topology recompute — synchronously fires `onDestinationSetsChanged`
@@ -1027,6 +1140,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // Per-app capture lifecycle. `start`/`stop` are idempotent per bundle ID.
             for bundleID in plan.captureToStart { self.perAppCapture.start(bundleID: bundleID) }
             for bundleID in plan.captureToStop { self.perAppCapture.stop(bundleID: bundleID) }
+
+            // Metering-only taps (T3): a SEPARATE coordinator from `perAppCapture`.
+            // Stop apps that became routed/local/excluded (or when metering turned
+            // off — the diff is empty then), start newly-listed uncaptured apps.
+            // Stop-before-start; idempotent per bundle ID.
+            for bundleID in plan.meteringToStop { self.meteringCapture.stop(bundleID: bundleID) }
+            for bundleID in plan.meteringToStart { self.meteringCapture.start(bundleID: bundleID) }
 
             // Local playback (Bug T2):
             //  - Drop players for apps that left `.currentDevice`.
@@ -1065,6 +1185,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         let localRemoved: Set<String>
         let localRoutes: [AppRoute]
         let localExcluded: Set<String>
+        /// Metering-only tap reconcile (T3): bundle IDs to start/stop a dedicated
+        /// `.unmuted` meter tap for (listed, uncaptured, unexcluded apps). Empty
+        /// while metering is inactive.
+        let meteringToStart: Set<String>
+        let meteringToStop: Set<String>
     }
 
     /// React to a per-app capture's state transition for LOCAL (`.currentDevice`)
@@ -1371,11 +1496,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                     ops.append(.bind(outputID, stream))
                 }
             }
+            var unboundDevices: [String] = []
             for (deviceID, _) in self.streamBindings where newBindings[deviceID] == nil {
                 if let outputID = self.outputIDs[deviceID] { ops.append(.unbind(outputID)) }
+                unboundDevices.append(deviceID)
             }
             self.streamBindings = newBindings
             self.enqueueBindOps(ops)
+            // T3: a device that just lost its per-app stream gets a final combined
+            // `.level` (now with a zero stream contribution, so its meter drops to
+            // its system contribution — 0 if unselected) so a torn-down stream can't
+            // leave a stuck bar. Unconditional (not metering-gated): this is a
+            // one-shot CLEAR, exactly what prevents a stale value surviving into a
+            // reopened popover.
+            for deviceID in unboundDevices { self.emitCombinedLevel(forDevice: deviceID) }
         }
     }
 
@@ -2578,7 +2712,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         }
     }
 
-    // MARK: Level pass-through (D3: coalesced to ~25 Hz display cadence)
+    // MARK: MeteringControlling (T-GATE / T3) + level coalescing (D3)
 
     /// Display cadence for level emission (D3) — ~25 Hz, above the perception
     /// threshold for a VU meter but far below the ~86/s raw capture-buffer rate.
@@ -2593,17 +2727,121 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// one `asyncAfter` per device.
     private var levelFlushScheduled: Set<String> = []
 
-    /// Fan a capture-side RMS sample out as `.level` for every currently-selected,
-    /// unmuted device (the meter is a property of the captured audio, identical for
-    /// every fanned-out device — playback-meter-research.md). On `stateQueue`.
+    /// Flip the popover-visibility metering gate. Forwards to ALL THREE RMS
+    /// sources — the whole-system `captureCoordinator`, the `routeMixer`
+    /// (`.device` per-app meter), and the `localPlaybackEngine` (`.currentDevice`
+    /// per-app meter) — and drives the metering-only tap lifecycle (the
+    /// `.noRedirect` per-app meter): on `true`, start a dedicated `.unmuted` tap
+    /// for every currently-eligible listed app; on `false`, stop them all.
+    /// `PopoverController` calls this on `popoverDidShow`/`popoverDidClose` via
+    /// `backend as? MeteringControlling`. The `?` sub-components are `nil` in
+    /// tests / the UI-only smoke path (harmless no-ops).
+    public func setMeteringActive(_ active: Bool) {
+        captureCoordinator?.setMeteringActive(active)
+        routeMixer.setMeteringActive(active)
+        localPlaybackEngine?.setMeteringActive(active)
+        let diff: (start: Set<String>, stop: Set<String>) = stateQueue.sync {
+            self.meteringActive = active
+            return self.meteringTapDiffLocked()
+        }
+        applyMeteringTapDiff(diff)
+    }
+
+    // MARK: Metering-only tap reconcile (T3, `.noRedirect` source)
+
+    /// Compute the metering-only tap start/stop diff and COMMIT the new target set
+    /// (`meteringTapTargets`). MUST be called on `stateQueue`.
+    ///
+    /// Metering-only taps exist ONLY for apps in the Applications list
+    /// (`lastRoutes`) that have no other capture — not `.device`-routed (level
+    /// comes from the mixer), not `.currentDevice` (from local playback), not
+    /// user-excluded (PRIVACY: never metered) — and ONLY while a meter is shown
+    /// (`meteringActive`). When metering is off the desired set is empty, so this
+    /// also STOPS every metering-only tap.
+    private func meteringTapDiffLocked() -> (start: Set<String>, stop: Set<String>) {
+        let desired: Set<String> = meteringActive
+            ? Set(lastRoutes.map(\.bundleID))
+                .subtracting(routedBundleIDs)
+                .subtracting(localBundleIDs)
+                .subtracting(lastExcludedBundleIDs)
+            : []
+        let current = meteringTapTargets
+        meteringTapTargets = desired
+        return (start: desired.subtracting(current), stop: current.subtracting(desired))
+    }
+
+    /// Execute a metering-only tap diff on `captureControlQueue` (off `stateQueue`
+    /// — a tap start/stop may block on Core Audio), stop-before-start. A no-op when
+    /// empty. Used by `setMeteringActive`; `updateAppRoutes` inlines the same ops
+    /// into its own `captureControlQueue` hop.
+    private func applyMeteringTapDiff(_ diff: (start: Set<String>, stop: Set<String>)) {
+        guard !diff.start.isEmpty || !diff.stop.isEmpty else { return }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            for bundleID in diff.stop { self.meteringCapture.stop(bundleID: bundleID) }
+            for bundleID in diff.start { self.meteringCapture.start(bundleID: bundleID) }
+        }
+    }
+
+    // MARK: Level emission (T3 — combined per-device MAX)
+
+    /// A whole-system-tap RMS sample (stream_id 0). Store it and re-emit the
+    /// combined `.level` for every Selected + unmuted device (its system
+    /// contribution just changed). On `stateQueue`; gated on metering (belt-and-
+    /// suspenders — the coordinator already only fires `onLevel` while active).
     private func emitLevel(_ rms: Float) {
         stateQueue.async {
-            let now = DispatchTime.now().uptimeNanoseconds
+            guard self.meteringActive else { return }
+            self.latestSystemRMS = rms
             for id in self.order {
                 guard let device = self.known[id], device.isSelected, !device.isMuted else { continue }
-                self.scheduleLevelEmit(id: id, rms: rms, now: now)
+                self.emitCombinedLevel(forDevice: id)
             }
         }
+    }
+
+    /// Record one app's PRE-volume SOURCE level and fan it out: to the app's own
+    /// row (`.appLevel`), and — if the app is `.device`-routed — into the combined
+    /// meter of the device it feeds (a redirect target's contribution is the
+    /// loudest source routed to it; see `emitCombinedLevel`). Gated on metering.
+    /// Callable from any source thread (mixer queue, tap delivery, engine); hops
+    /// to `stateQueue`. (The `.appLevel` itself is emitted directly, not through the
+    /// D3 coalescer, which is per-device `.level` only — app-level coalescing is a
+    /// tracked follow-up.)
+    private func emitAppLevel(bundleID: String, rms: Float) {
+        stateQueue.async {
+            guard self.meteringActive else { return }
+            self.emit(.appLevel(bundleID: bundleID, rms: rms))
+            self.latestAppLevel[bundleID] = rms
+            // The device this app feeds tracks the loudest source routed to it, so
+            // re-emit its combined `.level` now that this source level changed.
+            for route in self.lastRoutes where route.bundleID == bundleID {
+                if case .device(let deviceID) = route.destination {
+                    self.emitCombinedLevel(forDevice: deviceID)
+                }
+            }
+        }
+    }
+
+    /// Emit `.level` for `id` as the MAX of its whole-system contribution
+    /// (`latestSystemRMS`, only if it's a Selected Device + unmuted) and its SOURCE
+    /// contribution — the loudest PRE-volume level among the apps `.device`-routed
+    /// to it (`latestAppLevel`). A device fed by both shows the larger. Every input
+    /// is a source/program level, so no routing/output volume ever attenuates the
+    /// bar. Emitted through the D3 coalescer (`scheduleLevelEmit`, ~25 Hz). On
+    /// `stateQueue`.
+    private func emitCombinedLevel(forDevice id: String) {
+        guard let device = known[id] else { return }
+        let systemContribution: Float = (device.isSelected && !device.isMuted) ? latestSystemRMS : 0
+        var sourceContribution: Float = 0
+        for route in lastRoutes where !deadBundleIDs.contains(route.bundleID) {
+            if case .device(let deviceID) = route.destination, deviceID == id,
+               let level = latestAppLevel[route.bundleID] {
+                sourceContribution = max(sourceContribution, level)
+            }
+        }
+        scheduleLevelEmit(id: id, rms: max(systemContribution, sourceContribution),
+                          now: DispatchTime.now().uptimeNanoseconds)
     }
 
     /// Leading-edge/trailing-edge sampler (D3): emits immediately if at least
@@ -2768,6 +3006,9 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Stop capturing. Idempotent. MAY BLOCK on Core Audio teardown, so callers
     /// must keep it off `NativeBackend.stateQueue`.
     func stop()
+    /// Gate RMS computation/emission on or off (T-GATE) — independent of
+    /// `start()`/`stop()`. See ``NativeCaptureCoordinator/setMeteringActive(_:)``.
+    func setMeteringActive(_ active: Bool)
 
     /// Keep the whole-system tap's exclusion set in sync with the routing table
     /// (T4/T6): individually-routed apps (`.device(id:)` routes) and user-excluded
@@ -2778,6 +3019,9 @@ public protocol CaptureControlling: AnyObject, Sendable {
 }
 
 extension CaptureControlling {
+    /// Default no-op (T-GATE) so a fake that doesn't exercise the metering gate
+    /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
+    func setMeteringActive(_ active: Bool) {}
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {}
 }
 

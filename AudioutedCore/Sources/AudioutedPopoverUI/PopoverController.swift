@@ -196,6 +196,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
 
+    /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
+    /// (T-GATE): the metering-active gate. The app wires this to
+    /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
+    /// only computes/emits `.level` while a user can actually see a meter. `nil`
+    /// means "no backend adopts the capability" — the popover works exactly the
+    /// same either way, just without the RMS work switched off underneath it.
+    public var onMeteringActiveChange: ((Bool) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
     /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
     /// for a low-latency response, in ADDITION to the persisted
@@ -763,7 +770,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // card already separates rows, and the icon tint + switch state still
         // say "on"). The mixer window keeps the wash (its default `true`).
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false)
+                                 paintsSelectionBackground: false, showsMeter: true)
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -1036,7 +1043,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (decision 3, driven inside `AppRowView` by the selected entry's `isLocal`
     /// — true for both "No Redirect" and "Current Device").
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
-        let row = AppRowView()
+        let row = AppRowView(showsMeter: true)
         row.delegate = self
         row.apply(AppRowView.Configuration(
             appID: route.bundleID,
@@ -1732,11 +1739,65 @@ extension PopoverController: AppRowView.Delegate {
 
     public func popoverDidShow(_ notification: Notification) {
         installDeselectMonitor()
+        onMeteringActiveChange?(true)
     }
 
     public func popoverDidClose(_ notification: Notification) {
         removeDeselectMonitor()
         selectedAppBundleID = nil
+        for row in deviceRowsByID.values { row.resetLevel() }
+        mainOutRow.resetLevel()
+        for row in appRowsByBundleID.values { row.resetLevel() }
+        onMeteringActiveChange?(false)
+    }
+
+    // MARK: - Live level dispatch (task T5)
+    //
+    // Fed by the host's per-tick RMS callback, NOT by `update(devices:)` — a
+    // level push must never trigger `rebuild()`/`ensureDefaultSelection`, it
+    // only forwards to the already-built row views.
+
+    /// Push a live RMS reading for device `id` into its row's meter, and into
+    /// the Main Out master meter when `id` is currently selected (Main Out
+    /// shares the same level feed as its member device rows, task T4a).
+    /// Early-returns while the popover isn't shown — metering only matters
+    /// while a user can see it.
+    public func updateLevel(_ rms: Float, for id: String) {
+        guard popover.isShown else { return }
+        dispatchLevel(rms, for: id)
+    }
+
+    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the `isShown`
+    /// gate — headless snapshots/tests never actually show the popover.
+    public func test_pushLevel(_ rms: Float, for id: String) {
+        dispatchLevel(rms, for: id)
+    }
+
+    private func dispatchLevel(_ rms: Float, for id: String) {
+        deviceRowsByID[id]?.setLevel(rms)
+        if groupController?.isSpeakerSelected(id) == true {
+            mainOutRow.setLevel(rms)
+        }
+    }
+
+    /// Push a live RMS reading for the app with `bundleID` into its
+    /// Applications-row meter (task T5). Unlike device levels, an app level
+    /// never feeds Main Out — Main Out mirrors the SELECTED DEVICE's level,
+    /// not any one app's contribution. Early-returns while the popover isn't
+    /// shown, mirroring ``updateLevel(_:for:)``.
+    public func updateAppLevel(_ rms: Float, for bundleID: String) {
+        guard popover.isShown else { return }
+        dispatchAppLevel(rms, for: bundleID)
+    }
+
+    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the `isShown`
+    /// gate — headless snapshots/tests never actually show the popover.
+    public func test_pushAppLevel(_ rms: Float, for bundleID: String) {
+        dispatchAppLevel(rms, for: bundleID)
+    }
+
+    private func dispatchAppLevel(_ rms: Float, for bundleID: String) {
+        appRowsByBundleID[bundleID]?.setLevel(rms)
     }
 
     private func installDeselectMonitor() {

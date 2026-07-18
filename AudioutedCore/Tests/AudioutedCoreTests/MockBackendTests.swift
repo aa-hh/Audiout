@@ -351,6 +351,78 @@ final class MockBackendTests: XCTestCase {
         XCTAssertEqual(deviceID, "office")
         XCTAssertEqual(appNames, [])
     }
+
+    // MARK: T7 — offline `.appLevel` fixtures
+
+    /// `test_emitAppLevel`'s event reaches a subscriber through the real
+    /// `makeEventStream()` channel, carrying the exact bundleID + rms given —
+    /// same channel every other `BackendEvent` travels, mirroring
+    /// `test_emitRoutedApps`.
+    func testEmitAppLevelFixtureFiresThroughTheEventStream() async throws {
+        let backend = makeBackend()
+        _ = try await collect(demoFleet.count, from: backend)   // drain discovery
+
+        let stream = backend.makeEventStream()
+        let expectation = expectation(description: "appLevel event received")
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                if case .appLevel = event {
+                    _ = await box.append(event)
+                    expectation.fulfill()
+                    break
+                }
+            }
+        }
+        backend.test_emitAppLevel(bundleID: "com.apple.Music", rms: 0.42)
+        await fulfillment(of: [expectation], timeout: 2)
+        task.cancel()
+
+        guard case .appLevel(let bundleID, let rms) = await box.events.first else {
+            return XCTFail("expected an .appLevel event")
+        }
+        XCTAssertEqual(bundleID, "com.apple.Music")
+        XCTAssertEqual(rms, 0.42)
+    }
+
+    /// `test_setMeteredApps` registers bundle IDs the level timer should also
+    /// fabricate `.appLevel` samples for, on the exact same
+    /// `meteringActive`/`emitsLevels` gate as the device `.level` timer
+    /// (T-GATE): silent by default, then animating every listed app once the
+    /// popover-visibility gate flips on — regardless of whether that app is
+    /// actually routed anywhere, since the mock has no route table of its own.
+    func testMeteredAppsEmitAppLevelOnlyWhileMeteringActive() async throws {
+        let backend = MockBackend(
+            fleet: demoFleet, staggerDiscovery: false, emitsLevels: true, simulatesDropouts: false
+        )
+        backend.test_setMeteredApps(["com.apple.Music", "com.apple.Podcasts"])
+        _ = try await collect(demoFleet.count, from: backend)   // drain discovery; metering still inactive
+
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let collector = Task {
+            for await event in stream { _ = await box.append(event) }
+        }
+
+        // Default: metering inactive, so no `.appLevel` should show up yet.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        var seen = await box.events
+        XCTAssertFalse(
+            seen.contains { if case .appLevel = $0 { return true } else { return false } },
+            "no .appLevel may be emitted while metering is inactive"
+        )
+
+        // Flip metering on: both registered apps must start showing up.
+        backend.setMeteringActive(true)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        seen = await box.events
+        let seenBundleIDs = Set(seen.compactMap { event -> String? in
+            if case .appLevel(let bundleID, _) = event { return bundleID } else { return nil }
+        })
+        XCTAssertEqual(seenBundleIDs, ["com.apple.Music", "com.apple.Podcasts"])
+
+        collector.cancel()
+    }
 }
 
 private extension MockBackendTests {

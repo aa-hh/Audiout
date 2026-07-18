@@ -152,6 +152,19 @@ public final class AppRowView: NSView {
     /// reads as "warning/offline" without being red/alarming — the route is
     /// intact, the app just isn't running.
     private let offlineBadge = NSImageView()
+
+    /// The leading VU meter (task T4), mounted only when `showsMeter` is
+    /// true — mirrors `DeviceRowView`'s `LevelMeterView`. No per-app level
+    /// signal exists yet (see `AudioutedSharedUI/AGENTS.md`), so nothing
+    /// drives this automatically; a future per-stream metering seam calls
+    /// ``setLevel(_:)`` directly.
+    private let meterView = LevelMeterView()
+    /// Whether the leading VU meter column is shown. Defaults to `false` so
+    /// every existing caller (today, none pass `true`) sees no layout change.
+    private let showsMeter: Bool
+    /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
+    /// when there's no meter or after a ``resetLevel()``.
+    private var lastMeterLevel: Float = 0
     private let nameLabel = NSTextField(labelWithString: "")
     private let slider = NSSlider()
     private let readoutLabel = NSTextField(labelWithString: "")
@@ -178,7 +191,8 @@ public final class AppRowView: NSView {
     }
     private var hoverMoveMonitor: Any?
 
-    public init() {
+    public init(showsMeter: Bool = false) {
+        self.showsMeter = showsMeter
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
         autoresizingMask = [.width]
         translatesAutoresizingMaskIntoConstraints = true
@@ -228,6 +242,22 @@ public final class AppRowView: NSView {
         rebuildDestinationMenu(selecting: configuration.selectedDestinationID)
         configureAccessibility()
         setNeedsDisplay(bounds)
+    }
+
+    /// Push a live RMS reading into the leading VU meter (task T4). No-op when
+    /// `showsMeter` is false. Mirrors `DeviceRowView.setLevel(_:)`.
+    public func setLevel(_ rms: Float) {
+        guard showsMeter else { return }
+        lastMeterLevel = rms
+        meterView.setLevel(rms)
+    }
+
+    /// Zero the leading VU meter with no animation. No-op when `showsMeter`
+    /// is false. Mirrors `DeviceRowView.resetLevel()`.
+    public func resetLevel() {
+        guard showsMeter else { return }
+        meterView.reset()
+        lastMeterLevel = 0
     }
 
     /// Same as `apply(_:)`, but atomically re-asserts selection afterward —
@@ -408,7 +438,13 @@ public final class AppRowView: NSView {
         offlineBadge.translatesAutoresizingMaskIntoConstraints = false
         offlineBadge.isHidden = true   // visible only when !isRunning
 
+        // Leading VU meter (task T4): mounted only when `showsMeter` — no
+        // existing caller passes `true` today, so their layout is unaffected.
+        // Non-interactive (`LevelMeterView.hitTest` returns nil).
+        meterView.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(iconView)
+        if showsMeter { addSubview(meterView) }
         addSubview(offlineBadge)
         addSubview(nameLabel)
         addSubview(slider)
@@ -421,11 +457,16 @@ public final class AppRowView: NSView {
         // Removal is no longer a floating row control — it's the ± footer
         // segmented control, the row's context menu, and Delete/Backspace, all
         // routed through the same `didRemoveFor(appID:)` delegate call.
-        NSLayoutConstraint.activate([
+        //
+        // The meter (when shown) sits at the row's leading edge; the icon then
+        // repoints its leading anchor off the meter's trailing edge instead of
+        // `firstElementLeading(indented:)` directly — together these land the
+        // icon at exactly the same x either way (`firstElementLeading` is
+        // defined as leading + meterWidth + meterToLeading), matching
+        // `DeviceRowView`'s contract so the icon column never shifts.
+        var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                              constant: PopoverColumnGrid.leadingInset),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
@@ -458,7 +499,26 @@ public final class AppRowView: NSView {
                 equalToConstant: PopoverColumnGrid.trailingControlWidth),
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-        ])
+        ]
+
+        if showsMeter {
+            constraints.append(contentsOf: [
+                meterView.leadingAnchor.constraint(
+                    equalTo: leadingAnchor, constant: PopoverColumnGrid.leadingInset),
+                meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
+                meterView.heightAnchor.constraint(equalToConstant: 22),
+                iconView.leadingAnchor.constraint(
+                    equalTo: meterView.trailingAnchor, constant: PopoverColumnGrid.meterToLeading),
+            ])
+        } else {
+            constraints.append(
+                iconView.leadingAnchor.constraint(
+                    equalTo: leadingAnchor,
+                    constant: PopoverColumnGrid.firstElementLeading(indented: false)))
+        }
+
+        NSLayoutConstraint.activate(constraints)
     }
 
     // MARK: Drawing
@@ -805,6 +865,10 @@ public final class AppRowView: NSView {
     /// Whether the offline badge (T4) is currently visible — true when the
     /// routed app's process is not running.
     public var test_isOfflineBadgeVisible: Bool { !offlineBadge.isHidden }
+    /// The last level pushed to the leading VU meter via ``setLevel(_:)`` — `0`
+    /// when the row has no meter (`showsMeter == false`) or after a
+    /// ``resetLevel()``. Mirrors `DeviceRowView.test_meterLevel()`.
+    public func test_meterLevel() -> Float { lastMeterLevel }
     /// The full ordered list of titles in the destination menu: the standalone
     /// "No Redirect" entry, a separator (empty title), then the two disabled
     /// section headers ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.

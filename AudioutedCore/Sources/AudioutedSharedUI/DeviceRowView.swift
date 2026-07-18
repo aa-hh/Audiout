@@ -139,6 +139,18 @@ public final class DeviceRowView: NSView {
     private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
 
+    /// The leading VU meter (task T-METER/T3), mounted only when `showsMeter`
+    /// is true — the mixer window and `GroupRowView` leave it out and stay
+    /// visually unchanged. See ``LevelMeterView``.
+    private let meterView = LevelMeterView()
+    /// Whether the leading VU meter column is shown. Defaults to `false` so
+    /// the mixer window's existing layout is untouched; only the popover's
+    /// Selected Devices rows and Main Out pass `true`.
+    private let showsMeter: Bool
+    /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
+    /// when there's no meter or after a ``LevelMeterView/reset()``.
+    private var lastMeterLevel: Float = 0
+
     /// App-local mouse-moved monitor that guarantees hover clears even when the
     /// pointer leaves the row into a "dead zone" with no sibling tracking area
     /// (the card's bottom padding, the inter-card gap, the footer). This is the
@@ -185,11 +197,12 @@ public final class DeviceRowView: NSView {
     private var isUnsupported: Bool { !device.isLocalDevice && !device.supportsAirPlay2 }
 
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
-               paintsSelectionBackground: Bool = true) {
+               paintsSelectionBackground: Bool = true, showsMeter: Bool = false) {
         self.device = device
         self.indented = indented
         self.showsToggle = showsToggle
         self.paintsSelectionBackground = paintsSelectionBackground
+        self.showsMeter = showsMeter
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
         // Fill the host's width, keep a fixed height (brief §2).
         autoresizingMask = [.width]
@@ -341,6 +354,15 @@ public final class DeviceRowView: NSView {
         // its track.
         readoutLabel.textColor = slider.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
 
+        // The meter can only be showing a live level while the device is an
+        // actual selected, unmuted output — otherwise a stale bar could stick
+        // (same transient-reset discipline as `isHovered` above).
+        let isPlaying = device.isAvailable && isSelectedInSet && !device.isMuted
+        if showsMeter && !isPlaying {
+            meterView.reset()
+            lastMeterLevel = 0
+        }
+
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
@@ -431,6 +453,23 @@ public final class DeviceRowView: NSView {
         statusLabel.isHidden = true
         statusLabel.stringValue = ""
         applyNameStackLayout(twoLine: false)
+    }
+
+    /// Push a live RMS reading into the leading VU meter (task T3). No-op when
+    /// `showsMeter` is false — the mixer window/`GroupRowView` never call this.
+    public func setLevel(_ rms: Float) {
+        guard showsMeter else { return }
+        lastMeterLevel = rms
+        meterView.setLevel(rms)
+    }
+
+    /// Zero the leading VU meter with no animation (popover-close discipline —
+    /// PopoverController calls this on every row so a reopen never shows a
+    /// stale bar). No-op when `showsMeter` is false.
+    public func resetLevel() {
+        guard showsMeter else { return }
+        meterView.reset()
+        lastMeterLevel = 0
     }
 
     /// Backward-compatible one-arg update (selection derived from the backend
@@ -525,6 +564,11 @@ public final class DeviceRowView: NSView {
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
                                   action: #selector(muteToggled(_:)))
 
+        // Leading VU meter (task T3): mounted only when `showsMeter` — the
+        // mixer window/GroupRowView never pass `true`, so their layout is
+        // unaffected. Non-interactive (`LevelMeterView.hitTest` returns nil).
+        meterView.translatesAutoresizingMaskIntoConstraints = false
+
         // Name click toggles the ENABLED checkbox (2026-07-17 convenience — the
         // name is spatially separate on the left, so a gesture scoped to it can't
         // interfere with the slider/mute/%/toggle on the right). The checkbox stays
@@ -534,6 +578,7 @@ public final class DeviceRowView: NSView {
         nameLabel.addGestureRecognizer(nameClick)
 
         addSubview(enableCheckbox)
+        if showsMeter { addSubview(meterView) }
         addSubview(iconView)
         addSubview(statusDotView)          // over the icon's corner
         addSubview(nameLabel)
@@ -556,10 +601,14 @@ public final class DeviceRowView: NSView {
         let nameCenterY = nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         nameCenterYConstraint = nameCenterY
 
-        NSLayoutConstraint.activate([
+        // The meter (when shown) sits at the row's leading edge; the icon then
+        // repoints its leading anchor off the meter's trailing edge instead of
+        // `leadingAnchor` directly — together these land the icon at exactly
+        // `PopoverColumnGrid.firstElementLeading(indented:)`, matching T1's
+        // shared grid contract. When `showsMeter` is false the icon anchors
+        // directly to `leadingAnchor` as before — layout is IDENTICAL to today.
+        var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
-
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leading),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
@@ -618,7 +667,22 @@ public final class DeviceRowView: NSView {
                 equalTo: trailingAnchor,
                 constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
             enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+        ]
+
+        if showsMeter {
+            constraints.append(contentsOf: [
+                meterView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leading),
+                meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
+                meterView.heightAnchor.constraint(equalToConstant: 22),
+                iconView.leadingAnchor.constraint(
+                    equalTo: meterView.trailingAnchor, constant: PopoverColumnGrid.meterToLeading),
+            ])
+        } else {
+            constraints.append(iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leading))
+        }
+
+        NSLayoutConstraint.activate(constraints)
     }
 
     /// Center the name for a single-line row, or raise it a half-line when ANY
@@ -774,6 +838,12 @@ public final class DeviceRowView: NSView {
     /// Whether the primary membership toggle is shown. Group-member rows hide it
     /// (task C); Selected-Devices rows show it.
     public var test_showsToggle: Bool { !enableCheckbox.isHidden }
+
+    /// The last level pushed to the leading VU meter via ``setLevel(_:)`` — `0`
+    /// when the row has no meter (`showsMeter == false`) or after a reset
+    /// (``apply(_:selected:controllable:blocked:blockReason:routedAppNames:)``
+    /// resets it whenever the row isn't a playing output).
+    public func test_meterLevel() -> Float { lastMeterLevel }
 
     /// The row's icon tint. Always `.secondaryLabelColor` now (2026-07-17 — the
     /// icon is neutral identity-only; selection reads from the switch, status

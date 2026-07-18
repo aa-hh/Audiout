@@ -43,6 +43,18 @@ public enum PopoverColumnGrid {
     /// Trailing inset of the last column from the row's trailing edge.
     public static let trailingInset: CGFloat = 14
 
+    // MARK: Meter column (leading edge, task T-METER)
+
+    /// Width of the volume-meter column, the new leading column on every row.
+    public static let meterWidth: CGFloat = 8
+    /// Gap from the row's leading inset to the meter column.
+    public static let meterToLeading: CGFloat = 8
+    /// Leading edge of the first row element (accounting for indentation).
+    /// Computed as (indented ? indentedLeadingInset : leadingInset) + meterWidth + meterToLeading.
+    public static func firstElementLeading(indented: Bool) -> CGFloat {
+        (indented ? indentedLeadingInset : leadingInset) + meterWidth + meterToLeading
+    }
+
     // MARK: Fixed column widths
 
     /// The device/Main-Out icon column. Bumped 22→26 (2026-07-17) when the

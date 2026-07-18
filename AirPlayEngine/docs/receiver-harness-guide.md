@@ -371,7 +371,7 @@ scp <user>@<receiver-ip>:/tmp/verify-recv.pcm /Users/alechenderson/Projects/AirP
 ```
 
 ```sh
-python3 "/Users/alechenderson/Projects/AirPlay Controller/dev/audiocap/rms.py" "/Users/alechenderson/Projects/AirPlay Controller/dev/.run/verify-recv-ap2.pcm" 2
+python3 "/Users/alechenderson/Projects/Audiouted/dev/audiocap/rms.py" "/Users/alechenderson/Projects/Audiouted/dev/.run/verify-recv-ap2.pcm" 2
 ```
 
 (`rms.py` in its plain, non-`--tones` mode reads 16-bit PCM incorrectly today —
@@ -534,11 +534,11 @@ ssh <user>@<receiver-ip> 'pkill -f "shairport-sync -c /etc/shairport-sync-verify
 ```
 
 ```sh
-scp <user>@<receiver-ip>:/tmp/verify-recv.pcm "/Users/alechenderson/Projects/AirPlay Controller/dev/.run/verify-recv-owntone-ap2.pcm"
+scp <user>@<receiver-ip>:/tmp/verify-recv.pcm "/Users/alechenderson/Projects/Audiouted/dev/.run/verify-recv-owntone-ap2.pcm"
 ```
 
 ```sh
-python3 - "/Users/alechenderson/Projects/AirPlay Controller/dev/.run/verify-recv-owntone-ap2.pcm" <<'PY'
+python3 - "/Users/alechenderson/Projects/Audiouted/dev/.run/verify-recv-owntone-ap2.pcm" <<'PY'
 import struct, math, sys
 data = open(sys.argv[1], "rb").read()
 n = len(data) // 2

@@ -42,7 +42,7 @@ swift test              # 61 tests as of 2026-07-17, 0 failures expected
 
 # Core package (Device model, backends incl. NativeBackend/NativeDiscovery/
 # NativeCaptureCoordinator, UI targets)
-cd ../AirPlayControllerCore
+cd ../AudioutedCore
 swift build
 swift test               # 164 tests as of 2026-07-17, 0 failures expected
 ```
@@ -52,7 +52,7 @@ If `CaptureCoordinatorTests.testCaptureCrashOverBudgetSurfacesError` is the
 `PLAN-PHASE-2B.md`'s standing constraints) — re-run it in isolation:
 
 ```bash
-swift test --package-path AirPlayControllerCore \
+swift test --package-path AudioutedCore \
   --filter CaptureCoordinatorTests/testCaptureCrashOverBudgetSurfacesError
 ```
 
@@ -83,14 +83,14 @@ Use the stable `.app` bundle path instead:
 
 ```bash
 # From the repo root:
-scripts/make-app.sh                 # → ./build/AirPlay Controller.app
-open "./build/AirPlay Controller.app"
+scripts/make-app.sh                 # → ./build/Audiouted.app
+open "./build/Audiouted.app"
 ```
 
 `scripts/make-app.sh` (documented in its own header comment) builds the
-`AirPlayControllerApp` executable in release config, wraps it in a real
+`AudioutedApp` executable in release config, wraps it in a real
 `.app` bundle with a stable `CFBundleIdentifier`
-(`com.alechenderson.AirPlayController`) and `LSUIElement=true` (menu-bar-only,
+(`com.alechenderson.Audiouted`) and `LSUIElement=true` (menu-bar-only,
 no Dock icon), and ad-hoc codesigns it. Because the bundle id and signature
 are stable across rebuilds (same script, same output path), macOS remembers
 the TCC grant between runs — rebuild with `scripts/make-app.sh` again after
@@ -111,7 +111,7 @@ re-prompted.
    live session: an hour lost to exactly this). Since `open` does not forward
    shell env vars, set them session-wide first:
    `launchctl setenv AIRPLAY_BACKEND native`, then
-   `open "./build/AirPlay Controller.app"` (add
+   `open "./build/Audiouted.app"` (add
    `--stderr /path/to/log` to keep capturing the app's stderr log).
    Unset with `launchctl unsetenv` when done.
 3. On first Core Audio tap creation, macOS prompts for the system-audio

@@ -1,4 +1,4 @@
-# AirPlay Controller — Product Spec & Feasibility Plan
+# Audiouted — Product Spec & Feasibility Plan
 
 *Draft v0.1 — 2026-07-09. Based on our interview. Everything here is up for revision.*
 
@@ -470,8 +470,8 @@ trailing control, a device-selector dropdown as THE routing control.
 
    Owning types: `AppRoutingController` (model/persistence logic, sibling of
    `GroupController`) and `AppRouteStore` (versioned-JSON persistence,
-   `app-routes.json`) — see `AirPlayControllerCore/AGENTS.md` Key Types.
-   `AppRowView` / `AddApplicationRowView` (`AirPlayControllerSharedUI`) render
+   `app-routes.json`) — see `AudioutedCore/AGENTS.md` Key Types.
+   `AppRowView` / `AddApplicationRowView` (`AudioutedSharedUI`) render
    the rows; `PopoverController` wires the card and the running-app picker.
 
 **Rules:**

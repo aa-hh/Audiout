@@ -269,7 +269,7 @@ https://www.polpiella.dev/info-plist-swift-cli/
   ```xml
   <plist version="1.0"><dict>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>AirPlay Controller captures system audio to stream it to AirPlay devices.</string>
+    <string>Audiouted captures system audio to stream it to AirPlay devices.</string>
     <key>CFBundleIdentifier</key><string>com.you.airplay-capture</string>
   </dict></plist>
   ```

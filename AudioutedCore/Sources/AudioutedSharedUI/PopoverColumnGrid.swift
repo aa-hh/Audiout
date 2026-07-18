@@ -100,6 +100,26 @@ public enum PopoverColumnGrid {
     /// sitting off in the box padding. Tuned live.
     public static let statusDotInset: CGFloat = 3
 
+    // MARK: Unified row styling — body rows, hover, selection (2026-07-18)
+    //
+    // Visual tokens shared by `DeviceRowView` and `AppRowView` so both row types
+    // present a consistent row height and interactive-state styling (hover wash and
+    // selection wash). These named constants unify the row-dimension choices and
+    // enable the two row types to render as a cohesive popover list.
+
+    /// The shared body-row height for DeviceRowView and AppRowView, unifying
+    /// the previously divergent 42 (device) and 38 (app) heights. Consumers adopt
+    /// this constant in a later task.
+    public static let bodyRowHeight: CGFloat = 42
+    /// Alpha for the unified pointer-hover wash, drawn in
+    /// `NSColor.selectedContentBackgroundColor` at this opacity. Shared by
+    /// DeviceRowView and AppRowView to establish consistent hover interaction.
+    public static let rowHoverWashAlpha: CGFloat = 0.10
+    /// Alpha for the accent selection wash, drawn in `NSColor.controlAccentColor`.
+    /// Shared by AppRowView's single-selection highlight and DeviceRowView's
+    /// mixer-window selection pill.
+    public static let rowSelectionWashAlpha: CGFloat = 0.18
+
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
     // The Applications card's single-selection model (± footer controls,

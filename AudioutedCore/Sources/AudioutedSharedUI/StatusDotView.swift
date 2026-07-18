@@ -122,9 +122,10 @@ final class StatusDotView: NSView {
         }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             dotLayer.fillColor = fill.cgColor
-            // Best-effort punch-out ring in the card/window background so the dot
-            // reads as a separate badge over the icon (tuned live later).
-            dotLayer.borderColor = NSColor.windowBackgroundColor.cgColor
+            // Best-effort punch-out ring matching the card/menu surface so the dot
+            // reads as a separate badge over the icon. Uses underPageBackgroundColor
+            // which adapts well to both light and dark appearances on menu materials.
+            dotLayer.borderColor = NSColor.underPageBackgroundColor.cgColor
         }
     }
 

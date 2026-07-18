@@ -33,6 +33,8 @@ public final class ConnectionDiagnosisView: NSView {
     private static let suggestionToButtons: CGFloat = 8
     /// Gap between the two buttons.
     private static let buttonSpacing: CGFloat = 8
+    /// Inset of the dismiss button from the tinted background's top-trailing corner.
+    private static let dismissButtonInset: CGFloat = 6
 
     /// Called when the user clicks "Try again". The host owns the actual retry
     /// (re-adding the device to the Selected Devices set — brief §7.3).
@@ -40,6 +42,10 @@ public final class ConnectionDiagnosisView: NSView {
     /// Called when the user clicks "Copy details". The host writes to
     /// `NSPasteboard.general`; this view never touches the pasteboard.
     public var onCopyDetails: (() -> Void)?
+    /// Called when the user clicks the dismiss ("x") button. The host removes
+    /// the panel (`PopoverPanelViewController`); this view owns no open/closed
+    /// state of its own and never removes itself.
+    public var onDismiss: (() -> Void)?
 
     private var failure: ConnectionFailure
     private var deviceName: String
@@ -49,6 +55,7 @@ public final class ConnectionDiagnosisView: NSView {
     private let suggestionLabel = NSTextField(wrappingLabelWithString: "")
     private let retryButton = NSButton()
     private let copyDetailsButton = NSButton()
+    private let dismissButton = NSButton()
 
     /// Pinned wrapping width for the suggestion label, kept in sync with the
     /// panel's own width in `layout()` so Auto Layout can self-size the row's
@@ -114,6 +121,9 @@ public final class ConnectionDiagnosisView: NSView {
         background.addSubview(retryButton)
         background.addSubview(copyDetailsButton)
 
+        configureDismissButton()
+        background.addSubview(dismissButton)
+
         let suggestionWidth = suggestionLabel.widthAnchor.constraint(equalToConstant: 300)
         suggestionWidthConstraint = suggestionWidth
 
@@ -123,10 +133,14 @@ public final class ConnectionDiagnosisView: NSView {
             background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
             background.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
 
+            dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
+            dismissButton.trailingAnchor.constraint(
+                equalTo: background.trailingAnchor, constant: -Self.dismissButtonInset),
+
             headlineLabel.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.contentPadding),
             headlineLabel.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Self.contentPadding),
             headlineLabel.trailingAnchor.constraint(
-                lessThanOrEqualTo: background.trailingAnchor, constant: -Self.contentPadding),
+                lessThanOrEqualTo: dismissButton.leadingAnchor, constant: -Self.contentPadding),
 
             suggestionLabel.topAnchor.constraint(
                 equalTo: headlineLabel.bottomAnchor, constant: Self.headlineToSuggestion),
@@ -156,6 +170,30 @@ public final class ConnectionDiagnosisView: NSView {
         button.action = action
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    /// The quiet dismiss ("x") control pinned to the tinted background's
+    /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
+    /// (no box at rest, matching the borderless toolbar-glyph convention used
+    /// elsewhere in this popover, e.g. `PopoverHeaderView`), a small bold glyph,
+    /// and `.tertiaryLabelColor` so it reads as a quiet affordance rather than
+    /// competing with "Try again"/"Copy details".
+    private func configureDismissButton() {
+        dismissButton.translatesAutoresizingMaskIntoConstraints = false
+        dismissButton.bezelStyle = .accessoryBar
+        dismissButton.isBordered = false
+        dismissButton.imagePosition = .imageOnly
+        dismissButton.imageScaling = .scaleProportionallyDown
+        dismissButton.contentTintColor = .tertiaryLabelColor
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissClicked(_:))
+
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 9.5, weight: .bold)
+        if let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
+            .withSymbolConfiguration(symbolConfig) {
+            dismissButton.image = image
+        }
+        dismissButton.setAccessibilityLabel("Dismiss")
     }
 
     /// Resolve the warning tint (brief §7.1) against the *current* effective
@@ -200,6 +238,10 @@ public final class ConnectionDiagnosisView: NSView {
         onCopyDetails?()
     }
 
+    @objc private func dismissClicked(_ sender: NSButton) {
+        onDismiss?()
+    }
+
     // MARK: Accessibility
 
     private func configureAccessibility() {
@@ -210,6 +252,7 @@ public final class ConnectionDiagnosisView: NSView {
 
         retryButton.setAccessibilityLabel("Try again connecting to \(deviceName)")
         copyDetailsButton.setAccessibilityLabel("Copy connection details for \(deviceName)")
+        dismissButton.setAccessibilityLabel("Dismiss")
     }
 
     // MARK: Test-support hooks
@@ -223,8 +266,13 @@ public final class ConnectionDiagnosisView: NSView {
     /// The tinted background's current layer color (appearance-adaptivity asserts).
     public var test_backgroundTint: CGColor? { background.layer?.backgroundColor }
 
+    /// Whether the dismiss button is present and has a resolved image (never blank).
+    public var test_hasDismissButton: Bool { dismissButton.image != nil }
+
     /// Simulate a "Try again" click.
     public func test_tapRetry() { retryClicked(retryButton) }
     /// Simulate a "Copy details" click.
     public func test_tapCopyDetails() { copyDetailsClicked(copyDetailsButton) }
+    /// Simulate a dismiss ("x") click.
+    public func test_tapDismiss() { dismissClicked(dismissButton) }
 }

@@ -16,9 +16,8 @@ import AppKit
 ///      verified non-nil at runtime with graceful fallbacks).
 ///      Opens the mixer window (where group membership editing lives) via the
 ///      host's existing open-mixer path.
-///   2. **Settings** — SF Symbol `gearshape`. No action yet (a stub with an
-///      accessibility label + a real target so it's a live button). See the
-///      `// TODO: settings` marker below.
+///   2. **Settings** — SF Symbol `gearshape`. Wired to the Settings window
+///      by the host's `onOpenSettings` callback.
 ///
 /// The title is *centered* over the whole bar while the buttons float on the
 /// trailing edge, so the title stays visually centered regardless of the button
@@ -35,7 +34,7 @@ final class PopoverHeaderView: NSView {
 
     /// Tapped the "Open Groups editor" button — the host opens the mixer window.
     var onOpenGroupsEditor: (() -> Void)?
-    /// Tapped Settings — stubbed for now (`// TODO: settings`).
+    /// Tapped Settings — wired to open the Settings window.
     var onOpenSettings: (() -> Void)?
     /// Tapped Quit (far-right header button) — the host terminates the app. This
     /// replaces the removed footer "Quit" action.
@@ -59,7 +58,7 @@ final class PopoverHeaderView: NSView {
 
     private func buildSubviews() {
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = .labelColor
         titleLabel.alignment = .center
 
@@ -166,9 +165,6 @@ final class PopoverHeaderView: NSView {
     @objc private func groupsTapped() { onOpenGroupsEditor?() }
 
     @objc private func settingsTapped() {
-        // TODO: settings — no settings surface exists yet. The button is real
-        // (target/action + accessibility) so wiring a settings window later is a
-        // one-line callback hookup.
         onOpenSettings?()
     }
 

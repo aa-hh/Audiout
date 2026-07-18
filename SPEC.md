@@ -404,10 +404,11 @@ trailing control, a device-selector dropdown as THE routing control.
    The Main Out **volume = proportional master of the current target**.
 2. **"Selected Devices" section** (below System): every discovered device, split
    into two subsections: **Current Device** (the Mac, by its real name) and
-   **AirPlay Devices**. Row: name · volume · **toggle switch** (ahh explicitly
-   prefers toggles, not checkmarks) = membership in the Selected Devices set.
-   Toggles compose the set; routing is applied when Main Out targets Selected
-   Devices (the default).
+   **AirPlay Devices**. Row: name · volume · **checkbox** (NSButton, .switch
+   button type) = membership in the Selected Devices set. **REVISED 2026-07-18:**
+   the membership control shipped as, and stays, a checkbox under a SELECTED column
+   header; the earlier toggles preference is superseded. Checkboxes compose the set;
+   routing is applied when Main Out targets Selected Devices (the default).
    - **Default state: Current Device toggled ON**, Main Out = Selected Devices ⇒
      out-of-the-box the app is passthrough (normal local playback).
    - **Auto-swap rule:** toggling an AirPlay device ON while the current device
@@ -541,7 +542,7 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 | Device icon | `NSImage(systemSymbolName:variableValue:…)` | Speaker symbol; `variableValue` mirrors that device's volume. **26pt, always NEUTRAL** (`.secondaryLabelColor`) — identity only, no accent-when-selected fill (2026-07-17); selection reads from the ENABLED switch, connection status from the on-icon dot below. |
 | On-icon status dot (2026-07-17) | Custom `NSView` (`StatusDotView`) — a `CAShapeLayer` filled circle with a ~1.5pt punch-out border in the card/window background | A small **10pt corner badge** overlapping the icon's bottom-right (notification-badge position), replacing the retired right-side status slot. `.off` → hidden; `.connecting`/`.reconnecting` → **breathing** (pulsing) neutral dot (`.secondaryLabelColor`, `CABasicAnimation` opacity 0.3→1.0 + scale 0.82→1.0, ~1.6s, auto-reversed, forever — **static dot under Reduce Motion**); `.connected` → solid `.systemGreen`; `.failed` → solid `.systemOrange`. Appearance-adaptive (`updateLayer`/`viewDidChangeEffectiveAppearance`). Sizes are named constants in `PopoverColumnGrid` (swappable for a future compact/normal/large density). |
 | Name click | `NSClickGestureRecognizer` on the name label | Clicking the device NAME toggles the ENABLED switch (same delegate path as the switch); a no-op when the switch is disabled (local-mix block / unavailable). The switch stays the authoritative accessibility control. For a `.failed` device this re-enables it (= retry). |
-| Enable toggle | `NSSwitch`, mini size | HIG toggles: "within a grouped form, consider using a mini switch to control the setting in a single row" — sanctioned for per-device on/off. Never in toolbar/status areas (HIG). |
+| Enable toggle | `NSButton`, .switch button type | **REVISED 2026-07-18:** checkbox (NSButton, .switch button type, empty title) shipped as the SELECTED column control and is the canonical implementation; replaces the earlier NSSwitch design. HIG-sanctioned checkbox in grouped form settings. Never in toolbar/status areas (HIG). |
 | Volume | `NSSlider(value:minValue:maxValue:target:action:)`, horizontal | `isContinuous = true` for live drag feedback (HIG sliders: live feedback required). Min at leading edge, speaker icons at ends per HIG. (HIG's "don't use a slider for volume" is iOS-only — macOS's own Sound menu is a slider.) |
 | Mute / Solo | `NSButton`, `bezelStyle = .accessoryBar`, `setButtonType(.pushOnPushOff)` | `.accessoryBar` is documented for on/off-style buttons; NOT `NSSwitch` (HIG: switches only for emphasized settings, don't replace checkbox-like toggles). SF Symbols `speaker.slash.fill` / `headphones`. |
 | Level meter | `NSLevelIndicator`, `.discreteCapacity` | Docs describe this style as "similar to audio level indicators in audio playback applications" — with `warningValue`/`criticalValue` for free green/yellow/red. Display-only. |

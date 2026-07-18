@@ -97,6 +97,7 @@ public final class MainOutRowView: NSView {
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false) {
         self.options = options
         muteButton.state = isMuted ? .on : .off
+        updateMuteTint()
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
@@ -169,21 +170,23 @@ public final class MainOutRowView: NSView {
         slider.isContinuous = true
         slider.target = self
         slider.action = #selector(masterChanged(_:))
+        // Master slider remains enabled while muted to support immediate volume adjustments (audit A5).
+        slider.isEnabled = true
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, but the glyph itself stays
         // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
-        // — ahh wants the icon to never change on toggle).
+        // — ahh wants the icon to never change on toggle). Muted state is shown by
+        // tint color only.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
         muteButton.imagePosition = .imageOnly
         let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                   accessibilityDescription: "Mute Main Out")?
+                                   accessibilityDescription: "Mute Audio Out")?
             .withSymbolConfiguration(muteConfig)
-        muteButton.contentTintColor = .secondaryLabelColor
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -274,6 +277,18 @@ public final class MainOutRowView: NSView {
         ])
     }
 
+    // MARK: Private Helpers
+
+    /// Updates the mute button's tint color and accessibility label based on current state.
+    private func updateMuteTint() {
+        if muteButton.state == .on {
+            muteButton.contentTintColor = .controlAccentColor
+        } else {
+            muteButton.contentTintColor = .secondaryLabelColor
+        }
+        configureAccessibility()
+    }
+
     // MARK: Actions
 
     @objc private func selectionChanged(_ sender: NSPopUpButton) {
@@ -283,6 +298,7 @@ public final class MainOutRowView: NSView {
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
+        updateMuteTint()
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
@@ -309,10 +325,11 @@ public final class MainOutRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Main Out, master volume \(slider.integerValue) percent")
+        setAccessibilityLabel("Audio Out, master volume \(slider.integerValue) percent")
         slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("Main Out master volume")
-        destinationPopUp.setAccessibilityLabel("Main Out destination")
+        slider.setAccessibilityLabel("Audio Out master volume")
+        muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Audio Out" : "Mute Audio Out")
+        destinationPopUp.setAccessibilityLabel("Audio Out destination")
         destinationPopUp.setAccessibilityValue(selectedTitle ?? "")
     }
 

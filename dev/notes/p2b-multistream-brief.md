@@ -348,6 +348,17 @@ per destination-set.** Concretely:
 - Per set, sum the S16LE taps of its member apps (with clip/limit) → one buffer.
 - Hand each buffer to the engine tagged with the set's stream_id.
 
+**Future seam — VU meters (2026-07):** the popover's leading `LevelMeterView`
+column is fed by `NativeCaptureCoordinator`'s single whole-system-tap RMS via
+`BackendEvent.level(id:rms:)`, fanned to every selected+unmuted device with the
+SAME level (there's only one tap today). Once this per-speaker mix stage lands,
+`onLevel`/the mix stage's equivalent becomes per-stream/per-destination-set —
+each destination-set can hand its own distinct `rms` through to the devices in
+its set. That distinct-per-set `rms` still flows through the exact same
+`BackendEvent.level(id:rms:)` per device id; no UI change is required —
+`LevelMeterView`/`DeviceRowView.setLevel`/`PopoverController.updateLevel` stay
+as they are, they just start receiving genuinely different levels per row.
+
 This makes the "multi-stream" question mostly a **Swift mixing** problem, with a
 *small* engine change (option b) to let >1 tagged stream coexist and bind. It
 keeps the security posture intact (SPEC §4: nothing large runs privileged; the

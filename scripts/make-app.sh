@@ -1,11 +1,11 @@
 #!/bin/bash
-# make-app.sh — wrap the AudioutedApp SwiftPM binary into a real,
+# make-app.sh — wrap the AudiouterApp SwiftPM binary into a real,
 # double-clickable macOS .app bundle and ad-hoc codesign it.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
-# Xcode project). This produces "Audiouted.app" with an Info.plist
+# Xcode project). This produces "Audiouter.app" with an Info.plist
 # (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and an
 # ad-hoc signature so Gatekeeper lets it launch locally.
 #
@@ -15,9 +15,9 @@
 set -euo pipefail
 
 # --- Config ---------------------------------------------------------------
-APP_NAME="Audiouted"
-EXECUTABLE="AudioutedApp"
-BUNDLE_ID="com.audiouted.Audiouted"
+APP_NAME="Audiouter"
+EXECUTABLE="AudiouterApp"
+BUNDLE_ID="com.audiouter.Audiouter"
 MIN_MACOS="13.0"
 # Human-readable marketing version and monotonic build number.
 APP_VERSION="0.1.0"
@@ -26,13 +26,16 @@ BUILD_NUMBER="1"
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
 # deciding, so it has to do the whole job.
-AUDIO_CAPTURE_USAGE="Audiouted needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+# Shown INSIDE the macOS Local Network permission dialog. The app browses Bonjour
+# (_airplay._tcp / _raop._tcp) to find AirPlay speakers; say that plainly.
+LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
 
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$REPO_ROOT/AudioutedCore"
+PACKAGE_DIR="$REPO_ROOT/AudiouterCore"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
@@ -90,6 +93,21 @@ plutil -insert NSAudioCaptureUsageDescription -string "$AUDIO_CAPTURE_USAGE" "$P
 # and a missing permission rationale is not something to discover in the wild.
 plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSAudioCaptureUsageDescription missing from Info.plist" >&2; exit 1; }
 
+# Local Network: the app browses Bonjour to discover AirPlay speakers, which macOS
+# gates behind the Local Network permission (a separate prompt from audio). Two
+# keys are needed and BOTH must be present or discovery silently finds nothing:
+#   NSLocalNetworkUsageDescription — the prompt's rationale (same plutil-not-
+#     PlistBuddy reasoning as above: the prose has apostrophes).
+#   NSBonjourServices — the service types we're allowed to browse; without it the
+#     browse is blocked even with the usage string. These MUST match the types
+#     NativeDiscovery browses (_airplay._tcp for AirPlay 2, _raop._tcp for AP1).
+plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
+plutil -insert NSBonjourServices -array "$PLIST"
+plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
+plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
+plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
+plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
+
 # --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2
 # swaps this for a real signing identity + notarization.
@@ -100,7 +118,7 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 # dylib into the process and inherit that grant. The hardened runtime makes dyld
 # ignore DYLD_* env vars, closing that vector — as long as we withhold the
 # allow-dyld-environment-variables entitlement (we do). Library validation is
-# deliberately DISABLED in scripts/Audiouted.entitlements because the app links
+# deliberately DISABLED in scripts/Audiouter.entitlements because the app links
 # Homebrew dylibs signed under a different Team ID (with it on, dyld aborts at
 # launch); the DYLD_INSERT protection does NOT depend on library validation. See
 # that file for the full rationale and the Phase 2 plan to re-enable it.
@@ -109,7 +127,7 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 # (inherited) options. The bundle currently has a single Mach-O; when helpers get
 # embedded, sign them explicitly inside-out before this line.
 echo "==> Ad-hoc codesigning (hardened runtime)"
-ENTITLEMENTS="$SCRIPT_DIR/Audiouted.entitlements"
+ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
 codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE"
 codesign --verify --strict --verbose "$APP_BUNDLE"

@@ -6,7 +6,7 @@ Offline development tooling for working on the app without real AirPlay
 speakers, plus `dev/notes/`, home for pre-implementation research briefs.
 Owns the *optional* real-wire sanity check (a shairport-sync fake receiver) —
 not the primary offline tool, which is the in-app `MockBackend` in
-`../AudioutedCore`. Full setup docs live in `README.md`.
+`../AudiouterCore`. Full setup docs live in `README.md`.
 
 ## Rules
 
@@ -41,6 +41,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `audiocap/` | Standalone Core Audio process-tap capture CLI; independent tool. |
 | `README.md` | Setup/rationale for the mock, fake-speaker, and `native` backends. |
 | `notes/p2b-nativebackend-runbook.md` | How to run `native`: build/test, TCC grant, verification. |
+| `notes/onboarding-setup-brief.md` | First-run permission-priming flow: design + gated live-verify recipe for the audio self-test tone. |
 | `notes/p2b-nativebackend-seam-brief.md` | Gap analysis behind `NativeBackend`'s design. |
 | `notes/p2b-multistream-brief.md` | `stream_id` design, per-app routing (deferred). |
 | `notes/p2b-synced-local-brief.md` | Synced local Core Audio output design (deferred). |

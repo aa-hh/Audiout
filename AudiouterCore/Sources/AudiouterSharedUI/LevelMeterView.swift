@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import AppKit
+import QuartzCore
+
+/// The **leading-column VU meter** (task T1): a thin vertical bar whose green
+/// fill height tracks the live per-device RMS the backend emits via
+/// `BackendEvent.level(id:rms:)`. v1 is deliberately minimal — SINGLE GREEN
+/// fill (`.systemGreen`), no yellow/red ramp, no peak-hold marker.
+///
+/// Two layers on one custom `CALayer`-backed view: a faint rounded "track"
+/// (the recess the bar sits in) and a green "fill" layer that grows from the
+/// bottom. Only the fill layer's height changes per frame.
+///
+/// **Ballistics, not a snap-to-target bar**: `setLevel` only records a target;
+/// a `CVDisplayLink`-driven loop eases the *displayed* level toward it every
+/// frame via ``ballisticsStep(displayed:target:)``, with a faster attack
+/// (rising) than decay (falling) — the classic VU-meter feel where the needle
+/// jumps up but eases down. The pure step function is exposed standalone so it
+/// can be unit-tested without a live display link.
+///
+/// **Self-stopping is the whole point of this being a custom view instead of
+/// `NSLevelIndicator`**: once the displayed level has eased down to ~0 and the
+/// target is also 0 (silence, or the meter went idle), the display link is
+/// invalidated and released — zero CPU at rest. The next `setLevel(>0)`
+/// restarts it. Every popover row gets one of these, so an always-running
+/// per-row display link would be a real cost with several devices visible.
+///
+/// Mirrors ``StatusDotView``'s layer + Reduce-Motion idioms: `updateLayer` /
+/// `viewDidChangeEffectiveAppearance` for colour re-resolution, and a Reduce
+/// Motion check that snaps instead of animating.
+public final class LevelMeterView: NSView {
+
+    /// Width of the meter column — matches `PopoverColumnGrid.meterWidth`
+    /// (duplicated here as a `public static let` per the shared symbol
+    /// contract; `AirPlayControllerSharedUI` does not import the grid type).
+    public static let columnWidth: CGFloat = 8
+
+    /// Attack coefficient (rising level) — larger than `decay` so the bar
+    /// jumps up quickly on a transient.
+    private static let attack: CGFloat = 0.5
+    /// Decay coefficient (falling level) — smaller than `attack` so the bar
+    /// eases down, the classic VU-meter feel.
+    private static let decay: CGFloat = 0.12
+    /// Below this displayed level (with a zero target) the bar is considered
+    /// at rest and the display link is torn down.
+    private static let restEpsilon: CGFloat = 0.001
+
+    private let trackLayer = CALayer()
+    private let fillLayer = CALayer()
+
+    /// The most recently requested level (post-clamp), i.e. what the display
+    /// link eases `displayed` toward.
+    private var target: CGFloat = 0
+    /// The currently-drawn level, eased toward `target` each frame.
+    private var displayed: CGFloat = 0
+
+    private var displayLink: CVDisplayLink?
+
+    public init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        trackLayer.cornerRadius = Self.columnWidth / 2
+        fillLayer.cornerRadius = Self.columnWidth / 2
+        layer?.addSublayer(trackLayer)
+        layer?.addSublayer(fillLayer)
+        updateLayerColors()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        stopDisplayLink()
+    }
+
+    public override var intrinsicContentSize: NSSize {
+        NSSize(width: Self.columnWidth, height: 22)
+    }
+
+    /// Non-interactive: the meter never intercepts clicks/hover meant for the
+    /// row beneath it.
+    public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    // MARK: Colours
+
+    public override var wantsUpdateLayer: Bool { true }
+
+    public override func updateLayer() {
+        updateLayerColors()
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateLayerColors()
+    }
+
+    private func updateLayerColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            trackLayer.backgroundColor = NSColor.tertiarySystemFill.cgColor
+            fillLayer.backgroundColor = NSColor.systemGreen.cgColor
+        }
+    }
+
+    // MARK: Layout
+
+    public override func layout() {
+        super.layout()
+        trackLayer.frame = bounds
+        redrawFill()
+    }
+
+    /// Sizes the fill layer's height to the current `displayed` level,
+    /// growing from the bottom, inside a disabled-action transaction so
+    /// per-frame updates never trigger implicit Core Animation animations or
+    /// Auto Layout passes.
+    private func redrawFill() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let height = bounds.height * displayed
+        fillLayer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
+        CATransaction.commit()
+    }
+
+    // MARK: Public API
+
+    /// Push a new RMS reading. Clamps to `0...1`, records it as the ballistics
+    /// target, and starts the display link if it isn't already running.
+    /// Reduce Motion snaps `displayed` to the target immediately instead of
+    /// easing (mirrors `StatusDotView`).
+    public func setLevel(_ rms: Float) {
+        let clamped = CGFloat(min(max(rms, 0), 1))
+        target = clamped
+        if reduceMotion {
+            displayed = clamped
+            redrawFill()
+            if clamped <= Self.restEpsilon {
+                stopDisplayLink()
+            }
+            return
+        }
+        startDisplayLinkIfNeeded()
+    }
+
+    /// Zero the meter immediately (no ease-out) and stop the display link —
+    /// used when a row/device goes away or metering turns off.
+    public func reset() {
+        target = 0
+        displayed = 0
+        redrawFill()
+        stopDisplayLink()
+    }
+
+    /// True while the OS is set to reduce motion — a static bar is shown then
+    /// (mirrors `StatusDotView.reduceMotion`).
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    // MARK: Ballistics
+
+    /// One ease step from `displayed` toward `target`. Pure and static so it
+    /// can be unit-tested without a live display link. The attack coefficient
+    /// (rising) is larger than the decay coefficient (falling) — the bar
+    /// jumps up on a transient and eases back down.
+    public static func ballisticsStep(displayed: CGFloat, target: CGFloat) -> CGFloat {
+        let coefficient = target > displayed ? attack : decay
+        return displayed + (target - displayed) * coefficient
+    }
+
+    // MARK: Display link
+
+    private func startDisplayLinkIfNeeded() {
+        guard displayLink == nil else { return }
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { return }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        CVDisplayLinkSetOutputCallback(link, { _, _, _, _, _, userInfo -> CVReturn in
+            guard let userInfo else { return kCVReturnSuccess }
+            let view = Unmanaged<LevelMeterView>.fromOpaque(userInfo).takeUnretainedValue()
+            DispatchQueue.main.async {
+                view.tick()
+            }
+            return kCVReturnSuccess
+        }, context)
+        CVDisplayLinkStart(link)
+        displayLink = link
+    }
+
+    private func stopDisplayLink() {
+        guard let link = displayLink else { return }
+        CVDisplayLinkStop(link)
+        displayLink = nil
+    }
+
+    /// One frame of ballistics, called on the main thread by the display link
+    /// callback. Stops and releases the link once the bar has eased down to
+    /// rest at a zero target — the zero-CPU-at-rest property.
+    private func tick() {
+        displayed = Self.ballisticsStep(displayed: displayed, target: target)
+        redrawFill()
+        if target <= Self.restEpsilon && displayed <= Self.restEpsilon {
+            displayed = 0
+            redrawFill()
+            stopDisplayLink()
+        }
+    }
+
+    // MARK: Test-support hooks
+
+    /// Sets `displayed` synchronously and redraws inside a disabled-action
+    /// transaction WITHOUT starting the display link — deterministic for
+    /// snapshots/tests that can't wait on a live animation loop.
+    public func test_setDisplayedLevel(_ level: CGFloat) {
+        displayed = min(max(level, 0), 1)
+        redrawFill()
+    }
+}

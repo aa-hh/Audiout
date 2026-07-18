@@ -1,7 +1,7 @@
 # objc-exception-shim-handoff — ObjCExceptionShim: infrastructure to adopt in per-app-routing
 
 Written from `claude/crash-freeze-audit-d27718` (this worktree, post-rename:
-`AudioutedCore/*` paths) for the session owning the per-app-routing worktree
+`AudiouterCore/*` paths) for the session owning the per-app-routing worktree
 (`per-app-routing-engine-73f40c`, pre-rename target names, uncommitted
 `LocalPlaybackEngine.swift`). We cannot read that file — everything below
 about your code is inference from the audit, flagged as such. This is
@@ -37,14 +37,14 @@ worktree's `git log`. It carries, all main-bound:
    merge will do it for you. Lowest risk, standard cross-session
    convention here.
 2. Cherry-pick/merge `3760b2a` directly now. Your worktree predates the
-   `AudioutedCore` rename, so this commit's paths (`AudioutedCore/Sources/...`)
+   `AudiouterCore` rename, so this commit's paths (`AudiouterCore/Sources/...`)
    won't line up with your tree's pre-rename layout — you'd need to adapt
    paths by hand (and Package.swift target wiring) as part of the
    cherry-pick. Only worth it if you need the shim before the merge lands.
 
 ## 3. Public API (verbatim from committed source)
 
-`AudioutedCore/Sources/ObjCExceptionShim/include/ObjCExceptionShim.h`:
+`AudiouterCore/Sources/ObjCExceptionShim/include/ObjCExceptionShim.h`:
 
 ```objc
 extern NSString *const AUDObjCExceptionErrorDomain;
@@ -55,7 +55,7 @@ extern NSString *const AUDObjCExceptionCallStackSymbolsKey;
 NSError *_Nullable AUDCatchObjCException(void (NS_NOESCAPE ^_Nonnull block)(void));
 ```
 
-`AudioutedCore/Sources/AudioutedCore/ObjCExceptionCatching.swift`:
+`AudiouterCore/Sources/AudiouterCore/ObjCExceptionCatching.swift`:
 
 ```swift
 public struct ObjCExceptionError: Error, CustomStringConvertible {

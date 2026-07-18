@@ -1,5 +1,12 @@
 # Playback-level meter — research & design
 
+> **2026-07 update:** the meter feature described here has SHIPPED (leading
+> `LevelMeterView` column, `PopoverColumnGrid.meterWidth`/`meterToLeading`,
+> `DeviceRowView.showsMeter`, `PopoverController.updateLevel`). §6 "Phase B —
+> real level signal" below is OBSOLETE: it assumed an OwnTone/audiocap fan-out
+> that Phase 1/2 built against, but the shipped path is the native backend's
+> own tap — see the note inline in that section.
+
 **Feature:** add a new **leading (first) column** to every popover row: a thin
 **vertical bar meter** that fills green from the bottom up, its height driven by
 the **current live audio level** for that device/output, animating as audio
@@ -263,7 +270,7 @@ metering and (b) zero every meter on close so a stale bar can't linger on reopen
 ### 3.1 Design
 
 A small **layer-backed `NSView`** — `LevelMeterView` — living in
-`AudioutedSharedUI` (same target as `DeviceRowView`/`ControlCenterSlider`
+`AudiouterSharedUI` (same target as `DeviceRowView`/`ControlCenterSlider`
 so both popover and mixer window can reuse it). It draws a **vertical rounded
 track** with a **green fill** growing from the bottom.
 
@@ -323,7 +330,7 @@ add the ramp in polish.
 ### 3.5 Code sketch
 
 ```swift
-// AudioutedSharedUI/LevelMeterView.swift
+// AudiouterSharedUI/LevelMeterView.swift
 import AppKit
 import QuartzCore
 
@@ -557,7 +564,7 @@ leading column** and is orthogonal:
 
 Everything the mock needs already exists (§1.2). Rough effort: **~½–1 day.**
 
-1. **`LevelMeterView`** in `AudioutedSharedUI` (§3.5) — layer-backed
+1. **`LevelMeterView`** in `AudiouterSharedUI` (§3.5) — layer-backed
    vertical bar, `setLevel`/`reset`, self-stopping display link, single-green
    first (add the color ramp later). *(sonnet, med)*
 2. **`PopoverColumnGrid`** — add `meterWidth`/`meterToLeading` +
@@ -579,7 +586,15 @@ Everything the mock needs already exists (§1.2). Rough effort: **~½–1 day.**
 on selected/unmuted rows, decaying on mute/deselect, empty on closed reopen,
 CPU idle when closed.
 
-### Phase B — real level signal (behind the same API)
+### Phase B — real level signal (behind the same API) — OBSOLETE, see 2026-07 note above
+
+This section's plan (audiocap stderr line → CaptureCoordinator parse →
+OwnToneBackend emit) targeted the Phase-1 OwnTone/FIFO pipeline. That pipeline
+is no longer the shipping path: the native AirPlay 2 backend computes RMS
+directly off its own system-audio tap in `NativeCaptureCoordinator`
+(`rmsOfS16LE`, `onLevel` callback) and `NativeBackend.emitLevel` fans `.level`
+out per selected+unmuted device — no audiocap stderr parsing or IPC hop
+involved. The steps below are kept for historical record only.
 
 Rough effort: **~1–2 days** (mostly the capture-side emit + IPC choice).
 

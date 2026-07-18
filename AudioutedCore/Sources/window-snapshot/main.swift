@@ -167,7 +167,8 @@ func run() -> Int32 {
         window.setContentSize(NSSize(width: 720, height: 460))
         drain()
 
-        // 1. Default state: no groups, mixer pane showing all devices.
+        // 1. Default state: no groups — the empty "No groups yet" pane (the
+        //    mixer pane was removed by live-test feedback 2026-07-18).
         snapshotWindow(window, label: "1-default", appearanceName: appearanceName, outDir: outDir)
 
         // 2. Create sheet: the sidebar "+" with nothing selected presents the

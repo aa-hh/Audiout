@@ -15,8 +15,14 @@ import AudioutedSharedUI
 /// standard macOS sheet (a parallel task); this editor only ever shows an
 /// already-persisted group.
 ///
-/// Layout, top to bottom:
-/// - a rename `NSTextField` (real first responder — legal in a window);
+/// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
+/// design feedback 2026-07-18: groups and devices share the identical
+/// large-icon header, the only difference being that a group's TITLE is
+/// editable and a device's is not):
+/// - a large (``DeviceIconWellView/size``pt) group icon with the shared
+///   Contacts-style hover scrim; clicking it opens the icon picker;
+/// - the group name as an editable borderless title field (centered under the
+///   icon, capped width — commits on Return/focus loss, like a Finder rename);
 /// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
 ///   (per HIG — checkboxes for membership, not switches);
 /// - a "Delete group…" `NSButton`.
@@ -27,13 +33,11 @@ import AudioutedSharedUI
 /// notified via `onDidEditGroup` / `onDidDeleteGroup` so it can refresh the
 /// sidebar labels + toolbar presets.
 ///
-/// Beside the Name field sits an icon well — a bordered square button showing
-/// `group.iconSymbolName` (resolved through `DeviceIcon.resolve`, so a stale
-/// override still renders the default rather than a blank glyph). Clicking it
-/// presents `IconPickerViewController` as an anchored popover; picking a
-/// symbol (or "use default") persists instantly through `saveGroup`, exactly
-/// like a rename — this window never gates a group edit behind a separate
-/// "Save" step.
+/// The header icon shows `group.iconSymbolName` (resolved through
+/// `DeviceIcon.resolve`, so a stale override still renders the default rather
+/// than a blank glyph). Picking a symbol (or "use default") persists instantly
+/// through `saveGroup`, exactly like a rename — this window never gates a
+/// group edit behind a separate "Save" step.
 public final class GroupEditorViewController: NSViewController {
 
     /// Caps the form's content column width so long rows/fields don't stretch
@@ -57,14 +61,14 @@ public final class GroupEditorViewController: NSViewController {
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
 
+    private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
-    private let iconWellButton = NSButton()
     private let membershipStack = NSStackView()
     private let deleteButton = NSButton()
-    private let titleLabel = NSTextField(labelWithString: "Edit Group")
 
-    /// Square icon-well button side length (approved: "~28pt").
-    private static let iconWellSize: CGFloat = 28
+    /// Width cap for the editable title field (design feedback 2026-07-18:
+    /// the full-width Name bar was "unnecessarily long").
+    private static let titleFieldMaxWidth: CGFloat = 260
 
     /// Kept alive across a picker session so it can be dismissed/replaced;
     /// nil when no picker is currently presented.
@@ -93,31 +97,31 @@ public final class GroupEditorViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.stringValue = "Edit Group"
-        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
+        iconWell.translatesAutoresizingMaskIntoConstraints = false
+        iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.setAccessibilityLabel("Edit group icon")
+        iconWell.onClick = { [weak self] in
+            guard let self else { return }
+            self.presentIconPicker(anchoredTo: self.iconWell)
+        }
 
-        let nameLabel = NSTextField(labelWithString: "Name")
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.textColor = .secondaryLabelColor
-
+        // The editable title: styled like the detail pane's name label (header
+        // parity) but a real first responder. Borderless label-look that edits
+        // in place — bezel-less so the text baseline sits exactly where the
+        // static label's does (the bezeled field drew its text visibly
+        // off-center — live-test feedback 2026-07-18).
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
+        nameField.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
+        nameField.alignment = .center
+        nameField.isBezeled = false
+        nameField.drawsBackground = false
+        nameField.usesSingleLineMode = true
+        nameField.lineBreakMode = .byTruncatingTail
         nameField.target = self
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
-
-        iconWellButton.translatesAutoresizingMaskIntoConstraints = false
-        iconWellButton.bezelStyle = .regularSquare
-        iconWellButton.isBordered = true
-        iconWellButton.imagePosition = .imageOnly
-        iconWellButton.setButtonType(.momentaryPushIn)
-        iconWellButton.target = self
-        iconWellButton.action = #selector(iconWellTapped(_:))
-        iconWellButton.setAccessibilityLabel("Group icon")
-        iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
-        iconWellButton.heightAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -137,40 +141,37 @@ public final class GroupEditorViewController: NSViewController {
 
         let container = NSView()
         // The form column: capped to `contentMaxWidth`, leading-aligned,
-        // pinned below the title. Everything hangs off this column's edges
-        // rather than the container's, so the cap applies uniformly.
+        // pinned below the safe area. Everything hangs off this column's
+        // edges rather than the container's, so the cap applies uniformly.
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [nameLabel, nameField, iconWellButton, speakersLabel, membershipStack] {
+        for v in [iconWell, nameField, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
-        for v in [titleLabel, column, deleteButton] {
+        for v in [column, deleteButton] {
             container.addSubview(v)
         }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-
-            column.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 16),
+            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
             column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
-            nameLabel.topAnchor.constraint(equalTo: column.topAnchor),
-            nameLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            // Header parity with DeviceDetailViewController: centered large
+            // icon, centered (editable) title beneath it.
+            iconWell.topAnchor.constraint(equalTo: column.topAnchor),
+            iconWell.centerXAnchor.constraint(equalTo: column.centerXAnchor),
 
-            nameField.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
-            nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            nameField.trailingAnchor.constraint(equalTo: iconWellButton.leadingAnchor, constant: -8),
-            nameField.centerYAnchor.constraint(equalTo: iconWellButton.centerYAnchor),
+            nameField.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
+            nameField.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            // FIXED width, not a cap: an EDITABLE text field has no intrinsic
+            // width, so a "<=" alone lets auto layout collapse it to zero (it
+            // rendered invisible — snapshot-caught 2026-07-18).
+            nameField.widthAnchor.constraint(equalToConstant: Self.titleFieldMaxWidth),
 
-            iconWellButton.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
-            iconWellButton.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-
-            speakersLabel.topAnchor.constraint(equalTo: iconWellButton.bottomAnchor, constant: 16),
+            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 20),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
 
             membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 8),
@@ -197,13 +198,12 @@ public final class GroupEditorViewController: NSViewController {
         editingGroupID = groupID
         allDevices = devices
 
-        titleLabel.stringValue = "Edit Group"
         nameField.stringValue = group.name
         refreshIconWell(group: group)
         rebuildCandidates(memberSet: Set(group.memberIDs))
     }
 
-    /// Refresh the icon well's image from `group.iconSymbolName`, resolved
+    /// Refresh the header icon's image from `group.iconSymbolName`, resolved
     /// through `DeviceIcon.resolve` so a stale/unrecognized override still
     /// renders the default rather than a blank glyph.
     private func refreshIconWell(group: Group) {
@@ -211,7 +211,8 @@ public final class GroupEditorViewController: NSViewController {
         iconWellSymbolName = symbolName
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
-        iconWellButton.image = image
+        iconWell.iconImageView.image = image
+        iconWell.iconImageView.contentTintColor = .secondaryLabelColor
     }
 
     /// Recompute `candidateDevices` from `allDevices` — available devices,
@@ -276,10 +277,6 @@ public final class GroupEditorViewController: NSViewController {
         // Rebuild: an unchecked unavailable device drops out of the list.
         rebuildCandidates(memberSet: Set(group.memberIDs))
         onDidEditGroup?()
-    }
-
-    @objc private func iconWellTapped(_ sender: NSButton) {
-        presentIconPicker(anchoredTo: sender)
     }
 
     /// Build and present `IconPickerViewController` anchored to `anchor`,

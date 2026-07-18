@@ -15,7 +15,7 @@ import AudioutedCore
 ///
 /// It lives in `AudioutedSharedUI` (not the popover target) so the
 /// window target can link it without pulling in the whole dropdown; both
-/// `PopoverController` (popover) and `MixerViewController` (window) reuse it.
+/// `PopoverController` (the popover) is its host (the window's mixer pane was retired 2026-07-18).
 ///
 /// The custom-view rules below (`draw`/highlight/tracking) still support the
 /// legacy `NSMenuItem` host branch; in the popover and window there is no

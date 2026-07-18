@@ -20,8 +20,9 @@ import AudioutedSharedUI
 ///   that's gone stale on this OS still falls back to the kind default rather
 ///   than a blank glyph);
 /// - APPROVED CUSTOM ELEMENT (the only one this phase — `../../AGENTS.md`): a
-///   Contacts-style hover scrim over that icon (``DeviceIconWellView``).
-///   Hovering shows a translucent circular scrim with a centered white pencil
+///   Contacts-style hover scrim over that icon (the shared
+///   ``DeviceIconWellView``). Hovering shows a translucent full-coverage
+///   scrim with a centered white pencil
 ///   glyph; clicking it presents `IconPickerViewController` as an anchored
 ///   popover, and picking a symbol (or "use default") writes straight through
 ///   `DeviceIconController.setSymbolName`/`resetIcon`, instant-apply like the
@@ -330,122 +331,4 @@ public final class DeviceDetailViewController: NSViewController {
     /// (`test_pickCurated`, `test_apply`, …) without needing the popover that
     /// hosts it live.
     public private(set) var test_picker: IconPickerViewController?
-}
-
-// MARK: - DeviceIconWellView
-
-/// The approved custom-drawn element for this phase (`../../AGENTS.md`): a
-/// large device glyph with a Contacts-style hover scrim. Everything else in
-/// this file is stock AppKit.
-///
-/// Hovering the well shows a translucent circular scrim (a layer-backed
-/// `NSView`, not a `draw(_:)` override — the same layer-property idiom
-/// `StatusDotView` uses) with a centered white "pencil" glyph; the scrim
-/// colour is a fixed translucent black rather than switching per light/dark
-/// appearance, because it sits ON the icon (not the window chrome) and a
-/// white pencil reads clearly against it either way — swapping the scrim's
-/// tint per appearance would also force re-tinting the pencil for no visible
-/// gain. `setOverlayVisible(_:)` respects Reduce Motion (a plain show/hide,
-/// no fade) so this is also the headless test hook
-/// (`DeviceDetailViewController.test_setOverlayVisible`).
-private final class DeviceIconWellView: NSView {
-
-    /// Square side length (approved: "~64pt").
-    static let size: CGFloat = 64
-
-    private static let fadeDuration: TimeInterval = 0.12
-    private static let scrimColor = NSColor(white: 0, alpha: 0.55)
-
-    let iconImageView = NSImageView()
-    private let overlayView = NSView()
-    private let pencilImageView = NSImageView()
-
-    /// Fired on a real click (mouse-down) anywhere in the well.
-    var onClick: (() -> Void)?
-
-    private var trackingArea: NSTrackingArea?
-
-    init() {
-        super.init(frame: .zero)
-
-        iconImageView.translatesAutoresizingMaskIntoConstraints = false
-        iconImageView.imageScaling = .scaleProportionallyUpOrDown
-
-        overlayView.translatesAutoresizingMaskIntoConstraints = false
-        overlayView.wantsLayer = true
-        overlayView.layer?.cornerRadius = Self.size / 2
-        overlayView.layer?.backgroundColor = Self.scrimColor.cgColor
-        overlayView.isHidden = true
-        overlayView.alphaValue = 0
-
-        let pencil = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
-        pencil?.isTemplate = true
-        pencilImageView.translatesAutoresizingMaskIntoConstraints = false
-        pencilImageView.image = pencil
-        pencilImageView.contentTintColor = .white
-        pencilImageView.imageScaling = .scaleProportionallyUpOrDown
-
-        addSubview(iconImageView)
-        addSubview(overlayView)
-        overlayView.addSubview(pencilImageView)
-
-        NSLayoutConstraint.activate([
-            iconImageView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            iconImageView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            iconImageView.topAnchor.constraint(equalTo: topAnchor),
-            iconImageView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            overlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            overlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            overlayView.topAnchor.constraint(equalTo: topAnchor),
-            overlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            pencilImageView.centerXAnchor.constraint(equalTo: overlayView.centerXAnchor),
-            pencilImageView.centerYAnchor.constraint(equalTo: overlayView.centerYAnchor),
-            pencilImageView.widthAnchor.constraint(equalToConstant: Self.size * 0.36),
-            pencilImageView.heightAnchor.constraint(equalToConstant: Self.size * 0.36),
-        ])
-
-        setAccessibilityElement(true)
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("Edit icon")
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    // MARK: Hover tracking
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self, userInfo: nil)
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) { setOverlayVisible(true) }
-    override func mouseExited(with event: NSEvent) { setOverlayVisible(false) }
-    override func mouseDown(with event: NSEvent) { onClick?() }
-
-    /// Show/hide the scrim. Respects Reduce Motion (`../AGENTS.md`'s system-
-    /// settings rule): a plain, instant show/hide with Reduce Motion on, a
-    /// brief cross-fade otherwise. This is the one place hover state changes,
-    /// so it doubles as the headless test hook.
-    func setOverlayVisible(_ visible: Bool) {
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            overlayView.alphaValue = visible ? 1 : 0
-            overlayView.isHidden = !visible
-            return
-        }
-        overlayView.isHidden = false
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.fadeDuration
-            overlayView.animator().alphaValue = visible ? 1 : 0
-        }, completionHandler: { [weak self] in
-            if !visible { self?.overlayView.isHidden = true }
-        })
-    }
 }

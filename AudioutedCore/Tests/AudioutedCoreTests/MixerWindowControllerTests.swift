@@ -93,14 +93,11 @@ final class MixerWindowControllerTests: XCTestCase {
 
     // MARK: Window chrome (SPEC §9 "Full window")
 
-    func testWindowChromeIsUnifiedWithFullSizeContentAndToolbarItems() async throws {
+    func testWindowChromeHasFullSizeContentAndNoToolbar() async throws {
         let (window, _, _) = try await makeWindow()
-        XCTAssertEqual(window.test_toolbarStyle, .unified)
         XCTAssertTrue(window.test_hasFullSizeContentView)
-        XCTAssertTrue(window.test_toolbarItemIdentifiers.contains("master"),
-                      "toolbar mounts the master-volume item")
-        XCTAssertFalse(window.test_toolbarItemIdentifiers.contains("presets"),
-                       "the presets group-switcher popup was removed by the revamp")
+        XCTAssertTrue(window.test_hasNoToolbar,
+                      "the window mounts no toolbar (live-test feedback: no volume UI in a config-only window)")
     }
 
     func testWindowTitleIsGroups() async throws {
@@ -119,9 +116,31 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertFalse(window.test_isShowingEditor)
     }
 
-    func testBaselineMixerShowsAllDeviceRows() async throws {
+    func testBaselineContentIsEmptyStateAtZeroGroups() async throws {
         let (window, _, _) = try await makeWindow()
-        XCTAssertEqual(window.test_mixer.test_rowDeviceIDs.count, 7)
+        XCTAssertTrue(window.test_isShowingEmptyState,
+                      "zero groups + no selection auto-lands on the 'No groups yet' pane")
+    }
+
+    func testEmptyStateNewGroupButtonPresentsCreationSheet() async throws {
+        let (window, _, _) = try await makeWindow()
+        XCTAssertTrue(window.test_isShowingEmptyState)
+        // The empty pane's call-to-action runs the same sheet as the sidebar "+".
+        window.test_emptyState.test_tapNewGroup()
+        XCTAssertTrue(window.test_isPresentingCreateSheet)
+        window.test_createSheet?.test_cancel()
+    }
+
+    func testAutoSelectLandsOnFirstGroupsEditor() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+        XCTAssertTrue(window.test_isShowingEditor,
+                      "with a saved group and no selection, the window auto-selects it")
+        XCTAssertEqual(window.test_editor.editingGroupID, saved.id)
+        XCTAssertEqual(window.test_sidebar.currentSelection, .group(id: saved.id))
+        XCTAssertNil(controller.activeGroupID, "auto-select never activates")
     }
 
     func testSavingGroupAddsGroupsSectionWithMembersAndClearsEmptyState() async throws {
@@ -368,46 +387,10 @@ final class MixerWindowControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.groups.count, 0)
         XCTAssertFalse(window.test_isShowingEditor)
+        XCTAssertTrue(window.test_isShowingEmptyState,
+                      "deleting the last group falls back to the 'No groups yet' pane")
         XCTAssertTrue(window.test_sidebar.test_hasGroupsEmptyStateRow,
                       "the Groups section stays but shows the empty state again")
-    }
-
-    // MARK: Mixer rows drive the backend
-
-    func testMixerRowSliderDrivesBackend() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-
-        let target = saved.memberIDs[0]
-        let row = try XCTUnwrap(window.test_mixer.test_row(for: target))
-        row.test_setVolume(15)
-        await drain()
-        XCTAssertEqual(backend.devices.first { $0.id == target }?.volume, 15)
-    }
-
-    // MARK: Toolbar master (presets group-switcher removed by the revamp)
-
-    func testToolbarMasterDragScalesMembersProportionally() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        // Activation is a popover concern under the revamp — drive the model
-        // directly rather than through the window.
-        controller.activateGroup(id: saved.id)
-        window.update(devices: backend.devices)
-        await drain()
-
-        let m0 = saved.memberIDs[0], m1 = saved.memberIDs[1]
-        backend.setVolume(40, for: m0)
-        backend.setVolume(80, for: m1)
-        await drain()
-        window.update(devices: backend.devices)
-        XCTAssertEqual(controller.masterVolume, 60)
-
-        window.test_toolbar.test_dragMaster(to: 30)
-        await drain()
-        XCTAssertEqual(backend.devices.first { $0.id == m0 }?.volume, 20)
-        XCTAssertEqual(backend.devices.first { $0.id == m1 }?.volume, 40)
     }
 
     // MARK: Selecting a device → detail pane (config-only, never activation)
@@ -440,25 +423,36 @@ final class MixerWindowControllerTests: XCTestCase {
                        "office is a Group 1 member")
     }
 
-    func testDeselectingDeviceReturnsToMixer() async throws {
-        let (window, _, _) = try await makeWindow()
+    func testDeselectingDeviceAutoSelectsFirstGroupOrEmptyState() async throws {
+        let (window, controller, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
         XCTAssertTrue(window.test_isShowingDetail)
 
         window.test_select(nil)
         await drain()
-
         XCTAssertFalse(window.test_isShowingDetail)
-        XCTAssertEqual(window.test_mixer.test_rowDeviceIDs.count, 7, "deselection shows the full mixer")
+        XCTAssertTrue(window.test_isShowingEmptyState,
+                      "no groups: deselecting a device lands on the empty pane")
+
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.device(id: "office"))
+        await drain()
+        window.test_select(nil)
+        await drain()
+        XCTAssertTrue(window.test_isShowingEditor,
+                      "with a saved group, deselecting auto-selects its editor")
+        XCTAssertEqual(window.test_editor.editingGroupID, saved.id)
     }
 
-    func testSelectingUnknownDeviceIDFallsBackToMixer() async throws {
+    func testSelectingUnknownDeviceIDFallsBackToDefaultContent() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_select(.device(id: "does-not-exist"))
         await drain()
 
         XCTAssertFalse(window.test_isShowingDetail)
+        XCTAssertTrue(window.test_isShowingEmptyState)
         XCTAssertNil(window.test_detail.test_shownDeviceID, "the detail pane was never actually shown")
     }
 
@@ -493,7 +487,7 @@ final class MixerWindowControllerTests: XCTestCase {
                        "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
-    func testRefreshAllFallsBackToMixerWhenShownDeviceDisappears() async throws {
+    func testRefreshAllFallsBackWhenShownDeviceDisappears() async throws {
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
@@ -503,7 +497,8 @@ final class MixerWindowControllerTests: XCTestCase {
         window.update(devices: devicesWithoutOffice)
 
         XCTAssertFalse(window.test_isShowingDetail,
-                       "refreshAll() falls back to the mixer once the shown device vanishes from the snapshot")
+                       "refreshAll() falls back to the default content once the shown device vanishes")
+        XCTAssertTrue(window.test_isShowingEmptyState, "no groups saved, so the fallback is the empty pane")
     }
 
     // MARK: Icon flows
@@ -565,25 +560,19 @@ final class MixerWindowControllerTests: XCTestCase {
                        "dedup resolves to the existing group and does NOT overwrite its icon")
     }
 
-    func testDeviceIconControllerOverrideReachesMixerDeviceRow() async throws {
-        let (window, _, _, iconController) = try await makeWindowWithIconController()
-        let row = try XCTUnwrap(window.test_mixer.test_row(for: "office"))
-
-        iconController.setSymbolName("airpods", for: "office")
+    func testDeviceIconControllerOverrideReachesEditorMembershipRow() async throws {
+        let (window, controller, backend, icons) = try await makeWindowWithIconController()
+        let saved = try makeGroup1(controller)   // members incl. office
+        icons.setSymbolName("sofa.fill", for: "office")
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
         await drain()
-
-        let iconView = try XCTUnwrap(row.subviews.compactMap { $0 as? NSImageView }.first,
-                                     "DeviceRowView has exactly one NSImageView: its device glyph")
-        let config = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize, weight: .regular)
-        let overrideTiff = NSImage(systemSymbolName: "airpods", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)?.tiffRepresentation
-        let defaultTiff = NSImage(systemSymbolName: Device.Kind.generic.symbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)?.tiffRepresentation
-
-        XCTAssertEqual(iconView.image?.tiffRepresentation, overrideTiff,
-                       "the icon override reaches the shared mixer DeviceRowView's rendered glyph")
-        XCTAssertNotEqual(iconView.image?.tiffRepresentation, defaultTiff,
-                          "sanity: the override actually changed the glyph from office's kind default")
+        // The mixer pane is gone (live-test feedback) — the shared override's
+        // window-side rendering surface is the editor's membership rows.
+        XCTAssertTrue(window.test_editor.test_candidateDeviceIDs.contains("office"))
+        XCTAssertEqual(icons.symbolName(for: backend.devices.first { $0.id == "office" }!),
+                       "sofa.fill",
+                       "the shared controller resolves the override the row renders")
     }
 }
 

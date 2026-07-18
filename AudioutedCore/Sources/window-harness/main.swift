@@ -101,18 +101,15 @@ func run() -> Int32 {
     }
     window.update(devices: backend.devices)
 
-    // --- 0. Window chrome: unified toolbar + full-size content view, master
-    //        item mounted, presets popup GONE (config-only revamp), titled
+    // --- 0. Window chrome: full-size content view, NO toolbar at all
+    //        (live-test feedback 2026-07-18: the master slider left with the
+    //        mixer pane — nothing in this window touches audio), titled
     //        "Groups".
-    print("\n[0] Window chrome (unified toolbar, full-size content, master-only toolbar)")
-    checks.expectEqual(window.test_toolbarStyle, .unified,
-                       "window.toolbarStyle is .unified (SPEC §9)")
+    print("\n[0] Window chrome (full-size content, no toolbar)")
     checks.expect(window.test_hasFullSizeContentView,
                   "styleMask includes .fullSizeContentView (SPEC §9)")
-    checks.expect(window.test_toolbarItemIdentifiers.contains("master"),
-                  "toolbar mounts the master-volume item")
-    checks.expect(!window.test_toolbarItemIdentifiers.contains("presets"),
-                  "toolbar does NOT mount a presets item (config-only revamp)")
+    checks.expect(window.test_hasNoToolbar,
+                  "the window mounts NO toolbar (config-only: no volume UI here)")
     checks.expectEqual(window.window?.title, "Groups", "window title is 'Groups'")
 
     // --- 1. Baseline sidebar: zero groups still shows BOTH sections (the
@@ -124,12 +121,13 @@ func run() -> Int32 {
                   "the Groups section shows its empty-state row at zero groups")
     checks.expectEqual(window.test_sidebar.test_ungroupedDeviceRowCount, 7,
                        "all 7 devices listed as ungrouped")
-    checks.expect(!window.test_isShowingEditor, "the mixer pane shows by default (not the editor)")
+    checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
 
-    // --- 2. Baseline mixer: all 7 devices shown as rows.
-    print("\n[2] Baseline mixer pane (all devices)")
-    checks.expectEqual(window.test_mixer.test_rowDeviceIDs.count, 7,
-                       "mixer shows a DeviceRowView per device (7)")
+    // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on
+    //        the empty "No groups yet" pane (the mixer pane is GONE).
+    print("\n[2] Baseline content pane (empty state at zero groups)")
+    checks.expect(window.test_isShowingEmptyState,
+                  "the 'No groups yet' empty pane shows when there is nothing to select")
 
     // --- 3. Create sheet: enablement gating, member count, commit creates a
     //        group WITHOUT activating it.
@@ -232,23 +230,20 @@ func run() -> Int32 {
     checks.expect(availableNonMembers.allSatisfy { window.test_editor.test_candidateDeviceIDs.contains($0.id) },
                   "every available non-member device is offered as an editor candidate")
 
-    // --- 7. Master drag scales an ACTIVE group's members proportionally.
-    //        The window itself never activates, so activate via the model
-    //        directly (mirrors what the popover would do).
-    print("\n[7] Toolbar master drag scales an ACTIVE group's members proportionally")
-    controller.activateGroup(id: saved.id)
-    window.update(devices: backend.devices)
-    let members = controller.groups.first { $0.id == saved.id }!.memberIDs
-    let m0 = members[0], m1 = members[1]
-    backend.setVolume(40, for: m0); backend.setVolume(80, for: m1); drain()
-    window.update(devices: backend.devices)
-    checks.expectEqual(controller.masterVolume, 60, "master echoes the members' average (60)")
-    window.test_toolbar.test_dragMaster(to: 30)
+    // --- 7. AUTO-SELECT: deselecting with a saved group lands on that group's
+    //        editor (never a blank/no-op pane). The window has no volume UI at
+    //        all now — master math is exercised by the popover harness.
+    print("\n[7] Auto-select: deselecting lands on the first group's editor")
+    window.test_select(nil)
     drain()
-    checks.expectEqual(backend.devices.first { $0.id == m0 }?.volume, 20, "member0 40→20")
-    checks.expectEqual(backend.devices.first { $0.id == m1 }?.volume, 40, "member1 80→40")
-    controller.deactivateGroup()
-    window.update(devices: backend.devices)
+    checks.expect(window.test_isShowingEditor,
+                  "deselecting auto-selects the first saved group's editor")
+    checks.expectEqual(window.test_editor.editingGroupID, saved.id,
+                       "the auto-selected group is the first saved group")
+    checks.expectEqual(window.test_sidebar.currentSelection, .group(id: saved.id),
+                       "the sidebar reflects the auto-selection")
+    checks.expectEqual(controller.activeGroupID, nil,
+                       "auto-selection does NOT activate (config-only)")
 
     // --- 8. beginNewGroup() presents the create sheet.
     print("\n[8] beginNewGroup() presents the create sheet")
@@ -276,20 +271,21 @@ func run() -> Int32 {
     window.test_select(nil)
     drain()
     checks.expect(!window.test_isShowingDetail, "deselecting clears the detail pane")
-    checks.expect(!window.test_isShowingEditor, "deselecting does not show the editor")
-    checks.expectEqual(window.test_mixer.test_rowDeviceIDs.count, 7,
-                       "the mixer pane returns showing all devices")
+    checks.expect(window.test_isShowingEditor,
+                  "deselecting auto-selects the saved group's editor (never a blank pane)")
 
     // --- 10. Delete: removes the group, mixer returns, "Groups" section stays
     //        (empty-state row comes back).
-    print("\n[10] Delete group → deleteGroup, mixer pane returns, 'Groups' section stays")
+    print("\n[10] Delete group → deleteGroup, empty pane returns, 'Groups' section stays")
     window.test_select(.group(id: saved.id))
     drain()
     checks.expect(window.test_isShowingEditor, "editor shown before delete")
     window.test_editor.test_confirmDelete()
     drain()
     checks.expectEqual(controller.groups.count, 0, "deleteGroup removed the group")
-    checks.expect(!window.test_isShowingEditor, "mixer pane returns after delete")
+    checks.expect(!window.test_isShowingEditor, "the editor clears after delete")
+    checks.expect(window.test_isShowingEmptyState,
+                  "with the last group gone, the empty 'No groups yet' pane returns")
     checks.expect(window.test_sidebar.test_sectionTitles.contains("Groups"),
                   "the 'Groups' section stays (config-only window always shows it)")
     checks.expect(window.test_sidebar.test_hasGroupsEmptyStateRow,

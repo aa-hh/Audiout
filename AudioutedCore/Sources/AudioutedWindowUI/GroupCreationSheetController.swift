@@ -391,7 +391,7 @@ public final class GroupCreationSheetController: NSViewController {
 
 /// A flipped document view so the checklist scrolls from the top rather than
 /// bottom-gravitating with dead space above the rows. File-scoped like
-/// `MixerViewController`'s identical helper — no cross-file reuse intended.
+/// the retired mixer pane's identical helper once was — file-scoped on purpose.
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

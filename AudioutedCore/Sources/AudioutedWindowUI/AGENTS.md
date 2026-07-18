@@ -4,12 +4,16 @@
 
 The "Groups" window — a CONFIGURATION-ONLY host for viewing and editing saved
 groups. The window (via `MixerWindowController`) owns a source-list sidebar
-(`SidebarViewController`) plus a detail pane that swaps between a mixer view
-(`MixerViewController`) and a group editor (`GroupEditorViewController`).
-Selecting a group opens its editor; selecting a device or nothing shows the
-mixer. **Viewing or editing a group here never activates it or moves audio** —
-activation lives in the app's popover only. All mixer math (groups, master,
-mute) is delegated to the shared `GroupController` in
+(`SidebarViewController`) plus a content pane that swaps between a group
+editor (`GroupEditorViewController`), a read-only device detail pane
+(`DeviceDetailViewController`), and an empty "No groups yet" pane
+(`GroupsEmptyStateViewController`). Selecting a group opens its editor;
+selecting a device opens its detail pane; with NOTHING selected the window
+AUTO-SELECTS the first saved group (or shows the empty pane when none exist) —
+there is no mixer view and no toolbar (live-test feedback 2026-07-18 removed
+both; volume control lives only in the popover). **Viewing or editing a group
+here never activates it or moves audio** — activation lives in the app's
+popover only. All group logic is delegated to the shared `GroupController` in
 [../../AGENTS.md](../../AGENTS.md); this module never computes volumes or talks
 to a backend directly.
 
@@ -19,9 +23,6 @@ to a backend directly.
   opens its editor so the user can rename it, add/remove members, or delete it.
   No member becomes active, no audio moves, no Main Out change. Activation
   lives in the popover (`../ AudioutedPopoverUI`), not here.
-- **One row, two hosts.** The mixer pane reuses `DeviceRowView` from
-  `../AudioutedSharedUI` through the same `GroupController` calls the
-  popover's `PopoverController` uses. Fix a row bug there, not here.
 - **The content pane is swapped, not toggled.** `swapContent(to:)` removes
   and re-adds the content `NSSplitViewItem`; there is no hidden/shown view
   pair to reach for instead.
@@ -38,11 +39,22 @@ to a backend directly.
   creation (`GroupCreationSheetController`) is a separate, parallel flow.
 - **`MembershipRowView` is a shared checklist row.** Used by both the
   creation sheet and the group editor to present devices as a checkbox list
-  (memberships, not routing). A separate `DeviceRowView` exists in the
-  mixer for routing-and-volume use cases; never conflate them.
-- **The toolbar hosts ONLY a master-volume slider** (the old presets popup
-  was removed with the revamp — this window never switches the active group,
-  so there is nothing to switch between).
+  (memberships, not routing). The popover's `DeviceRowView` remains the
+  routing-and-volume row; never conflate them.
+- **No toolbar, no volume UI.** The window mounts no `NSToolbar` at all —
+  the master slider left with the mixer pane (live-test feedback 2026-07-18).
+  Anything that changes what you HEAR belongs in the popover.
+- **Auto-select, never a no-op pane.** With no sidebar selection the window
+  selects the first saved group's editor; with zero groups it shows
+  `GroupsEmptyStateViewController` ("No groups yet" + a New Group button that
+  runs the same creation sheet).
+- **Header parity between groups and devices.** `GroupEditorViewController`
+  and `DeviceDetailViewController` share the identical large-icon header —
+  the same `DeviceIconWellView` (size, hover scrim, click-to-pick) — the only
+  difference being that a group's title is an EDITABLE borderless field
+  (commits like a Finder rename) while a device's title is a static label.
+  An editable `NSTextField` has no intrinsic width: the title uses a FIXED
+  width constraint, not a `<=` cap (a cap alone collapses it to zero).
 - **No synthesized clicks in headless runs.** Every controller exposes
   `test_*` methods mirroring a real UI action; add one for any new
   user-facing action or it becomes untestable outside a live window.
@@ -54,15 +66,14 @@ to a backend directly.
   status, availability, volume, kind) plus which saved groups it belongs to
   (via the injected `GroupController`). No slider, no mute, no Selected-
   Devices toggle, no group-activation control lives here.
-- **The device icon's hover scrim is the one approved custom-drawn element
-  for this whole phase** (`../../AGENTS.md`) — it lives only in
-  `DeviceDetailViewController`'s icon well. Hovering the large device icon
-  shows a translucent circular scrim with a centered pencil glyph; clicking
-  it presents `IconPickerViewController` as an anchored popover, and picking
-  a symbol (or "use default") writes straight through
-  `DeviceIconController.setSymbolName`/`resetIcon`. Do not reuse or copy this
-  custom-drawn pattern elsewhere — every other icon well in this window is
-  stock controls plus `NSImage(systemSymbolName:)`.
+- **The icon hover scrim is the one approved custom-drawn element**
+  (`../../AGENTS.md`) — `DeviceIconWellView`, shared by exactly two hosts:
+  `DeviceDetailViewController` and `GroupEditorViewController` (header
+  parity). Hovering the large icon shows a translucent full-coverage
+  rounded-rect scrim with a centered pencil glyph; clicking it presents
+  `IconPickerViewController` as an anchored popover, and picking a symbol
+  (or "use default") writes through `DeviceIconController` (devices) or
+  `saveGroup` (groups). Do not copy this custom-drawn pattern anywhere else.
 - **`IconPickerViewController` has no opinion on presentation.** It only
   builds a curated grid (`DeviceIcon.curated`, filtered through
   `DeviceIcon.isValid` so a stale curated name never renders a blank glyph)
@@ -92,13 +103,13 @@ to a backend directly.
 
 | Type | Role |
 |---|---|
-| `MixerWindowController` | Owns `NSWindow`, split-view, toolbar, sheet; swaps content between mixer/editor. |
-| `MixerViewController` | Mixer pane: device rows scoped to a group or all devices. |
-| `SidebarViewController` | Source-list (Groups + Devices sections); selection drives the detail pane. |
+| `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes; auto-select rule. |
+| `GroupsEmptyStateViewController` | "No groups yet" pane + New Group call-to-action. |
+| `SidebarViewController` | Source-list (Groups + Devices sections); selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete; no creation flow. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
 | `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom hover scrim lives on its icon well. |
 | `IconPickerViewController` | Curated SF Symbol grid + validated free-text search, presented as an anchored popover; reports a symbol name via `onPick`. |
 | `MembershipRowView` | Checkbox + icon + name row used in creation sheet and editor. |
-| `ToolbarController` | Master-volume slider (no group switcher); reports to its delegate. |
+| `DeviceIconWellView` | Shared large icon + hover scrim (the approved custom element); used by editor + detail headers. |
 | `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |

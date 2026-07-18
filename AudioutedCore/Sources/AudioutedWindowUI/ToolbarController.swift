@@ -3,17 +3,18 @@
 import AppKit
 import AudioutedCore
 
-/// The mixer window's `NSToolbar` delegate (SPEC §9 "Toolbar" + "Master volume"
-/// + "Presets picker"). Hosts, in a `.unified` toolbar:
+/// The Groups window's `NSToolbar` delegate. Under the config-only revamp the
+/// toolbar hosts a SINGLE item, in a `.unified` toolbar:
 /// - a master-volume `NSSlider` (horizontal, continuous, speaker SF Symbols at
-///   both ends per HIG);
-/// - a presets `NSPopUpButton` with `pullsDown = false` — "choosing one item
-///   from a set", shows the current selection (SPEC §9: saving/renaming are
-///   separate actions, NOT mixed into this picker).
+///   both ends per HIG).
+///
+/// The old presets `NSPopUpButton` group-switcher was removed with the revamp:
+/// this window never activates a group (activation lives in the popover only),
+/// so there is nothing here to switch between.
 ///
 /// The controller is `NSToolbarDelegate`; it reports master-slider drag
-/// brackets + preset selection to its `Delegate` (the window controller), which
-/// forwards them to `GroupController`. It never does mixer math itself.
+/// brackets to its `Delegate` (the window controller), which forwards them to
+/// `GroupController`. It never does mixer math itself.
 public final class ToolbarController: NSObject, NSToolbarDelegate {
 
     /// Callbacks to the window controller (→ `GroupController`).
@@ -21,50 +22,27 @@ public final class ToolbarController: NSObject, NSToolbarDelegate {
         func toolbarDidBeginMasterDrag(_ controller: ToolbarController)
         func toolbarController(_ controller: ToolbarController, didSetMaster volume: Int)
         func toolbarDidEndMasterDrag(_ controller: ToolbarController)
-        /// A preset was chosen. `nil` = the "No group" sentinel (deactivate).
-        func toolbarController(_ controller: ToolbarController, didSelectPresetGroupID groupID: String?)
     }
 
     public weak var delegate: Delegate?
 
     private static let masterItemID = NSToolbarItem.Identifier("master")
-    private static let presetsItemID = NSToolbarItem.Identifier("presets")
 
     private let masterSlider = NSSlider()
-    private let presetsPopUp = NSPopUpButton(frame: .zero, pullsDown: false)  // SPEC §9
-
-    /// The group ids backing the presets menu, indexed to the popup's items
-    /// (item 0 is the "No group" sentinel → nil).
-    private var presetGroupIDs: [String?] = [nil]
 
     private var isDraggingMaster = false
 
     public override init() {
         super.init()
         buildMasterSlider()
-        buildPresetsPopUp()
     }
 
     // MARK: State
 
-    /// Rebuild the presets menu + master readout from the current model.
-    public func reload(groups: [Group], activeGroupID: String?, masterVolume: Int) {
-        // Presets popup — "No group" first, then one item per group.
-        presetsPopUp.removeAllItems()
-        presetGroupIDs = [nil]
-        presetsPopUp.addItem(withTitle: "No group")
-        for group in groups {
-            presetsPopUp.addItem(withTitle: group.name)
-            presetGroupIDs.append(group.id)
-        }
-        if let activeGroupID, let index = presetGroupIDs.firstIndex(of: activeGroupID) {
-            presetsPopUp.selectItem(at: index)
-        } else {
-            presetsPopUp.selectItem(at: 0)
-        }
-
-        // The master slider is meaningful only with an active group; still show
-        // the readout so it reflects the group's average.
+    /// Refresh the master readout from the current model. The master is
+    /// meaningful only when a group is active (activation happens in the
+    /// popover, not this window); `activeGroupID == nil` disables the slider.
+    public func reload(activeGroupID: String?, masterVolume: Int) {
         masterSlider.isEnabled = activeGroupID != nil
         if !isDraggingMaster { masterSlider.integerValue = masterVolume }
     }
@@ -81,13 +59,6 @@ public final class ToolbarController: NSObject, NSToolbarDelegate {
         masterSlider.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
     }
 
-    private func buildPresetsPopUp() {
-        presetsPopUp.target = self
-        presetsPopUp.action = #selector(presetChanged(_:))
-        presetsPopUp.setAccessibilityLabel("Preset group")
-        presetsPopUp.addItem(withTitle: "No group")
-    }
-
     // MARK: Actions
 
     @objc private func masterChanged(_ sender: NSSlider) {
@@ -102,12 +73,6 @@ public final class ToolbarController: NSObject, NSToolbarDelegate {
         }
     }
 
-    @objc private func presetChanged(_ sender: NSPopUpButton) {
-        let index = sender.indexOfSelectedItem
-        guard index >= 0, index < presetGroupIDs.count else { return }
-        delegate?.toolbarController(self, didSelectPresetGroupID: presetGroupIDs[index])
-    }
-
     // MARK: NSToolbarDelegate
 
     public func toolbar(_ toolbar: NSToolbar,
@@ -120,23 +85,17 @@ public final class ToolbarController: NSObject, NSToolbarDelegate {
             item.paletteLabel = "Master Volume"
             item.view = wrapWithSpeakerIcons(masterSlider)
             return item
-        case Self.presetsItemID:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Preset"
-            item.paletteLabel = "Preset"
-            item.view = presetsPopUp
-            return item
         default:
             return nil
         }
     }
 
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.presetsItemID, .flexibleSpace, Self.masterItemID]
+        [.flexibleSpace, Self.masterItemID]
     }
 
     public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.presetsItemID, Self.masterItemID, .flexibleSpace, .space]
+        [Self.masterItemID, .flexibleSpace, .space]
     }
 
     /// Master slider flanked by low/high speaker SF Symbols (HIG: icons at slider
@@ -160,31 +119,11 @@ public final class ToolbarController: NSObject, NSToolbarDelegate {
 
     // MARK: Test-support hooks
 
-    /// The presets popup's item titles, in order (item 0 is "No group").
-    public var test_presetTitles: [String] {
-        presetsPopUp.itemArray.map(\.title)
-    }
-
-    /// The group id currently selected in the presets popup (nil = "No group").
-    public var test_selectedPresetGroupID: String? {
-        let index = presetsPopUp.indexOfSelectedItem
-        guard index >= 0, index < presetGroupIDs.count else { return nil }
-        return presetGroupIDs[index]
-    }
-
     /// Simulate a full master-slider drag (begin → set → end).
     public func test_dragMaster(to value: Int) {
         delegate?.toolbarDidBeginMasterDrag(self)
         delegate?.toolbarController(self, didSetMaster: value)
         delegate?.toolbarDidEndMasterDrag(self)
-    }
-
-    /// Simulate picking a preset by group id (or nil for "No group").
-    public func test_selectPreset(groupID: String?) {
-        if let index = presetGroupIDs.firstIndex(of: groupID) {
-            presetsPopUp.selectItem(at: index)
-        }
-        delegate?.toolbarController(self, didSelectPresetGroupID: groupID)
     }
 
     /// The master slider's current value (for readout assertions).

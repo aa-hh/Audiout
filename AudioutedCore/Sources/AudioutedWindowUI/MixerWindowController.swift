@@ -3,25 +3,36 @@
 import AppKit
 import AudioutedCore
 
-/// The full mixer window (SPEC §9 "Full window"). Owns:
-/// - an `NSWindow` with `toolbarStyle = .unified` and a `styleMask` including
-///   `.fullSizeContentView`;
-/// - an `NSToolbar` (via `ToolbarController`) hosting a master-volume
-///   `NSSlider` + a presets `NSPopUpButton` (`pullsDown = false`);
+/// The "Groups" window (design revamp): a CONFIGURATION-ONLY host for viewing
+/// and editing saved groups. Viewing or editing a group here NEVER activates it
+/// or moves audio — activation lives in the app's popover, not this window.
+/// Owns:
+/// - an `NSWindow` (titled "Groups") with `toolbarStyle = .unified` and a
+///   `styleMask` including `.fullSizeContentView`;
+/// - an `NSToolbar` (via `ToolbarController`) hosting ONLY a master-volume
+///   `NSSlider` (the group-switcher presets popup was removed with the revamp —
+///   nothing here switches the active group);
 /// - an `NSSplitViewController` whose sidebar item is a source-list
 ///   `NSOutlineView` (`SidebarViewController`) and whose content item is the
 ///   detail pane (`MixerViewController` for a mixer, or the group editor when a
 ///   group is selected).
 ///
+/// Group creation is a standard macOS sheet (`GroupCreationSheetController`)
+/// presented over the window, replacing the old in-pane unsaved-draft flow;
+/// creating a group never activates it either — the caller only selects the
+/// resolved group in the sidebar and opens its editor.
+///
 /// Everything group/master/mute goes through the injected
 /// `GroupController` (UI-agnostic, unit-tested in core) — the window never does
-/// mixer math itself, exactly like the menu. `@MainActor` because it touches
-/// AppKit and the non-`Sendable` `GroupController` only on the main thread; the
-/// app folds backend events on `MainActor` before calling `update(devices:)`.
+/// mixer math itself, exactly like the menu, and never calls `activateGroup`.
+/// `@MainActor` because it touches AppKit and the non-`Sendable`
+/// `GroupController` only on the main thread; the app folds backend events on
+/// `MainActor` before calling `update(devices:)`.
 ///
 /// The window is `public` so both the app (`AppDelegate.openMixer()`) and the
 /// headless `window-harness` / tests can build it against a MockBackend-backed
-/// `GroupController` and assert its structure.
+/// `GroupController` and assert its structure. The create sheet is
+/// fully constructible and drivable headless (see the `test_*` hooks).
 @MainActor
 public final class MixerWindowController: NSWindowController {
 
@@ -73,7 +84,7 @@ public final class MixerWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Audiouted"
+        window.title = "Groups"
         window.toolbarStyle = .unified
         window.contentViewController = splitViewController
         window.setContentSize(NSSize(width: 720, height: 460))
@@ -83,8 +94,8 @@ public final class MixerWindowController: NSWindowController {
 
         super.init(window: window)
 
-        // Toolbar (master slider + presets popup). The controller is the
-        // toolbar's delegate; assign after the window exists.
+        // Toolbar (master slider only). The controller is the toolbar's
+        // delegate; assign after the window exists.
         toolbarController.delegate = self
         let toolbar = NSToolbar(identifier: "MixerToolbar")
         toolbar.delegate = toolbarController
@@ -96,29 +107,16 @@ public final class MixerWindowController: NSWindowController {
         sidebarViewController.onSelect = { [weak self] selection in
             self?.handleSidebarSelection(selection)
         }
-        // "+" with no selection → new empty draft group (SPEC.md §9 manual
-        // creation, PRIMARY path).
+        // "+" with no selection → new-group creation sheet (revamp: standard
+        // macOS sheet, PRIMARY path).
         sidebarViewController.onAddGroup = { [weak self] in
-            self?.beginNewGroupDraft(preselected: [])
+            self?.presentCreateSheet(preselected: [])
         }
-        // "+" / context menu with devices multi-selected → draft pre-populated
-        // with exactly those speakers (SPEC.md §9 — "click on speakers and
+        // "+" / context menu with devices multi-selected → creation sheet
+        // pre-populated with exactly those speakers ("click on speakers and
         // multiselect to create a group").
         sidebarViewController.onNewGroupFromSelection = { [weak self] deviceIDs in
-            self?.beginNewGroupDraft(preselected: deviceIDs)
-        }
-        // Draft Save → activate + select the resolved group (dedup: an identical
-        // set resolves to the existing group).
-        editorViewController.onDidCreateGroup = { [weak self] group, _ in
-            guard let self else { return }
-            self.groupController.activateGroup(id: group.id)
-            self.refreshAll()
-            self.sidebarViewController.select(.group(id: group.id), notify: false)
-            self.showEditor(for: group.id)
-        }
-        // Draft Cancel → discard, pop back to the mixer.
-        editorViewController.onDidCancelCreate = { [weak self] in
-            self?.showMixer(for: nil)
+            self?.presentCreateSheet(preselected: deviceIDs)
         }
         // The editor's "Delete group…" pops us back to the mixer + a fresh
         // sidebar (the group is gone).
@@ -152,12 +150,12 @@ public final class MixerWindowController: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// Open the window and immediately begin a new-group draft — the public entry
-    /// the popover's Groups "+" uses (task D), reusing the exact same
-    /// manual-creation flow the sidebar "+" runs.
+    /// Open the window and immediately present the new-group creation sheet —
+    /// the public entry the popover's Groups "+" uses, reusing the exact same
+    /// sheet flow the sidebar "+" runs.
     public func beginNewGroup() {
         showWindow()
-        beginNewGroupDraft(preselected: [])
+        presentCreateSheet(preselected: [])
     }
 
     // MARK: Selection → detail pane
@@ -165,9 +163,9 @@ public final class MixerWindowController: NSWindowController {
     private func handleSidebarSelection(_ selection: SidebarSelection?) {
         switch selection {
         case .group(let id):
-            // Selecting a group shows its editor (rename / membership / delete)
-            // AND makes it the active output preset (SPEC §9 — one active group).
-            groupController.activateGroup(id: id)
+            // Selecting a group ONLY shows its editor (rename / membership /
+            // delete). CONFIG-ONLY: selection never activates the group or moves
+            // audio — activation lives in the popover, not this window.
             showEditor(for: id)
             refreshSidebarAndToolbar()
         case .device, .none:
@@ -188,15 +186,40 @@ public final class MixerWindowController: NSWindowController {
         swapContent(to: editorViewController)
     }
 
-    /// Open the editor on a fresh empty draft (SPEC.md §9 manual creation). The
-    /// name is prefilled with the next "Group N"; `preselected` seeds the
-    /// membership checklist (from a device multi-selection, or empty).
-    private func beginNewGroupDraft(preselected: [String]) {
-        let name = "Group \(groupController.groups.count + 1)"
-        editorViewController.showNewDraft(defaultName: name,
-                                          devices: orderedDevices(),
-                                          preselected: preselected)
-        swapContent(to: editorViewController)
+    /// The live group-creation sheet while it's up, so `refreshAll()` can leave
+    /// it undisturbed and tests can drive it. `nil` when no sheet is presenting.
+    private var createSheetController: GroupCreationSheetController?
+
+    /// Present the standard macOS "New Group" sheet over the window (revamp:
+    /// replaces the old in-pane draft). The name is prefilled with the next
+    /// "Group N"; `preselected` seeds the membership checklist (from a device
+    /// multi-selection, or empty). On create: refresh, select the resolved group
+    /// in the sidebar, and open its editor — NO activation, CONFIG-ONLY.
+    ///
+    /// Fully constructible/drivable headless: the controller is built and its
+    /// `onComplete` wired unconditionally, but the actual sheet is only
+    /// presented when the window is on screen. Headless tests reach the live
+    /// controller via `test_createSheet` and drive `test_commit()`/`test_cancel()`
+    /// directly (the controller's `finish` skips `dismiss` when unhosted).
+    private func presentCreateSheet(preselected: [String]) {
+        let sheet = GroupCreationSheetController(groupController: groupController)
+        sheet.configure(defaultName: "Group \(groupController.groups.count + 1)",
+                        devices: orderedDevices(),
+                        preselected: Set(preselected))
+        sheet.onComplete = { [weak self] result in
+            guard let self else { return }
+            self.createSheetController = nil
+            guard let result else { return }   // cancelled
+            self.refreshAll()
+            self.sidebarViewController.select(.group(id: result.group.id), notify: false)
+            self.showEditor(for: result.group.id)
+        }
+        createSheetController = sheet
+        // Present as a sheet only when there's a window on screen to host it;
+        // headless runs keep the reference and drive it via the test hooks.
+        if let contentVC = window?.contentViewController, window?.isVisible == true {
+            contentVC.presentAsSheet(sheet)
+        }
     }
 
     private func swapContent(to controller: NSViewController) {
@@ -222,16 +245,16 @@ public final class MixerWindowController: NSWindowController {
         sidebarViewController.reload(groups: groupController.groups,
                                      activeGroupID: groupController.activeGroupID,
                                      devices: devices)
-        toolbarController.reload(groups: groupController.groups,
-                                 activeGroupID: groupController.activeGroupID,
+        toolbarController.reload(activeGroupID: groupController.activeGroupID,
                                  masterVolume: groupController.masterVolume)
-        // Refresh whichever detail pane is showing. Don't rebuild an in-progress
-        // draft (it has no persisted id yet and the user is mid-edit).
+        // Refresh whichever detail pane is showing. The create sheet is a
+        // separate presentation (not the content pane) — it is never disturbed
+        // here. Group creation now lives in that sheet, so the editor always has
+        // a persisted `editingGroupID` when it's up.
         if currentContentItem.viewController === editorViewController {
             if let id = editorViewController.editingGroupID {
                 editorViewController.show(groupID: id, devices: devices)
             }
-            // else: draft in progress — leave the editor untouched.
         } else {
             mixerViewController.refresh(devices: devices)
         }
@@ -242,8 +265,7 @@ public final class MixerWindowController: NSWindowController {
         sidebarViewController.reload(groups: groupController.groups,
                                      activeGroupID: groupController.activeGroupID,
                                      devices: devices)
-        toolbarController.reload(groups: groupController.groups,
-                                 activeGroupID: groupController.activeGroupID,
+        toolbarController.reload(activeGroupID: groupController.activeGroupID,
                                  masterVolume: groupController.masterVolume)
     }
 
@@ -259,8 +281,8 @@ public final class MixerWindowController: NSWindowController {
     // XCTest can drive the same paths and assert structure + model state.
 
     /// The live toolbar item identifiers, so a test can assert the window
-    /// actually mounts the master-volume + presets items (the `NSToolbar`
-    /// delegate vends them lazily — an empty toolbar is a real bug).
+    /// actually mounts the master-volume item (the `NSToolbar` delegate vends
+    /// it lazily — an empty toolbar is a real bug).
     public var test_toolbarItemIdentifiers: [String] {
         (window?.toolbar?.items ?? []).map(\.itemIdentifier.rawValue)
     }
@@ -290,27 +312,23 @@ public final class MixerWindowController: NSWindowController {
         handleSidebarSelection(selection)
     }
 
-    /// Simulate the presets popup picking a group (activates it — SPEC §9).
-    public func test_selectPreset(groupID: String) {
-        groupController.activateGroup(id: groupID)
-        refreshAll()
+    /// Drive the new-group creation path directly (mirrors the sidebar "+" /
+    /// "New Group from Selection" gestures and the popover's public
+    /// `beginNewGroup()`). Builds and wires the sheet controller; headless it
+    /// stays unpresented but fully drivable via `test_createSheet`.
+    public func test_presentCreateSheet(preselected: [String]) {
+        presentCreateSheet(preselected: preselected)
     }
 
-    /// Simulate clicking the sidebar "+" with no selection → new empty draft.
-    public func test_tapAddGroup() {
-        sidebarViewController.test_tapAdd()
+    /// The live group-creation sheet controller, or nil when none is up — so a
+    /// headless test can drive `test_commit()` / `test_cancel()` on it.
+    public var test_createSheet: GroupCreationSheetController? {
+        createSheetController
     }
 
-    /// Simulate multi-selecting devices then "New Group from Selection" (the
-    /// "+"/context-menu gesture) — opens the draft editor pre-populated.
-    public func test_newGroupFromSelection(_ deviceIDs: [String]) {
-        sidebarViewController.test_selectDevices(deviceIDs)
-        sidebarViewController.test_tapAdd()
-    }
-
-    /// True when the editor is showing an unsaved draft (create mode).
-    public var test_isShowingDraft: Bool {
-        test_isShowingEditor && editorViewController.isCreatingDraft
+    /// True while a group-creation sheet is presenting (or, headless, wired).
+    public var test_isPresentingCreateSheet: Bool {
+        createSheetController != nil
     }
 }
 
@@ -330,14 +348,5 @@ extension MixerWindowController: ToolbarController.Delegate {
 
     public func toolbarDidEndMasterDrag(_ controller: ToolbarController) {
         groupController.endMasterDrag()
-    }
-
-    public func toolbarController(_ controller: ToolbarController, didSelectPresetGroupID groupID: String?) {
-        if let groupID {
-            groupController.activateGroup(id: groupID)
-        } else {
-            groupController.deactivateGroup()
-        }
-        refreshAll()
     }
 }

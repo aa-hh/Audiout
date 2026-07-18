@@ -5,10 +5,15 @@ import AppKit
 @testable import AudioutedCore
 @testable import AudioutedWindowUI
 
-/// Structural + integration coverage for the T-U4 mixer window (SPEC §9). The
-/// window isn't visible to CI, so these assert the *built* window structure and
-/// that interactions call through the model — the same checks the
-/// `window-harness` executable runs, folded into `swift test`.
+/// Structural + integration coverage for the "Groups" window (design revamp,
+/// SPEC §9). The window isn't visible to CI, so these assert the *built*
+/// window structure and that interactions call through the model — the same
+/// checks the `window-harness` executable runs, folded into `swift test`.
+///
+/// The window is CONFIGURATION-ONLY under the revamp: viewing/editing groups
+/// here never activates them or moves audio (activation lives in the app's
+/// popover). Group creation is a standard macOS sheet
+/// (`GroupCreationSheetController`), not an in-pane draft.
 ///
 /// `MixerWindowController` is `@MainActor`; these cases are `@MainActor` so they
 /// touch it (and the non-`Sendable` `GroupController`) on the main thread,
@@ -76,15 +81,22 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertTrue(window.test_hasFullSizeContentView)
         XCTAssertTrue(window.test_toolbarItemIdentifiers.contains("master"),
                       "toolbar mounts the master-volume item")
-        XCTAssertTrue(window.test_toolbarItemIdentifiers.contains("presets"),
-                      "toolbar mounts the presets item")
+        XCTAssertFalse(window.test_toolbarItemIdentifiers.contains("presets"),
+                       "the presets group-switcher popup was removed by the revamp")
     }
 
-    // MARK: Sidebar structure
-
-    func testBaselineSidebarHasOnlyDevicesSection() async throws {
+    func testWindowTitleIsGroups() async throws {
         let (window, _, _) = try await makeWindow()
-        XCTAssertEqual(window.test_sidebar.test_sectionTitles, ["Devices"])
+        XCTAssertEqual(window.window?.title, "Groups")
+    }
+
+    // MARK: Sidebar structure (config-only revamp: always both sections)
+
+    func testSidebarAlwaysShowsGroupsAndDevicesSections() async throws {
+        let (window, _, _) = try await makeWindow()
+        XCTAssertEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"])
+        XCTAssertTrue(window.test_sidebar.test_hasGroupsEmptyStateRow,
+                      "zero saved groups shows the empty-state placeholder row")
         XCTAssertEqual(window.test_sidebar.test_ungroupedDeviceRowCount, 7)
         XCTAssertFalse(window.test_isShowingEditor)
     }
@@ -94,120 +106,203 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertEqual(window.test_mixer.test_rowDeviceIDs.count, 7)
     }
 
-    func testSavingGroupAddsGroupsSectionWithMembers() async throws {
+    func testSavingGroupAddsGroupsSectionWithMembersAndClearsEmptyState() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        XCTAssertTrue(window.test_sidebar.test_sectionTitles.contains("Groups"))
+        XCTAssertEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"])
+        XCTAssertFalse(window.test_sidebar.test_hasGroupsEmptyStateRow)
         XCTAssertEqual(window.test_sidebar.test_groupRowCount, 1)
         XCTAssertEqual(Set(window.test_sidebar.test_memberIDs(underGroup: saved.id)),
                        Set(saved.memberIDs))
     }
-
-    // MARK: New Group — manual creation (SPEC.md §9)
 
     func testSidebarSupportsMultipleSelection() async throws {
         let (window, _, _) = try await makeWindow()
         XCTAssertTrue(window.test_sidebar.test_allowsMultipleSelection)
     }
 
-    func testTapAddOpensEmptyDraftEditor() async throws {
+    // MARK: New Group — sheet (SPEC.md §9, design revamp)
+
+    func testTapAddRoutesToCreationSheet() async throws {
         let (window, controller, _) = try await makeWindow()
-        window.test_tapAddGroup()
+        window.test_sidebar.test_tapAdd()
         await drain()
 
-        XCTAssertTrue(window.test_isShowingDraft, "the '+' opens an unsaved draft")
-        XCTAssertTrue(window.test_editor.test_draftButtonsVisible, "Save/Cancel shown in create mode")
-        XCTAssertFalse(window.test_editor.test_deleteButtonVisible, "no Delete in create mode")
-        XCTAssertNil(window.test_editor.editingGroupID, "a draft has no persisted id yet")
-        // All discovered devices are offered as candidates; none checked by default.
-        XCTAssertEqual(window.test_editor.test_candidateDeviceIDs.count, 7)
-        XCTAssertTrue(window.test_editor.test_checkedDeviceIDs.isEmpty)
-        XCTAssertEqual(controller.groups.count, 0, "opening the draft creates nothing")
+        XCTAssertNotNil(window.test_createSheet, "the '+' with no selection presents the New Group sheet")
+        XCTAssertEqual(controller.groups.count, 0, "presenting the sheet creates nothing")
     }
 
-    func testDraftSaveCreatesGroupFromCheckedMembers() async throws {
-        let (window, controller, _) = try await makeWindow()
-        window.test_tapAddGroup()
+    func testBeginNewGroupPresentsCreationSheet() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.beginNewGroup()
         await drain()
 
-        window.test_editor.test_setDraftName("Downstairs")
-        window.test_editor.test_setMembership(true, for: "office")
-        window.test_editor.test_setMembership(true, for: "homepod-bed")
-        window.test_editor.test_commitDraft()
+        XCTAssertTrue(window.test_isPresentingCreateSheet,
+                      "the popover's beginNewGroup() opens the same creation sheet")
+    }
+
+    func testCreateSheetPrefillsPreselectedMembersChecked() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
+        await drain()
+
+        let sheet = try XCTUnwrap(window.test_createSheet)
+        XCTAssertEqual(Set(sheet.test_checkedDeviceIDs), ["office", "appletv-lr"],
+                       "the sheet is pre-populated with exactly the multi-selected speakers")
+    }
+
+    func testCreateSheetCreateDisabledAtZeroMembersEnabledAtOne() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try XCTUnwrap(window.test_createSheet)
+
+        XCTAssertFalse(sheet.test_isCreateEnabled, "Create is disabled with zero members checked")
+
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+        XCTAssertTrue(sheet.test_isCreateEnabled, "Create enables once >= 1 member is checked")
+
+        sheet.test_setMembership(deviceID: "office", isChecked: false)
+        XCTAssertFalse(sheet.test_isCreateEnabled, "unchecking the only member disables Create again")
+    }
+
+    func testCreateSheetCommitCreatesExactlyCheckedMembers() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try XCTUnwrap(window.test_createSheet)
+
+        sheet.test_setName("Downstairs")
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+        sheet.test_commit()
         await drain()
 
         XCTAssertEqual(controller.groups.count, 1)
         let group = try XCTUnwrap(controller.groups.first)
         XCTAssertEqual(group.name, "Downstairs")
         XCTAssertEqual(Set(group.memberIDs), ["office", "homepod-bed"])
-        XCTAssertEqual(controller.activeGroupID, group.id, "the new group is activated")
+        XCTAssertEqual(Set(group.memberVolumes.keys), Set(group.memberIDs),
+                       "each checked member gets a remembered volume")
     }
 
-    func testDraftCancelCreatesNothing() async throws {
+    func testCreateSheetCommitDoesNotActivate() async throws {
         let (window, controller, _) = try await makeWindow()
-        window.test_tapAddGroup()
+        XCTAssertNil(controller.activeGroupID)
+        window.test_presentCreateSheet(preselected: [])
         await drain()
-        window.test_editor.test_setMembership(true, for: "office")
+        let sheet = try XCTUnwrap(window.test_createSheet)
 
-        window.test_editor.test_cancelDraft()
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+        sheet.test_commit()
         await drain()
 
-        XCTAssertEqual(controller.groups.count, 0, "Cancel discards the draft")
-        XCTAssertFalse(window.test_isShowingDraft)
+        XCTAssertEqual(controller.groups.count, 1)
+        XCTAssertNil(controller.activeGroupID, "creating a group never activates it — CONFIG-ONLY")
     }
 
-    func testNewGroupFromMultiSelectionPrepopulatesMembers() async throws {
+    func testCreateSheetCommitAfterCreateSelectsAndOpensEditorWithoutActivating() async throws {
         let (window, controller, _) = try await makeWindow()
-        // Multi-select two devices then hit "+" → draft seeded with exactly them.
-        window.test_newGroupFromSelection(["office", "appletv-lr"])
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try XCTUnwrap(window.test_createSheet)
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+        sheet.test_commit()
         await drain()
 
-        XCTAssertTrue(window.test_isShowingDraft)
-        XCTAssertEqual(Set(window.test_editor.test_checkedDeviceIDs), ["office", "appletv-lr"],
-                       "the draft is pre-populated with exactly the multi-selected speakers")
+        let group = try XCTUnwrap(controller.groups.first)
+        XCTAssertTrue(window.test_isShowingEditor, "creation opens the new group's editor")
+        XCTAssertEqual(window.test_editor.editingGroupID, group.id)
+        XCTAssertNil(controller.activeGroupID, "still not activated after opening the editor")
+    }
 
-        window.test_editor.test_commitDraft()
+    func testCreateSheetDedupsIdenticalMemberSetToExistingGroup() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
+        await drain()
+        var sheet = try XCTUnwrap(window.test_createSheet)
+        var completedResult: (group: Group, alreadyExisted: Bool)?
+        sheet.onComplete = { completedResult = $0 }
+        sheet.test_commit()
         await drain()
         XCTAssertEqual(controller.groups.count, 1)
-        XCTAssertEqual(Set(controller.groups[0].memberIDs), ["office", "appletv-lr"])
-    }
-
-    func testNewGroupFromSelectionDedupsToExistingGroup() async throws {
-        let (window, controller, _) = try await makeWindow()
-        // First create the group.
-        window.test_newGroupFromSelection(["office", "appletv-lr"])
-        await drain()
-        window.test_editor.test_commitDraft()
-        await drain()
-        XCTAssertEqual(controller.groups.count, 1)
+        XCTAssertEqual(completedResult?.alreadyExisted, false)
         let firstID = controller.groups[0].id
 
         // Same member set again (order swapped) must resolve to the existing group.
-        window.test_newGroupFromSelection(["appletv-lr", "office"])
+        window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
         await drain()
-        window.test_editor.test_commitDraft()
+        sheet = try XCTUnwrap(window.test_createSheet)
+        completedResult = nil
+        sheet.onComplete = { completedResult = $0 }
+        sheet.test_commit()
         await drain()
+
         XCTAssertEqual(controller.groups.count, 1, "no duplicate group for an identical member set")
-        XCTAssertEqual(controller.activeGroupID, firstID, "resolves to and activates the existing group")
+        XCTAssertEqual(completedResult?.group.id, firstID)
+        XCTAssertEqual(completedResult?.alreadyExisted, true)
     }
 
-    // MARK: Selecting a group → editor + activation
+    func testCreateSheetCandidatesExcludeUnavailableDevices() async throws {
+        let (window, _, backend) = try await makeWindow()
+        let unavailableID = "office"
+        let devices = backend.devices.map { device -> Device in
+            var d = device
+            if d.id == unavailableID { d.isAvailable = false }
+            return d
+        }
+        window.update(devices: devices)
 
-    func testSelectingGroupShowsEditorAndActivates() async throws {
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try XCTUnwrap(window.test_createSheet)
+
+        XCTAssertFalse(sheet.test_candidateDeviceIDs.contains(unavailableID),
+                       "a brand-new group never offers joining an unreachable speaker")
+        XCTAssertEqual(sheet.test_candidateDeviceIDs.count, 6)
+    }
+
+    // MARK: Selecting a group → editor only, never activation
+
+    func testSelectingGroupShowsEditorAndDoesNotActivate() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
+        XCTAssertNil(controller.activeGroupID)
 
         window.test_select(.group(id: saved.id))
         await drain()
 
         XCTAssertTrue(window.test_isShowingEditor)
-        XCTAssertEqual(controller.activeGroupID, saved.id)
+        XCTAssertNil(controller.activeGroupID, "selecting a group in the sidebar never activates it")
         XCTAssertEqual(window.test_editor.editingGroupID, saved.id)
         XCTAssertEqual(Set(window.test_editor.test_checkedDeviceIDs), Set(saved.memberIDs))
         XCTAssertEqual(window.test_editor.test_candidateDeviceIDs.count, 7)
+    }
+
+    // MARK: Editor candidates: unavailable devices stay only while a member
+
+    func testEditorCandidatesIncludeUnavailableDeviceOnlyIfMember() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        // "office" is a member of Group 1; mark it unavailable, and mark a
+        // non-member ("appletv-lr") unavailable too, in the same push.
+        let devices = backend.devices.map { device -> Device in
+            var d = device
+            if d.id == "office" || d.id == "appletv-lr" { d.isAvailable = false }
+            return d
+        }
+        window.update(devices: devices)
+
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        XCTAssertTrue(window.test_editor.test_candidateDeviceIDs.contains("office"),
+                      "an unavailable device stays offered while it remains a member")
+        XCTAssertFalse(window.test_editor.test_candidateDeviceIDs.contains("appletv-lr"),
+                       "an unavailable non-member is not offered")
     }
 
     // MARK: Editor → GroupController
@@ -255,7 +350,8 @@ final class MixerWindowControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.groups.count, 0)
         XCTAssertFalse(window.test_isShowingEditor)
-        XCTAssertFalse(window.test_sidebar.test_sectionTitles.contains("Groups"))
+        XCTAssertTrue(window.test_sidebar.test_hasGroupsEmptyStateRow,
+                      "the Groups section stays but shows the empty state again")
     }
 
     // MARK: Mixer rows drive the backend
@@ -272,26 +368,15 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertEqual(backend.devices.first { $0.id == target }?.volume, 15)
     }
 
-    // MARK: Toolbar presets + master
-
-    func testToolbarPresetsListGroupsAndActivate() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-
-        XCTAssertTrue(window.test_toolbar.test_presetTitles.contains("No group"))
-        XCTAssertTrue(window.test_toolbar.test_presetTitles.contains("Group 1"))
-
-        window.test_toolbar.test_selectPreset(groupID: saved.id)
-        await drain()
-        XCTAssertEqual(controller.activeGroupID, saved.id)
-    }
+    // MARK: Toolbar master (presets group-switcher removed by the revamp)
 
     func testToolbarMasterDragScalesMembersProportionally() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
+        // Activation is a popover concern under the revamp — drive the model
+        // directly rather than through the window.
+        controller.activateGroup(id: saved.id)
         window.update(devices: backend.devices)
-        window.test_selectPreset(groupID: saved.id)   // activate via preset
         await drain()
 
         let m0 = saved.memberIDs[0], m1 = saved.memberIDs[1]

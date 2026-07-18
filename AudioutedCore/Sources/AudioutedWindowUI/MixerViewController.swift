@@ -54,7 +54,7 @@ public final class MixerViewController: NSViewController {
         stackView.distribution = .fill
         stackView.spacing = 2
 
-        let documentView = NSView()
+        let documentView = FlippedView()
         documentView.translatesAutoresizingMaskIntoConstraints = false
         documentView.addSubview(stackView)
 
@@ -68,7 +68,7 @@ public final class MixerViewController: NSViewController {
         container.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            titleLabel.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 12),
             titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
@@ -162,6 +162,12 @@ public final class MixerViewController: NSViewController {
     /// The `DeviceRowView` for a device, if shown (drives its slider/mute
     /// through the same delegate path as a real click).
     public func test_row(for id: String) -> DeviceRowView? { rowsByID[id] }
+}
+
+/// A flipped document view so scroll-view content flows from the top rather
+/// than bottom-gravitating with dead space above the rows.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 // MARK: - DeviceRowView.Delegate

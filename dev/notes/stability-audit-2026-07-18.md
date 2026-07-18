@@ -22,6 +22,23 @@ lands, re-verify against source rather than trusting this line number.
 
 ## Section 1 — Fix when you touch this code
 
+### C6a — per-app play/pause recovery (T2/T3/T4 redesign)
+
+Per-app routed capture previously went silent when a paused app resumed if the rebuild hit a rate mismatch or the app's process object disappeared (the pid was no longer audible). Three coordinated fixes eliminate the failure modes:
+
+**T2 — indefinite capped-exponential backoff:** `NativeBackend.scheduleProcessNotYetAudibleRetry` (line 1363) changed from bounded (5×2s, then permanent silent dead) to capped-exponential `retryDelay × 2^(attempt-1)`, capped at `processNotYetAudibleMaxBackoff` (default 10s, injected at line 471). The retry runs indefinitely while the route is desired, removing the permanent-failure cliff.
+
+**T3 — paused-app process-object recovery:** `PerAppCaptureCoordinator` now registers a system-wide `kAudioHardwarePropertyProcessObjectList` listener (installed lazily in `installProcessListListenerLocked`, line 139) — when a paused app resumes and its process object reappears (line 139: `mSelector: kAudioHardwarePropertyProcessObjectList`), the listener fires `handleProcessListChanged()` (line 514), which re-drives every failed slot through the normal `.capturing` recovery path (lines 515–523). Dead slots that were retrying before the resume self-heal near-instantly.
+
+**T4 — bounded AirPlay rebind recovery:** `NativeBackend.resetAirPlaySessionForRoutedApp` (line 1235) is called after a per-app tap rebuild (line 1192) to recover the AirPlay session if the rebuild changed the audio format. The rebind (removeOutput → addOutput) now has bounded recovery via `enqueueRebindRecovery` (line 1272): 3 attempts (line 1290: `maxRebindRecoveryAttempts`, injected), backoff 0.5s→1s (line 1299, `rebindRecoveryRetryDelay`), single-flighted per device via `rebindRecoveryGen` (line 396, bumped on each reset at line 1243), and loud failure logging (line 1291–1294). Succeeds if the device re-locks (removeOutput + addOutput both succeeding), gives up if the device is truly gone (e.g. powered off mid-playback).
+
+Together, T2/T3/T4 form the "lost tap" recovery loop for per-app capture:
+- **T2** retries the tap creation indefinitely while waiting for the process to become audible.
+- **T3** detects when the paused process wakes and re-drives creation attempts.
+- **T4** ensures the AirPlay session is rebinced cleanly after each tap rebuild, with bounded recovery if the device briefly rejects the rebind.
+
+This is the production per-app routing safety net; the system-wide tap has only the device-change coalescing from C6 (see Section 3 — resolved).
+
 ### C7 — discovery re-resolve clears the failure gate with no backoff
 
 **Site:** `AudioutedCore/Sources/AudioutedCore/NativeBackend.swift`, the

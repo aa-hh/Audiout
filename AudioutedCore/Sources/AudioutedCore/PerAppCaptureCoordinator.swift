@@ -110,10 +110,36 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private final class Slot {
         var state: State = .idle
         var tap: ProcessAudioTap?
+        /// STABILITY(C6) (per-app port): set when a device-change notification
+        /// arrives while this slot is mid-rebuild (`.creatingTap`), so it isn't
+        /// silently dropped — see `handleDeviceChange(bundleID:)` and
+        /// dev/notes/stability-audit-2026-07-18.md §C6.
+        var pendingDeviceChange = false
     }
 
     private let queue = DispatchQueue(label: "PerAppCaptureCoordinator.state")
     private var slots: [String: Slot] = [:]
+
+    #if canImport(AudioToolbox)
+    /// System-wide "a process's audio object appeared/disappeared" listener (T3
+    /// self-heal). Registered ONCE, lazily, on the first `start(bundleID:)` and
+    /// removed in `deinit` — paired add/remove, no leak. See
+    /// ``installProcessListListenerLocked()`` for why this is the resume signal
+    /// and how it re-drives dead slots through the ordinary `start` path.
+    ///
+    /// Stored (rather than recomputed at removal time) so the exact block handed
+    /// to `AudioObjectAddPropertyListenerBlock` is the exact block removed —
+    /// structural add/remove symmetry, the same discipline ``SystemOutputVolume``
+    /// keeps. Touched only on ``queue``.
+    private var processListBlock: AudioObjectPropertyListenerBlock?
+
+    /// The one address we register the above block on. A `let` so add and remove
+    /// can never drift apart.
+    private static let processObjectListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    #endif
 
     /// Fired on every per-bundle-ID state transition. Called on the
     /// coordinator's internal queue.
@@ -189,6 +215,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// bundle ID having been explicitly `stop(bundleID:)`-ed (each concrete
     /// tap also has its own `deinit`-based backstop).
     deinit {
+        #if canImport(AudioToolbox)
+        // Symmetric removal of the resume listener installed by the first
+        // `start(bundleID:)`. Safe to touch the field directly: the block
+        // captures `self` weakly, so a block mid-flight holds a strong reference
+        // and `deinit` cannot run concurrently with one (same argument
+        // ``SystemOutputVolume.deinit`` makes).
+        removeProcessListListenerLocked()
+        #endif
         let leftover = queue.sync { slots.values.compactMap { $0.tap } }
         leftover.forEach { $0.teardown() }
     }
@@ -215,6 +249,12 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// `queue`, never the blocking Core Audio calls themselves.
     public func start(bundleID: String) {
         let claimed: Bool = queue.sync {
+            #if canImport(AudioToolbox)
+            // First tap of this coordinator's life arms the system-wide resume
+            // listener (idempotent). Doing it here, rather than in `init`, keeps a
+            // coordinator that never starts a tap from touching the HAL at all.
+            installProcessListListenerLocked()
+            #endif
             let slot = slotFor(bundleID)
             switch slot.state {
             case .idle, .failed:
@@ -318,15 +358,28 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// recreate the tap + aggregate against the new device.
     private func handleDeviceChange(bundleID: String) {
         AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FIRED (default output device changed)")
+        // STABILITY(C6) (per-app port of NativeCaptureCoordinator's fix sketch,
+        // dev/notes/stability-audit-2026-07-18.md §C6): if this notification
+        // arrives while the slot is already mid-rebuild (`.creatingTap`), don't
+        // drop it — mark it pending so the in-flight rebuild replays a fresh
+        // handleDeviceChange once it lands in `.capturing`. Rapid sample-rate
+        // bounces (44.1 -> 48 -> 44.1) mean the LAST notification can be the one
+        // that would otherwise be dropped, rebuilding against a stale rate.
         let claim: (proceed: Bool, old: ProcessAudioTap?) = queue.sync {
-            guard let slot = slots[bundleID], case .capturing = slot.state else { return (false, nil) }
+            guard let slot = slots[bundleID] else { return (false, nil) }
+            guard case .capturing = slot.state else {
+                if case .creatingTap = slot.state {
+                    slot.pendingDeviceChange = true
+                }
+                return (false, nil)
+            }
             let old = slot.tap
             slot.tap = nil
             transition(slot, bundleID: bundleID, to: .creatingTap)
             return (true, old)
         }
         guard claim.proceed else {
-            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) SKIPPED (not capturing)")
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) SKIPPED (not capturing) — coalesced=\(queue.sync { slots[bundleID]?.pendingDeviceChange ?? false })")
             return
         }
         claim.old?.teardown()
@@ -347,13 +400,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         do {
             let format = try newTap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
             AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATED ok, new format \(format.sampleRate)/\(format.channels)ch")
-            queue.sync {
+            let replay: Bool = queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     newTap.teardown()
-                    return
+                    return false
                 }
                 slot.tap = newTap
                 transition(slot, bundleID: bundleID, to: .capturing(format))
+                // STABILITY(C6): a device-change notification landed while we were
+                // rebuilding — replay it once now that we're capturing again,
+                // coalescing however many were dropped into a single retry.
+                guard slot.pendingDeviceChange else { return false }
+                slot.pendingDeviceChange = false
+                return true
+            }
+            if replay {
+                AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) replaying coalesced pending device change")
+                handleDeviceChange(bundleID: bundleID)
             }
         } catch {
             newTap.teardown()
@@ -367,6 +430,103 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             }
         }
     }
+
+    // MARK: System-wide resume self-heal (T3)
+    //
+    // A routed app that was paused (or hadn't yet played audio) fails to tap
+    // with `.processNotYetAudible`: the pid exists but has no Core Audio process
+    // object yet, so `translateProcessObject` returns `kAudioObjectUnknown`.
+    // T2's capped-exponential backoff already re-probes such a slot forever, so
+    // correctness is covered — but the backoff can idle up to its 10 s cap
+    // between probes, which is a visible lag between "app resumes audio" and
+    // "its audio starts flowing to the speaker".
+    //
+    // The moment a paused app resumes, it (re)connects to the audio system and a
+    // process object appears in `kAudioHardwarePropertyProcessObjectList` — a
+    // listenable property on the system object (AudioHardware.h: "an array of
+    // AudioObjectIDs ... for all client processes currently connected to the
+    // system"). Listening for that list changing lets a dead slot self-heal
+    // essentially instantly instead of waiting out the backoff.
+    //
+    // This is a latency optimization layered ON TOP of the backoff, not a
+    // replacement: the recovery itself flows through the ordinary `start`
+    // path, so it reuses every existing invariant.
+
+    #if canImport(AudioToolbox)
+    /// Arm the system-wide process-object-list listener. Idempotent — a no-op
+    /// once installed, so calling it from every `start(bundleID:)` costs nothing
+    /// after the first. MUST hold ``queue`` (installs the registration state).
+    ///
+    /// The block is dispatched by the HAL on an **internal** thread (`nil`
+    /// dispatch queue), NOT on ``queue`` — deliberately: the handler calls back
+    /// into `start(bundleID:)`, which itself does `queue.sync`, so running the
+    /// block on `queue` would deadlock. `nil` matches the idiom the per-app
+    /// tap's own default-device / sample-rate listeners already use in this
+    /// file. Process-list changes are never delivered from the IO context, so
+    /// the async-dispatch caveat in AudioHardware.h does not bite.
+    private func installProcessListListenerLocked() {
+        guard processListBlock == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleProcessListChanged()
+        }
+        var address = Self.processObjectListAddress
+        let err = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        guard err == noErr else {
+            AudioDiag.log("PAC resume-listener install FAILED (\(err)) — relying on T2 backoff only")
+            return
+        }
+        processListBlock = block
+        AudioDiag.log("PAC resume-listener armed (process-object-list)")
+    }
+
+    /// Symmetric removal. MUST hold ``queue`` (or run in `deinit`, where no
+    /// block can be concurrently live — see the `deinit` note).
+    private func removeProcessListListenerLocked() {
+        guard let block = processListBlock else { return }
+        var address = Self.processObjectListAddress
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        processListBlock = nil
+    }
+
+    /// A process connected to / disconnected from the audio system. Re-drive
+    /// every one of OUR dead-but-retryable slots through the ordinary
+    /// `start(bundleID:)` path: if the app has now resumed, its pid finally
+    /// translates to a live process object and the tap builds, landing the slot
+    /// in `.capturing` — which fires `onStateChange`, exactly as a successful
+    /// backoff retry would, so `NativeBackend` clears `deadBundleIDs` and
+    /// republishes the mixer topology through its existing `.capturing` handler.
+    /// No parallel recovery path.
+    ///
+    /// Filtered to our own slots (the wider system-wide churn of unrelated apps
+    /// is ignored for free — we only ever look at bundle IDs we route). A slot
+    /// still not audible just fails fast back to `.failed`, cheaply.
+    ///
+    /// ## Single-flighting against T2's backoff
+    /// `start(bundleID:)` only claims a slot out of `.idle`/`.failed`; a slot the
+    /// backoff already has in flight (`.resolvingProcess`/`.creatingTap`) makes
+    /// `start` a no-op, so the listener and the backoff timer can never
+    /// double-start or thrash a slot. And when a re-drive succeeds, the eventual
+    /// `.capturing` transition is what cancels the pending backoff retry (in
+    /// `NativeBackend.handlePerAppCaptureHealthChange`), so the two mechanisms
+    /// converge instead of racing.
+    /// Internal (not `private`) purely so tests can invoke the resume-listener
+    /// dispatch hermetically — firing a real `kAudioHardwarePropertyProcessObjectList`
+    /// notification in CI isn't possible without live Core Audio churn. Behavior
+    /// is unchanged; this is only an access-level seam.
+    func handleProcessListChanged() {
+        let toRetry: [String] = queue.sync {
+            slots.compactMap { key, slot -> String? in
+                guard case .failed(let error) = slot.state, error.isRetryable else { return nil }
+                return key
+            }
+        }
+        guard !toRetry.isEmpty else { return }
+        AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
+        for bundleID in toRetry { start(bundleID: bundleID) }
+    }
+    #endif
 
     // MARK: Slot + transition helpers (must hold `queue`)
 

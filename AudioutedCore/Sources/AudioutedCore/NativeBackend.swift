@@ -371,8 +371,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the bundle stops being routed or its capture stops.
     private var everCapturedBundleIDs: Set<String> = []
 
-    /// bundleID → how many bounded `.processNotYetAudible` retries have already
-    /// fired (edge case 3). Reset on recovery (`.capturing`) or on losing the
+    /// bundleID → how many `.processNotYetAudible` retries have already fired
+    /// (edge case 3). Kept ONLY to grow the capped-exponential backoff delay, not
+    /// as a give-up ceiling. Reset on recovery (`.capturing`) or on losing the
     /// route entirely.
     private var retryCounts: [String: Int] = [:]
 
@@ -383,17 +384,44 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// else in this file).
     private var pendingRetries: [String: DispatchWorkItem] = [:]
 
-    /// How long to wait before retrying a `.processNotYetAudible` failure.
-    /// `var`-free `let`, injectable only through the designated initializer so
-    /// tests can shrink it — production never needs to.
+    /// Base delay before the FIRST `.processNotYetAudible` retry, and the seed of
+    /// the capped-exponential backoff (doubled per attempt, capped at
+    /// `processNotYetAudibleMaxBackoff`). `var`-free `let`, injectable only through
+    /// the designated initializer so tests can shrink it — production never needs to.
     private let processNotYetAudibleRetryDelay: TimeInterval
 
-    /// How many bounded `.processNotYetAudible` retries to attempt before giving
-    /// up and leaving the bundle ID `.failed` (still excluded from the mixer via
-    /// `deadBundleIDs`, but no longer automatically retried — the blanket retry
-    /// in `updateAppRoutes` can still recover it later if the route table is
-    /// touched for any other reason).
-    private let processNotYetAudibleMaxRetries: Int
+    /// Ceiling for the `.processNotYetAudible` retry backoff. The delay doubles
+    /// each attempt (`retryDelay`, ×2, ×2, …) but never exceeds this, so a routed
+    /// app that stays paused is re-probed forever on a bounded interval rather than
+    /// being permanently given up on. Retries continue as long as the route is
+    /// still desired (`routedBundleIDs.contains`); there is no attempt ceiling.
+    private let processNotYetAudibleMaxBackoff: TimeInterval
+
+    /// deviceID → a monotonically increasing generation token for its in-flight
+    /// AirPlay-session rebind recovery (T4). Bumped on every fresh
+    /// `resetAirPlaySessionForRoutedApp` for the device, so an older recovery
+    /// chain that completes late can tell it has been superseded (its captured
+    /// `gen` no longer matches) and bow out — this is what single-flights the
+    /// recovery per device. Removed once the recovery succeeds or gives up.
+    private var rebindRecoveryGen: [String: Int] = [:]
+
+    /// deviceID → its scheduled (backing-off) rebind-recovery retry, so a fresh
+    /// reset or a de-route/unbind can cancel a pending attempt rather than let it
+    /// thrash a receiver. Best-effort (a work item already running when cancelled
+    /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
+    private var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
+
+    /// Bounded attempt ceiling for the AirPlay-session rebind recovery (T4).
+    /// UNLIKE the indefinite `.processNotYetAudible` retry: a rebind that keeps
+    /// failing means the receiver is genuinely gone, and infinite
+    /// removeOutput/addOutput would thrash a real device — so recovery gives up
+    /// loudly after this many attempts and leaves the device in a defined state.
+    private let maxRebindRecoveryAttempts: Int
+
+    /// Base (and backoff seed) delay before the next rebind-recovery attempt (T4).
+    /// Doubled per attempt (`delay × 2^(attempt-1)`). Injectable so tests don't
+    /// pay real wall-clock seconds; production never needs to tune it.
+    private let rebindRecoveryRetryDelay: TimeInterval
 
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
@@ -483,9 +511,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``PerAppCaptureCoordinator`` over a fake ``ProcessAudioTap`` themselves and
     /// pass it in here, bypassing the real Core Audio path entirely — mirrors how
     /// `engineControl`/`discoverySource` are always doubles in this init.
-    /// `processNotYetAudibleRetryDelay`/`processNotYetAudibleMaxRetries` (T8) tune
-    /// the bounded retry for a `.processNotYetAudible` capture failure; tests shrink
-    /// the delay so the retry doesn't cost real wall-clock seconds.
+    /// `processNotYetAudibleRetryDelay`/`processNotYetAudibleMaxBackoff` (T8) tune
+    /// the capped-exponential retry for a `.processNotYetAudible` capture failure;
+    /// tests shrink the delay so the retry doesn't cost real wall-clock seconds.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
@@ -494,7 +522,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
-        processNotYetAudibleMaxRetries: Int = 5
+        processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
+        maxRebindRecoveryAttempts: Int = 3,
+        rebindRecoveryRetryDelay: TimeInterval = 0.5
     ) {
         self.engine = engineControl
         self.discovery = discoverySource
@@ -508,7 +538,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudioutedMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
-        self.processNotYetAudibleMaxRetries = processNotYetAudibleMaxRetries
+        self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
+        self.maxRebindRecoveryAttempts = maxRebindRecoveryAttempts
+        self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
         // here, never mutated after, so no `stateQueue` synchronization is needed
@@ -854,6 +886,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
+            // T4: drop any in-flight AirPlay-session rebind recovery — the engine
+            // sessions are torn down by `engine.stop()` above and `bindTail` is
+            // cancelled, so a fresh start() re-binds from scratch.
+            self.rebindRecoveryGen.removeAll()
+            for work in self.pendingRebindRecoveries.values { work.cancel() }
+            self.pendingRebindRecoveries.removeAll()
             self.bufferReAdding.removeAll()
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
@@ -1248,7 +1286,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// bundle ID and, if it had been dead, re-includes it in the mixer topology.
     /// `.failed` marks it dead (excluding it from `.routedApps` / the engine stream
     /// binding so a silent app is never claimed as streaming) and, ONLY for
-    /// `.processNotYetAudible`, schedules a bounded retry — every other failure
+    /// `.processNotYetAudible`, schedules an INDEFINITE capped-exponential-backoff
+    /// retry that continues as long as the route is still desired — a paused app is
+    /// re-probed forever and its `deadBundleIDs` exclusion is temporary (cleared on
+    /// the eventual `.capturing`), never a permanent give-up. Every other failure
     /// needs the user to act (grant permission, update macOS), so nothing else is
     /// retried blindly.
     private func handlePerAppCaptureHealthChange(
@@ -1284,9 +1325,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 else {
                     return (justDied, false, 0)
                 }
+                // Indefinite retry: as long as the route is still desired (guard
+                // above), a paused app is re-probed forever. `retryCounts` is kept
+                // ONLY to grow the backoff delay, never as a give-up ceiling — so a
+                // routed app is never permanently marked dead for `.processNotYetAudible`.
                 let attempt = (self.retryCounts[bundleID] ?? 0) + 1
                 self.retryCounts[bundleID] = attempt
-                return (justDied, attempt <= self.processNotYetAudibleMaxRetries, attempt)
+                return (justDied, true, attempt)
             }
             if justDied { republishMixerTopology() }
             if shouldRetry {
@@ -1316,14 +1361,105 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard let stream = routeMixer.streamID(for: bundleID) else { return }
         let streamU = UInt32(stream)
         stateQueue.sync {
-            var ops: [StreamBindOp] = []
             for (deviceID, bound) in self.streamBindings where bound == streamU {
                 if let outputID = self.outputIDs[deviceID] {
+                    // Fresh reset → bump the generation (supersedes + cancels any
+                    // in-flight recovery for this device) and start attempt 1.
+                    let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
+                    self.rebindRecoveryGen[deviceID] = gen
+                    self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
-                    ops.append(.rebind(outputID, streamU))
+                    self.enqueueRebindRecovery(
+                        deviceID: deviceID, outputID: outputID, stream: streamU,
+                        gen: gen, attempt: 1)
                 }
             }
-            self.enqueueBindOps(ops)
+        }
+    }
+
+    /// Perform ONE rebind (removeOutput → addOutput) for a routed device's AirPlay
+    /// session and — UNLIKE the fire-and-forget `enqueueBindOps` — OBSERVE whether
+    /// the engine's `addOutput` threw (T4). Chains onto `bindTail` so it stays
+    /// serialized against every other per-device engine op (a topology change's
+    /// bind/rebind/unbind for the same device never overlaps this). On failure it
+    /// reschedules with a small capped-doubling backoff up to
+    /// `maxRebindRecoveryAttempts`, then gives up LOUDLY (`AudioDiag.log`) and
+    /// leaves the device unbound-in-engine — a receiver that keeps refusing the
+    /// rebind is genuinely gone, and infinite removeOutput/addOutput would thrash a
+    /// real device; the next topology change re-binds it idempotently anyway.
+    ///
+    /// Single-flighted per device via `rebindRecoveryGen`: a newer reset bumps the
+    /// gen, so this chain — checking its captured `gen` still matches on completion
+    /// — bows out the moment it is superseded, de-routed, or the device leaves
+    /// per-app routing (`streamBindings[deviceID] != stream`). Called on
+    /// `stateQueue` (the async body hops back onto `stateQueue` only for the
+    /// bookkeeping mutation, never holding it across the engine op).
+    private func enqueueRebindRecovery(
+        deviceID: String, outputID: OutputID, stream: UInt32, gen: Int, attempt: Int
+    ) {   // on stateQueue
+        let prev = self.bindTail
+        self.bindTail = Task { [weak self] in
+            await prev.value
+            guard let self else { return }
+            let ok = await self.performRebindRecovery(outputID: outputID, stream: stream)
+            self.stateQueue.sync {
+                // Superseded by a newer reset, or the device left per-app routing
+                // (unbind / teardown cleared the binding): we no longer own it.
+                guard self.rebindRecoveryGen[deviceID] == gen,
+                      self.streamBindings[deviceID] == stream else { return }
+                if ok {
+                    self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                    self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                    return
+                }
+                guard attempt < self.maxRebindRecoveryAttempts else {
+                    AudioDiag.log(
+                        "RESET AirPlay session GAVE UP after \(attempt) attempts: "
+                        + "device=\(deviceID) stream=\(stream) — receiver likely gone; "
+                        + "left unbound-in-engine (re-binds on next topology change)")
+                    self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                    self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                    return
+                }
+                let delay = self.rebindRecoveryRetryDelay * pow(2.0, Double(attempt - 1))
+                AudioDiag.log(
+                    "RESET AirPlay session retry \(attempt + 1)/\(self.maxRebindRecoveryAttempts) "
+                    + "in \(delay)s: device=\(deviceID) stream=\(stream)")
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.stateQueue.sync {
+                        // Re-check under the lock: still the same generation, still
+                        // bound to this stream, device still discovered.
+                        guard self.rebindRecoveryGen[deviceID] == gen,
+                              self.streamBindings[deviceID] == stream,
+                              let out = self.outputIDs[deviceID] else { return }
+                        self.enqueueRebindRecovery(
+                            deviceID: deviceID, outputID: out, stream: stream,
+                            gen: gen, attempt: attempt + 1)
+                    }
+                }
+                self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                self.pendingRebindRecoveries[deviceID] = work
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+            }
+        }
+    }
+
+    /// The observable rebind: stop the device's session then re-add it on `stream`,
+    /// returning whether the re-add SUCCEEDED (T4). The `removeOutput` throw is
+    /// tolerated (the device may not currently be added — a no-op teardown is fine);
+    /// only the `addOutput` result determines success, since that is what actually
+    /// re-establishes the RTP session with a clean timeline anchor.
+    private func performRebindRecovery(outputID: OutputID, stream: UInt32) async -> Bool {
+        AudioDiag.log("engine REBIND(recover) output=\(outputID) stream=\(stream)")
+        try? await engine.removeOutput(outputID)
+        do {
+            try await engine.addOutput(outputID, streamId: stream)
+            return true
+        } catch {
+            AudioDiag.log(
+                "engine REBIND(recover) FAILED output=\(outputID) stream=\(stream): \(error)")
+            return false
         }
     }
 
@@ -1338,14 +1474,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// Schedule one bounded retry of a `.processNotYetAudible` capture failure
-    /// (T8, edge case 3) — self-heals a route made just before the app started
-    /// playing audio, without the user touching the UI again. Replaces any retry
-    /// already pending for this bundle ID. Best-effort (D4): if the route is gone
-    /// by the time the timer fires, `perAppCapture.start` fails fast
-    /// (`.appNotRunning` or similar) and the failure handler above simply declines
-    /// to reschedule (the route no longer being in `routedBundleIDs`).
+    /// Schedule the next `.processNotYetAudible` retry with capped-exponential
+    /// backoff (T8, edge case 3) — self-heals a route made just before the app
+    /// started playing audio, and keeps re-probing an app that stays paused,
+    /// without the user touching the UI again. The delay is
+    /// `retryDelay × 2^(attempt-1)`, capped at `processNotYetAudibleMaxBackoff`
+    /// (e.g. 2 → 4 → 8 → 10 → 10 … forever). Single-flighted: replaces any retry
+    /// already pending for this bundle ID (so N `.failed` events never stack N
+    /// timers). Best-effort (D4): if the route is gone by the time the timer fires,
+    /// `perAppCapture.start` fails fast (`.appNotRunning` or similar) and the
+    /// failure handler above declines to reschedule (route no longer in
+    /// `routedBundleIDs`).
     private func scheduleProcessNotYetAudibleRetry(bundleID: String, attempt: Int) {
+        let delay = min(
+            processNotYetAudibleRetryDelay * pow(2.0, Double(attempt - 1)),
+            processNotYetAudibleMaxBackoff)
         let work = DispatchWorkItem { [weak self] in
             self?.perAppCapture.start(bundleID: bundleID)
         }
@@ -1354,7 +1497,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.pendingRetries[bundleID] = work
         }
         DispatchQueue.global().asyncAfter(
-            deadline: .now() + processNotYetAudibleRetryDelay, execute: work)
+            deadline: .now() + delay, execute: work)
     }
 
     /// Forward an app-quit notification from the AppKit boundary (T8, edge case 1:
@@ -1500,6 +1643,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (deviceID, _) in self.streamBindings where newBindings[deviceID] == nil {
                 if let outputID = self.outputIDs[deviceID] { ops.append(.unbind(outputID)) }
                 unboundDevices.append(deviceID)
+                // T4: the device is leaving per-app routing — abandon any pending
+                // rebind recovery for it. Bumping the gen also makes any in-flight
+                // recovery chain bow out on completion (its captured gen no longer
+                // matches), and the unbind op below tears the session down anyway.
+                self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
             }
             self.streamBindings = newBindings
             self.enqueueBindOps(ops)

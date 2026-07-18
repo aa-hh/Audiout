@@ -3133,7 +3133,7 @@ final class NativeBackendTests: XCTestCase {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxRetries: 5)
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -3153,6 +3153,185 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil(timeout: 5) { engine.streamAddCalls.contains { $0.0 == device.outputID } }
         XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == device.outputID },
                       "after the bounded retry recovers the capture, the device must be bound to the app's stream")
+    }
+
+    /// T2 fix: `.processNotYetAudible` retries INDEFINITELY (capped-exponential
+    /// backoff), no longer giving up after the old hardcoded cap of 5 attempts
+    /// (`processNotYetAudibleMaxRetries` was removed). Scripts 7 scripted
+    /// failures (past the old cap) then a success on the 8th, proving the
+    /// backend's own retry loop chases it down with no user action.
+    func testProcessNotYetAudibleRetriesPastOldCapOfFiveAttempts() async {
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 7)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // 7 scripted failures + 1 success = at least 8 attempts — strictly past
+        // the OLD hardcoded cap of 5, proving the retry is no longer bounded.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 8 }
+        XCTAssertGreaterThanOrEqual(tap.attemptsMade, 8,
+                                    "retries must continue past the old cap of 5 attempts")
+
+        await pollUntil(timeout: 5) { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                      "the eventual success must still rejoin the live mixer topology")
+    }
+
+    /// T2 fix: retries must STOP once the route is dropped (bundle ID removed
+    /// from `routedBundleIDs`) — a de-routed app must not be probed forever.
+    /// Any retry already IN FLIGHT when the route is dropped is tolerated (it
+    /// was scheduled before the drop), but no FURTHER retry may be scheduled.
+    func testProcessNotYetAudibleRetriesStopOnDeRoute() async {
+        // Never succeeds within the test window — every attempt fails.
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 10_000)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // Let a couple of retries happen first.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+
+        // De-route: drop the route entirely.
+        backend.updateAppRoutes([])
+
+        // Give any already-in-flight retry (scheduled before the drop) time to
+        // land, then snapshot.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let afterDropSnapshot = tap.attemptsMade
+
+        // Wait several more backoff periods — if retries were still scheduling,
+        // this window (well past several 0.02-0.05s backoff cycles) would show
+        // growth. It must NOT.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(tap.attemptsMade, afterDropSnapshot,
+                       "no further retry may be scheduled once the route has been dropped")
+    }
+
+    /// A `ProcessAudioTap` that always succeeds and stores the
+    /// `onDefaultDeviceChanged` closure it was handed, so a test can force a
+    /// tap rebuild (`fireDeviceChange()`) at will — the per-app analogue of
+    /// `PerAppCaptureCoordinatorTests.FakeProcessTap`, needed here to drive
+    /// `NativeBackend`'s T4 rebind-recovery path (a rebuild with no death in
+    /// between is a "recapture", which triggers `resetAirPlaySessionForRoutedApp`).
+    private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        }
+        func teardown() {}
+        func fireDeviceChange() { onDefaultDeviceChanged?() }
+    }
+
+    /// T4 fix: `resetAirPlaySessionForRoutedApp`'s bounded rebind recovery
+    /// (`enqueueRebindRecovery`/`performRebindRecovery`) retries a failing
+    /// `addOutput` with backoff and eventually re-binds once the engine starts
+    /// succeeding again — all within `maxRebindRecoveryAttempts`.
+    func testRebindRecoveryRetriesThenSucceedsWithinBoundedAttempts() async {
+        let tap = RebindTriggerTap()
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        let firstBindCount = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+
+        // Every addOutput for this device fails until we flip it back off —
+        // simulating a receiver that's rejecting the rebind at first.
+        engine.addFailures = [device.outputID.rawValue]
+
+        // A tap rebuild with no death in between is a "recapture" — this drives
+        // resetAirPlaySessionForRoutedApp -> enqueueRebindRecovery(attempt: 1).
+        tap.fireDeviceChange()
+
+        // Attempt 1 is recorded (and fails, since addFailures is still set).
+        await pollUntil(timeout: 5) {
+            engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount
+        }
+
+        // Let it succeed on the next attempt.
+        engine.addFailures = []
+
+        // Attempt 2 (or later, bounded by maxRebindRecoveryAttempts=3) succeeds.
+        await pollUntil(timeout: 5) {
+            engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount + 1
+        }
+        let finalCount = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+        XCTAssertGreaterThan(finalCount, firstBindCount + 1,
+                             "rebind recovery must retry the failing addOutput and eventually re-bind")
+        XCTAssertLessThanOrEqual(finalCount, firstBindCount + 3,
+                                 "recovery must stay within maxRebindRecoveryAttempts, not retry forever")
+    }
+
+    /// T4 fix: rebind recovery gives up LOUDLY (and stops retrying) once
+    /// `maxRebindRecoveryAttempts` is exhausted — it must not thrash the engine
+    /// with unbounded removeOutput/addOutput pairs against a receiver that's
+    /// genuinely gone.
+    func testRebindRecoveryGivesUpAfterMaxAttempts() async {
+        let tap = RebindTriggerTap()
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        let firstBindCount = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+
+        // Every addOutput for this device fails, PERMANENTLY — the receiver is
+        // genuinely gone.
+        engine.addFailures = [device.outputID.rawValue]
+        tap.fireDeviceChange()
+
+        // Both bounded attempts (2) get recorded (and fail).
+        await pollUntil(timeout: 5) {
+            engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= firstBindCount + 2
+        }
+        let countAtCeiling = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+        XCTAssertEqual(countAtCeiling, firstBindCount + 2,
+                       "exactly maxRebindRecoveryAttempts (2) rebind attempts must be made")
+
+        // Wait several more backoff periods — recovery must have given up, so
+        // no further addOutput attempts for this device should appear.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, countAtCeiling,
+                       "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
     }
 
     /// T8 edge case 2 (device disappears while routed), driven through the REAL

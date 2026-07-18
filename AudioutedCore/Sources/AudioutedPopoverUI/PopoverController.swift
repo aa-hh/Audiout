@@ -715,11 +715,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // row (the Mac included). `MainOutRowView` matches options by TARGET, not
         // title, so a changing title is safe; the count feeds both the dropdown
         // item and the popup's collapsed title, staying in sync because
-        // `refreshMainOutRow` re-runs on every selection change.
+        // `refreshMainOutRow` re-runs on every selection change. The open menu
+        // shows the full "Selected Devices (n)"; the collapsed button shows the
+        // shorter "Selected (n)" (via `buttonTitle`) so the count isn't truncated
+        // to "Selected Device…" by the fixed trailing-control width — the "DEVICE"
+        // column header already supplies the "Devices" word.
         let selectedCount = controller.selectedDeviceIDs.count
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices),
+            .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices,
+                  buttonTitle: "Selected (\(selectedCount))"),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))

@@ -1456,6 +1456,10 @@ final class PopoverControllerTests: XCTestCase {
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (2)",
                        "the count rose to 2 on the toggle")
+        // The full count lives in the menu title; the collapsed button shows the
+        // shorter "Selected (n)" so the count survives the fixed trailing width.
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected (2)",
+                       "the collapsed button shows the count in the short form")
 
         // Remove one ⇒ back to 1.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false)

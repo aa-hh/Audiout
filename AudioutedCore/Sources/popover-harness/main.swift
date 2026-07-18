@@ -129,7 +129,8 @@ func run() -> Int32 {
     print("\n[2] Main Out selector sections")
     checks.expect(popover.test_mainOutRow.test_selectableTargets.contains(.selectedDevices),
                   "selector offers Selected Devices")
-    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Selected Devices"),
+    // A2: the entry title now carries a live count, e.g. "Selected Devices (1)".
+    checks.expect(popover.test_mainOutRow.test_optionTitles.contains { $0.hasPrefix("Selected Devices (") },
                   "selector has a Selected Devices entry")
 
     // --- 3. Auto-swap: toggling an AirPlay device ON while local is sole member drops local.
@@ -246,8 +247,9 @@ func run() -> Int32 {
     // --- 13. Main Out named dropdown reflects the current target's title (task B).
     print("\n[13] Main Out named dropdown")
     popover.test_selectMainOut(.selectedDevices); drain()
-    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
-                       "the Main Out dropdown shows the current target's name")
+    // A2: the menu title now carries a live count, e.g. "Selected Devices (2)".
+    checks.expect(popover.test_mainOutRow.test_selectedTitle?.hasPrefix("Selected Devices (") ?? false,
+                  "the Main Out dropdown shows the current target's name")
     popover.test_selectMainOut(.group(id: group.id)); drain()
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown to the group name")

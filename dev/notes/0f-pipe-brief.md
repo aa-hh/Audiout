@@ -151,7 +151,7 @@ curl -X PUT 'http://localhost:3689/api/outputs/117846700406551' \
    a zombie RAOP session + silent auto-deselect while the player still says `play`.
 4. `PUT /api/update` = 204 and instant; pipe indexing is trivial.
 5. macOS AirPlay Receiver was ON at task start (ControlCenter held :5000/:7000;
-   `748F3CBFFECB@Alec's MacBook Pro` in `dns-sd -B _raop._tcp`). Alec toggled it
+   `748F3CBFFECB@ahh's MacBook Pro` in `dns-sd -B _raop._tcp`). ahh toggled it
    off mid-session (System Settings → General → AirDrop & Handoff), after which
    shairport bound :5000 fine. It must stay off for all fake-receiver work.
 6. shairport-sync Homebrew build ignores its configured RTSP port (asked for

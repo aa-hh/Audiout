@@ -33,13 +33,13 @@ not a thin bar with a protruding knob.
 
 ## What I adopted vs the image spec
 
-The Big-Sur-Sliders construction and Alec's image-analysis spec agree on every
+The Big-Sur-Sliders construction and ahh's image-analysis spec agree on every
 structural point (full-height capsule, white fill, flush white knob == height,
-in-track leading glyph, faint outline). Where they differ I took Alec's
+in-track leading glyph, faint outline). Where they differ I took ahh's
 screenshot spec as ground truth because it is macOS 14 Sonoma (the repo targets
 Big Sur) and it carries the recessed-3D cue the repo omits:
 
-| Property        | Repo (Big Sur)     | Alec's spec (Sonoma)      | Adopted                          |
+| Property        | Repo (Big Sur)     | ahh's spec (Sonoma)      | Adopted                          |
 |-----------------|--------------------|---------------------------|----------------------------------|
 | Track height    | "slider height"    | ~24pt                     | **24pt** (intrinsic 22 → 24)     |
 | Radius          | 20 (≈capsule)      | height/2                  | **height/2** (true capsule)      |

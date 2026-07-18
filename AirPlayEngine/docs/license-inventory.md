@@ -123,7 +123,7 @@ When the AirPlayEngine (and the full Audiouted app) is distributed under GPL-2.0
 ### 3. NOTICE / THIRD-PARTY File
 A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
 - **GPL-2.0-or-later** — AirPlayEngine + Audiouted Core
-  - Copyright: Alec Henderson (or the named project holder)
+  - Copyright: The Audiouted authors (or the named project holder)
   - Source: Audiouted repository
   - Includes OwnTone-derived code (airplay.c, rtp_common.c) — see individual files for original copyright.
 - **OwnTone GPL-2.0-or-later Components** (for historical record)

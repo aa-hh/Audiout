@@ -1,13 +1,13 @@
 # AirPlay 2 receiver harness — setup guide (T-HARNESS-RESEARCH-1)
 
-Goal: turn Alec's second machine into a real AirPlay 2 receiver (`shairport-sync`
+Goal: turn ahh's second machine into a real AirPlay 2 receiver (`shairport-sync`
 built `--with-airplay-2` + `nqptp`) that our extracted engine can be verified
 against, with receiver-side PCM captured to a file for a silent PASS/FAIL verdict
 (the Phase-0 `dev/verify-0f2-e2e.sh` idiom).
 
 This doc is research + a setup guide only. It does not touch the second machine —
 that machine is unidentified as of this writing (OS unknown). All sections below
-are written to cover the likely cases; skip to the one that matches once Alec
+are written to cover the likely cases; skip to the one that matches once ahh
 confirms the machine.
 
 Sources fetched directly from upstream for this doc (2026-07-13):
@@ -298,7 +298,7 @@ Requirements, in priority order:
   for the receiver is strongly preferred if it's an option — removes Wi-Fi power
   management as a variable entirely (see below).
 - **No VPN in the path on either host.** This is a known, previously-hit failure
-  mode: **flag explicitly** — Alec's Mac previously had a VPN client running that
+  mode: **flag explicitly** — ahh's Mac previously had a VPN client running that
   silently swallowed multicast traffic (mDNS and/or PTP), breaking discovery/sync
   without any obvious error. **Before running any harness session, confirm no VPN
   is active on this Mac** (check the menu bar / `scutil --nc list` / `ifconfig`
@@ -572,7 +572,7 @@ ssh <user>@<receiver-ip> 'sudo systemctl start shairport-sync'
 
 ---
 
-## 7. Information needed from Alec
+## 7. Information needed from ahh
 
 Before this harness can be stood up for real, confirm:
 

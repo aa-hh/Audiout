@@ -381,7 +381,7 @@ Differences that matter:
 
 Until the SMAppService helper exists, run the built `airptpd` (or the engine's own
 in-process `airptp_daemon_bind`) under an **`osascript` admin-privilege prompt** with
-Alec present (RESOLVED DECISIONS / plan T-HELPER-DESIGN-1). For non-privileged local
+ahh present (RESOLVED DECISIONS / plan T-HELPER-DESIGN-1). For non-privileged local
 smoke tests, `airptp_ports_override(30319, 30320)` (as `tests/daemon.c:67` does) lets the
 whole find/start/peer path run on high ports with **no root at all** — use this for CI
 and unit smoke tests of the shim.
@@ -412,7 +412,7 @@ Implications for every daemon combination on one Mac:
 "engine-PTP vs nqptp can't both hold live on one host; live PTP sessions take turns").
 Because the *shared* daemon model exists precisely to avoid multiple binders, the correct
 posture is: **exactly one PTP master on the sender host (our helper), and the receiver's
-nqptp on a *different* host** — which is exactly the RESOLVED two-host harness (Alec's
+nqptp on a *different* host** — which is exactly the RESOLVED two-host harness (ahh's
 second machine runs shairport-sync AP2 + nqptp). On the two-host setup there is **no
 319/320 war at all**: the dev Mac binds them for our sender-side master, the receiver box
 binds its own for nqptp. Single-host testing (if ever) must serialize: only one of

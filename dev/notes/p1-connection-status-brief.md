@@ -11,7 +11,7 @@ the diagnosis panel is purely auto-driven (no manual warning-button toggle). §6
 status-slot/sublabel/spinner details below are superseded by SPEC §9's device-row
 table for the new model.
 
-*2026-07-16. Approved by Alec. This is the single source of truth for the
+*2026-07-16. Approved by ahh. This is the single source of truth for the
 connection-status build. Implementation agents: read this whole file, plus the
 repo AGENTS.md and `AudioutedCore/AGENTS.md`, before touching code.*
 

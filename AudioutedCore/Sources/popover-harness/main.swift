@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 //
 // popover-harness — programmatic verification for the popover (SPEC §9 2026-07-14b
 // — SoundSource-inspired Main Out model).

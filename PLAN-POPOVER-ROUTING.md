@@ -1,6 +1,6 @@
 # PLAN — Popover per-app routing + collapsible sections + exact-fit sizing
 
-*2026-07-16. Decisions confirmed with Alec this date; supersedes the "Future (v2):
+*2026-07-16. Decisions confirmed with ahh this date; supersedes the "Future (v2):
 Applications section" note in SPEC.md §9. Task format follows PLAN-PHASE-1/2.*
 
 ## A. End state (one paragraph)
@@ -18,7 +18,7 @@ redirected — and manual toggles never persist. The `NSScrollView` is removed:
 the popover is exactly its content height, **no scrollbar ever**, and grows/
 shrinks with expansion state.
 
-## B. Resolved decisions (Alec, 2026-07-16) — authoritative
+## B. Resolved decisions (ahh, 2026-07-16) — authoritative
 
 1. **Scope: UI + model + persistence only.** Wired against `MockBackend`; no
    `OutputBackend` changes. Redirects persist and render but move no audio until
@@ -88,7 +88,7 @@ icon · truncating name · `ControlCenterSlider` (dimmed when local, decision 3)
 didSetVolume / didSelectDestination / didRemove (hover-revealed ✕,
 `HoverActionButton` idiom). Takes plain values — no dependency on Core's
 `AppRoute`. Plus the "+ Add application…" row (decision 6). `test_*` hooks +
-tests. **Truncation check at 623 pt: report, don't widen (Alec).**
+tests. **Truncation check at 623 pt: report, don't widen (ahh).**
 
 **T-7 — Running-app picker** *(sonnet / medium)*
 `PopoverController.swift` + injectable `RunningAppsProvider` (closure over
@@ -143,12 +143,12 @@ Hot file: `PopoverController.swift` (T-3, T-5, T-7, T-8, T-10) — serialize.
    the `preferredContentSize` channel; clip + fade instead of hide; Reduce
    Motion + non-animated fallback path; animator proxies for retargetable rapid
    toggles; end-state size assertions in tests (smoothness verified live by
-   Alec).
+   ahh).
 2. **Hover monitors (T-4/T-6):** replicate `DeviceRowView`'s monitor discipline;
    collapsing must clear/park hover state on hidden rows.
-3. **623 pt width (T-6):** if app names over-truncate, flag to Alec — do not
+3. **623 pt width (T-6):** if app names over-truncate, flag to ahh — do not
    widen the panel.
-4. **Engine-honesty:** out of scope here (handled separately by Alec).
+4. **Engine-honesty:** out of scope here (handled separately by ahh).
 
 ## F. Verification
 

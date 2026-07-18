@@ -251,7 +251,7 @@ live output set. Flag this explicitly as a follow-up once that brief lands
    emits the initial `deviceAdded` dump for all members; assert
    `activateGroup` semantics are applied once discovery settles.
 
-### Open questions for Alec
+### Open questions for ahh
 
 - Should auto-reconnect ever apply to `.selectedDevices` (ad hoc set), or
   is "only for saved groups" definitely correct per SPEC's wording ("a
@@ -422,7 +422,7 @@ Reasoning:
    real speakers are back in the loop; the mock rig can validate the code
    path (gain math, buffer shapes) but not perceptual correctness.
 
-### Open questions for Alec
+### Open questions for ahh
 
 - Is per-band parametric EQ actually in scope for v2, or is "balance only"
   the real v2 target with EQ pushed to a later phase? (SPEC.md:33 lists

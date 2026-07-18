@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedCore
@@ -161,7 +160,7 @@ public final class DeviceRowView: NSView {
     private let showsToggle: Bool
 
     /// Whether the row paints the accent-wash pill behind a row that's IN the
-    /// Selected Devices set. The popover (2026-07-14 — Alec: no longer needed,
+    /// Selected Devices set. The popover (2026-07-14 — ahh: no longer needed,
     /// the row's accent icon tint + switch state already say "on") passes
     /// `false`; the mixer window keeps it (its rows have no card background to
     /// separate them, so the wash still carries useful row-to-row separation).
@@ -564,7 +563,7 @@ public final class DeviceRowView: NSView {
         button.isBordered = false
         // Speaker glyph LEFT of the slider: `pushOnPushOff` still toggles the
         // mute STATE (and fires the delegate) on tap, but the glyph itself stays
-        // fixed on `symbol` in both states — no alternate/slash image (Alec wants
+        // fixed on `symbol` in both states — no alternate/slash image (ahh wants
         // the icon to never change on toggle). Mute state is reflected only via
         // `button.state` and the accessibility label update in `apply`.
         let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)

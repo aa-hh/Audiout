@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 
@@ -145,7 +144,7 @@ enum SettingsForm {
 /// constraint graph has settled — measured empirically, a 265pt-wide, single-
 /// line subtitle collapsed to a 97pt width and wrapped into 4 lines, inflating
 /// a 44pt row to 86pt (and the whole General pane to 122pt — the visible
-/// "empty gap under Launch at login" Alec flagged). Recomputing
+/// "empty gap under Launch at login" ahh flagged). Recomputing
 /// `preferredMaxLayoutWidth` from the actually-resolved bounds on every
 /// `layout()` call is the documented AppKit fix, and doing it here (not a
 /// fixed literal) keeps it correct if a future row uses a wider control than

@@ -93,7 +93,7 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.selectedDeviceIDs, ["office"], "local dropped, AirPlay added")
     }
 
-    /// REVERSE auto-swap (Alec, live session 2026-07-17b): removing the LAST
+    /// REVERSE auto-swap (ahh, live session 2026-07-17b): removing the LAST
     /// AirPlay device must restore the local passthrough default, not leave the
     /// set empty — an empty set renders as a zeroed Main Out master and gives the
     /// volume keys nothing to visibly drive.
@@ -504,7 +504,7 @@ final class GroupControllerTests: XCTestCase {
 
     // MARK: Routing persistence (SPEC §9b — Selected Devices + Main Out)
 
-    // DECISION (Alec, 2026-07-17): the live Selected-Devices routing set does
+    // DECISION (ahh, 2026-07-17): the live Selected-Devices routing set does
     // NOT auto-resume on launch — every launch defaults to {current device} =
     // passthrough. Saved GROUPS still persist and stay re-applyable. This test
     // pins that split: the group loads on session 2, but the previously-selected
@@ -688,7 +688,7 @@ final class GroupControllerTests: XCTestCase {
 
     // MARK: System-volume mirror — the volume keys drive what's actually playing
     //
-    // The bug (Alec, live session 2026-07-17): the volume keys move the system
+    // The bug (ahh, live session 2026-07-17): the volume keys move the system
     // output = the local "Current Device", but the capture tap mutes that output
     // while streaming — so the keys adjusted a device nobody could hear. The mirror
     // pushes an external system-volume change onto the Main Out master instead.
@@ -956,7 +956,7 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertTrue(spy.volumeWrites.isEmpty)
     }
 
-    /// THE BUG (Alec, live session 2026-07-17): "if nothing is connected to the
+    /// THE BUG (ahh, live session 2026-07-17): "if nothing is connected to the
     /// audio out and I hit the volume buttons, the audio out volume doesn't
     /// change." A per-app redirect can open an AirPlay session — muting the Mac —
     /// even while Selected Devices is exactly {local} (`isPassthrough == true`);

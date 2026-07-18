@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedSharedUI
@@ -87,7 +86,7 @@ final class PopoverPanelViewController: NSViewController {
     /// top of it. `NSPopover` gives a vibrant frame "for free" only around
     /// `container`'s edges; historically `container` itself was a plain,
     /// materialless `NSView`, so the visible background behind/between cards
-    /// was really just that free popover chrome. Alec asked (2026-07-16) for
+    /// was really just that free popover chrome. ahh asked (2026-07-16) for
     /// MORE translucency specifically here (not on the cards, which stay
     /// `.withinWindow` — see `CardView`): this is a real, `.behindWindow`
     /// `NSVisualEffectView` blending against the actual desktop behind the

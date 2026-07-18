@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedCore
 
 /// Settings › **Appearance** pane: a Theme picker built from **miniature window
 /// previews** (Match System / Light / Dark) — the standard macOS pattern
-/// (System Settings › Appearance; SoundSource's own Theme picker, Alec's
+/// (System Settings › Appearance; SoundSource's own Theme picker, ahh's
 /// reference). Each option renders a tiny window mock *in that appearance* —
 /// light chrome for Light, dark chrome for Dark, a diagonal light/dark split for
 /// Match System — with the label beneath and an accent ring on the selection.

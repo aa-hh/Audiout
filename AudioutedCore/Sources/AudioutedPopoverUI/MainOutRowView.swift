@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
 
 import AppKit
 import AudioutedCore
@@ -13,7 +12,7 @@ import AudioutedSharedUI
 /// (`NSPopUpButton`, `pullsDown = false`) as the trailing control.
 ///
 /// (T-U10 briefly moved the glyph into the slider's track to match a full-height
-/// capsule redesign; Alec reverted the slider to its original slim-track design,
+/// capsule redesign; ahh reverted the slider to its original slim-track design,
 /// so the leading icon is back.)
 ///
 /// **REVISED (task B, 2026-07-14) — the circular icon button became a NAMED
@@ -57,7 +56,7 @@ public final class MainOutRowView: NSView {
 
     public weak var delegate: Delegate?
 
-    /// Leading speaker icon (restored — Alec reverted the slider to the original
+    /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
     private let iconView = NSImageView()
     /// The System row's name — "Audio Out" (2026-07-14), matching SoundSource's
@@ -139,11 +138,11 @@ public final class MainOutRowView: NSView {
         wantsLayer = true
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        // Alec's requested icon `hifispeaker.arrow.forward.fill` was introduced in
+        // ahh's requested icon `hifispeaker.arrow.forward.fill` was introduced in
         // macOS 15 (Sequoia); it returns nil on our macOS 13 target and on macOS 14,
         // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
         // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
-        // visible fallback (Alec's choice).
+        // visible fallback (ahh's choice).
         // Match the device rows' glyph sizing (2026-07-17): size the symbol to
         // fill the shared 26pt icon box so the Main Out icon reads at the same
         // scale as the device icons below it (without a config it renders at the
@@ -175,7 +174,7 @@ public final class MainOutRowView: NSView {
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, but the glyph itself stays
         // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
-        // — Alec wants the icon to never change on toggle).
+        // — ahh wants the icon to never change on toggle).
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false

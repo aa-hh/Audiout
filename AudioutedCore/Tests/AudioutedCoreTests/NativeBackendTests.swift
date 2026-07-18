@@ -594,7 +594,7 @@ final class NativeBackendTests: XCTestCase {
     //
     // The volume keys move the system output = the local "Current Device", which the
     // capture tap MUTES while streaming — so they adjusted a device nobody could hear
-    // (Alec, live session 2026-07-17). This backend republishes a genuine external
+    // (ahh, live session 2026-07-17). This backend republishes a genuine external
     // change as `.systemVolumeChanged` and `AppDelegate` hands it to
     // `GroupController.mirrorSystemVolumeToMainOut(_:)`. The backend must NOT know
     // `GroupController` exists — it only states the fact.

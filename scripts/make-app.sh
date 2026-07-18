@@ -3,7 +3,6 @@
 # double-clickable macOS .app bundle and ad-hoc codesign it.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Copyright (C) 2026 Alec Henderson and contributors.
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
 # Xcode project). This produces "Audiouted.app" with an Info.plist
@@ -18,7 +17,7 @@ set -euo pipefail
 # --- Config ---------------------------------------------------------------
 APP_NAME="Audiouted"
 EXECUTABLE="AudioutedApp"
-BUNDLE_ID="com.alechenderson.Audiouted"
+BUNDLE_ID="com.audiouted.Audiouted"
 MIN_MACOS="13.0"
 # Human-readable marketing version and monotonic build number.
 APP_VERSION="0.1.0"

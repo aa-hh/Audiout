@@ -12,10 +12,19 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 
 ## Rules
 
-- **One engine thread, one `event_base`, no exceptions.** The vendored
-  cluster assumes a single libevent base owned by a single thread; every call
-  into it goes through `EngineThread.run`/`.enqueue`, never a raw C entry
-  point.
+- **One engine thread at a time, one `event_base`, no exceptions —
+  recreatable, not reusable.** The vendored cluster assumes a single libevent
+  base owned by a single thread; every call into it goes through
+  `EngineThread.run`/`.enqueue`, never a raw C entry point. A given
+  `EngineThread`/`Thread` is single-use (a second `Thread.start()` aborts), so
+  `AirPlayEngine.start()` constructs a FRESH `EngineThread` per start and holds
+  it in `EngineThreadHolder`; `stop()` clears it and `outputs_registry_clear()`
+  empties the C device/callback registry so the next start begins clean.
+- **`EngineThread.enqueue` returns `Bool` and `run` throws — never assume work
+  ran.** A closure carrying a continuation that is dropped (base gone, or a
+  once-event the broken loop never fired) freezes the caller forever, which is
+  why `enqueue` reports scheduling failure, `run` fail-fasts, `stop()` sweeps
+  the tracked-pending list, and its join is deadlined rather than spun.
 - **The sender hosts N independent content streams inside that one thread**,
   via a `stream_id` dimension added to the vendored master-session lookup and
   the `airplay_write` fan-out (per-app routing needs one stream per

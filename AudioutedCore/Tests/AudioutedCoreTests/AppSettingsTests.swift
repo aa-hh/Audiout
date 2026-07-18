@@ -86,4 +86,45 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(AppSettings.startBufferOptionsMs, AppSettings.startBufferOptionsMs.sorted())
         XCTAssertTrue(AppSettings.startBufferOptionsMs.allSatisfy { (300...5000).contains($0) })
     }
+
+    // MARK: Wake restore (B6b)
+
+    func testWakeRestoreDefaultsToTwoMinutesWhenUnset() {
+        // Unset must resolve to the default (2), NOT 0 — 0 is a valid "Never" that
+        // `UserDefaults.integer` also returns for a missing key.
+        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+                       AppSettings.defaultWakeRestoreMinutes)
+        XCTAssertEqual(AppSettings.defaultWakeRestoreMinutes, 2)
+    }
+
+    func testWakeRestoreRoundTripsEveryOfferedOption() {
+        let settings = AppSettings(defaults: defaults)
+        for option in AppSettings.wakeRestoreMinuteOptions {
+            settings.wakeRestoreMinutes = option
+            XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes, option)
+        }
+    }
+
+    func testWakeRestoreNeverIsDistinctFromUnset() {
+        // Explicitly choosing Never (0) must PERSIST as 0, not be re-defaulted to 2.
+        let settings = AppSettings(defaults: defaults)
+        settings.wakeRestoreMinutes = 0
+        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes, 0)
+    }
+
+    func testWakeRestoreUnofferedStoredValueFallsBack() {
+        defaults.set(3, forKey: "audio.wakeRestoreMinutes")
+        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+                       AppSettings.defaultWakeRestoreMinutes)
+        defaults.set(-5, forKey: "audio.wakeRestoreMinutes")
+        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+                       AppSettings.defaultWakeRestoreMinutes)
+    }
+
+    func testWakeRestoreOptionListInvariants() {
+        // The default must be offered, options ascend, and Never (0) is offered.
+        XCTAssertTrue(AppSettings.wakeRestoreMinuteOptions.contains(AppSettings.defaultWakeRestoreMinutes))
+        XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions, AppSettings.wakeRestoreMinuteOptions.sorted())
+        XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions.first, 0)
+    }
 }

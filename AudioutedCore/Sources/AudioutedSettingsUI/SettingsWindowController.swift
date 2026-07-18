@@ -71,12 +71,14 @@ public final class SettingsWindowController: NSWindowController {
                 loginItem: LoginItemManaging = SMAppServiceLoginItem(),
                 excludedApps: ExcludedAppsController = ExcludedAppsController(),
                 runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
-                latency: LatencySettingModel? = nil) {
+                latency: LatencySettingModel? = nil,
+                wakeRestore: WakeAudioRestoreModel? = nil) {
         generalVC = GeneralSettingsViewController(loginItem: loginItem)
         appearanceVC = AppearanceSettingsViewController(settings: settings)
         audioVC = AudioSettingsViewController(excluded: excludedApps,
                                               runningAppsProvider: runningAppsProvider,
-                                              latency: latency)
+                                              latency: latency,
+                                              wakeRestore: wakeRestore)
         rootVC = SettingsRootViewController(sections: [
             ("General", generalVC),
             ("Appearance", appearanceVC),

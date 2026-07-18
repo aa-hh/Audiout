@@ -668,6 +668,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
 
+    /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`
+    /// below). Resampled once at `startIOProc()` (i.e. every tap create/recreate,
+    /// not once per process) and thereafter mutated ONLY from inside the IOProc
+    /// block, which Core Audio dispatches serially onto `queue` in `startIOProc()`
+    /// — so no lock is needed on this RT-adjacent path, matching this file's
+    /// queue-confinement discipline elsewhere.
+    private var machToMonotonicOffsetNanos: Int64 = 0
+
     /// Private serial queue the HAL dispatches the default-output-device listener
     /// block onto. Registering with a `nil` queue lands the block on Core Audio's
     /// internal notification-delivery thread, where the block's blocking tap
@@ -834,21 +842,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let onBuffer = self.onBuffer
 
+        // Seed the rebase offset fresh for THIS tap instance (not a process-wide
+        // one-time sample) — see `machToMonotonicOffsetNanos` doc. This write
+        // happens-before `AudioDeviceStart` below, which happens-before the
+        // IOProc block below ever runs, so no lock is needed for this initial
+        // handoff either.
+        self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(label: "com.audiouted.native.capture", qos: .userInitiated)
 
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
-        ) { _, inInputData, inInputTime, _, _ in
+        ) { [weak self] _, inInputData, inInputTime, _, _ in
             // ---- REALTIME THREAD ----
+            guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
             let bufCount = listPtr.count
             if bufCount == 0 { return }
 
             // pts from the IOProc's own capture clock (host time → timespec).
+            // Drift self-heal: if the cached offset has fallen out of step with
+            // reality (e.g. the box slept mid-tap), resample it before use —
+            // two clock reads, cheap, and confined to this same serial queue so
+            // no lock is needed. `machToMonotonicOffsetNanos` is only ever
+            // touched from this block after the initial seed in `startIOProc`.
             let hostTime = inInputTime.pointee.mHostTime
-            let pts = Self.timespec(fromHostTime: hostTime)
+            let machNanos = Self.machNanoseconds(fromHostTime: hostTime)
+            if Self.shouldResample(
+                machNanos: machNanos,
+                offset: self.machToMonotonicOffsetNanos,
+                monotonicNowNanos: Self.currentMonotonicNanos()
+            ) {
+                self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+            }
+            let pts = Self.timespec(machNanos: machNanos, offset: self.machToMonotonicOffsetNanos)
 
             var channelData: [Data] = []
             var frameCount = 0
@@ -945,13 +974,31 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// sync packet then advertises a position receding into the past and the
     /// receiver schedules nothing (the "Sonos light green, never white, no audio"
     /// failure the engine-probe warns about). We rebase mach time onto
-    /// `CLOCK_MONOTONIC` using a fixed offset sampled once at first use.
-    static func timespec(fromHostTime hostTime: UInt64) -> timespec {
-        let machNanos = machNanoseconds(fromHostTime: hostTime)
-        let monotonicNanos = Int64(machNanos) &+ machToMonotonicOffsetNanos
+    /// `CLOCK_MONOTONIC` using an offset that is (1) per-tap-instance — reseeded
+    /// at every `startIOProc()`, i.e. every tap create/recreate, not sampled once
+    /// for the whole process (a process-lifetime offset goes stale across ANY
+    /// sleep and silences every reconnect until relaunch) — and (2) self-healed
+    /// per buffer via `shouldResample`, which catches a sleep that happens
+    /// mid-tap between recreations. `machNanos` and `offset` are handled in
+    /// signed `Int64` nanosecond space throughout (`offset` can be negative when
+    /// the box has slept), and the final result is clamped at zero.
+    static func timespec(machNanos: UInt64, offset: Int64) -> timespec {
+        let monotonicNanos = Int64(machNanos) &+ offset
         let clamped = monotonicNanos < 0 ? 0 : monotonicNanos
         return Darwin.timespec(tv_sec: Int(clamped / 1_000_000_000),
                                tv_nsec: Int(clamped % 1_000_000_000))
+    }
+
+    /// Test/convenience entry point: derives a fresh offset every call (no
+    /// caching), so unlike the production RT path above it can never itself go
+    /// stale across a sleep. Production code must go through the instance path
+    /// (seeded in `startIOProc`, healed in the IOProc block) instead, since
+    /// resampling both clocks on every single call is not something we want to
+    /// pay for on every real captured buffer.
+    static func timespec(fromHostTime hostTime: UInt64) -> timespec {
+        let machNanos = machNanoseconds(fromHostTime: hostTime)
+        let offset = sampleMachToMonotonicOffsetNanos()
+        return timespec(machNanos: machNanos, offset: offset)
     }
 
     /// mach host ticks → nanoseconds on the mach-absolute timescale.
@@ -967,22 +1014,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return tb
     }()
 
-    /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled ONCE at first use.
-    /// Adding it to a mach-time nanosecond value rebases that value onto the
-    /// `CLOCK_MONOTONIC` timescale the engine/receiver compare against. Sampled
-    /// as a single offset (rather than re-reading both clocks per buffer) so a
-    /// captured buffer's `mHostTime` maps to a stable, monotonically-advancing
-    /// `CLOCK_MONOTONIC` position — exactly what the sync path needs. Can be
-    /// negative (CLOCK_MONOTONIC < mach-absolute when the box has slept), which is
-    /// why the arithmetic above is signed.
-    private static let machToMonotonicOffsetNanos: Int64 = {
-        // Sample both clocks as close together as possible.
-        let mach = machNanoseconds(fromHostTime: mach_absolute_time())
+    /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
+    private static func currentMonotonicNanos() -> UInt64 {
         var ts = Darwin.timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
-        let monotonic = UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+        return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+
+    /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled fresh on each call
+    /// by reading both clocks back-to-back. Adding the result to a mach-time
+    /// nanosecond value rebases that value onto the `CLOCK_MONOTONIC` timescale
+    /// the engine/receiver compare against. Callers cache this (per tap instance,
+    /// re-seeded on create/recreate and drift-healed per buffer — see
+    /// `timespec(machNanos:offset:)`) rather than calling this on every buffer,
+    /// so a captured buffer's `mHostTime` maps to a stable, monotonically-
+    /// advancing `CLOCK_MONOTONIC` position. Can be negative (CLOCK_MONOTONIC <
+    /// mach-absolute when the box has slept), which is why all offset arithmetic
+    /// in this file is signed.
+    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+        // Sample both clocks as close together as possible.
+        let mach = machNanoseconds(fromHostTime: mach_absolute_time())
+        let monotonic = currentMonotonicNanos()
         return Int64(monotonic) &- Int64(mach)
-    }()
+    }
+
+    /// Drift self-heal decision (finding B6a): true when the cached `offset`
+    /// no longer agrees with reality — i.e. `machNanos + offset` (the pts this
+    /// buffer would get) has drifted from an actual fresh `CLOCK_MONOTONIC`
+    /// reading by more than ~1s. This is exactly what a mid-tap sleep produces
+    /// (mach halts, CLOCK_MONOTONIC keeps advancing), and is the seam a caller
+    /// resamples `machToMonotonicOffsetNanos` from. Pure/signed so it is testable
+    /// without a real clock.
+    static func shouldResample(machNanos: UInt64, offset: Int64, monotonicNowNanos: UInt64) -> Bool {
+        let predicted = Int64(machNanos) &+ offset
+        let diff = predicted &- Int64(monotonicNowNanos)
+        return diff.magnitude > 1_000_000_000
+    }
 
     // MARK: Device reads (adapted from CAHelpers.swift)
 

@@ -37,6 +37,29 @@ public struct LatencySettingModel {
     }
 }
 
+/// Everything the Audio pane's **wake-restore** control needs from the app layer
+/// (B6b). If, after the Mac wakes from sleep, a selected speaker doesn't reconnect
+/// within the chosen delay, the backend un-mutes the Mac's own output (the stuck
+/// capture gate is lifted without clearing the user's selection). Options are in
+/// MINUTES (`0` = Never — `AppSettings.wakeRestoreMinuteOptions`); `apply` persists
+/// the choice and pushes it to the backend.
+public struct WakeAudioRestoreModel {
+    /// The offered fallback delays in minutes (`0` = Never).
+    public let minuteOptions: [Int]
+    /// The persisted value in force at pane creation.
+    public let initialMinutes: Int
+    /// Persist + push the new value to the backend (fires on every popup change).
+    public let apply: @MainActor (Int) -> Void
+
+    public init(minuteOptions: [Int],
+                initialMinutes: Int,
+                apply: @escaping @MainActor (Int) -> Void) {
+        self.minuteOptions = minuteOptions
+        self.initialMinutes = initialMinutes
+        self.apply = apply
+    }
+}
+
 /// Settings › **Audio** pane. Step 3: the **excluded applications** denylist,
 /// plus (2026-07-17, PLAN-LATENCY-SETTING.md) the **Advanced › Audio buffer**
 /// control.
@@ -68,6 +91,10 @@ public final class AudioSettingsViewController: NSViewController {
     private let excluded: ExcludedAppsController
     private let runningAppsProvider: () -> [AppPickerItem]
     private let latency: LatencySettingModel?
+    private let wakeRestore: WakeAudioRestoreModel?
+
+    // Wake-restore state (nil/untouched when `wakeRestore` is nil).
+    private let wakeRestorePopup = NSPopUpButton()
 
     /// Fired after the denylist changes so the app can enforce precedence (prune
     /// routes) and refresh the popover.
@@ -90,10 +117,12 @@ public final class AudioSettingsViewController: NSViewController {
 
     public init(excluded: ExcludedAppsController,
                 runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
-                latency: LatencySettingModel? = nil) {
+                latency: LatencySettingModel? = nil,
+                wakeRestore: WakeAudioRestoreModel? = nil) {
         self.excluded = excluded
         self.runningAppsProvider = runningAppsProvider
         self.latency = latency
+        self.wakeRestore = wakeRestore
         super.init(nibName: nil, bundle: nil)
         title = "Audio"
     }
@@ -131,6 +160,13 @@ public final class AudioSettingsViewController: NSViewController {
         column.spacing = 8
         column.translatesAutoresizingMaskIntoConstraints = false
 
+        if wakeRestore != nil {
+            for sectionView in makeWakeRestoreSectionViews() {
+                column.addArrangedSubview(sectionView)
+                sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+            }
+        }
+
         if latency != nil {
             for sectionView in makeAdvancedSectionViews() {
                 column.addArrangedSubview(sectionView)
@@ -152,6 +188,56 @@ public final class AudioSettingsViewController: NSViewController {
         ])
         view = container
         rebuildList()
+    }
+
+    // MARK: Wake restore (B6b)
+
+    /// Format one option as "Never" / "1 minute" / "N minutes" (bare number + unit
+    /// by design — house style, `AppSettings.wakeRestoreMinuteOptions`).
+    private static func wakeMinutesLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: return "Never"
+        case 1: return "1 minute"
+        default: return "\(minutes) minutes"
+        }
+    }
+
+    /// The wake-restore sub-section: hairline + heading + the popup row. Applies
+    /// immediately on change (persist + push to backend) — no CTA, since un-gating
+    /// the Mac's own output on a future wake has no live-session cost now.
+    private func makeWakeRestoreSectionViews() -> [NSView] {
+        guard let wakeRestore else { return [] }
+        var views: [NSView] = []
+
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        views.append(hairline)
+
+        wakeRestorePopup.translatesAutoresizingMaskIntoConstraints = false
+        for minutes in wakeRestore.minuteOptions {
+            wakeRestorePopup.addItem(withTitle: Self.wakeMinutesLabel(minutes))
+        }
+        if let index = wakeRestore.minuteOptions.firstIndex(of: wakeRestore.initialMinutes) {
+            wakeRestorePopup.selectItem(at: index)
+        }
+        wakeRestorePopup.target = self
+        wakeRestorePopup.action = #selector(wakeRestoreChanged)
+        wakeRestorePopup.setAccessibilityLabel("Restore Mac audio after wake")
+
+        views.append(SettingsForm.row(
+            title: "Restore Mac audio after wake if speakers don't return",
+            subtitle: "After the Mac wakes from sleep, if a selected speaker hasn't "
+                + "reconnected within this time, play audio on this Mac instead.",
+            control: wakeRestorePopup))
+        return views
+    }
+
+    @objc private func wakeRestoreChanged() {
+        guard let wakeRestore else { return }
+        let index = wakeRestorePopup.indexOfSelectedItem
+        guard wakeRestore.minuteOptions.indices.contains(index) else { return }
+        wakeRestore.apply(wakeRestore.minuteOptions[index])
     }
 
     // MARK: Advanced › Audio buffer (PLAN-LATENCY-SETTING.md)
@@ -512,6 +598,34 @@ public final class AudioSettingsViewController: NSViewController {
     public func test_removeExcluded(bundleID: String) {
         _ = view
         remove(bundleID: bundleID)
+    }
+
+    // MARK: Test-support hooks (Wake restore — B6b)
+
+    /// Whether the wake-restore section mounted (a `WakeAudioRestoreModel` was injected).
+    public var test_hasWakeRestoreSection: Bool {
+        _ = view
+        return wakeRestore != nil && wakeRestorePopup.numberOfItems > 0
+    }
+
+    /// The wake-restore popup's option titles, in order.
+    public var test_wakeRestoreOptionTitles: [String] {
+        _ = view
+        return wakeRestorePopup.itemTitles
+    }
+
+    /// The currently-selected wake-restore option title.
+    public var test_wakeRestoreSelectedTitle: String? {
+        _ = view
+        return wakeRestorePopup.titleOfSelectedItem
+    }
+
+    /// Simulate the user picking `minutes` in the wake-restore popup (applies immediately).
+    public func test_selectWakeRestore(minutes: Int) {
+        _ = view
+        guard let wakeRestore, let index = wakeRestore.minuteOptions.firstIndex(of: minutes) else { return }
+        wakeRestorePopup.selectItem(at: index)
+        wakeRestoreChanged()
     }
 
     // MARK: Test-support hooks (Advanced › Audio buffer)

@@ -110,6 +110,28 @@ public protocol OutputBackend: AnyObject {
     /// Stop discovery and tear down any streams.
     func stop()
 
+    /// System is about to sleep (B6b). Proactively disconnect cleanly — stop the
+    /// engine outputs/streams so receivers get a graceful RTSP TEARDOWN before the
+    /// sockets die — WITHOUT clearing the user's selection intent, so ``handleSystemDidWake()``
+    /// can re-converge on wake. Default no-op: only ``NativeBackend`` holds real
+    /// streaming sessions; the AppKit layer wires this to
+    /// `NSWorkspace.willSleepNotification`.
+    func handleSystemWillSleep()
+
+    /// System just woke (B6b). Re-kick convergence for every still-desired device
+    /// (intent survived sleep) and arm the wake fallback watchdog
+    /// (``setWakeAudioRestoreDelay(_:)``). Default no-op; wired to
+    /// `NSWorkspace.didWakeNotification`.
+    func handleSystemDidWake()
+
+    /// Configure the post-wake fallback watchdog (B6b, Settings › Audio). `delay`
+    /// is in SECONDS; `nil` disables it ("Never"). If, after wake, `delay` elapses
+    /// with no desired-on device reconnecting, the backend un-gates whole-system
+    /// capture so the Mac's own output un-mutes — WITHOUT clearing the user's
+    /// selection intent (a late reconnect re-engages the gate). Default no-op; only
+    /// ``NativeBackend`` runs a capture gate/watchdog.
+    func setWakeAudioRestoreDelay(_ delay: TimeInterval?)
+
     /// Await the teardown that ``stop()`` started, bounded by `timeout` (C1). Call
     /// AFTER ``stop()`` on the app's terminate path so graceful stream teardown gets
     /// a bounded window before process exit, rather than being outrun by it. Returns
@@ -149,6 +171,13 @@ public protocol OutputBackend: AnyObject {
 public extension OutputBackend {
     /// Backends with no post-`stop()` teardown to await inherit this no-op.
     func stopAndWait(timeout: Duration) async {}
+
+    /// Backends with no real streaming sessions (mock / OwnTone) have nothing to
+    /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit
+    /// these no-ops (B6b). Only ``NativeBackend`` overrides them.
+    func handleSystemWillSleep() {}
+    func handleSystemDidWake() {}
+    func setWakeAudioRestoreDelay(_ delay: TimeInterval?) {}
 }
 
 /// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend

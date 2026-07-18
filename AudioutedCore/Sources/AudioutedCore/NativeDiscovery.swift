@@ -193,8 +193,14 @@ public protocol ServiceBrowsing: AnyObject, Sendable {
     var onResolve: (@Sendable (ResolvedService) -> Void)? { get set }
     /// Called when a service leaves the network.
     var onRemove: (@Sendable (RemovedService) -> Void)? { get set }
-    /// Called when the underlying browser hits a terminal `.failed`/`.cancelled`
-    /// state (informational — NativeDiscovery logs it; the browser owns retry).
+    /// Called on every state transition, including terminal `.failed`/
+    /// `.cancelled`. Purely informational to `NativeDiscovery` — it does not
+    /// retry anything itself. `.failed` is NOT self-recovering in
+    /// Network.framework (unlike `.waiting`, which the OS retries on its own):
+    /// a conforming implementation is responsible for recreating itself after
+    /// `.failed` (with backoff) if it wants discovery to survive an
+    /// mDNSResponder restart or similar network-stack churn.
+    /// (`NetworkFrameworkBrowser` does this per service type.)
     var onStateChange: (@Sendable (BrowserState) -> Void)? { get set }
 
     func start()
@@ -405,9 +411,12 @@ public final class NativeDiscovery: @unchecked Sendable {
     }
 
     private func handleStateChange(_ state: BrowserState) {
-        // Informational only. The browser owns its own retry/lifecycle; we don't
-        // tear down `known` on a transient `.failed` (that would spuriously drop
-        // every device). `.cancelled` follows an explicit `stop()`, already handled.
+        // Informational only. `NetworkFrameworkBrowser` (or the injected double)
+        // is responsible for recreating itself after `.failed` (B9: `.failed` is
+        // terminal in Network.framework and never self-recovers, unlike
+        // `.waiting`) — we don't tear down `known` on a transient `.failed`
+        // (that would spuriously drop every device). `.cancelled` follows an
+        // explicit `stop()`, already handled.
     }
 
     // MARK: Building & classification (pure, static — easy to unit-test)
@@ -603,12 +612,28 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
     public var onStateChange: (@Sendable (BrowserState) -> Void)?
 
     private let queue = DispatchQueue(label: "Audiouted.NetworkFrameworkBrowser")
-    private var browsers: [NWBrowser] = []
+    /// One live `NWBrowser` per service type, keyed by its Bonjour type string
+    /// (e.g. `"_airplay._tcp"`). `.failed` is a TERMINAL NWBrowser state —
+    /// Network.framework does not restart it (only `.waiting` self-recovers) —
+    /// so B9: on `.failed` we cancel that entry and recreate it after a capped
+    /// backoff, independently per service type, so one service's failure never
+    /// stalls the other's browser.
+    private var browsers: [String: NWBrowser] = [:]
+    /// Pending recreate work, keyed by type, so `stop()` (or a fresh `.ready`)
+    /// can cancel an in-flight backoff timer and avoid a zombie browser
+    /// appearing after teardown.
+    private var pendingRecreate: [String: DispatchWorkItem] = [:]
+    /// Consecutive `.failed` count per type, feeding `nextDelay(afterAttempt:)`.
+    /// Reset to 0 once that type's browser reaches `.ready`.
+    private var failureAttempt: [String: Int] = [:]
     /// In-flight resolve probes, keyed so we can cancel on removal.
     private var probes: [String: NWConnection] = [:]
     /// Last-known TXT/name per browse result, so a removal can report the
     /// deviceid even though NWBrowser only hands us the endpoint on the way out.
     private var resultTXT: [String: (name: String, deviceID: String?)] = [:]
+
+    /// Cap for `nextDelay(afterAttempt:)`, seconds.
+    static let maxBackoffSeconds: TimeInterval = 30
 
     public init() {}
 
@@ -621,7 +646,10 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
 
     public func stop() {
         queue.async {
-            for b in self.browsers { b.cancel() }
+            for item in self.pendingRecreate.values { item.cancel() }
+            self.pendingRecreate.removeAll()
+            self.failureAttempt.removeAll()
+            for b in self.browsers.values { b.cancel() }
             self.browsers.removeAll()
             for (_, c) in self.probes { c.cancel() }
             self.probes.removeAll()
@@ -631,7 +659,21 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
 
     // MARK: Browser setup (on `queue`)
 
+    /// Pure backoff schedule: 1s, 2s, 4s, … capped at `maxBackoffSeconds`.
+    /// `attempt` is 0-based (the count of consecutive `.failed`s seen so far,
+    /// before this one). Unit-testable without any live NWBrowser.
+    static func nextDelay(afterAttempt attempt: Int) -> TimeInterval {
+        guard attempt > 0 else { return 1 }
+        let scaled = 1 * pow(2.0, Double(attempt))
+        return min(maxBackoffSeconds, scaled)
+    }
+
     private func makeBrowser(type: String, serviceType: ResolvedService.ServiceType) {
+        // A recreate for this type is happening now — any timer that was still
+        // pending for it is stale.
+        pendingRecreate[type]?.cancel()
+        pendingRecreate[type] = nil
+
         let params = NWParameters()
         params.includePeerToPeer = false
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: type, domain: nil), using: params)
@@ -639,12 +681,24 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         browser.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
-            case .setup:      self.onStateChange?(.setup)
-            case .ready:      self.onStateChange?(.ready)
-            case .cancelled:  self.onStateChange?(.cancelled)
-            case .failed(let err): self.onStateChange?(.failed("\(err)"))
-            case .waiting(let err): self.onStateChange?(.failed("waiting: \(err)"))
-            @unknown default: break
+            case .setup:
+                self.onStateChange?(.setup)
+            case .ready:
+                // Live and well again: forgive past failures so a later
+                // `.failed` restarts the backoff schedule from 1s.
+                self.failureAttempt[type] = 0
+                self.onStateChange?(.ready)
+            case .cancelled:
+                self.onStateChange?(.cancelled)
+            case .failed(let err):
+                self.onStateChange?(.failed("\(err)"))
+                self.scheduleRecreate(type: type, serviceType: serviceType)
+            case .waiting(let err):
+                // `.waiting` self-recovers inside Network.framework once the
+                // underlying condition clears — no recreate needed here.
+                self.onStateChange?(.failed("waiting: \(err)"))
+            @unknown default:
+                break
             }
         }
 
@@ -653,8 +707,32 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
             self.queue.async { self.applyChanges(results: results, changes: changes, serviceType: serviceType) }
         }
 
-        browsers.append(browser)
+        browsers[type] = browser
         browser.start(queue: queue)
+    }
+
+    /// Runs on `queue` (called from the browser's `stateUpdateHandler`, which
+    /// is bound to `queue` via `browser.start(queue:)`). Cancels the failed
+    /// browser and schedules a same-service-type recreate after a capped
+    /// backoff delay. The scheduled work is cancellable so `stop()` (or a
+    /// type recreating for an unrelated reason) never leaves a zombie timer
+    /// that fires a browser back into existence after teardown.
+    private func scheduleRecreate(type: String, serviceType: ResolvedService.ServiceType) {
+        browsers[type]?.cancel()
+        browsers[type] = nil
+
+        let attempt = failureAttempt[type, default: 0]
+        failureAttempt[type] = attempt + 1
+        let delay = Self.nextDelay(afterAttempt: attempt)
+
+        pendingRecreate[type]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRecreate[type] = nil
+            self.makeBrowser(type: type, serviceType: serviceType)
+        }
+        pendingRecreate[type] = item
+        queue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func applyChanges(results: Set<NWBrowser.Result>, changes: Set<NWBrowser.Result.Change>, serviceType: ResolvedService.ServiceType) {

@@ -2218,6 +2218,236 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(capture.isCapturing)
     }
 
+    /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
+    /// display cadence) must be coalesced per device — not fanned out 1:1 as
+    /// `.level` events — while still guaranteeing the burst's final value lands
+    /// (the trailing-edge flush), so the meter never freezes on a stale value.
+    func testLevelEmissionIsCoalescedToDisplayCadence() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:45", name: "Meter Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.contains(device.outputID) }
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        // Collect .level events on our own stream (the shared `collect` helper
+        // filters .level out).
+        let stream = backend.makeEventStream()
+        actor LevelBox {
+            private(set) var levels: [Float] = []
+            func append(_ v: Float) { levels.append(v) }
+        }
+        let box = LevelBox()
+        let collector = Task {
+            for await event in stream {
+                if case .level(let id, let rms) = event, id == device.id {
+                    await box.append(rms)
+                }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        // Fire a burst: 40 callbacks over ~100ms (every ~2.5ms) — far above the
+        // 40ms/~25Hz coalescing window. Last value is a distinctive sentinel so we
+        // can confirm the trailing-edge flush delivers it.
+        let burstDuration: UInt64 = 100_000_000
+        let steps = 40
+        let finalValue: Float = 0.987
+        for i in 0..<steps {
+            let value: Float = i == steps - 1 ? finalValue : Float(i) / Float(steps)
+            capture.onLevel?(value)
+            try? await Task.sleep(nanoseconds: burstDuration / UInt64(steps))
+        }
+
+        // Give the trailing flush (scheduled up to ~40ms after the last coalesced
+        // leading edge) time to deliver the final value.
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        collector.cancel()
+
+        let levels = await box.levels
+        // Burst spans ~100ms at a 40ms cadence: the ideal count is ceil(100/40)+1
+        // = 4, generously bounded to allow for scheduler/timer jitter — the point
+        // is coalescing to well below 40 (one event per callback), not a razor's
+        // edge on exact timer firing.
+        XCTAssertLessThanOrEqual(levels.count, 8,
+            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks")
+        XCTAssertGreaterThan(levels.count, 0, "meter must still receive events")
+        XCTAssertEqual(levels.last, finalValue,
+            "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
+    }
+
+    // MARK: Sleep/wake (B6b)
+
+    /// Discover an AP2 device, select it, and wait until it's streaming (`added`).
+    /// Returns once `engine.addedIDs` contains the device and its row is selected.
+    private func connectAP2(
+        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+        _ device: DiscoveredDevice
+    ) async {
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.contains(device.outputID) }
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+    }
+
+    /// A willSleep → didWake cycle PRESERVES the selection intent and re-kicks
+    /// convergence: the device is torn down on sleep and re-added on wake, with no
+    /// intervening `setOutputSet`.
+    func testSleepWakePreservesIntentAndReconverges() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:60", name: "Sleep Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        // Sleep: the engine output is removed, intent (isSelected) is preserved, and
+        // the tap stops (Mac un-muted while asleep).
+        backend.handleSystemWillSleep()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        await pollUntil { !capture.isCapturing }
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.isSelected, true,
+                       "sleep must NOT clear the selection intent")
+
+        let addsBeforeWake = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        // Wake: convergence re-kicks with no new setOutputSet, re-adding the device
+        // and re-muting the Mac.
+        backend.handleSystemDidWake()
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeWake }
+        await pollUntil { capture.isCapturing }
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.isSelected, true)
+    }
+
+    /// The sleep teardown must NOT emit a `deviceUpdated` deselect — that's what
+    /// GroupController's reverse auto-swap keys off, and firing it would clear the
+    /// user's intent (the whole thing sleep preserves).
+    func testSleepDoesNotEmitDeselectEvent() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "No Swap Speaker")
+        await connectAP2(backend, engine, discovery, device)
+
+        // Collect every event over a fixed window straddling the sleep, then assert
+        // none is a deselect/unavailable echo for our device (the predicate here can
+        // never be "satisfied", so we drain manually rather than via `collect`).
+        let box = EventBox()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await event in stream {
+                if case .level = event { continue }
+                _ = await box.append(event)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)   // let the subscription go live
+        backend.handleSystemWillSleep()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }   // teardown really happened
+        try? await Task.sleep(nanoseconds: 200_000_000)   // give any stray echo time to arrive
+        task.cancel()
+        let events = await box.snapshot()
+
+        XCTAssertFalse(
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && (!d.isSelected || !d.isAvailable) }
+                return false
+            },
+            "sleep teardown must emit no deselect — reverse auto-swap must not fire")
+    }
+
+    /// With a 1-minute (here: sub-second) fallback and no reconnect after wake, the
+    /// watchdog un-gates capture so the Mac's own output un-mutes — WITHOUT clearing
+    /// the selection intent.
+    func testWakeWatchdogUnGatesCaptureWhenNoReconnect() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:62", name: "Watchdog Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        // Short fallback so the test doesn't wait real minutes.
+        backend.setWakeAudioRestoreDelay(0.1)
+        // Make re-adds fail so NOTHING reconnects after wake.
+        engine.addFailures = [device.outputID.rawValue]
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !capture.isCapturing }
+        backend.handleSystemDidWake()
+
+        // The watchdog fires (~0.1s) and un-gates: capture stays/returns to OFF even
+        // though the device is still selected (intent), so the Mac un-mutes.
+        await pollUntil { capture.ops.last == "stop" }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(capture.isCapturing, false,
+                       "watchdog must leave capture off so the Mac un-mutes when no speaker returns")
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id),
+                      "watchdog must un-gate capture WITHOUT clearing the selection intent")
+    }
+
+    /// A successful reconnect after wake disarms the watchdog: capture stays gated
+    /// (Mac muted, streaming) and never un-gates.
+    func testWakeWatchdogDisarmedOnReconnect() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Reconnect Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        backend.setWakeAudioRestoreDelay(0.15)
+        backend.handleSystemWillSleep()
+        await pollUntil { !capture.isCapturing }
+        backend.handleSystemDidWake()
+
+        // The re-add succeeds (default engine), so capture returns and stays ON well
+        // past the watchdog window.
+        await pollUntil { capture.isCapturing }
+        try? await Task.sleep(nanoseconds: 400_000_000)   // outlast the 0.15s watchdog
+        XCTAssertTrue(capture.isCapturing,
+                      "a successful reconnect must keep capture gated on (Mac muted), not un-gate")
+    }
+
+    /// Setting = Never (nil delay) arms no watchdog: even with no reconnect after
+    /// wake, capture stays gated (the intent-keyed gate holds, un-muting deferred to
+    /// the user).
+    func testWakeWatchdogNeverArmsNothing() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:64", name: "Never Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        backend.setWakeAudioRestoreDelay(nil)   // "Never"
+        engine.addFailures = [device.outputID.rawValue]   // nothing reconnects
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !capture.isCapturing }
+        let stopsAfterSleep = capture.ops.filter { $0 == "stop" }.count
+        backend.handleSystemDidWake()
+
+        // No watchdog: the gate is driven only by suspend lifting. With intent still
+        // set and suspend cleared, the gate wants ON again (even though the re-add
+        // fails); it must NOT be un-gated by any watchdog. Give it time to (not) fire.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Intent intact, and no watchdog-driven extra stop beyond the sleep one.
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id))
+        XCTAssertEqual(capture.ops.filter { $0 == "stop" }.count, stopsAfterSleep,
+                       "Never must arm no watchdog — no extra un-gate stop after wake")
+    }
+
     // MARK: Helpers
 
     /// Records the gate's capture ops in order, with no Core Audio tap / TCC prompt.

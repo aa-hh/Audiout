@@ -24,6 +24,7 @@
 
 import Foundation
 import CAirPlayEngine
+import os
 
 /// Bridges C completions to Swift continuations, keyed by the dispatcher's
 /// `callback_id`. All mutation happens on the engine thread (the hook fires
@@ -122,13 +123,21 @@ final class CompletionRegistry: @unchecked Sendable {
     /// A non-positive `timeout` disables the timer (used by tests that only
     /// exercise the deliver/cancel paths); production always passes a positive
     /// interval so a stalled op can never leak its continuation.
+    /// Returns `false` and arms NOTHING if a waiter is ALREADY armed for
+    /// `callbackId` (B5.3): overwriting it would drop the existing op's
+    /// continuation (a permanent hang + a false timeout on the other op). The
+    /// per-``OutputID`` op serialization in ``AirPlayEngine`` makes a same-id
+    /// collision unreachable in normal flow; this is the belt-and-suspenders that
+    /// refuses rather than silently clobbers if that guard is ever bypassed. The
+    /// caller must resolve its own continuation (and release the C slot) on false.
+    @discardableResult
     func arm(
         callbackId: Int32,
         timeout: TimeInterval,
         onCancel: @escaping () -> Void,
         onTimeout: @escaping () -> Void,
         _ completion: @escaping (OutputState) -> Void
-    ) {
+    ) -> Bool {
         var timer: DispatchSourceTimer?
         if timeout > 0 {
             let t = DispatchSource.makeTimerSource(queue: timerQueue)
@@ -139,6 +148,13 @@ final class CompletionRegistry: @unchecked Sendable {
             timer = t
         }
         lock.lock()
+        if waiters[callbackId] != nil {
+            lock.unlock()
+            timer?.cancel()
+            Logger(subsystem: "com.airplayengine", category: "completion")
+                .error("CompletionRegistry.arm refused: waiter already armed for callbackId \(callbackId) — refusing to overwrite (would strand a continuation)")
+            return false
+        }
         waiters[callbackId] = Waiter(
             deliver: completion, cancel: onCancel, timeout: onTimeout, timer: timer
         )
@@ -147,6 +163,7 @@ final class CompletionRegistry: @unchecked Sendable {
         // resolves by looking the waiter up under the lock) can never observe a
         // half-armed state.
         timer?.activate()
+        return true
     }
 
     /// Test-only: whether a waiter is currently armed for `callbackId`. Lets a
@@ -180,6 +197,12 @@ final class CompletionRegistry: @unchecked Sendable {
         let waiter = waiters.removeValue(forKey: callbackId)
         lock.unlock()
         waiter?.timeout()
+    }
+
+    /// Test seam: drive `deliver` directly (the C hook path is exercised
+    /// elsewhere) so a unit test can resolve an armed waiter without a dispatcher.
+    func deliverForTest(callbackId: Int32, state: output_device_state) {
+        deliver(callbackId: callbackId, state: state)
     }
 
     /// Called by the C hook on the engine thread. Resolves the state enum and

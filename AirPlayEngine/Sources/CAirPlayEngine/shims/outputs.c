@@ -325,6 +325,41 @@ outputs_callback_remove(struct output_device *device)
       memset(&outputs_cb_register[callback_id], 0, sizeof(outputs_cb_register[callback_id]));
 }
 
+void
+outputs_callback_clear(int callback_id)
+{
+  /* Clear exactly one slot by id (B5). A timed-out op leaves its slot armed
+   * (cb != NULL) forever; without this, OUTPUTS_MAX_CALLBACKS such leaks
+   * exhaust the register and outputs_callback_add returns -1 for every op. */
+  if (callback_id < 0 || (unsigned int)callback_id >= ARRAY_SIZE(outputs_cb_register))
+    return;
+  memset(&outputs_cb_register[callback_id], 0, sizeof(outputs_cb_register[callback_id]));
+}
+
+void
+outputs_registry_clear(void)
+{
+  /* C2: empty the registry on stop() so a fresh start() begins clean.
+   * airplay_deinit frees the sessions but leaves device->session dangling and
+   * never empties device_list — so a stop→start cycle would otherwise inherit
+   * freed session pointers and stale devices. NULL each session (already freed
+   * by airplay_deinit — do NOT double-free) so outputs_device_free's
+   * active-session BUG log doesn't fire, then free every device. */
+  while (device_list)
+    {
+      struct output_device *d = device_list;
+      device_list = d->next;
+      d->session = NULL;
+      outputs_device_free(d);
+    }
+
+  /* Drop any leaked callback slots + out-of-band state notes from the old run. */
+  memset(outputs_cb_register, 0, sizeof(outputs_cb_register));
+  memset(outputs_state_ring, 0, sizeof(outputs_state_ring));
+  outputs_state_ring_head = 0;
+  outputs_state_ring_count = 0;
+}
+
 int
 outputs_callback_add(struct output_device *device, output_status_cb cb)
 {

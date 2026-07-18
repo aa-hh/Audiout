@@ -80,7 +80,7 @@ to a backend directly.
   runs the same creation sheet).
 - **Header parity between groups and devices.** `GroupEditorViewController`
   and `DeviceDetailViewController` share the identical large-icon header —
-  the same `DeviceIconWellView` (size, hover scrim, click-to-pick) — the only
+  the same `DeviceIconWellView` (size, edit badge, click-to-pick) — the only
   difference being that a group's title is an EDITABLE borderless field
   (commits like a Finder rename) while a device's title is a static label.
   An editable `NSTextField` has no intrinsic width: the title uses a FIXED
@@ -96,19 +96,20 @@ to a backend directly.
   status, availability, volume, kind) plus which saved groups it belongs to
   (via the injected `GroupController`). No slider, no mute, no Selected-
   Devices toggle, no group-activation control lives here.
-- **The icon hover scrim is the one approved custom-drawn element**
+- **The icon-edit badge is the one approved custom-drawn element**
   (`../../AGENTS.md`) — `DeviceIconWellView`, shared by exactly two hosts:
   `DeviceDetailViewController` and `GroupEditorViewController` (header
-  parity). The edit affordance is discoverable AT REST, not hover-only: a
-  small faint circular pencil badge sits in the well's bottom-trailing
-  corner at all times and steps up to a higher alpha on hover; both the
-  badge and the full scrim honor Reduce Motion identically (instant
-  show/hide vs. a brief cross-fade), through the same `setOverlayVisible(_:)`
-  call. Hovering the large icon shows a translucent full-coverage
-  rounded-rect scrim with a centered pencil glyph; clicking it presents
-  `IconPickerViewController` as an anchored popover, and picking a symbol
-  (or "use default") writes through `DeviceIconController` (devices) or
-  `saveGroup` (groups). Do not copy this custom-drawn pattern anywhere else.
+  parity). ONE affordance, not two (live-test feedback 2026-07-18b): a small
+  faint circular pencil badge sits in the well's bottom-trailing corner AT
+  ALL TIMES (discoverable without a hover) and steps up in alpha when the
+  pointer enters — through `setOverlayVisible(_:)`, which honors Reduce
+  Motion (instant vs. a brief fade). The earlier full-coverage hover scrim
+  was REMOVED — a persistent badge plus a separate full-cover pencil-on-hover
+  read as two conflicting affordances. The whole well is the click target
+  (camera-badge pattern: badge is the cue, glyph is the button); clicking
+  presents `IconPickerViewController` as an anchored popover, and picking a
+  symbol (or "use default") writes through `DeviceIconController` (devices)
+  or `saveGroup` (groups). Do not copy this custom-drawn pattern anywhere else.
 - **`IconPickerViewController` has no opinion on presentation.** It only
   builds a curated grid (`DeviceIcon.curated`, filtered through
   `DeviceIcon.isValid` so a stale curated name never renders a blank glyph)
@@ -143,8 +144,8 @@ to a backend directly.
 | `SidebarViewController` | Source-list (Groups + Devices sections); selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete; no creation flow. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
-| `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom hover scrim lives on its icon well. |
+| `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom-drawn icon-edit badge lives on its icon well. |
 | `IconPickerViewController` | Curated SF Symbol grid + validated free-text search, presented as an anchored popover; reports a symbol name via `onPick`. |
 | `MembershipRowView` | Checkbox + icon + name row used in creation sheet and editor. |
-| `DeviceIconWellView` | Shared large icon + at-rest edit badge + hover scrim (the approved custom element); used by editor + detail headers. |
+| `DeviceIconWellView` | Shared large icon + at-rest edit badge (the one approved custom element; no hover scrim); used by editor + detail headers. |
 | `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |

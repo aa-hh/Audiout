@@ -114,7 +114,7 @@ public final class GroupEditorViewController: NSViewController {
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
         nameField.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
-        nameField.alignment = .center
+        nameField.alignment = .natural   // left-aligned (LTR) to match the column
         nameField.isBezeled = false
         nameField.drawsBackground = false
         nameField.usesSingleLineMode = true
@@ -159,13 +159,13 @@ public final class GroupEditorViewController: NSViewController {
             column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
-            // Header parity with DeviceDetailViewController: centered large
-            // icon, centered (editable) title beneath it.
+            // Header parity with DeviceDetailViewController: left-aligned large
+            // icon, left-aligned (editable) title beneath it.
             iconWell.topAnchor.constraint(equalTo: column.topAnchor),
-            iconWell.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
 
             nameField.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
-            nameField.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             // FIXED width, not a cap: an EDITABLE text field has no intrinsic
             // width, so a "<=" alone lets auto layout collapse it to zero (it
             // rendered invisible — snapshot-caught 2026-07-18).

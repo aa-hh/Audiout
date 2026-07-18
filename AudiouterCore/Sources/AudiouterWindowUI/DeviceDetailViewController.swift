@@ -98,7 +98,7 @@ public final class DeviceDetailViewController: NSViewController {
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
-        nameLabel.alignment = .center
+        nameLabel.alignment = .natural   // left-aligned (LTR) to match the form column
         nameLabel.lineBreakMode = .byTruncatingTail
 
         // Two logical groups within one outer stack: device STATE (status,
@@ -158,7 +158,7 @@ public final class DeviceDetailViewController: NSViewController {
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
             iconWell.topAnchor.constraint(equalTo: column.topAnchor),
-            iconWell.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
 
             nameLabel.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
             nameLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),

@@ -308,6 +308,7 @@ public final class CaptureCoordinator: @unchecked Sendable {
                 // and tear the capture down rather than emit garbage.
                 self.transition(to: .failed(.rateMismatch(
                     tapRate: rate, configuredRate: self.configuredPipeSampleRate)))
+                // STABILITY(D6): narrow verified races — see dev/notes/stability-audit-2026-07-18.md
                 Task { [weak self] in self?.captureProcess?.stop() }
                 return
             }

@@ -356,6 +356,7 @@ public final class AppRowView: NSView {
 
     // MARK: Actions
 
+    // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
     @objc private func volumeChanged(_ sender: NSSlider) {
         isDraggingSlider = true
         let event = NSApp.currentEvent
@@ -465,6 +466,7 @@ public final class AppRowView: NSView {
         // Sticky-hover fix (shared row idiom): a bottom-most row can miss
         // `mouseExited` when the pointer leaves into an untracked dead-zone
         // below the card, so reconcile against the true pointer position.
+        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see this target's AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
         hoverMoveMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
             guard let self, let window = self.window else { return event }
             let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)

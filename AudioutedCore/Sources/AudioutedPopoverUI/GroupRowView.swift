@@ -248,6 +248,7 @@ public final class GroupRowView: NSView {
         delegate?.groupRow(self, didSetMuted: sender.state == .on, groupID: group.id)
     }
 
+    // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
         let event = NSApp.currentEvent
         if !isDraggingMaster {
@@ -315,6 +316,7 @@ public final class GroupRowView: NSView {
 
     private func installMouseMovedMonitor() {
         guard mouseMovedMonitor == nil else { return }
+        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see AudioutedSharedUI/AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
         mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
             self?.refreshHoverFromPointer()
             return event

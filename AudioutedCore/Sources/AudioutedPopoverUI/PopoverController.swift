@@ -340,6 +340,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // A device being added or removed also restructures the device rows —
         // `refreshDeviceRows()` only repaints EXISTING rows, so a device set
         // change (not just a route change) must force the same full rebuild path.
+        // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if popover.isShown {
             if routesChanged || deviceSetChanged {

@@ -14,6 +14,7 @@ AppKit row views shared by the popover (`AudioutedPopoverUI`) and the mixer wind
 - The device row's trailing control is an `NSButton` checkbox under a "Selected" header (membership in "Selected Devices"), not an `NSSwitch`; the column is not "Enabled".
 - `DeviceRowView.apply` takes `controllable` separate from `selected`: slider/mute enablement follows `controllable`, but the checkbox and the sublabel's "System" token follow `selected` alone.
 - The popover header's icon buttons are stock `NSButton` (`bezelStyle = .smallSquare`) — no custom hover-button class exists here.
+- Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 
 ## Map
 

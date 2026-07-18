@@ -567,6 +567,7 @@ public final class OwnToneBackend: OutputBackend, @unchecked Sendable {
     /// deliberately replaced the old mark-unavailable behaviour).
     private func recoverZombies(_ ids: [String], expected: Set<String>) async {
         do {
+            // STABILITY(D5): legacy OwnTone backend - recovery re-PUTs stale expected set — see dev/notes/stability-audit-2026-07-18.md
             try await client.setOutputSet(Array(expected))
         } catch {
             markUnreachable(); return

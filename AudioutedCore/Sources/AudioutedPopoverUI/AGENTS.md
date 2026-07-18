@@ -15,6 +15,7 @@ The menu-bar popover UI (pure AppKit). `PopoverController` owns the `NSPopover`,
 - `ConnectionDiagnosisView` never touches `NSPasteboard`; the host writes on `onCopyDetails`.
 - `selectedAppBundleID` is host-owned, transient. All three removal entry points (± footer, "Remove from list", Delete/Backspace) must funnel through `removeApp(bundleID:)`.
 - The Applications card's add/remove control is `ApplicationsFooterView` (± `NSSegmentedControl`), replacing the old "+ Add application…" row.
+- Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 
 ## Map
 

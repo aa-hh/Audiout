@@ -28,6 +28,7 @@ public final class AppRoutingController {
         self.appRoutes = loadPersisted ? ((try? store.load()) ?? []) : []
     }
 
+    // STABILITY(D4): UI-thread stalls and stuck-drag state — see dev/notes/stability-audit-2026-07-18.md
     private func persist() {
         try? store.save(appRoutes)
     }

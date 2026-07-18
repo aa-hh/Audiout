@@ -152,6 +152,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     // MARK: Public lifecycle (idempotent)
 
+    // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
     /// Start capture: create the tap, read its real format, register the delivery
     /// callback + the default-output-device-change callback, and start the IOProc.
     /// Idempotent: `start()` while already creating/capturing is a no-op. `start()`
@@ -191,6 +192,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     // MARK: Start sequence (on `queue`)
 
+    // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
     private func beginStart() {   // on queue
         transition(to: .creatingTap)
         let tap = makeTap()
@@ -202,6 +204,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         tap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
 
         do {
+            // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
             let format = try tap.createAndStart(muteBehavior: muteBehavior)
             self.converter = makeConverter(format)
             transition(to: .capturing(format))
@@ -255,6 +258,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // Core Audio"). Holding `queue` across those HAL calls would head-of-line
         // block the `state` getter, a concurrent stop(), and every buffer's
         // `handleBuffer` (which reads the converter under the same lock).
+        // STABILITY(C6): a device change during tap recreation is silently dropped — see dev/notes/stability-audit-2026-07-18.md
         let claim: (proceed: Bool, old: SystemAudioTap?) = queue.sync {
             guard case .capturing = _state else { return (false, nil) }
             let t = self.tap

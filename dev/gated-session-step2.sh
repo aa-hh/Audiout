@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BIN="$ROOT/build/AirPlay Controller.app/Contents/MacOS/AirPlayControllerApp"
+APP_BIN="$ROOT/build/Audiouted.app/Contents/MacOS/AudioutedApp"
 [ -x "$APP_BIN" ] || { echo "app not built (scripts/make-app.sh)"; exit 1; }
 
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw

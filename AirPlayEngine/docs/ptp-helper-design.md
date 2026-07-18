@@ -143,7 +143,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.<team>.airplaycontroller.ptphelper</string>
+    <string>com.<team>.audiouted.ptphelper</string>
 
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>   <!-- path is relative to the app bundle -->
@@ -155,7 +155,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
     <true/>                                       <!-- see §2.4: restart-on-crash -->
 
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
-    <string>com.<team>.airplaycontroller</string>
+    <string>com.<team>.audiouted</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>                  <!-- low-latency: PTP is timing-sensitive -->

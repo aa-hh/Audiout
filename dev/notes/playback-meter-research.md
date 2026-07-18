@@ -263,7 +263,7 @@ metering and (b) zero every meter on close so a stale bar can't linger on reopen
 ### 3.1 Design
 
 A small **layer-backed `NSView`** — `LevelMeterView` — living in
-`AirPlayControllerSharedUI` (same target as `DeviceRowView`/`ControlCenterSlider`
+`AudioutedSharedUI` (same target as `DeviceRowView`/`ControlCenterSlider`
 so both popover and mixer window can reuse it). It draws a **vertical rounded
 track** with a **green fill** growing from the bottom.
 
@@ -323,7 +323,7 @@ add the ramp in polish.
 ### 3.5 Code sketch
 
 ```swift
-// AirPlayControllerSharedUI/LevelMeterView.swift
+// AudioutedSharedUI/LevelMeterView.swift
 import AppKit
 import QuartzCore
 
@@ -557,7 +557,7 @@ leading column** and is orthogonal:
 
 Everything the mock needs already exists (§1.2). Rough effort: **~½–1 day.**
 
-1. **`LevelMeterView`** in `AirPlayControllerSharedUI` (§3.5) — layer-backed
+1. **`LevelMeterView`** in `AudioutedSharedUI` (§3.5) — layer-backed
    vertical bar, `setLevel`/`reset`, self-stopping display link, single-green
    first (add the color ramp later). *(sonnet, med)*
 2. **`PopoverColumnGrid`** — add `meterWidth`/`meterToLeading` +

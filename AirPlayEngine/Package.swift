@@ -29,9 +29,9 @@ import PackageDescription
 //
 // Platform: .macOS(.v14). Per T-PKG-1 instructions this matches the
 // capture-side deployment target used elsewhere in this project's Phase-2
-// planning; it is intentionally HIGHER than AirPlayControllerCore's
-// .macOS(.v13) (AirPlayControllerCore/Package.swift) — that package's
-// deployment target is NOT touched by this task. AirPlayControllerCore
+// planning; it is intentionally HIGHER than AudioutedCore's
+// .macOS(.v13) (AudioutedCore/Package.swift) — that package's
+// deployment target is NOT touched by this task. AudioutedCore
 // depends on AirPlayEngine only via NativeBackend (T-BACKEND-1, later),
 // at which point the core app's effective minimum OS follows this
 // package's floor for that one backend.

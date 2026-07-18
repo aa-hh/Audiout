@@ -1,12 +1,12 @@
 #!/bin/bash
-# make-app.sh — wrap the AirPlayControllerApp SwiftPM binary into a real,
+# make-app.sh — wrap the AudioutedApp SwiftPM binary into a real,
 # double-clickable macOS .app bundle and ad-hoc codesign it.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 Alec Henderson and contributors.
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
-# Xcode project). This produces "AirPlay Controller.app" with an Info.plist
+# Xcode project). This produces "Audiouted.app" with an Info.plist
 # (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and an
 # ad-hoc signature so Gatekeeper lets it launch locally.
 #
@@ -16,9 +16,9 @@
 set -euo pipefail
 
 # --- Config ---------------------------------------------------------------
-APP_NAME="AirPlay Controller"
-EXECUTABLE="AirPlayControllerApp"
-BUNDLE_ID="com.alechenderson.AirPlayController"
+APP_NAME="Audiouted"
+EXECUTABLE="AudioutedApp"
+BUNDLE_ID="com.alechenderson.Audiouted"
 MIN_MACOS="13.0"
 # Human-readable marketing version and monotonic build number.
 APP_VERSION="0.1.0"
@@ -27,13 +27,13 @@ BUILD_NUMBER="1"
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
 # deciding, so it has to do the whole job.
-AUDIO_CAPTURE_USAGE="AirPlay Controller needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+AUDIO_CAPTURE_USAGE="Audiouted needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
 
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$REPO_ROOT/AirPlayControllerCore"
+PACKAGE_DIR="$REPO_ROOT/AudioutedCore"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"

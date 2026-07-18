@@ -16,6 +16,14 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
   cluster assumes a single libevent base owned by a single thread; every call
   into it goes through `EngineThread.run`/`.enqueue`, never a raw C entry
   point.
+- **The sender hosts N independent content streams inside that one thread**,
+  via a `stream_id` dimension added to the vendored master-session lookup and
+  the `airplay_write` fan-out (per-app routing needs one stream per
+  destination-set, not one PCM feed for the whole process). `stream_id`
+  defaults to 0 (pre-existing single-stream behavior unchanged). This is
+  vendored surgery, not a shim — see `docs/VENDORED-DIFFS.md` Entry 2 for the
+  rationale and exact hunk. Swift-side: `AirPlayEngine.addOutput(_:streamId:)`
+  / `write(pcm:streamId:pts:)` / `write(streams:pts:)`.
 - **Suspect the hosting/shim layer before the vendored protocol code.**
   Real-hardware bugs have consistently been an application-layer duty
   OwnTone's `main()`/player performed that the hosting code hadn't

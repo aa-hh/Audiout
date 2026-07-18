@@ -301,12 +301,13 @@ duplicating tracking here would just drift.
 - **C4** — `NativeCaptureCoordinator.swift`, tap format construction — no
   guard against a NaN/zero sample rate reaching the converter, which would
   propagate silently rather than failing loud.
-- **B7** — `PopoverController.swift`, a per-tick rebuild path — risk of
-  redundant work on a timer-driven cadence rather than only on real state
-  change.
+- **B7** — RESOLVED by the per-app-routing landing (the app-row volume
+  handler now explicitly avoids the per-tick rebuild; its comment documents
+  why). No further work needed.
 - **B8** — `PopoverController.swift`, rebuild while the popover is hidden —
-  risk of doing full rebuild work the user can't see, wasting cycles that
-  matter more while other operations are in flight.
+  `update(devices:)`'s not-shown branch still runs a full rebuild per
+  backend event; under volume-key repeat while streaming that is a hidden
+  rebuild storm on the main thread. Still open post-per-app-landing.
 - **B3–B6, B9, C1–C3** — phase-2/3 backlog items from the same audit pass;
   tracked in the scheduling system, not restated here to avoid two sources
   of truth.

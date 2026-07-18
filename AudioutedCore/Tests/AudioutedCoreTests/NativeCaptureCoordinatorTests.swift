@@ -32,9 +32,13 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         private(set) var createCount = 0
         private(set) var teardownCount = 0
         private(set) var started = false
+        /// The `excludedPIDs` passed to the MOST RECENT `createAndStart` call
+        /// (T4) — lets a test assert the tap was (re)created with the right
+        /// exclusion set without needing a real Core Audio process object.
+        private(set) var lastExcludedPIDs: Set<pid_t> = []
 
-        func createAndStart(muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            lock.lock(); createCount += 1; lock.unlock()
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastExcludedPIDs = excludedPIDs; lock.unlock()
             if let startError { throw startError }
             lock.lock(); started = true; lock.unlock()
             return format
@@ -49,6 +53,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
+        var excludedPIDs: Set<pid_t> { lock.withLock { lastExcludedPIDs } }
     }
 
     /// Records every forwarded (pcm, pts) pair.
@@ -81,12 +86,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         tap: FakeTap,
         sink: SpySink,
-        converter: FakeConverter
+        converter: FakeConverter,
+        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { tap },
             sink: sink,
             makeConverter: { _ in converter },
+            resolvePID: resolvePID,
             muteBehavior: .mutedWhenTapped
         )
     }
@@ -185,7 +192,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableSystemTapSurfacesOSUnsupported() {
         let tap = UnavailableSystemTap()
-        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped)) { error in
+        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedPIDs: [])) { error in
             XCTAssertEqual(error as? NativeCaptureError, .osUnsupported(minimum: "14.2"))
         }
     }
@@ -229,6 +236,169 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.fireDeviceChange()
         waitFor { if case .failed = coordinator.state { return true } else { return false } }
         XCTAssertEqual(coordinator.state, .failed(.deviceLost(reason: "gone")))
+    }
+
+    // MARK: - T4: exclusion-list wiring (routed apps + user-excluded apps must
+    // not leak into the whole-system mix tap).
+
+    /// Changing the routed-apps set recreates the capturing tap with the
+    /// correctly updated exclusion pid list.
+    func testUpdateRoutingRecreatesTapWithUpdatedExclusionPIDs() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        XCTAssertEqual(tap.creates, 1)
+        XCTAssertEqual(tap.excludedPIDs, [], "no routes yet — nothing excluded")
+
+        let routes = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
+        coordinator.updateRouting(appRoutes: routes, excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.creates, 2, "a route change while capturing recreates the tap")
+        XCTAssertEqual(tap.excludedPIDs, [111], "the newly-routed app's pid is excluded from the system mix")
+        coordinator.stop()
+    }
+
+    /// An app flipped from `.device(id:)` back to `.currentDevice` is REMOVED
+    /// from the exclusion list — it re-enters the system mix.
+    func testAppFlippedBackToCurrentDeviceReentersSystemMix() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterRoute = tap.creates
+
+        // The route flips back to .currentDevice — "no redirect."
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .currentDevice)],
+            excludedBundleIDs: [])
+
+        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "the tap is recreated again on the flip back")
+        XCTAssertEqual(tap.excludedPIDs, [], "an app back on .currentDevice must re-enter the system mix")
+        coordinator.stop()
+    }
+
+    /// A `.device`-routed app's pid never appears in the system-mix tap's
+    /// exclusion-blind spot — i.e. it IS present in the exclusion list
+    /// (so it can never double-send: once to its own destination via
+    /// per-app capture, and again via this whole-system mixdown).
+    func testDeviceRoutedAppPIDNeverLeaksIntoSystemMix() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [
+                AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1")),
+                AppRoute(bundleID: "com.app.b", displayName: "App B", destination: .currentDevice),
+            ],
+            excludedBundleIDs: [])
+
+        XCTAssertTrue(tap.excludedPIDs.contains(111), "the .device-routed app's pid must be excluded (no double-send)")
+        XCTAssertFalse(tap.excludedPIDs.contains(222), ".currentDevice apps stay in the system mix")
+        coordinator.stop()
+    }
+
+    /// `.noRedirect` (the new default/unset state) is exclusion-equivalent to
+    /// `.currentDevice`: neither is ever excluded from the system-wide tap. An
+    /// app left "unset" must not be accidentally dropped from the system mix.
+    func testNoRedirectAppPIDStaysInSystemMixJustLikeCurrentDevice() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [
+                AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1")),
+                AppRoute(bundleID: "com.app.b", displayName: "App B", destination: .currentDevice),
+                AppRoute(bundleID: "com.app.c", displayName: "App C", destination: .noRedirect),
+            ],
+            excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.excludedPIDs, [111],
+                       "only the .device-routed app is excluded; both local states (.currentDevice AND "
+                       + ".noRedirect) stay in the system mix identically")
+        coordinator.stop()
+    }
+
+    /// The existing user-excluded-apps list (Settings › Audio) still works
+    /// and composes correctly (UNION) with route-based exclusion.
+    func testUserExcludedAppsComposeWithRouteBasedExclusion() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.c": 333]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        // Only a user-excluded app, no routes yet.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.c"])
+        XCTAssertEqual(tap.excludedPIDs, [333])
+
+        // Add a routed app on top — the union must include BOTH.
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: ["com.app.c"])
+        XCTAssertEqual(tap.excludedPIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
+        coordinator.stop()
+    }
+
+    /// Calling `updateRouting` with an unchanged union is a no-op — it must
+    /// not recreate the tap on every unrelated tick.
+    func testUpdateRoutingIsNoOpWhenUnionUnchanged() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        coordinator.start()
+        let route = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
+        coordinator.updateRouting(appRoutes: route, excludedBundleIDs: [])
+        let createsAfterFirstUpdate = tap.creates
+
+        // Same union again (route list re-passed verbatim, as a caller might
+        // do on an unrelated tick) — must NOT recreate.
+        coordinator.updateRouting(appRoutes: route, excludedBundleIDs: [])
+        XCTAssertEqual(tap.creates, createsAfterFirstUpdate, "an unchanged exclusion union must not recreate the tap")
+        coordinator.stop()
+    }
+
+    /// `updateRouting` called while NOT capturing doesn't touch any tap, but
+    /// the computed exclusion set is applied on the NEXT `start()`.
+    func testUpdateRoutingWhileIdleAppliesOnNextStart() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] })
+
+        // Not capturing yet — updateRouting must not create a tap.
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        XCTAssertEqual(tap.creates, 0)
+
+        coordinator.start()
+        XCTAssertEqual(tap.creates, 1)
+        XCTAssertEqual(tap.excludedPIDs, [111], "the previously-computed exclusion set is applied on start()")
+        coordinator.stop()
     }
 
     // MARK: - Idempotency: start() while capturing is a no-op; stop() from idle is a no-op.

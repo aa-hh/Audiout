@@ -52,15 +52,6 @@ public final class GroupController {
 
     private var memberState: [String: MemberState] = [:]
 
-    /// App-route redirect targets that must ALSO be connected (an AirPlay session
-    /// opens the moment an app is redirected, before per-app capture exists). These
-    /// device ids are UNIONed into the backend output set at every applyRouting()
-    /// call site, but are deliberately kept OUT of selectedDeviceIDs and
-    /// mainOutMemberIDs (Q5: a redirect must not move the system master). Injected
-    /// as a closure so GroupController does not depend on AppRoutingController.
-    /// Defaults to {} so tests and legacy callers are unaffected.
-    public var appRouteTargets: () -> Set<String> = { [] }
-
     // MARK: Main Out / Selected Devices (SPEC.md §9 2026-07-14b — SoundSource model)
     //
     // Per-device toggles no longer route audio. They compose a PERSISTENT ad-hoc
@@ -97,13 +88,10 @@ public final class GroupController {
     ///   - routingStore: persistence for the live routing set. WRITE-ONLY at
     ///     launch by design — `persistRouting()` saves to it, nothing reads it
     ///     back (same decision note).
-    ///   - appRouteTargets: injected redirect targets to union into the backend
-    ///     output set; see ``appRouteTargets``.
     public init(backend: OutputBackend,
                 store: GroupStore = GroupStore(),
                 routingStore: RoutingStore = RoutingStore(),
-                loadPersisted: Bool = true,
-                appRouteTargets: @escaping () -> Set<String> = { [] }) {
+                loadPersisted: Bool = true) {
         self.backend = backend
         self.store = store
         self.routingStore = routingStore
@@ -129,7 +117,6 @@ public final class GroupController {
         // it must never again gate a routing resume. Do not "restore" the read
         // below; it is absent on purpose.
         _ = routingStore
-        self.appRouteTargets = appRouteTargets
     }
 
     /// True once the out-of-the-box default has been established, so
@@ -321,15 +308,13 @@ public final class GroupController {
     /// is what let a passthrough session mute the Mac in the first place (the tap
     /// ran unconditionally; nothing here ever stopped it).
     ///
-    /// MERGE NOTE (2026-07-17, phase2b ← main): the "passthrough ⇒ empty output
-    /// set" agreement above holds only for the SELECTED set. `applyRouting()` now
-    /// also unions `redirectOutputIDs()`, so with an app redirected to an AirPlay
-    /// device the backend receives a NON-empty set — the capture gate opens and the
-    /// tap (a single global `.mutedWhenTapped`) silences the whole Mac — while this
-    /// property still reports `true`. That is the known "per-app routing needs
-    /// per-app capture streams" limitation, NOT a bug in either side: this property
-    /// answers "is the SELECTED set just the Mac?", which stays correct. It is one
-    /// more reason nothing in the audio path may key off `isPassthrough`.
+    /// T7 NOTE: `applyRouting()` no longer unions app-route redirect targets into
+    /// the backend output set, so the "passthrough ⇒ empty output set" agreement
+    /// now holds unconditionally again — redirecting an app leaves this property's
+    /// answer (and the whole-system output set) untouched, because that app's audio
+    /// travels the per-app capture path (`NativeBackend.updateAppRoutes`) instead.
+    /// This property still answers only "is the SELECTED set just the Mac?"; nothing
+    /// in the audio path may key off it.
     public var isPassthrough: Bool {
         guard mainOut == .selectedDevices, let local = localDeviceID else { return false }
         return selectedDeviceIDs == [local]
@@ -353,30 +338,19 @@ public final class GroupController {
         case .selectedDevices:
             activeGroupID = nil
             // Only real (AirPlay) outputs go to the backend; the local device is
-            // the Mac's own output, represented by an EMPTY output set. Redirect
-            // targets (app routes) are UNIONed in so an AirPlay session opens the
-            // moment an app is redirected (Q1) — kept out of selectedDeviceIDs.
+            // the Mac's own output, represented by an EMPTY output set. App-route
+            // redirect targets are deliberately NOT unioned in here (T7): a
+            // redirected app streams to its target device through the per-app
+            // capture path (`NativeBackend.updateAppRoutes`), not the whole-system
+            // output set — so this set stays exactly Selected Devices' AirPlay
+            // members. Routing one app must never push the whole system mix to that
+            // device (the original per-app-routing bug).
             let outputs = selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
-            backend.setOutputSet(outputs.union(redirectOutputIDs()))
+            backend.setOutputSet(outputs)
         case .group(let id):
             activateGroup(id: id)
         }
     }
-
-    /// The redirect-target output ids to union into the backend set: the injected
-    /// app-route targets, filtered to devices that exist and are NOT the local Mac
-    /// (defensive — .device(id:) is non-local by construction, but a target may be
-    /// unknown/stale). Never touches selectedDeviceIDs or mainOutMemberIDs.
-    private func redirectOutputIDs() -> Set<String> {
-        appRouteTargets().filter { device($0)?.isLocalDevice == false }
-    }
-
-    /// Re-run routing against the CURRENT Main Out target + Selected set + the
-    /// injected app-route targets. Call after app routes change (redirect set /
-    /// changed / removed) so the redirect-target union is recomputed and the
-    /// affected device connects or leaves the output set (→ .off). Cheap; the
-    /// backend no-ops when the set is unchanged.
-    public func reapplyRouting() { applyRouting() }
 
     // MARK: Group identity — member-set matching (SPEC.md §9 "DEDUP / group identity")
     //
@@ -524,10 +498,10 @@ public final class GroupController {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
         memberState.removeAll()
-        // Union redirect targets so an app-redirect session isn't dropped when
-        // Main Out points at a group (Q1). Redirect ids stay out of the group's
-        // membership + the Main Out master set (Q5).
-        backend.setOutputSet(Set(group.memberIDs).union(redirectOutputIDs()))
+        // Exactly the group's members reach the backend output set. App-route
+        // redirect targets are NOT unioned in (T7) — a redirected app reaches its
+        // device through the per-app capture path, not this whole-system set.
+        backend.setOutputSet(Set(group.memberIDs))
         for memberID in group.memberIDs {
             if let volume = group.memberVolumes[memberID] {
                 backend.setVolume(volume, for: memberID)
@@ -715,14 +689,24 @@ public final class GroupController {
     // speakers actually playing ignored them.
     //
     // THE FIX: on an external system-volume change, mirror the new volume onto
-    // whatever ``mirrorMemberIDs`` names — Main Out's own target plus any per-app
-    // redirect target — so the keys drive whatever is actually playing, not just
-    // what Selected Devices happens to say (a redirect can be streaming to an
-    // AirPlay speaker, muting the Mac, while Selected Devices reports passthrough).
+    // whatever ``mirrorMemberIDs`` names — Main Out's own target — so the keys
+    // drive whatever is actually playing instead of the tap-muted local row.
     //
     // NOT via CGEventTap/media-key interception — that needs an Accessibility grant.
     // The `SystemOutputVolume` listener already exists and already reports only
     // genuinely external changes, which is the whole design.
+    //
+    // T7 NOTE: this mirror does NOT reach per-app redirect targets. It originally
+    // did (`redirectOutputIDs()`, since removed): a redirect used to open its
+    // session via the whole-system output-set union, so the tap-mute problem this
+    // fix addresses applied to a redirected device too. T7 removed that union — a
+    // redirect now streams via its own dedicated per-app capture path
+    // (`NativeBackend.updateAppRoutes`) and never touches the Mac's system output
+    // or this mirror's target set. Each redirected app also already has its own
+    // independent volume control (the Applications card slider, `AppRoute.volume`),
+    // so mapping the Mac's physical volume keys onto it too would be a second,
+    // confusing way to change the same audio's loudness. Decision (Alec,
+    // 2026-07-17): volume keys drive Main Out only.
 
     /// The ratio snapshot an in-flight mirror burst is scaling from, plus the exact
     /// per-member volumes the last mirror write COMMANDED. `nil` when no burst is
@@ -734,41 +718,28 @@ public final class GroupController {
     /// master. The two snapshots answer different questions and get different fields.
     private var mirrorRatios: (ratios: [String: Double], commanded: [String: Int])?
 
-    /// The ids the volume-key mirror actually drives — Main Out's own target PLUS
-    /// any per-app redirect target, always excluding the local Mac.
+    /// The ids the volume-key mirror actually drives — Main Out's own target,
+    /// always excluding the local Mac.
     ///
-    /// Deliberately NOT `mainOutMemberIDs`: that set (and the Main Out master slider
-    /// built on it, incl. ``testMainOutMasterExcludesRedirectOnlyTarget``) represents
-    /// only the Selected Devices/group target (SPEC §9b, Q5) and must keep excluding
-    /// redirect-only devices. But `applyRouting()`/`activateGroup(id:)` union
-    /// `redirectOutputIDs()` into the REAL backend output set (see the MERGE NOTE on
-    /// ``isPassthrough`` above), so a per-app redirect can open an AirPlay session —
-    /// and mute the Mac via the capture tap — even while Selected Devices is empty
-    /// (`isPassthrough == true`). Before this, a volume key in exactly that state hit
-    /// `mirrorSystemVolumeToMainOut`'s old `!isPassthrough` guard and did nothing,
-    /// leaving the redirected device's volume stuck while the Mac played silence
-    /// (ahh, live session 2026-07-17: "if nothing is connected to the audio out and
-    /// I hit the volume buttons, the audio out volume doesn't change").
+    /// Currently identical in composition to `mainOutMemberIDs` (Selected
+    /// Devices/group target only, per-app redirects never included — see the T7
+    /// NOTE above `mirrorSystemVolumeToMainOut`'s comment block for why). Kept as
+    /// its own property rather than reusing `mainOutMemberIDs` directly because the
+    /// two answer conceptually different questions (this one is "what should the
+    /// physical volume keys move right now"), so a future divergence between them
+    /// is a one-line change here, not a call-site hunt.
     ///
-    /// For `.selectedDevices`, the local Mac is filtered out unconditionally (its
-    /// presence there is the normal shape of passthrough, not a reason to block a
-    /// redirect elsewhere) and redirect targets are unioned in. For `.group`, a
-    /// member set that already includes the local Mac is returned AS-IS — the mixed-
-    /// group trap (``testSystemVolumeMirrorRefusesGroupMixingLocalDeviceWithAirPlay``)
-    /// is unrelated to redirects and must still block the whole mirror via the
-    /// local-member guard in ``mirrorSystemVolumeToMainOut(_:)``, not silently drop
-    /// the Mac and mirror to the AirPlay member anyway.
+    /// For `.group`, a member set that already includes the local Mac is returned
+    /// AS-IS — the mixed-group trap
+    /// (``testSystemVolumeMirrorRefusesGroupMixingLocalDeviceWithAirPlay``) is
+    /// handled by the local-member guard in ``mirrorSystemVolumeToMainOut(_:)``,
+    /// not by dropping the Mac here.
     private var mirrorMemberIDs: [String] {
         switch mainOut {
         case .selectedDevices:
-            let nonLocal = selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
-            return Array(Set(nonLocal).union(redirectOutputIDs()))
+            return selectedDeviceIDs.filter { device($0)?.isLocalDevice == false }
         case .group(let id):
-            let members = groups.first { $0.id == id }?.memberIDs ?? []
-            guard !members.contains(where: { device($0)?.isLocalDevice == true }) else {
-                return members
-            }
-            return Array(Set(members).union(redirectOutputIDs()))
+            return groups.first { $0.id == id }?.memberIDs ?? []
         }
     }
 

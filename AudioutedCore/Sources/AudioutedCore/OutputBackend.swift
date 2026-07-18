@@ -62,6 +62,33 @@ public enum BackendEvent: Sendable, Equatable {
     /// - **A real move.** Never emitted when the volume didn't actually change
     ///   (e.g. only mute did).
     case systemVolumeChanged(volume: Int)
+    /// A routed app's process lifecycle changed — it quit (`isRunning == false`)
+    /// or relaunched (`isRunning == true`). Only emitted for apps that currently
+    /// have an active `.device(id:)` route in the backend's last route table;
+    /// non-routed apps' lifecycle events are silently ignored. The UI uses this
+    /// to show or clear an offline indicator on the app's row in the Applications
+    /// card (T4). Only ``NativeBackend`` emits it; `MockBackend` and
+    /// `OwnToneBackend` never do (they have no per-app capture lifecycle).
+    case routedAppRunning(bundleID: String, isRunning: Bool)
+
+    /// The live per-app routing map for one destination device changed (T6):
+    /// `appNames` are the display names of the apps whose audio is currently
+    /// being streamed to `deviceID` through a per-app redirect, derived from the
+    /// mixer's live destination-set → device topology. An empty `appNames` means
+    /// no app routes to that device any more (the mapping cleared). Fires only
+    /// when the mapping for a device actually changes, so a consumer can treat
+    /// each event as the new truth for that one device.
+    ///
+    /// This is purely a UI signal (T9 renders it in `DeviceRowView`'s routing
+    /// sublabel, taking precedence over the intent-based label whenever
+    /// non-empty) and never a `Device` field — a redirect target is deliberately
+    /// NOT `isSelected`/in the Selected Devices set
+    /// (`AudioutedCore/AGENTS.md`), so it can't ride the `deviceUpdated`
+    /// echo. Only ``NativeBackend`` emits it organically; `OwnToneBackend` never
+    /// does (no per-app streaming). `MockBackend` also never emits it on its own,
+    /// but exposes `test_emitRoutedApps(deviceID:appNames:)` so offline
+    /// demos/tests can exercise the UI without a real per-app-routing backend.
+    case routedApps(deviceID: String, appNames: [String])
 }
 
 /// The seam between the app and wherever audio actually goes.
@@ -130,4 +157,66 @@ public protocol LatencyConfigurable: AnyObject {
     /// the re-add pass has completed (per-device failures follow the D4
     /// best-effort rule: marked unavailable, the rest proceed).
     func applyStartBuffer(ms: Int) async
+}
+
+/// The optional per-app routing capability (T6/T7). A backend that can stream a
+/// routed app's audio to its OWN device — independently of the whole-system output
+/// set — adopts this; the app calls ``updateAppRoutes(_:excludedBundleIDs:)``
+/// whenever the app-routing table (or the excluded-apps set) changes.
+///
+/// Deliberately NOT part of ``OutputBackend`` (mirrors ``LatencyConfigurable``):
+/// the base seam stays capability-free. Backends without per-app capture
+/// (`MockBackend`, `OwnToneBackend`) simply don't conform, so
+/// `backend as? AppRouteConfiguring` is nil and the app skips the call — routing an
+/// app is then a no-op on those backends rather than a compile-time requirement.
+public protocol AppRouteConfiguring: AnyObject {
+
+    /// Reconcile per-app capture + engine bindings with the current route table.
+    /// Starts/stops per-app taps, binds engine sessions, and emits `.routedApps`.
+    /// `excludedBundleIDs` is the Settings › Audio denylist, forwarded so the
+    /// whole-system tap keeps excluding both individually-routed and user-excluded
+    /// apps. Must NOT be called while holding any backend-internal lock.
+    func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String>)
+
+    /// Forward an app-quit notification (T8). `bundleID`'s process just
+    /// terminated — if it currently has an active `.device(id:)` route, its
+    /// per-app capture is torn down and it's excluded from the mixer topology
+    /// immediately, without waiting for the persisted route table to change (the
+    /// route itself survives the quit; only the live streaming state reacts). A
+    /// no-op if `bundleID` has no active route. The AppKit layer is the only
+    /// caller (observes `NSWorkspace.didTerminateApplicationNotification`) since
+    /// Core can't observe that notification itself.
+    func handleAppTerminated(bundleID: String)
+
+    /// Forward an app-launch notification (T4). `bundleID`'s process just
+    /// started — if it currently has a persisted `.device(id:)` route, this
+    /// clears the dead-bundle tracking, restarts its per-app capture, and
+    /// republishes the mixer topology so the route becomes live again. A no-op
+    /// if `bundleID` has no active `.device(id:)` route. The AppKit layer is
+    /// the only caller (observes `NSWorkspace.didLaunchApplicationNotification`).
+    /// Default empty body so non-NativeBackend conformers (`MockBackend`,
+    /// `OwnToneBackend`) compile without change — they have no per-app capture.
+    func handleAppLaunched(bundleID: String)
+
+    /// Set the LOCAL playback volume of a `.currentDevice`-routed app (Bug T2):
+    /// an app pinned to "Current Device" is captured and replayed on the Mac's
+    /// built-in speakers as an independent stream, and this levels that stream.
+    /// The popover slider calls it directly for a low-latency response; the same
+    /// value also flows through `updateAppRoutes` from the persisted route edit.
+    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID with no live local
+    /// stream (non-`.currentDevice`, or not yet capturing). Default empty body so
+    /// non-`NativeBackend` conformers compile without change — they have no local
+    /// per-app playback.
+    func setLocalPlaybackVolume(volume: Int, bundleID: String)
+}
+
+extension AppRouteConfiguring {
+    /// Default no-op so backends without per-app capture don't need to implement
+    /// this. Only `NativeBackend` overrides it with real restart logic.
+    public func handleAppLaunched(bundleID: String) {}
+
+    /// Default no-op so backends without local per-app playback don't need to
+    /// implement this. Only `NativeBackend` overrides it (drives
+    /// ``LocalPlaybackControlling``).
+    public func setLocalPlaybackVolume(volume: Int, bundleID: String) {}
 }

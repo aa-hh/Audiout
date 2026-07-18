@@ -124,6 +124,14 @@ public actor AirPlayEngine {
     // A nonisolated mirror of `started` the hot write path can read without an
     // actor hop. Kept in lock-step with `started`.
     private nonisolated let startedFlag = AtomicBool(false)
+    // A nonisolated mirror of `headlessMode` (T2). `write`/`write(streamId:)`
+    // are `nonisolated` so they cannot read the actor-isolated `issueOverride`/
+    // `headlessMode` directly (the pattern `applyVolumeOnDevice`/`liveDeviceState`
+    // use, since those ARE actor-isolated methods) — this atomic is the same
+    // cross-isolation trick as `startedFlag`, letting the hot write path decide
+    // "run inline" vs "hand off to the engine thread" without an actor hop.
+    // Kept in lock-step with `headlessMode`.
+    private nonisolated let headlessFlag = AtomicBool(false)
 
     // Retained C strings handed to conffile (not copied by the C side).
     private var clientNameC: UnsafeMutablePointer<CChar>?
@@ -365,6 +373,7 @@ public actor AirPlayEngine {
         // path from the 2026-07-17 toggle-spam session is exactly this teardown.
         if headlessMode {
             headlessMode = false
+            headlessFlag.store(false)
             issueOverride = nil
             startedFlag.store(false)
             stateReconcileTask?.cancel()
@@ -533,7 +542,31 @@ public actor AirPlayEngine {
     /// state to a thrown error.
     ///
     /// This is the primitive a future `NativeBackend.addOutput` builds on.
+    ///
+    /// Equivalent to `addOutput(id, streamId: 0)` — the legacy single-stream
+    /// path, unchanged.
     public func addOutput(_ id: OutputID) async throws {
+        try await addOutput(id, streamId: 0)
+    }
+
+    /// Begin streaming to `id`, bound to `streamId` (T2, per-app multi-stream
+    /// routing). Same op as `addOutput(_:)`, but first writes `streamId` onto
+    /// the C `output_device.stream_id` field the vendored `session_make` reads
+    /// when it creates this device's session (`session->stream_id =
+    /// device->stream_id`, T1) — which is what determines which independent
+    /// master session (and therefore which content stream, via
+    /// `master_session_make`'s `(stream_id, quality, use_ptp)` cache key) this
+    /// device's RTP timeline joins. See `docs/VENDORED-DIFFS.md` Entry 2.
+    ///
+    /// The stream_id write happens BEFORE `device_start` is issued — it MUST
+    /// land before `session_make` runs, same ordering constraint `setVolume`
+    /// has for `device->volume`. Devices already streaming/connected take the
+    /// existing idempotency no-op path (below) and do NOT get re-bound to a
+    /// new `streamId` — the session already exists; moving a live device to a
+    /// different stream requires `removeOutput` then `addOutput(_:streamId:)`
+    /// again (rebinding a live session is out of scope here; T6's job if
+    /// needed).
+    public func addOutput(_ id: OutputID, streamId: UInt32) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
@@ -561,6 +594,10 @@ public actor AirPlayEngine {
             return
         default: break
         }
+
+        // T2: bind BEFORE issuing device_start (session_make reads
+        // device->stream_id at session-creation time; see the doc comment above).
+        await applyStreamIdOnDevice(id: id, streamId: streamId)
 
         let terminal = try await startOp(id: id) { device, cbId in
             guard let startFn = output_airplay.device_start else { return -1 }
@@ -609,6 +646,26 @@ public actor AirPlayEngine {
             // .stopped.
             guard Self.stopSessionIsLive(device) else { return 0 }
             guard let stopFn = output_airplay.device_stop else { return -1 }
+            // CRASH GUARD (T5, EXC_BAD_ACCESS SIGSEGV at airplay.c:4271). The
+            // idempotency check above reads device->state, but state and
+            // device->session can disagree for a window: when a device
+            // disappears mid-flight (e.g. a per-app route is torn down while
+            // this removeOutput is in progress) session_cleanup zeroes
+            // device->session while device->state may still read
+            // STREAMING/CONNECTED. `airplay_device_stop` unconditionally does
+            // `session = device->session; session->callback_id = …` — a NULL
+            // session there dereferences offset 0x8 and crashes the engine
+            // thread. A NULL session means there is nothing left to stop, so
+            // short-circuit: returning <= 0 makes startOp resolve the op as
+            // `.stopped` via its N<=0 contract (no completion promised), exactly
+            // the terminal a completed stop would report. This guard runs on the
+            // engine thread — the same thread session_cleanup runs on — so it is
+            // atomic with respect to the teardown that nulls the session (a check
+            // back in removeOutput, on the actor, could still race). This is
+            // deliberately NOT applied to addOutput/device_start: `session_make`
+            // CREATES the session, so device->session is legitimately NULL before
+            // a start and guarding it there would break every connect.
+            guard device.pointee.session != nil else { return 0 }
             return stopFn(device, cbId)
         }
         knownOutputs[id] = terminal
@@ -685,6 +742,18 @@ public actor AirPlayEngine {
         if issueOverride != nil { apply() } else { await engineThread.run(apply) }
     }
 
+    /// Set the C device's `stream_id` field (T2, per-app multi-stream routing).
+    /// Mirrors `applyVolumeOnDevice`'s dispatch: engine thread in production,
+    /// inline in headless test mode. MUST run before `device_start` is issued —
+    /// see `addOutput(_:streamId:)`.
+    private func applyStreamIdOnDevice(id: OutputID, streamId: UInt32) async {
+        let apply: () -> Void = {
+            guard let device = outputs_device_get(id.rawValue) else { return }
+            device.pointee.stream_id = streamId
+        }
+        if issueOverride != nil { apply() } else { await engineThread.run(apply) }
+    }
+
     /// The LIVE state of the vendored C `output_device` for `id` — read straight
     /// off `device->state`, which `outputs_cb` keeps current (including the
     /// out-of-band `outputs_cb(-1,…)` FAILED after a receiver drops RTSP). This is
@@ -703,35 +772,94 @@ public actor AirPlayEngine {
     }
 
     /// Feed one buffer of interleaved S16LE PCM (44100/16/2) to all active
-    /// sessions. The bytes are copied onto the engine thread and handed to
-    /// `output_airplay.write` there (R-B: write MUST run on the engine thread).
-    /// Fire-and-forget (the hot path): does not await.
+    /// sessions on the legacy single stream (`stream_id = 0`). Exactly
+    /// `write(pcm: pcm, streamId: 0, pts: pts)` — kept as its own overload so
+    /// every pre-T2 caller keeps compiling and behaving identically.
     ///
     /// `pts` is the presentation timestamp for the first sample; pass the
     /// capture clock's timestamp for A/V sync.
     ///
     /// `nonisolated` on purpose: the hot audio path must not hop the actor
-    /// executor per frame. It copies the Data and hands the bytes to the
-    /// (thread-safe) engine thread, which is where the actual C `airplay_write`
-    /// runs (R-B). It reads `started` unsynchronized — a benign race at teardown
-    /// (a late frame is simply enqueued onto a stopping loop and dropped).
+    /// executor per frame. See `write(pcm:streamId:pts:)` for the full
+    /// R-B/engine-thread contract.
     public nonisolated func write(pcm: Data, pts: timespec) {
-        guard startedFlag.load() else { return }
-        // Copy out of the Data (which may be reclaimed) into a C buffer the
-        // engine thread owns for the duration of the write.
-        let byteCount = pcm.count
-        guard byteCount > 0 else { return }
-        let cbuf = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
-        pcm.copyBytes(to: cbuf, count: byteCount)
+        write(pcm: pcm, streamId: 0, pts: pts)
+    }
 
-        let samples = byteCount / (PCMFormat.airplay.channels * PCMFormat.airplay.bitsPerSample / 8)
+    /// Feed one buffer of interleaved S16LE PCM (44100/16/2) tagged with
+    /// `streamId` — the per-app multi-stream routing primitive (T2). Devices
+    /// bound to the same `streamId` (`addOutput(_:streamId:)`) share the
+    /// master session that carries this content; devices on a different
+    /// `streamId` never see it — that guard is `airplay_write`'s
+    /// `obuf->data[i].stream_id == ams->stream_id` check (T1,
+    /// `docs/VENDORED-DIFFS.md` Entry 2). `streamId = 0` is the legacy single
+    /// stream and is exactly what `write(pcm:pts:)` uses.
+    ///
+    /// Equivalent to `write(streams: [(pcm, streamId)], pts: pts)` — see that
+    /// overload for the engine-thread/R-B contract and for feeding several
+    /// simultaneous streams phase-aligned in one call (T5's mixer / T6's
+    /// backend coordination).
+    public nonisolated func write(pcm: Data, streamId: UInt32, pts: timespec) {
+        write(streams: [(pcm: pcm, streamId: streamId)], pts: pts)
+    }
+
+    /// Feed up to `Self.maxSimultaneousStreams` PCM buffers in ONE call, each
+    /// tagged with its own `streamId`, sharing a single `output_buffer`/`pts`
+    /// (T2). Prefer this over N separate `write(pcm:streamId:pts:)` calls when
+    /// several streams are ready in the same tick — the vendored fan-out
+    /// (`airplay_write`) processes one shared `pts` per call, so batching keeps
+    /// simultaneous streams phase-aligned instead of letting N independently
+    /// enqueued closures race onto the engine thread with drifting timestamps.
+    /// This is the primitive a future mixer (T5) and `NativeBackend` router
+    /// (T6) build on.
+    ///
+    /// The bytes are copied and handed to the engine thread, which is where the
+    /// actual C `airplay_write` runs (R-B: every C entry point goes through
+    /// `EngineThread`, never called raw). Fire-and-forget: does not await.
+    /// Entries beyond `Self.maxSimultaneousStreams` and empty buffers are
+    /// silently dropped (hot path — no error channel).
+    ///
+    /// `nonisolated` on purpose: the hot audio path must not hop the actor
+    /// executor per frame. It copies each `Data` and hands the bytes to the
+    /// (thread-safe) engine thread. Reads `startedFlag`/`headlessFlag`
+    /// unsynchronized-vs-actor-state (same benign-race rationale as the
+    /// original single-stream `write`): a late frame after teardown is simply
+    /// enqueued onto a stopping loop (or, in headless mode, run inline) and
+    /// dropped/no-op'd.
+    public nonisolated func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
+        guard startedFlag.load() else { return }
+        let entries = streams.prefix(Self.maxSimultaneousStreams).filter { !$0.pcm.isEmpty }
+        guard !entries.isEmpty else { return }
+
+        // Copy each buffer out of its `Data` (which may be reclaimed) into a C
+        // buffer the engine thread owns for the duration of the write.
+        struct PreparedEntry {
+            let cbuf: UnsafeMutablePointer<UInt8>
+            let byteCount: Int
+            let samples: Int
+            let streamId: UInt32
+        }
+        let bytesPerSample = PCMFormat.airplay.channels * PCMFormat.airplay.bitsPerSample / 8
+        let prepared: [PreparedEntry] = entries.map { entry in
+            let byteCount = entry.pcm.count
+            let cbuf = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
+            entry.pcm.copyBytes(to: cbuf, count: byteCount)
+            return PreparedEntry(
+                cbuf: cbuf,
+                byteCount: byteCount,
+                samples: byteCount / bytesPerSample,
+                streamId: entry.streamId
+            )
+        }
 
         // T-ENG-CADENCE-1: record this write's audio-time contribution against
-        // the wall clock BEFORE handing off to the engine thread. Allocation-
-        // free (fixed-size struct, lock already held by the tracker's own
-        // NSLock — no closures/collections created here) and never gates the
-        // write below; `record` only accumulates counters.
-        cadence.record(samples: samples, sampleRate: PCMFormat.airplay.sampleRate)
+        // the wall clock BEFORE handing off to the engine thread. Keyed off the
+        // FIRST entry — the cadence tracker models one write-rate stream; a
+        // future task can split per-stream cadence if simultaneous streams stop
+        // sharing a nominal rate. Allocation-free, never gates the write below.
+        if let first = prepared.first {
+            cadence.record(samples: first.samples, sampleRate: PCMFormat.airplay.sampleRate)
+        }
         // Latency budget probe (env-gated, diagnostic only): how stale is the
         // pts the producer stamped, measured on the pts's own CLOCK_MONOTONIC
         // domain? Seconds here would mean upstream capture queuing/aggregation;
@@ -744,25 +872,59 @@ public actor AirPlayEngine {
             bit_rate: 0
         )
 
-        engineThread.enqueue {
-            defer { cbuf.deallocate() }
+        let body: () -> Void = {
+            defer { prepared.forEach { $0.cbuf.deallocate() } }
             guard let writeFn = output_airplay.write else { return }
 
             // Build a stack output_buffer. data[0] is the original (untranscoded)
-            // PCM per outputs.h; the session's own ALAC encoder converts it.
+            // PCM per outputs.h; each session's own ALAC encoder converts it.
+            // The C array backing `data` is a tuple in Swift, but it's laid out
+            // contiguously identically to the C array, so pointer arithmetic off
+            // `&obuf.data.0` reaches data[1], data[2], etc. — the same trick the
+            // single-entry path already relied on (index 0 with an implicit
+            // zero-terminator at index 1).
             var obuf = output_buffer()
             obuf.pts = pts
-            withUnsafeMutablePointer(to: &obuf.data.0) { d0 in
-                d0.pointee.quality = quality
-                d0.pointee.buffer = cbuf
-                d0.pointee.bufsize = byteCount
-                d0.pointee.samples = Int32(samples)
-                d0.pointee.evbuf = nil
+            withUnsafeMutablePointer(to: &obuf.data.0) { base in
+                for (i, entry) in prepared.enumerated() {
+                    let d = base + i
+                    d.pointee.quality = quality
+                    d.pointee.buffer = entry.cbuf
+                    d.pointee.bufsize = entry.byteCount
+                    d.pointee.samples = Int32(entry.samples)
+                    d.pointee.evbuf = nil
+                    d.pointee.stream_id = entry.streamId
+                }
             }
-            // data[1].buffer stays NULL: airplay_write loops `for (i; obuf->data[i].buffer; i++)`.
+            // The slot right after the last real entry stays zeroed (buffer ==
+            // NULL): airplay_write loops `for (i; obuf->data[i].buffer; i++)`.
             writeFn(&obuf)
         }
+
+        // Headless test mode never starts the engine thread (`enterHeadlessTestMode`
+        // doc), so `engineThread.enqueue` would silently no-op (its own `guard let
+        // base else { return }`) and no test could observe the C fan-out. Mirror
+        // the inline-vs-engine-thread split every other op uses
+        // (`applyVolumeOnDevice`/`liveDeviceState`/`startOp`) via the nonisolated
+        // `headlessFlag` mirror, since this method is `nonisolated` and can't read
+        // the actor-isolated `issueOverride` directly. Production (headlessFlag
+        // == false) is byte-for-byte the prior dispatch: always `engineThread.enqueue`.
+        if headlessFlag.load() {
+            body()
+        } else {
+            engineThread.enqueue(body)
+        }
     }
+
+    /// Max simultaneous `output_data` entries one `write(streams:pts:)` call
+    /// can carry. Derived from the shim's fixed `output_buffer.data` array
+    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` (5) `+ 2` in `shims/outputs.h`: one
+    /// slot for the original untranscoded blob the array was originally sized
+    /// for, one always-zero terminator) minus 1 further reserved slot so a
+    /// zero terminator (`buffer == NULL`) always remains immediately after the
+    /// last real entry — `airplay_write` loops `for (i; obuf->data[i].buffer;
+    /// i++)` and never sees a `bufsize`/count, only the NULL sentinel.
+    static let maxSimultaneousStreams = 6
 
     // MARK: - Write-cadence diagnostics (T-ENG-CADENCE-1)
 
@@ -914,6 +1076,7 @@ public actor AirPlayEngine {
         issueOverride = issue
         self.opTimeout = opTimeout
         headlessMode = true
+        headlessFlag.store(true)
         completions.install() // wire the C completion hook (start() isn't called)
         stateHub.install()    // wire the C device-state hook (T-ENG-STATESTREAM-1)
         // So the hot `write(pcm:pts:)` path's started-guard passes in headless

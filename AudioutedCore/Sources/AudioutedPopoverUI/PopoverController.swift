@@ -132,6 +132,27 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private var groupController: GroupController?
     private var devicesByID: [String: Device] = [:]
 
+    /// Live per-device "which apps are actually streaming here now" map (T9),
+    /// keyed by device id — driven entirely by `BackendEvent.routedApps` via
+    /// ``applyRoutedApps(deviceID:appNames:)``. This is the CONFIRMED signal
+    /// (T6/T8: only apps whose per-app capture is actually alive), distinct
+    /// from `AppRoutingController.routedAppNames(for:)` which reflects routing
+    /// INTENT (what's configured) regardless of whether it's live. A device
+    /// with no entry here has nothing confirmed streaming to it — either
+    /// because it was never a redirect target, or because a route exists but
+    /// hasn't started producing audio yet (e.g. still connecting). See
+    /// `DeviceRowView.apply`'s `liveAppNames` doc for the precedence rule this
+    /// feeds into.
+    private var liveRoutedAppNames: [String: [String]] = [:]
+
+    /// Bundle IDs of routed apps whose process is currently NOT running (T4).
+    /// Populated by `BackendEvent.routedAppRunning(isRunning: false)` and
+    /// cleared by `isRunning: true`. An app row with its bundle ID in this set
+    /// renders an offline indicator so the user knows the redirect is saved but
+    /// inactive. The row stays interactive — the user can still change the
+    /// route destination while the app is offline.
+    private var offlineBundleIDs: Set<String> = []
+
     /// Backs the Applications card's collapse default (PLAN §B decision:
     /// "Applications expanded iff ≥1 app is redirected" — T-5). Injected with a
     /// default so every existing call site (AppDelegate, popover-harness,
@@ -174,6 +195,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Called when the user taps the header's Settings button (task A). The app
     /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
+
+    /// Called when an Applications-card slider moves, so the app can push the new
+    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
+    /// for a low-latency response, in ADDITION to the persisted
+    /// `AppRoutingController.setVolume` edit. The app wires this to
+    /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
+    /// unconditionally (for every route kind): the backend no-ops it for a bundle
+    /// ID with no live local stream, so the popover needs no destination knowledge.
+    public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
     /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
     /// captured")? An excluded app is un-routable — dropped from the "+ Add
@@ -251,11 +281,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private var lastValidDestinationIDs: Set<String>?
 
     /// The sentinel destination id the Applications card's "Current Device" entry
-    /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device
-    /// (decision 8 — "current device" == "no redirect"), but `AppRowView` works in
-    /// plain string ids; this sentinel bridges the two and is chosen so it can
-    /// never collide with a real `Device.id`.
+    /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device,
+    /// but `AppRowView` works in plain string ids; this sentinel bridges the two
+    /// and is chosen so it can never collide with a real `Device.id`.
     static let currentDeviceDestinationID = "\u{0000}current-device"
+
+    /// The sentinel destination id the Applications card's standalone "No
+    /// Redirect" entry carries — the new default/neutral state for a newly-added
+    /// app (`AppRouteDestination.noRedirect`), distinct from the now-explicit
+    /// "Current Device" pick. Chosen so it can never collide with a real
+    /// `Device.id` or with `currentDeviceDestinationID`.
+    static let noRedirectDestinationID = "\u{0000}no-redirect"
 
     /// The SF Symbol shown for a routed app that isn't currently running (its icon
     /// can't be resolved) — routes persist across app quits (T-8, PLAN §C). A
@@ -312,6 +348,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (defensive under a group target) and repaints mounted rows in place.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        // Drop any live-streaming entry (T9) for a device that vanished from the
+        // snapshot entirely. Defensive: a normal route-change already clears the
+        // entry itself (a redirect leaving X emits `.routedApps(X, [])`), but a
+        // device that drops off the network without a route-table change first
+        // (e.g. no app was ever routed to it) should never let a stale confirmed
+        // name resurface if the same device id reappears later.
+        liveRoutedAppNames = liveRoutedAppNames.filter { devicesByID[$0.key] != nil }
         handleConnectionTransitions(devices)
         groupController?.syncActiveGroupToSelection()
 
@@ -353,6 +396,48 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             }
         } else {
             rebuild()
+        }
+    }
+
+    /// Store the latest CONFIRMED per-device streaming map (T9,
+    /// `BackendEvent.routedApps`) and let it feed the next repaint. Called by
+    /// the host (`AppDelegate`) directly — unlike `Device` fields this signal
+    /// has no home on `Device` (a redirect target is deliberately not
+    /// `isSelected`, `AudioutedCore/AGENTS.md`), so it can't ride
+    /// `update(devices:)`'s snapshot and gets its own entry point instead. An
+    /// empty `appNames` clears the mapping for `deviceID` (the live set went
+    /// back to empty — connecting, stopped, or the route was removed), which
+    /// drops the row back to the intent-based label rather than showing a
+    /// stale confirmed app. Doesn't repaint itself — callers already fall
+    /// through to the shared `update(devices:)` repaint tail, same as every
+    /// other `BackendEvent` case (see `AppDelegate.apply(_:)`); tests/harness
+    /// code calling this directly should follow with `update(devices:)` or rely
+    /// on the next natural repaint.
+    public func applyRoutedApps(deviceID: String, appNames: [String]) {
+        if appNames.isEmpty {
+            liveRoutedAppNames.removeValue(forKey: deviceID)
+        } else {
+            liveRoutedAppNames[deviceID] = appNames
+        }
+    }
+
+    /// Record a routed-app process-lifecycle change (T4, `BackendEvent.routedAppRunning`).
+    /// Called by the host (`AppDelegate`) directly — the signal has no home on
+    /// `Device` and can't ride `update(devices:)`. Stores the offline state and
+    /// triggers a rebuild so the app row's indicator refreshes. If the popover is
+    /// not currently shown, the rebuild is deferred to the next `update(devices:)`
+    /// via the standard `rebuild()` path that always runs off device events.
+    public func applyRoutedAppRunning(bundleID: String, isRunning: Bool) {
+        if isRunning {
+            offlineBundleIDs.remove(bundleID)
+        } else {
+            offlineBundleIDs.insert(bundleID)
+        }
+        // Rebuild in place (not a reopen) so this open's transient collapse state
+        // is preserved — same discipline as `applyRoutedApps`.
+        if popover.isShown {
+            rebuild()
+            panel.panelContentDidChangeHeight(animated: false)
         }
     }
 
@@ -421,6 +506,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         diagnosisPanelsByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
+
+        // Prune offline tracking for apps that no longer have a route (T4).
+        // A de-routed app can never come back as "online" via `handleAppLaunched`
+        // (which only acts on routed bundle IDs), so any stale entry here is
+        // dead weight and should not bleed onto a future route for the same id.
+        let currentRouteIDs = Set(appRouting.appRoutes.map(\.bundleID))
+        offlineBundleIDs = offlineBundleIDs.intersection(currentRouteIDs)
 
         let allDevices = orderedDevices()
 
@@ -535,7 +627,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// least one app is currently redirected. Exposed so the later task that
     /// wires the card (T-8) only needs to call `collapsedState(for:
     /// Self.applicationsCardTitle, default: !applicationsDefaultExpanded)`.
-    private var applicationsDefaultExpanded: Bool { appRouting.routedAppCount > 0 }
+    private var applicationsDefaultExpanded: Bool {
+        appRouting.appRoutes.contains { $0.destination != .noRedirect }
+    }
 
     /// Chevron/title click handler for a card (T-4 affordance): flips the
     /// TRANSIENT collapse state (never the default) and drives the panel's own
@@ -593,7 +687,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else {
             // No controller ⇒ nothing routable ⇒ not controllable.
             row.apply(device, selected: false, controllable: false,
-                      routedAppNames: appRouting.routedAppNames(for: device.id))
+                      routedAppNames: appRouting.routedAppNames(for: device.id),
+                      liveAppNames: liveRoutedAppNames[device.id] ?? [])
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -604,7 +699,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
                   blocked: blocked,
                   blockReason: blocked ? GroupController.localMixRefusalReason : nil,
-                  routedAppNames: appRouting.routedAppNames(for: device.id))
+                  routedAppNames: appRouting.routedAppNames(for: device.id),
+                  liveAppNames: liveRoutedAppNames[device.id] ?? [])
     }
 
     private func refreshDeviceRows() {
@@ -755,11 +851,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Applications card rows (T-8, PLAN §C decisions 3/4/6/8)
 
     /// Build one `AppRowView` for `route` against the discovered device `devices`.
-    /// The destination popup mirrors `refreshMainOutRow`'s split — a single
-    /// "Current Device" entry (local, decision 8 — "no redirect") first, then the
-    /// available (present + reachable) non-local AirPlay devices. The selected id
-    /// is derived from `route.destination`, and the slider dims while local
-    /// (decision 3, driven inside `AppRowView` by the selected entry's `isLocal`).
+    /// The destination popup leads with the standalone "No Redirect" entry (the
+    /// new default/neutral state), then mirrors `refreshMainOutRow`'s split — a
+    /// "Current Device" entry (local, now an explicit pick) then the available
+    /// (present + reachable) non-local AirPlay devices. The selected id is
+    /// derived from `route.destination`, and the slider dims while local
+    /// (decision 3, driven inside `AppRowView` by the selected entry's `isLocal`
+    /// — true for both "No Redirect" and "Current Device").
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
         let row = AppRowView()
         row.delegate = self
@@ -769,18 +867,25 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             icon: appIcon(for: route.bundleID),
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
-            destinations: appDestinations(devices: devices)),
+            destinations: appDestinations(devices: devices),
+            isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
     }
 
-    /// The destination entries for the Applications popup, in display order: the
-    /// single "Current Device" entry (decision 8) first, then every AVAILABLE
-    /// non-local device (`availableAirPlayDestinations`). Plain values only —
-    /// `AppRowView` is isolated from Core's `AppRoute` (T-6).
+    /// The destination entries for the Applications popup, in display order:
+    /// the standalone "No Redirect" entry (the default/neutral state) first,
+    /// then the "Current Device" entry (decision 8, now an explicit pick),
+    /// then every AVAILABLE non-local device (`availableAirPlayDestinations`).
+    /// Plain values only — `AppRowView` is isolated from Core's `AppRoute` (T-6).
     private func appDestinations(devices: [Device]) -> [AppRowView.Destination] {
         var entries: [AppRowView.Destination] = [
+            .init(id: Self.noRedirectDestinationID,
+                  title: "No Redirect",
+                  isLocal: true,
+                  symbolName: nil,
+                  isStandalone: true),
             .init(id: Self.currentDeviceDestinationID,
                   title: currentDeviceTitle(devices: devices),
                   isLocal: true,
@@ -809,18 +914,22 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     /// Map an `AppRoute.destination` onto the plain-string id `AppRowView` selects
-    /// by: the sentinel for `.currentDevice`, or the device id for `.device(id:)`.
+    /// by: one of the two local sentinels for `.noRedirect`/`.currentDevice`, or
+    /// the device id for `.device(id:)`.
     private func destinationID(for destination: AppRouteDestination) -> String {
         switch destination {
+        case .noRedirect:          return Self.noRedirectDestinationID
         case .currentDevice:       return Self.currentDeviceDestinationID
         case .device(let id):      return id
         }
     }
 
-    /// Inverse of `destinationID(for:)`: the sentinel maps back to `.currentDevice`,
-    /// any other id to `.device(id:)`.
+    /// Inverse of `destinationID(for:)`: either sentinel maps back to its own
+    /// local case, any other id to `.device(id:)`.
     private func destination(forID id: String) -> AppRouteDestination {
-        id == Self.currentDeviceDestinationID ? .currentDevice : .device(id: id)
+        if id == Self.noRedirectDestinationID { return .noRedirect }
+        if id == Self.currentDeviceDestinationID { return .currentDevice }
+        return .device(id: id)
     }
 
     /// Resolve a routed app's icon lazily (T-8): the live `NSRunningApplication`'s
@@ -893,9 +1002,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         return runningAppsProvider().filter { !routed.contains($0.bundleID) && !isAppExcluded($0.bundleID) }
     }
 
-    /// Add a route for `bundleID`/`displayName` (defaults to `.currentDevice` —
-    /// PLAN decision 8, "no redirect") and rebuild, preserving this open's
-    /// transient collapse state (a plain `rebuild()`, not `rebuildForOpen()`).
+    /// Add a route for `bundleID`/`displayName` (defaults to `.noRedirect` —
+    /// the new neutral/unset state for a newly-added app) and rebuild,
+    /// preserving this open's transient collapse state (a plain `rebuild()`,
+    /// not `rebuildForOpen()`).
     private func pickApp(bundleID: String, displayName: String) {
         appRouting.addRoute(bundleID: bundleID, displayName: displayName)
         rebuild()
@@ -1304,8 +1414,12 @@ extension PopoverController: MainOutRowView.Delegate {
 extension PopoverController: AppRowView.Delegate {
 
     public func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
+        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
+        // to the mixer/engine — no rebuild needed here; a rebuild would replace
+        // the AppRowView mid-drag and break the NSSlider tracking loop.
+        onSetLocalPlaybackVolume?(volume, appID)
         appRouting.setVolume(volume, for: appID)
-        rebuild()
     }
 
     public func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String) {
@@ -1397,5 +1511,15 @@ extension PopoverController: AppRowView.Delegate {
     public func test_deselectApp() {
         selectedAppBundleID = nil
         rebuild()
+    }
+
+    /// The set of bundle IDs currently tracked as offline (T4). Lets tests assert
+    /// that `applyRoutedAppRunning` updated the tracking set correctly.
+    public var test_offlineBundleIDs: Set<String> { offlineBundleIDs }
+
+    /// Whether `bundleID`'s row is currently showing the offline badge (T4).
+    /// `nil` if no such row exists in the Applications card.
+    public func test_isAppRowOffline(bundleID: String) -> Bool? {
+        appRowsByBundleID[bundleID]?.test_isOfflineBadgeVisible
     }
 }

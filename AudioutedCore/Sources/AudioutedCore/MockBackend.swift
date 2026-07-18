@@ -226,6 +226,21 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         }
     }
 
+    // MARK: T9 offline fixture — live per-app routing indicator
+
+    /// Fire a `.routedApps` event as if a per-app redirect just went live (or
+    /// cleared, if `appNames` is empty). `MockBackend` has no real per-app
+    /// capture/streaming of its own — only `NativeBackend` (`AppRouteConfiguring`)
+    /// emits `.routedApps` organically — so this is purely a scripted fixture:
+    /// it lets `popover-harness`/`popover-snapshot`/tests demonstrate T9's
+    /// confirmed-streaming device-row indicator offline, without a real
+    /// per-app-routing backend. Fire-and-forget, matching every other mock
+    /// mutation (`test_` prefix marks it as a fixture hook, not a real
+    /// capability).
+    public func test_emitRoutedApps(deviceID: String, appNames: [String]) {
+        queue.async { self.emit(.routedApps(deviceID: deviceID, appNames: appNames)) }
+    }
+
     // MARK: Scripted connect choreography (all run on `queue`)
 
     /// Remove a device from the expected-selected set. Sticky-failed (§1):

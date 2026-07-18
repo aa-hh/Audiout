@@ -229,6 +229,14 @@ struct airplay_master_session
   struct media_quality quality;
   bool use_ptp;
 
+  // [AirPlayEngine vendored change 2026-07-17] Per-app multi-stream routing
+  // (P2b). Identity of the independent content stream this master session
+  // carries. master_session_make keys the session cache on
+  // (stream_id, quality, use_ptp), so distinct stream_ids never share a master
+  // session (one RTP timeline / encoder / input buffer per stream). Default 0 =
+  // the single legacy stream, so the pre-P2b single-stream path is unchanged.
+  uint32_t stream_id;
+
   // Number of samples that we tell the output to buffer (this will mean that
   // the position that we send in the sync packages are offset by this amount
   // compared to the rtptimes of the corresponding RTP packages we are sending)
@@ -241,6 +249,11 @@ struct airplay_session
 {
   uint64_t device_id;
   int callback_id;
+
+  // [AirPlayEngine vendored change 2026-07-17] Per-app multi-stream routing
+  // (P2b). The content stream this device connection is routed to; used to bind
+  // the session to the matching master session in session_make. Default 0.
+  uint32_t stream_id;
 
   struct airplay_master_session *master_session;
 
@@ -1144,8 +1157,14 @@ master_session_cleanup(struct airplay_master_session *ams)
   master_session_free(ams);
 }
 
+// [AirPlayEngine vendored change 2026-07-17] Per-app multi-stream routing (P2b):
+// added the leading `stream_id` parameter and keyed the session-reuse cache on
+// (stream_id, quality, use_ptp) instead of (quality, use_ptp). This is what lets
+// N independent-content streams coexist: two devices routed to different streams
+// get DIFFERENT master sessions even at the same quality, so their RTP timelines /
+// encoders / input buffers never collide. stream_id 0 = the legacy single stream.
 static struct airplay_master_session *
-master_session_make(struct media_quality *quality, bool use_ptp)
+master_session_make(uint32_t stream_id, struct media_quality *quality, bool use_ptp)
 {
   struct airplay_master_session *ams;
   uint64_t buffer_duration_ms;
@@ -1156,7 +1175,7 @@ master_session_make(struct media_quality *quality, bool use_ptp)
   // First check if we already have a suitable session
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
-      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp)
+      if (ams->stream_id == stream_id && quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp)
 	return ams;
     }
 
@@ -1202,6 +1221,9 @@ master_session_make(struct media_quality *quality, bool use_ptp)
 
   ams->quality = *quality;
   ams->use_ptp = use_ptp;
+  // [AirPlayEngine vendored change 2026-07-17] P2b: record the stream this master
+  // session serves so the reuse cache above and airplay_write's fan-out can match it.
+  ams->stream_id = stream_id;
   ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
   ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
   ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_AUDIO_LATENCY_MS) * quality->sample_rate / 1000;
@@ -1218,6 +1240,61 @@ master_session_make(struct media_quality *quality, bool use_ptp)
  error:
   master_session_free(ams);
   return NULL;
+}
+
+// [AirPlayEngine vendored change 2026-07-17] P2b TEST/DIAGNOSTIC SEAM.
+// master_session_make() and the airplay_master_sessions list are static, so the
+// headless multi-stream unit test cannot otherwise observe master-session
+// identity. These thin non-static accessors expose exactly that, calling the
+// SAME master_session_make the production session_make uses (so the test
+// exercises the real (stream_id, quality, use_ptp) keying, not a reimplementation).
+// None of these are reachable from any shipping code path — they exist purely to
+// let AirPlayEngineTests assert that distinct stream_ids get distinct master
+// sessions. Prototypes in shims/engine_bridge.h.
+void *
+airplay_test_master_session_make(uint32_t stream_id, struct media_quality *quality, bool use_ptp)
+{
+  return master_session_make(stream_id, quality, use_ptp);
+}
+
+uint32_t
+airplay_test_master_session_stream_id(const void *ams)
+{
+  return ((const struct airplay_master_session *)ams)->stream_id;
+}
+
+// [AirPlayEngine vendored change 2026-07-17] P2b/T2 addition to the same test
+// seam: exposes the sample count `airplay_write`'s fan-out has accumulated
+// into this master session's (otherwise-static/opaque) input_buffer. Lets a
+// headless Swift-layer test prove NO CROSS-TALK end-to-end — that feeding
+// distinct stream_ids through the real `AirPlayEngine.write` API only grows
+// the input_buffer of the master session whose stream_id matches, never the
+// other — complementing the C-level master-session-identity test above.
+uint32_t
+airplay_test_master_session_input_buffer_samples(const void *ams)
+{
+  return ((const struct airplay_master_session *)ams)->input_buffer_samples;
+}
+
+int
+airplay_test_master_session_count(void)
+{
+  int n = 0;
+  struct airplay_master_session *ams;
+
+  for (ams = airplay_master_sessions; ams; ams = ams->next)
+    n++;
+
+  return n;
+}
+
+void
+airplay_test_master_sessions_reset(void)
+{
+  // In the test rig no airplay_session references these, so master_session_cleanup
+  // unlinks and frees each current head until the list is empty.
+  while (airplay_master_sessions)
+    master_session_cleanup(airplay_master_sessions);
 }
 
 static void
@@ -1604,6 +1681,10 @@ session_make(struct output_device *device, int callback_id)
   session->device_id = device->id;
   session->callback_id = callback_id;
 
+  // [AirPlayEngine vendored change 2026-07-17] P2b: carry the device's routed
+  // stream onto the session so it binds to the matching master session below.
+  session->stream_id = device->stream_id;
+
   session->server_fd = -1;
 
   session->password = device->password;
@@ -1624,7 +1705,9 @@ session_make(struct output_device *device, int callback_id)
 	goto error;
     }
 
-  session->master_session = master_session_make(&device->quality, extra->use_ptp);
+  // [AirPlayEngine vendored change 2026-07-17] P2b: bind to the master session for
+  // this device's routed stream (was keyed on quality+use_ptp only).
+  session->master_session = master_session_make(session->stream_id, &device->quality, extra->use_ptp);
   if (!session->master_session)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
@@ -2094,6 +2177,13 @@ packets_send(struct airplay_master_session *ams)
 
   for (session = airplay_sessions; session; session = session->next)
     {
+      // [AirPlayEngine vendored change 2026-07-17] P2b fan-out audit: this loop
+      // matches on master_session POINTER identity, which is strictly stronger
+      // than a stream_id compare — a session bound to `ams` necessarily carries
+      // `ams->stream_id` (session_make binds via master_session_make on the same
+      // stream_id). So this send site is already stream-safe with no change; the
+      // stream_id discriminator only had to be added where matching was by
+      // quality (airplay_write) rather than by pointer.
       if (session->master_session != ams)
 	continue;
 
@@ -2171,6 +2261,10 @@ packets_sync_send(struct airplay_master_session *ams)
 
   for (session = airplay_sessions; session; session = session->next)
     {
+      // [AirPlayEngine vendored change 2026-07-17] P2b fan-out audit: as in
+      // packets_send, master_session pointer identity already isolates streams
+      // (a session bound to `ams` carries `ams->stream_id`), so no stream_id
+      // compare is needed here.
       if (session->master_session != ams)
 	continue;
 
@@ -4239,6 +4333,14 @@ airplay_write(struct output_buffer *obuf)
     {
       for (i = 0; obuf->data[i].buffer; i++)
 	{
+	  // [AirPlayEngine vendored change 2026-07-17] P2b: a PCM blob reaches a
+	  // master session only when BOTH its stream_id and its quality match.
+	  // stream_id selects WHICH content stream (per-app routing); quality still
+	  // selects the encoder format. Without the stream_id guard, every stream's
+	  // audio would fan out to every master session of the same quality =
+	  // silent cross-talk. Default 0 == 0 keeps the single-stream path exact.
+	  if (obuf->data[i].stream_id != ams->stream_id)
+	    continue;
 	  if (!quality_is_equal(&obuf->data[i].quality, &ams->rtp_session->quality))
 	    continue;
 

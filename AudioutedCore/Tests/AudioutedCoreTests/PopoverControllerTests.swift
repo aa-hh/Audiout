@@ -789,8 +789,8 @@ final class PopoverControllerTests: XCTestCase {
 
         XCTAssertEqual(appRouting.appRoutes.map(\.bundleID), ["com.example.music"],
                        "picking the app created a route via AppRoutingController")
-        XCTAssertEqual(appRouting.appRoutes.first?.destination, .currentDevice,
-                       "a new route defaults to Current Device (decision 8 — no redirect)")
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .noRedirect,
+                       "a new route defaults to No Redirect, the neutral/unset state")
         XCTAssertTrue(popover.test_availableAppsForPicker().isEmpty,
                       "the picker excludes it now that it's routed (proves the rebuild/state refreshed)")
     }
@@ -807,12 +807,12 @@ final class PopoverControllerTests: XCTestCase {
     }
 
     /// Seed one route (`AppRoutingController` builds every new route at
-    /// `.currentDevice`/vol 100, then mutates), so tests can start with a route
+    /// `.noRedirect`/vol 100, then mutates), so tests can start with a route
     /// already redirected / at a chosen volume.
     private func seedRoute(_ appRouting: AppRoutingController, bundleID: String, displayName: String,
-                           destination: AppRouteDestination = .currentDevice, volume: Int = 100) {
+                           destination: AppRouteDestination = .noRedirect, volume: Int = 100) {
         appRouting.addRoute(bundleID: bundleID, displayName: displayName)
-        if destination != .currentDevice { appRouting.setDestination(destination, for: bundleID) }
+        if destination != .noRedirect { appRouting.setDestination(destination, for: bundleID) }
         if volume != 100 { appRouting.setVolume(volume, for: bundleID) }
     }
 
@@ -845,10 +845,13 @@ final class PopoverControllerTests: XCTestCase {
                         "the card is still present as the empty state (Add row only)")
     }
 
-    /// A row's destination menu splits into a "Current Device" section (the local
-    /// device) and an "AirPlay Devices" section (the available non-local fleet),
-    /// with the sentinel current-device id selected for a `.currentDevice` route
-    /// and the slider dimmed (decision 3).
+    /// A row's destination menu leads with the standalone "No Redirect" entry
+    /// (no header — the new default/neutral choice), then splits into a
+    /// "Current Device" section (the local device) and an "AirPlay Devices"
+    /// section (the available non-local fleet). A freshly-added route selects
+    /// the "No Redirect" sentinel and dims the slider; an explicit "Current
+    /// Device" pick keeps the slider LIVE (Bug T2 — it's its own local stream),
+    /// so only "No Redirect" dims.
     func testAppRowDestinationMenuStructureAndLocalDimming() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
@@ -856,19 +859,39 @@ final class PopoverControllerTests: XCTestCase {
                                                      runningAppsProvider: routedApps)
 
         let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
-        XCTAssertEqual(titles.first, "CURRENT DEVICE",
-                       "the menu leads with the Current Device section header")
-        XCTAssertTrue(titles.contains("AIRPLAY DEVICES"),
-                      "the menu has an AirPlay Devices section (decision 4 — no Groups)")
+        XCTAssertEqual(titles.first, "No Redirect",
+                       "the menu leads with the standalone No Redirect entry")
+        let noRedirectIndex = titles.firstIndex(of: "No Redirect")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
+        let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
+        XCTAssertNotNil(currentDeviceHeaderIndex, "the menu has a Current Device section")
+        XCTAssertNotNil(airplayHeaderIndex,
+                        "the menu has an AirPlay Devices section (decision 4 — no Groups)")
+        XCTAssertLessThan(noRedirectIndex!, currentDeviceHeaderIndex!,
+                          "No Redirect must come before the Current Device section")
+        XCTAssertLessThan(currentDeviceHeaderIndex!, airplayHeaderIndex!,
+                          "Current Device section must come before AirPlay Devices")
         XCTAssertTrue(titles.contains("MacBook Pro Speakers"),
                       "the Current Device entry carries the local device's name")
         XCTAssertTrue(titles.contains("Office"), "an available AirPlay device is offered")
 
+        // A freshly-added (never-touched) route defaults to No Redirect.
+        XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"),
+                       PopoverController.noRedirectDestinationID,
+                       "a fresh route selects the sentinel No Redirect entry")
+        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), true,
+                       "the slider is dimmed on No Redirect (no independent stream to level)")
+
+        // Bug T2: explicitly picking Current Device gives the app its OWN local
+        // stream (played on the Mac's built-in speakers), so its slider is LIVE —
+        // only No Redirect stays dimmed.
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+        row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"),
                        PopoverController.currentDeviceDestinationID,
-                       "a .currentDevice route selects the sentinel Current Device entry")
-        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), true,
-                       "decision 3 — the slider is dimmed while the app plays locally")
+                       "an explicit Current Device pick selects its own sentinel entry")
+        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), false,
+                       "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
     }
 
     /// Selecting an AirPlay destination on a row calls through to
@@ -891,9 +914,12 @@ final class PopoverControllerTests: XCTestCase {
                        "redirected ⇒ the slider is enabled (decision 3)")
     }
 
-    /// Setting a row's volume calls through to `AppRoutingController.setVolume` and
-    /// repaints.
-    func testAppRowVolumeCallsThroughAndRepaints() async throws {
+    /// Setting a row's volume calls through to `AppRoutingController.setVolume`
+    /// (persisted). The handler deliberately does NOT `rebuild()`: a rebuild would
+    /// replace the `AppRowView` mid-drag and break the live NSSlider tracking loop
+    /// (the visible value tracks the slider directly during a drag). So this
+    /// asserts the model call-through, not a repaint.
+    func testAppRowVolumeCallsThrough() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
@@ -905,8 +931,6 @@ final class PopoverControllerTests: XCTestCase {
 
         XCTAssertEqual(appRouting.appRoutes.first?.volume, 42,
                        "the volume change reached AppRoutingController")
-        XCTAssertEqual(popover.test_appRow(for: "com.example.music")?.test_volume, 42,
-                       "the repainted row shows the new volume")
     }
 
     /// Removing a row calls through to `AppRoutingController.removeRoute` and
@@ -1077,7 +1101,9 @@ final class PopoverControllerTests: XCTestCase {
     }
 
     /// PLAN decision 7 (silent fallback): when a routed device drops out of the
-    /// available fleet, the route resets to Current Device and the card repaints.
+    /// available fleet, the route resets to No Redirect (the neutral/unset
+    /// state — losing a device isn't a deliberate "play on this Mac" choice)
+    /// and the card repaints.
     func testDeviceDropResetsMatchingRouteSilently() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
@@ -1091,10 +1117,10 @@ final class PopoverControllerTests: XCTestCase {
         let remaining = backend.devices.filter { $0.id != "office" }
         popover.update(devices: remaining)
 
-        XCTAssertEqual(appRouting.appRoutes.first?.destination, .currentDevice,
-                       "decision 7 — the route silently fell back to Current Device")
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .noRedirect,
+                       "decision 7 (revised) — the route silently fell back to No Redirect, not Current Device")
         XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"),
-                       PopoverController.currentDeviceDestinationID,
+                       PopoverController.noRedirectDestinationID,
                        "the repainted row reflects the fallback")
     }
 
@@ -1113,8 +1139,8 @@ final class PopoverControllerTests: XCTestCase {
         }
         popover.update(devices: devices)
 
-        XCTAssertEqual(appRouting.appRoutes.first?.destination, .currentDevice,
-                       "an unavailable target falls back to Current Device")
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .noRedirect,
+                       "an unavailable target falls back to No Redirect, not Current Device")
     }
 
     /// A device update that doesn't touch any routed target leaves routes alone
@@ -1138,7 +1164,7 @@ final class PopoverControllerTests: XCTestCase {
     func testApplicationsCardExpandedOnOpenIffRedirected() async throws {
         // No redirected app ⇒ collapsed on open.
         let empty = tempAppRoutingController()
-        empty.addRoute(bundleID: "com.example.music", displayName: "Music") // .currentDevice ⇒ not redirected
+        empty.addRoute(bundleID: "com.example.music", displayName: "Music") // .noRedirect ⇒ not redirected
         let (popoverEmpty, _, _) = try await makePopover(appRouting: empty,
                                                           runningAppsProvider: routedApps)
         popoverEmpty.test_simulateOpen()
@@ -1154,6 +1180,113 @@ final class PopoverControllerTests: XCTestCase {
         popover.test_simulateOpen()
         XCTAssertEqual(popover.test_isCardCollapsed(title: "Applications"), false,
                        "≥1 redirected app (routedAppCount > 0) ⇒ Applications starts expanded")
+    }
+
+    // MARK: T9 — live per-device streaming indicator (`BackendEvent.routedApps`)
+    //
+    // `applyRoutedApps` stores the CONFIRMED live map that `AppDelegate` feeds
+    // from `BackendEvent.routedApps`; `DeviceRowView`'s routing sublabel prefers
+    // it over the intent-based `AppRoutingController.routedAppNames(for:)`
+    // label whenever it's non-empty, falling back to intent when the live map
+    // goes back to empty (see `DeviceRowView.apply`'s `liveAppNames` doc for the
+    // full precedence rule this exercises end-to-end).
+
+    /// A non-empty `.routedApps` event overrides the intent-based label with
+    /// the confirmed live set.
+    func testApplyRoutedAppsOverridesIntentLabelWhenNonEmpty() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                           runningAppsProvider: routedApps)
+
+        // Intent alone (no live signal yet): the row shows the configured app name.
+        // `update(devices:)` fully rebuilds the row set while the popover is
+        // closed (every one of these tests' state, per `PopoverController.update`),
+        // so each check below re-fetches the row rather than holding a
+        // reference across a call — a held reference would go stale the moment
+        // rebuild() swaps in a fresh `DeviceRowView` instance.
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+                       "intent-based label before any live signal arrives")
+
+        // A confirmed live signal takes over, even though it carries a
+        // different string, to make the precedence unambiguous in the assertion.
+        popover.applyRoutedApps(deviceID: "office", appNames: ["Music (confirmed)"])
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music (confirmed)",
+                       "the confirmed live set takes precedence over the intent-based label")
+    }
+
+    /// An empty `appNames` (mapping cleared) reverts the row to the
+    /// intent-based label rather than leaving it blank.
+    func testApplyRoutedAppsWithEmptyListRevertsToIntentLabel() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                           runningAppsProvider: routedApps)
+
+        // Re-fetch the row after every `update(devices:)` — see the note in
+        // `testApplyRoutedAppsOverridesIntentLabelWhenNonEmpty` above.
+        popover.applyRoutedApps(deviceID: "office", appNames: ["Music (confirmed)"])
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music (confirmed)")
+
+        // The live mapping clears (capture stopped, or the route left this
+        // device) — falls back to the intent-based label, not a blank row.
+        popover.applyRoutedApps(deviceID: "office", appNames: [])
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+                       "an empty live mapping reverts to the intent-based label")
+    }
+
+    /// A device that drops out of the snapshot entirely and later reappears
+    /// under the same id must NOT resurface a stale confirmed name from
+    /// before it left (the live map isn't tied to `Device`, so it needs its
+    /// own cleanup on removal).
+    func testApplyRoutedAppsClearsOnDeviceRemoval() async throws {
+        let (popover, _, backend) = try await makePopover()
+        popover.applyRoutedApps(deviceID: "office", appNames: ["Music"])
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music")
+
+        // The device drops off the network entirely.
+        popover.update(devices: backend.devices.filter { $0.id != "office" })
+        XCTAssertNil(popover.test_deviceRow(for: "office"))
+
+        // It reappears with no route and no fresh live signal — must show
+        // nothing, not the stale "Music" from before it left.
+        popover.update(devices: backend.devices)
+        XCTAssertNil(popover.test_deviceRow(for: "office")?.test_statusText,
+                     "a stale live mapping must not resurface after the device left and returned")
+    }
+
+    /// The `MockBackend` offline fixture (`test_emitRoutedApps`) round-trips
+    /// through the real `BackendEvent` channel exactly the way `AppDelegate`
+    /// would consume it in production, ending with the row rendering the live
+    /// label — proving `popover-harness`/`popover-snapshot` can demonstrate T9
+    /// without a real per-app-routing backend.
+    func testMockBackendFixtureRoundTripsToDeviceRowLabel() async throws {
+        let (popover, _, backend) = try await makePopover()
+
+        let stream = backend.makeEventStream()
+        let expectation = expectation(description: "routedApps event observed")
+        let task = Task {
+            for await event in stream {
+                if case .routedApps(let deviceID, let appNames) = event {
+                    await popover.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+                    expectation.fulfill()
+                    break
+                }
+            }
+        }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music"])
+        await fulfillment(of: [expectation], timeout: 2)
+        task.cancel()
+
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+                       "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 }
 

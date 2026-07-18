@@ -123,6 +123,13 @@ struct output_device
 
   struct media_quality quality;
 
+  // [AirPlayEngine vendored change 2026-07-17] Per-app multi-stream routing
+  // (P2b). Identifies which independent content stream this device is routed
+  // to; the sender binds the device's session to the master session carrying
+  // this stream_id. Default 0 = the single legacy stream (behaviour unchanged
+  // when nothing opts into multi-stream). Set by the Swift router upstream.
+  uint32_t stream_id;
+
   enum media_format selected_format;
   enum media_format default_format;
   uint32_t supported_formats;
@@ -165,6 +172,11 @@ struct output_metadata
 struct output_data
 {
   struct media_quality quality;
+  // [AirPlayEngine vendored change 2026-07-17] Per-app multi-stream routing
+  // (P2b). Tags this PCM blob with the content stream it belongs to; airplay_write
+  // fans it only to the master session whose stream_id matches (in addition to the
+  // existing quality match). Default 0 = the single legacy stream.
+  uint32_t stream_id;
   struct evbuffer *evbuf;
   uint8_t *buffer;
   size_t bufsize;

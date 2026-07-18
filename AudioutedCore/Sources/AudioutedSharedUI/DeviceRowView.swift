@@ -219,14 +219,27 @@ public final class DeviceRowView: NSView {
     ///   - routedAppNames: the bypassed-app display names routed to THIS device
     ///     (the routing set's app tokens only, in stable route order). Does NOT
     ///     include the "System" token — the view synthesizes "System" itself from
-    ///     `selected`. Drives the routing sublabel (see the precedence ladder in
-    ///     ``resolveSublabel(routedAppNames:)``).
+    ///     `selected`. This is INTENT (config), not a playback claim — see
+    ///     `liveAppNames` below for the confirmed signal. Drives the routing
+    ///     sublabel (see the precedence ladder in
+    ///     ``resolveSublabel(routedAppNames:liveAppNames:)``).
+    ///   - liveAppNames: the app display names CONFIRMED currently streaming to
+    ///     THIS device right now (T9 — `BackendEvent.routedApps`, the live
+    ///     per-device signal, not just routing intent). When non-empty this
+    ///     TAKES PRECEDENCE over `routedAppNames` in the routing sublabel — it's
+    ///     the "confirmed" state, so it wins over what's merely configured.
+    ///     When empty (nothing confirmed streaming yet — e.g. still connecting,
+    ///     or no live backend), the sublabel falls back to `routedAppNames` so
+    ///     the row isn't blank while a redirect is pending. Only `NativeBackend`
+    ///     ever populates this; `MockBackend`/`OwnToneBackend` leave it empty
+    ///     unless a test/demo explicitly injects it.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
                       blocked: Bool = false,
                       blockReason: String? = nil,
-                      routedAppNames: [String] = []) {
+                      routedAppNames: [String] = [],
+                      liveAppNames: [String] = []) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -265,12 +278,17 @@ public final class DeviceRowView: NSView {
         // now" and "can never be used (yet)" look consistently de-emphasized.
         alphaValue = isUnsupported ? 0.5 : 1.0
 
-        // On-icon status badge is idempotent and always driven off the state.
-        statusDotView.apply(device.connectionState)
+        // On-icon status badge: driven off connectionState. When the device has
+        // live per-app routes but is NOT in the whole-system output set, the
+        // badge shows a teal routing-active dot (T3) — visually distinct from
+        // the streaming-green (.connected) so a redirect-only row is never
+        // mistaken for a fully disconnected one.
+        let hasLiveRouting = !liveAppNames.isEmpty
+        statusDotView.apply(state: device.connectionState, routingActive: hasLiveRouting)
         // Single sublabel precedence ladder (failed → unavailable → routing →
         // none), evaluated here after `device`/`isSelectedInSet` are set so the
         // precedence is unambiguous.
-        resolveSublabel(routedAppNames: routedAppNames)
+        resolveSublabel(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
 
         // Don't fight a live drag: only push the model value into the slider
         // when the user isn't dragging it. (The readout is kept live during a
@@ -316,17 +334,21 @@ public final class DeviceRowView: NSView {
     /// 1. `.failed` connection → "Couldn't connect" (`.systemOrange`). Highest.
     /// 2. else device unavailable → "Unavailable" (`.tertiaryLabelColor`, greyed).
     /// 3. else routing set non-empty → the routing line (`.secondaryLabelColor`).
-    ///    The routing set is non-empty iff selected OR `routedAppNames` non-empty.
-    ///    Tokens: "System" first when selected, then each app name in order,
-    ///    joined by `routingTokenSeparator`. This is ASSIGNMENT/ROUTING (config),
-    ///    NOT a claim about playback — no "playing"/"active" language.
+    ///    The routing set is non-empty iff selected OR an app-name list (live or
+    ///    intent) is non-empty. Tokens: "System" first when selected, then each
+    ///    app name in order, joined by `routingTokenSeparator`. The app names
+    ///    come from `liveAppNames` (T9's confirmed-streaming signal) when it's
+    ///    non-empty, else fall back to `routedAppNames` (routing INTENT/config —
+    ///    no "playing"/"active" language on its own). Using `liveAppNames` when
+    ///    present is the one case that genuinely IS a playback claim: it only
+    ///    ever carries names the backend confirmed are actually streaming there.
     /// 4. else → no sublabel; single-line row (name centered).
-    private func resolveSublabel(routedAppNames: [String]) {
+    private func resolveSublabel(routedAppNames: [String], liveAppNames: [String]) {
         if case .failed = device.connectionState {
             showSublabel("Couldn't connect", color: .systemOrange)
         } else if !device.isAvailable {
             showSublabel("Unavailable", color: .tertiaryLabelColor)
-        } else if let routing = routingLine(routedAppNames: routedAppNames) {
+        } else if let routing = routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames) {
             showSublabel(routing, color: .secondaryLabelColor)
         } else {
             hideSublabel()
@@ -334,12 +356,15 @@ public final class DeviceRowView: NSView {
     }
 
     /// The routing line for the current selection + routed apps, or `nil` when
-    /// the routing set is empty (not selected AND no routed apps). "System" leads
-    /// when selected, then the app names in the given order.
-    private func routingLine(routedAppNames: [String]) -> String? {
+    /// the routing set is empty (not selected AND no app names on either list).
+    /// "System" leads when selected, then the effective app-name list in the
+    /// given order — `liveAppNames` (confirmed streaming, T9) when non-empty,
+    /// else `routedAppNames` (routing intent) as the fallback so a device with a
+    /// pending redirect isn't left with no label at all.
+    private func routingLine(routedAppNames: [String], liveAppNames: [String]) -> String? {
         var tokens: [String] = []
         if isSelectedInSet { tokens.append("System") }
-        tokens.append(contentsOf: routedAppNames)
+        tokens.append(contentsOf: liveAppNames.isEmpty ? routedAppNames : liveAppNames)
         guard !tokens.isEmpty else { return nil }
         return tokens.joined(separator: Self.routingTokenSeparator)
     }
@@ -672,9 +697,11 @@ public final class DeviceRowView: NSView {
 
     /// The composed routing sublabel string ("System …" joined by " · "), or
     /// `nil` when the routing set is empty — for asserting the routing line in
-    /// isolation from the failed/unavailable precedence. Test hook.
-    public func test_sourceText(routedAppNames: [String]) -> String? {
-        routingLine(routedAppNames: routedAppNames)
+    /// isolation from the failed/unavailable precedence. `liveAppNames`
+    /// defaults to empty so existing intent-only callers are unaffected; pass it
+    /// to assert the T9 live-precedence-over-intent behavior. Test hook.
+    public func test_sourceText(routedAppNames: [String], liveAppNames: [String] = []) -> String? {
+        routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
     }
 
     /// Whether the connecting/reconnecting badge's breathing pulse is installed
@@ -697,6 +724,11 @@ public final class DeviceRowView: NSView {
     /// receiver (T-UI-AP1-1): dimmed, toggle disabled, click asks for the
     /// "coming soon" explanation.
     public var test_isUnsupported: Bool { isUnsupported }
+
+    /// Whether the routing-active teal indicator is currently showing on the
+    /// icon badge — true when the device has live per-app routes but is not in
+    /// the whole-system output set (T3). Delegates to the badge view.
+    public var test_isShowingRoutingIndicator: Bool { statusDotView.test_isShowingRoutingDot }
 
     /// Simulate a click on the row body (T-UI-AP1-1) — drives the same path a
     /// real `mouseDown:` on an unsupported row takes. No-op (like the real

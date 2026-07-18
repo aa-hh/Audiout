@@ -554,136 +554,79 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"])
     }
 
-    // MARK: Redirect-connects-and-controls — appRouteTargets union (LOCKED DECISIONS)
+    // MARK: Union removed (T7) — app-route targets NEVER enter the backend output set
+    //
+    // Pre-T7, `applyRouting()`/`activateGroup()` UNIONed app-route redirect targets
+    // into `backend.setOutputSet(...)`, so redirecting ONE app streamed the whole
+    // system mix to that device and muted the Mac (the original per-app-routing bug,
+    // documented in AGENTS.md). T7 removed that union entirely — the injection point
+    // (`appRouteTargets`/`redirectOutputIDs()`/`reapplyRouting()`) is gone, and a
+    // redirected app now reaches its device through the per-app capture path
+    // (`NativeBackend.updateAppRoutes`), never through this whole-system set. These
+    // tests pin that the output set is now a PURE function of Selected Devices /
+    // group membership, with nothing else able to leak in.
 
-    /// Q1/Q5 — the connect set under `.selectedDevices` is Selected ∪ redirect
-    /// targets, but a redirect-only device (in `appRouteTargets`, NOT in
-    /// `selectedDeviceIDs`) is never added to `selectedDeviceIDs` itself.
-    func testReapplyRoutingUnionsRedirectTargetsUnderSelectedDevices() async throws {
+    /// Under `.selectedDevices` the backend output set is EXACTLY the Selected
+    /// AirPlay members — no app-route target is ever added (the union is gone).
+    func testSelectedDevicesOutputSetIsExactlySelectedAirPlayMembers() async throws {
         let (controller, backend) = try await makeController()
-        controller.appRouteTargets = { ["homepod-bed"] }
         _ = controller.setDeviceSelected("office", true)
         controller.setMainOut(.selectedDevices)
         try await Task.sleep(nanoseconds: 200_000_000)
 
         let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
-        XCTAssertEqual(outputs, ["office", "homepod-bed"],
-                       "the redirect-only target is unioned into the connect set")
-        XCTAssertFalse(controller.isSpeakerSelected("homepod-bed"),
-                       "the redirect target is connected but NOT added to Selected Devices")
-        XCTAssertTrue(controller.isSpeakerSelected("office"))
+        XCTAssertEqual(outputs, ["office"],
+                       "output set is exactly Selected Devices — no redirect-target union")
     }
 
-    /// Q1 — with Main Out pointed at a group, `activateGroup`/`.group` case must
-    /// also union redirect targets so they aren't dropped.
-    func testActivateGroupUnionsRedirectTargets() async throws {
+    /// Passthrough (Selected == {local}) reaches the backend as an EMPTY output
+    /// set even when app routes exist — the mute bug is gone: a redirect can no
+    /// longer force a non-empty output set that opens the capture gate.
+    func testPassthroughOutputSetStaysEmpty() async throws {
+        let (controller, backend) = try await makeController()
+        controller.ensureDefaultSelection()   // seeds {local-mac} = passthrough
+        controller.setMainOut(.selectedDevices)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertTrue(controller.isPassthrough)
+        XCTAssertTrue(backend.devices.filter(\.isSelected).isEmpty,
+                      "passthrough output set is empty — no app-route target unioned in")
+    }
+
+    /// With Main Out pointed at a group, the output set is EXACTLY the group's
+    /// members — app-route targets are not unioned into an active group either.
+    func testActivateGroupOutputSetIsExactlyGroupMembers() async throws {
         let (controller, backend) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
-        controller.appRouteTargets = { ["homepod-bed"] }
-
         controller.setMainOut(.group(id: "g1"))
         try await Task.sleep(nanoseconds: 200_000_000)
 
         let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
-        XCTAssertEqual(outputs, ["sonos-move", "homepod-bed"],
-                       "activateGroup unions the group's members with redirect targets")
+        XCTAssertEqual(outputs, ["sonos-move"],
+                       "active group's output set is exactly its members — no redirect union")
     }
 
-    /// Q1 — `reapplyRouting()` re-runs the union so a device newly added to
-    /// `appRouteTargets` connects without any other model mutation.
-    func testReapplyRoutingConnectsNewRedirectTarget() async throws {
-        let (controller, backend) = try await makeController()
-        controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertTrue(backend.devices.filter(\.isSelected).isEmpty)
-
-        controller.appRouteTargets = { ["office"] }
-        controller.reapplyRouting()
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        XCTAssertTrue(backend.devices.first { $0.id == "office" }?.isSelected == true,
-                      "reapplyRouting() connects a newly redirected device")
-        XCTAssertFalse(controller.isSpeakerSelected("office"))
-    }
-
-    /// Teardown — removing the last app route targeting a device (simulated by
-    /// clearing `appRouteTargets` and calling `reapplyRouting()`) drops it out of
-    /// the output set (→ `.off` at the backend/state level).
-    func testReapplyRoutingDropsDeviceWhenRedirectRemoved() async throws {
-        let (controller, backend) = try await makeController()
-        controller.appRouteTargets = { ["office"] }
-        controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertTrue(backend.devices.first { $0.id == "office" }?.isSelected == true)
-
-        controller.appRouteTargets = { [] }
-        controller.reapplyRouting()
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        XCTAssertFalse(backend.devices.first { $0.id == "office" }?.isSelected ?? false,
-                       "the device leaves the output set once no longer a redirect target or selected")
-    }
-
-    /// Q5 — the Main Out master (`mainOutMasterVolume`) and its member set must
-    /// EXCLUDE redirect-only targets; moving the master must not touch a
-    /// redirect-only device's volume.
-    func testMainOutMasterExcludesRedirectOnlyTarget() async throws {
-        let (controller, backend) = try await makeController()
-        controller.appRouteTargets = { ["homepod-bed"] }
-        _ = controller.setDeviceSelected("office", true)
-        controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        backend.setVolume(80, for: "office")
-        backend.setVolume(10, for: "homepod-bed")
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        XCTAssertEqual(controller.mainOutMasterVolume, 80,
-                       "master reflects only Selected members (office), not the redirect-only device")
-
-        controller.beginMainOutMasterDrag()
-        controller.setMainOutMasterVolume(20)
-        controller.endMainOutMasterDrag()
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        XCTAssertEqual(volume("office", in: backend), 20, "master drag scales the Selected member")
-        XCTAssertEqual(volume("homepod-bed", in: backend), 10,
-                       "the redirect-only device's volume is untouched by the master drag")
-    }
-
-    /// Q3 — group identity must key off `selectedDeviceIDs`, not the live output
-    /// set. A redirect-only connection must not pollute `groupMatchingCurrentSelection`.
-    func testGroupMatchingCurrentSelectionIgnoresRedirectOnlyConnection() async throws {
+    /// The separate invariant that OUTLIVES the union removal (AGENTS.md): the
+    /// Main Out master + its member set are keyed off `selectedDeviceIDs` /
+    /// `mainOutMemberIDs`, which never contained redirect targets — so master math
+    /// and group identity are unaffected by any app route. Verified here against a
+    /// selection that equals a saved group.
+    func testGroupIdentityAndMasterKeyOffSelectedDevicesNotOutputSet() async throws {
         let (controller, backend) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
         _ = controller.setDeviceSelected("office", true)
         controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(controller.groupMatchingCurrentSelection?.id, "g1",
-                       "Selected Devices set alone still matches the saved group")
-
-        // Redirect-connect a SECOND device — the live output set now differs from
-        // the group's member set, but selectedDeviceIDs (and thus the match) must
-        // be unaffected.
-        controller.appRouteTargets = { ["homepod-bed"] }
-        controller.reapplyRouting()
         try await Task.sleep(nanoseconds: 200_000_000)
 
-        let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
-        XCTAssertEqual(outputs, ["office", "homepod-bed"], "the redirect target did enter the output set")
+        XCTAssertFalse(controller.isSpeakerSelected("homepod-bed"),
+                       "a non-selected device is not in Selected Devices")
         XCTAssertEqual(controller.groupMatchingCurrentSelection?.id, "g1",
-                       "group identity is keyed off selectedDeviceIDs, unaffected by the redirect-polluted output set")
-    }
+                       "group identity keys off selectedDeviceIDs")
 
-    /// Default `appRouteTargets` is `{ [] }` so every existing constructor/call
-    /// site (tests included) is unaffected until it's explicitly set.
-    func testAppRouteTargetsDefaultsToEmpty() async throws {
-        let (controller, backend) = try await makeController()
-        _ = controller.setDeviceSelected("office", true)
-        controller.setMainOut(.selectedDevices)
+        backend.setVolume(80, for: "office")
         try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), ["office"],
-                       "with no appRouteTargets injected, the output set is exactly Selected Devices")
+        XCTAssertEqual(controller.mainOutMasterVolume, 80,
+                       "master reflects only Selected members")
     }
 
     // MARK: System-volume mirror — the volume keys drive what's actually playing
@@ -956,42 +899,27 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertTrue(spy.volumeWrites.isEmpty)
     }
 
-    /// THE BUG (ahh, live session 2026-07-17): "if nothing is connected to the
-    /// audio out and I hit the volume buttons, the audio out volume doesn't
-    /// change." A per-app redirect can open an AirPlay session — muting the Mac —
-    /// even while Selected Devices is exactly {local} (`isPassthrough == true`);
-    /// the old `!isPassthrough` guard blocked the mirror entirely in that state,
-    /// leaving the redirected device's volume stuck. `mirrorMemberIDs` now unions
-    /// redirect targets in regardless of what Selected Devices reports.
-    func testSystemVolumeMirrorDrivesRedirectOnlyTargetInPassthrough() async throws {
+    /// T7 NOTE (superseding the pre-merge version of this test, Alec 2026-07-17):
+    /// a per-app redirect used to open its AirPlay session via the whole-system
+    /// output-set union, so the tap-mute bug this file's mirror fixes ("if nothing
+    /// is connected to the audio out and I hit the volume buttons, the audio out
+    /// volume doesn't change") applied to a redirected device too, and the mirror
+    /// briefly unioned redirect targets in to cover it (`appRouteTargets`,
+    /// `redirectOutputIDs()` — both since removed). T7 removed that union — a
+    /// redirect now streams via its own dedicated per-app capture path and never
+    /// touches the Mac's system output, so there's nothing left for the volume
+    /// keys to unstick there; each redirected app already has its own independent
+    /// volume control (the Applications card slider). Decision: volume keys drive
+    /// Main Out only. `homepod-bed` here stands in for a device an app COULD be
+    /// redirected to — it is simply never selected, and the mirror must never
+    /// reach it.
+    func testSystemVolumeMirrorNeverTouchesAnUnselectedDevice() async throws {
         let mock = try await makeBackend(mirrorFleetWithRedirectTarget)
         let spy = WriteCountingBackend(mock)
         let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
                                          loadPersisted: false)
-        controller.appRouteTargets = { ["homepod-bed"] }
-        controller.ensureDefaultSelection()                     // {local} — passthrough
-        controller.reapplyRouting()
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertTrue(controller.isPassthrough, "precondition: Selected Devices is still just {local}")
-        spy.reset()
-
-        controller.mirrorSystemVolumeToMainOut(25)
-        try await Task.sleep(nanoseconds: 100_000_000)
-
-        XCTAssertEqual(spy.volume(of: "homepod-bed"), 25,
-                       "the redirect-only device follows the volume keys even though Selected Devices is passthrough")
-        XCTAssertEqual(spy.volume(of: "local-mac"), 65, "the mirror still never writes the local device")
-    }
-
-    /// The same union applies while genuinely streaming: a redirect target playing
-    /// alongside a Selected Device is scaled proportionally right along with it.
-    func testSystemVolumeMirrorDrivesRedirectTargetAlongsideSelectedDevice() async throws {
-        let mock = try await makeBackend(mirrorFleetWithRedirectTarget)
-        let spy = WriteCountingBackend(mock)
-        let controller = GroupController(backend: spy, store: GroupStore(directory: tempDirectory()),
-                                         loadPersisted: false)
-        controller.appRouteTargets = { ["homepod-bed"] }
-        _ = controller.setDeviceSelected("loud", true)          // loud=80, homepod-bed=40 → avg 60, a clean 2:1
+        _ = controller.setDeviceSelected("loud", true)          // loud=80, quiet=40 → avg 60, a clean 2:1
+        _ = controller.setDeviceSelected("quiet", true)
         controller.setMainOut(.selectedDevices)
         try await Task.sleep(nanoseconds: 100_000_000)
         spy.reset()
@@ -1000,8 +928,10 @@ final class GroupControllerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(spy.volume(of: "loud"), 40, "80 scaled by 30/60")
-        XCTAssertEqual(spy.volume(of: "homepod-bed"), 20,
-                       "the redirect-only device is scaled proportionally alongside the Selected Device — 40 scaled by 30/60")
+        XCTAssertTrue(spy.volumeWrites.allSatisfy { $0.id != "homepod-bed" },
+                     "an unselected device — including one an app might be redirected to — is never touched by the mirror")
+        XCTAssertEqual(spy.volume(of: "homepod-bed"), 40, "its volume stays exactly at the fixture's untouched value")
+        XCTAssertEqual(spy.volume(of: "local-mac"), 65, "the mirror still never writes the local device")
     }
 }
 

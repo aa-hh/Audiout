@@ -48,13 +48,16 @@ final class AppRoutingControllerTests: XCTestCase {
 
     // MARK: routedAppCount
 
+    /// Every new route defaults to `.noRedirect` (not `.currentDevice`) — this
+    /// pins that `routedAppCount` correctly reports 0 for a freshly-added batch,
+    /// which would be wrong (3) under the old `!= .currentDevice` comparison.
     func testRoutedAppCountCountsOnlyRedirectedRoutes() {
         let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
         controller.addRoute(bundleID: "com.spotify.client", displayName: "Spotify")
         controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
 
-        XCTAssertEqual(controller.routedAppCount, 0)
+        XCTAssertEqual(controller.routedAppCount, 0, "fresh routes default to .noRedirect, not routed")
 
         controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
         XCTAssertEqual(controller.routedAppCount, 1)
@@ -62,8 +65,13 @@ final class AppRoutingControllerTests: XCTestCase {
         controller.setDestination(.device(id: "office"), for: "com.spotify.client")
         XCTAssertEqual(controller.routedAppCount, 2)
 
+        // Explicit Current Device is just as "not routed" as No Redirect.
         controller.setDestination(.currentDevice, for: "com.apple.Music")
         XCTAssertEqual(controller.routedAppCount, 1)
+
+        // Reverting to No Redirect drops it out too.
+        controller.setDestination(.noRedirect, for: "com.spotify.client")
+        XCTAssertEqual(controller.routedAppCount, 0)
     }
 
     // MARK: handleDeviceUnavailable
@@ -79,12 +87,13 @@ final class AppRoutingControllerTests: XCTestCase {
 
         controller.handleDeviceUnavailable(id: "homepod-1")
 
-        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .currentDevice)
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .noRedirect,
+                       "fallback targets No Redirect, not Current Device — losing a device isn't a deliberate choice")
         XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination, .device(id: "office"),
                        "unrelated device routes must be untouched")
 
         let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
-        XCTAssertEqual(reloaded.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .currentDevice,
+        XCTAssertEqual(reloaded.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .noRedirect,
                        "the fallback must be persisted")
     }
 
@@ -140,7 +149,7 @@ final class AppRoutingControllerTests: XCTestCase {
         let fileURL = fileURL(in: dir)
         let before = try Data(contentsOf: fileURL)
 
-        controller.setDestination(.currentDevice, for: "com.apple.Music") // already .currentDevice
+        controller.setDestination(.noRedirect, for: "com.apple.Music") // already .noRedirect (the new default)
 
         let after = try Data(contentsOf: fileURL)
         XCTAssertEqual(before, after, "setting the same destination must not rewrite the store")
@@ -164,7 +173,7 @@ final class AppRoutingControllerTests: XCTestCase {
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
         let before = controller.appRoutes
 
-        controller.setDestination(.currentDevice, for: "com.apple.Music")
+        controller.setDestination(.noRedirect, for: "com.apple.Music") // already .noRedirect (the new default)
         controller.setVolume(100, for: "com.apple.Music")
         controller.setDestination(.currentDevice, for: "unknown.bundle.id")
         controller.setVolume(50, for: "unknown.bundle.id")
@@ -183,7 +192,7 @@ final class AppRoutingControllerTests: XCTestCase {
 
         controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
         controller.setDestination(.device(id: "office"), for: "com.spotify.client")
-        // com.apple.Safari stays .currentDevice (no redirect) — must be excluded.
+        // com.apple.Safari stays .noRedirect (no redirect) — must be excluded.
 
         XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), ["Music"])
         XCTAssertEqual(controller.routedAppNames(for: "office"), ["Spotify"])
@@ -191,12 +200,15 @@ final class AppRoutingControllerTests: XCTestCase {
                        "a device with no routes gets an empty list")
     }
 
-    func testRoutedAppNamesExcludesCurrentDeviceRoutesEntirely() {
+    func testRoutedAppNamesExcludesNoRedirectAndCurrentDeviceRoutesEntirely() {
         let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
-        // Never redirected — stays .currentDevice.
+        // Never redirected — stays .noRedirect (the new default).
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari") // explicit local pick
 
-        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), [])
+        XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), [],
+                       "neither .noRedirect nor .currentDevice routes are ever routed to a device")
     }
 
     func testRoutedAppNamesPreservesStableRouteOrder() {
@@ -222,5 +234,70 @@ final class AppRoutingControllerTests: XCTestCase {
         controller.setDestination(.currentDevice, for: "com.apple.Music")
         XCTAssertEqual(controller.routedAppNames(for: "homepod-1"), [],
                        "reverting to .currentDevice removes it from the routing set")
+    }
+
+    // MARK: onRoutesDidChange — the "routing table changed" signal (T7)
+    //
+    // T7 wires this callback to `AppRouteConfiguring.updateAppRoutes` so a route
+    // change actually streams the app to its device via the per-app capture path
+    // (replacing the removed whole-system output-set union). These tests pin that
+    // the signal fires exactly on the change edge, and that hooking it to a backend
+    // forwards the current table.
+
+    func testOnRoutesDidChangeFiresOnRealMutationsOnly() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        var fireCount = 0
+        controller.onRoutesDidChange = { fireCount += 1 }
+
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")   // 1
+        controller.setDestination(.device(id: "office"), for: "com.apple.Music") // 2
+        controller.setVolume(30, for: "com.apple.Music")                         // 3
+        XCTAssertEqual(fireCount, 3)
+
+        // No-op mutations must NOT fire (they return before persist()).
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")   // dup — no-op
+        controller.setDestination(.device(id: "office"), for: "com.apple.Music") // same dest — no-op
+        controller.setVolume(30, for: "com.apple.Music")                         // same vol — no-op
+        controller.removeRoute(bundleID: "not-present")                          // missing — no-op
+        XCTAssertEqual(fireCount, 3, "no-op mutations don't fire the change signal")
+
+        controller.removeRoute(bundleID: "com.apple.Music")                      // 4
+        XCTAssertEqual(fireCount, 4)
+    }
+
+    /// Integration proof of the T7 wiring: hooking `onRoutesDidChange` to forward
+    /// into an `AppRouteConfiguring` backend means every route change calls through
+    /// to `updateAppRoutes` with the current table + excluded set — exactly what
+    /// `AppDelegate.pushAppRoutesToBackend()` does in production.
+    func testRouteChangeCallsThroughToBackendUpdateAppRoutes() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        let backend = SpyAppRouteBackend()
+        let excluded: Set<String> = ["com.example.excluded"]
+        controller.onRoutesDidChange = {
+            backend.updateAppRoutes(controller.appRoutes, excludedBundleIDs: excluded)
+        }
+
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.device(id: "office"), for: "com.apple.Music")
+
+        XCTAssertEqual(backend.calls.count, 2, "each real mutation calls updateAppRoutes once")
+        XCTAssertEqual(backend.calls.last?.routes, [
+            AppRoute(bundleID: "com.apple.Music", displayName: "Music", destination: .device(id: "office"), volume: 100),
+        ])
+        XCTAssertEqual(backend.calls.last?.excluded, excluded,
+                       "the excluded set is forwarded verbatim to the backend")
+    }
+}
+
+/// A test double capturing every `updateAppRoutes` call, standing in for
+/// `NativeBackend` (the only production `AppRouteConfiguring`).
+private final class SpyAppRouteBackend: AppRouteConfiguring {
+    private(set) var calls: [(routes: [AppRoute], excluded: Set<String>)] = []
+    private(set) var terminatedBundleIDs: [String] = []
+    func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String>) {
+        calls.append((routes, excludedBundleIDs))
+    }
+    func handleAppTerminated(bundleID: String) {
+        terminatedBundleIDs.append(bundleID)
     }
 }

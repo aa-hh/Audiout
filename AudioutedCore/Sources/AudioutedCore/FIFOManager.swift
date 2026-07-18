@@ -36,22 +36,41 @@ final class FIFOManager: FIFOManaging, @unchecked Sendable {
         self.fifoPath = (libraryDirectory as NSString).appendingPathComponent(fifoName)
     }
 
+    /// FIFO permission bits: owner read/write only. The pipe carries the Mac's
+    /// full captured audio, so it MUST NOT be readable by other users/processes —
+    /// a world-readable pipe (the old `0o644`) let any local process `cat` the
+    /// live stream. OwnTone reads this pipe as the same user, so owner-only is
+    /// sufficient. (If OwnTone is ever run as a different user, widen to `0o660`
+    /// with a shared group — never add world bits.)
+    private static let fifoMode: mode_t = 0o600
+
     func create() throws {
         let fm = FileManager.default
-        var isDir: ObjCBool = false
-        if fm.fileExists(atPath: fifoPath, isDirectory: &isDir) {
-            if isDir.boolValue {
+        // Inspect the path WITHOUT following symlinks (`lstat`, not `stat`): an
+        // attacker who can write the library dir must not be able to redirect our
+        // captured audio through a symlink, nor have us reuse a pipe they own.
+        var st = stat()
+        if lstat(fifoPath, &st) == 0 {
+            // Something already exists here. Only reuse it if it is a real FIFO we
+            // own — otherwise refuse rather than stream audio into a foreign file,
+            // socket, symlink, or a pipe planted by another user.
+            guard (st.st_mode & S_IFMT) == S_IFIFO else {
                 throw CaptureCoordinatorError.fifoCreationFailed(
-                    path: fifoPath, reason: "path exists and is a directory")
+                    path: fifoPath, reason: "path exists but is not a FIFO (won't follow a symlink or reuse a foreign file)")
             }
-            // Verify it's actually a FIFO; if it's a regular file, refuse rather
-            // than feed OwnTone a non-pipe.
-            let attrs = try? fm.attributesOfItem(atPath: fifoPath)
-            if let type = attrs?[.type] as? FileAttributeType, type != .typeSocket, !isFIFO(fifoPath) {
+            guard st.st_uid == getuid() else {
                 throw CaptureCoordinatorError.fifoCreationFailed(
-                    path: fifoPath, reason: "path exists but is not a FIFO")
+                    path: fifoPath, reason: "existing FIFO is owned by uid \(st.st_uid), not us — refusing to reuse")
             }
-            return // reuse the existing FIFO
+            // Self-heal permissions: a pipe left behind by an older build (or
+            // widened by tampering) gets tightened back to owner-only here.
+            if (st.st_mode & 0o777) != Self.fifoMode {
+                guard chmod(fifoPath, Self.fifoMode) == 0 else {
+                    throw CaptureCoordinatorError.fifoCreationFailed(
+                        path: fifoPath, reason: "existing FIFO has too-permissive mode and could not be restricted (errno \(errno))")
+                }
+            }
+            return // safe to reuse
         }
         // Ensure the parent dir exists.
         let parent = (fifoPath as NSString).deletingLastPathComponent
@@ -59,22 +78,43 @@ final class FIFOManager: FIFOManaging, @unchecked Sendable {
             throw CaptureCoordinatorError.fifoCreationFailed(
                 path: fifoPath, reason: "library directory does not exist: \(parent)")
         }
-        let result = fifoPath.withCString { mkfifo($0, 0o644) }
+        // `mkfifo` is atomic and does NOT follow symlinks — it fails EEXIST if
+        // anything (including a symlink planted in a create-time race) is already
+        // at the path, so there is no TOCTOU window between the check above and
+        // this call.
+        let result = fifoPath.withCString { mkfifo($0, Self.fifoMode) }
         guard result == 0 else {
             throw CaptureCoordinatorError.fifoCreationFailed(
                 path: fifoPath, reason: "mkfifo failed (errno \(errno): \(String(cString: strerror(errno))))")
         }
+        // mkfifo's mode is masked by the process umask, so the on-disk mode can be
+        // narrower (never wider) than requested. Verify we created a FIFO we own
+        // and pin the exact mode, defeating any umask that stripped the owner
+        // write bit (which would block audiocap from writing).
+        var created = stat()
+        guard lstat(fifoPath, &created) == 0,
+              (created.st_mode & S_IFMT) == S_IFIFO,
+              created.st_uid == getuid()
+        else {
+            try? fm.removeItem(atPath: fifoPath)
+            throw CaptureCoordinatorError.fifoCreationFailed(
+                path: fifoPath, reason: "FIFO verification failed immediately after creation")
+        }
+        if (created.st_mode & 0o777) != Self.fifoMode {
+            _ = chmod(fifoPath, Self.fifoMode)
+        }
     }
 
     func cleanup() {
-        // Best-effort: only remove if it's a FIFO we own.
-        guard isFIFO(fifoPath) else { return }
+        // Best-effort: only remove if it's a FIFO we own (lstat — never traverse a
+        // symlink someone swapped in).
+        guard isOwnedFIFO(fifoPath) else { return }
         try? FileManager.default.removeItem(atPath: fifoPath)
     }
 
-    private func isFIFO(_ path: String) -> Bool {
+    private func isOwnedFIFO(_ path: String) -> Bool {
         var st = stat()
-        guard stat(path, &st) == 0 else { return false }
-        return (st.st_mode & S_IFMT) == S_IFIFO
+        guard lstat(path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFIFO && st.st_uid == getuid()
     }
 }

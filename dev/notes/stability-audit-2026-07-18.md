@@ -265,7 +265,7 @@ marker in source. Don't add one; duplicating tracking here would just drift.
 - **B7** — RESOLVED by the per-app-routing landing (the app-row volume
   handler now explicitly avoids the per-tick rebuild; its comment documents
   why). No further work needed.
-- **B3–B6, B9, C1–C3** — phase-2/3 backlog items from the same audit pass;
+- **B3–B6, B9, C2–C3** — phase-2/3 backlog items from the same audit pass;
   tracked in the scheduling system, not restated here to avoid two sources
   of truth.
 
@@ -303,3 +303,12 @@ marker in source. Don't add one; duplicating tracking here would just drift.
 - **A1 (partial)** — an Objective-C exception shim was built on `main`;
   adoption in the per-app-routing branch is still pending. See
   `dev/notes/objc-exception-shim-handoff.md` for the handoff.
+- **C1** — quitting while streaming no longer outruns the AirPlay goodbye:
+  `AppDelegate.applicationShouldTerminate` calls `backend.stop()` then
+  `.terminateLater`, awaits the bounded `OutputBackend.stopAndWait(timeout:
+  .seconds(2))` seam, shows a delayed (~300ms) "Disconnecting…" indicator so a
+  slow quit doesn't read as a hang, then replies. Residual (not resolved by
+  C1): `NativeBackend.stop()` still runs `perAppCapture.stopAll()` /
+  `routeMixer.flush()` / `localPlaybackEngine?.stop()` on the caller thread —
+  bounded, graphQueue-serialized work, but a follow-up candidate to move off
+  the quit path.

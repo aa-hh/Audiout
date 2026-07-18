@@ -227,6 +227,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
 
     private var stateStreamTask: Task<Void, Never>?
 
+    /// The in-flight engine-teardown Task from the last `stop()` (C1). Stored so
+    /// `stopAndWait(timeout:)` can await it on the app's terminate path. Confined to
+    /// `stateQueue` like everything else.
+    private var engineStopTask: Task<Void, Never>?
+
     // MARK: Per-app routing state (T6 — all confined to `stateQueue`)
 
     /// The bundle IDs most recently routed to a specific device (a `.device(id:)`
@@ -487,6 +492,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     }
 
     public func start() {
+        // Snapshot the local output's HAL state OFF `stateQueue` (B3): these are
+        // blocking Core Audio reads and must not run inside the critical section the
+        // main-thread `devices` getter waits on. Lock-free and valid before
+        // `systemVolume.start()` (SystemOutputVolume's contract), which is what lets
+        // them run here, ahead of the queue hop.
+        let localName = Self.currentOutputDeviceName()
+        let localVolume = systemVolume.currentVolume()
+        let localMuted = systemVolume.currentMuted()
         stateQueue.async {
             guard !self.started else { return }
             self.started = true
@@ -497,7 +510,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // It is NEVER fed to the engine or `addOutput`-ed: it's the local
             // output, not an AirPlay receiver (guarded everywhere by
             // `isLocalDevice` / `supportsAirPlay2 == false`).
-            self.surfaceLocalDevice()
+            self.surfaceLocalDevice(name: localName, volume: localVolume, muted: localMuted)
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. AP2
@@ -519,13 +532,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         //     against `setVolume`/`setMuted`.
         systemVolume.onExternalChange = { [weak self] volume, muted, defaultDeviceChanged in
             guard let self else { return }
+            // A default-device switch reports no name, so re-read it every time: this
+            // is the one path that relabels the row. Read it HERE, on the helper's own
+            // callback thread, BEFORE hopping to `stateQueue` (B3): it is a blocking
+            // Core Audio HAL read, and running it inside the critical section stalls
+            // every `stateQueue` waiter — including the main-thread `devices` getter —
+            // when coreaudiod is busy (device switches, sleep/wake). An unchanged name
+            // is harmless: `applyLocal` suppresses the no-op emit anyway.
+            let name = Self.currentOutputDeviceName()
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
             self.stateQueue.async {
-                // A default-device switch reports no name, so re-read it every time:
-                // this is the one path that relabels the row (an unchanged name costs
-                // one HAL read and `applyLocal` suppresses the no-op emit anyway).
-                let name = Self.currentOutputDeviceName()
                 let previousVolume = self.known[Self.localDeviceID]?.volume
                 self.applyLocal(Self.localDeviceID) { device in
                     device.name = name
@@ -607,10 +624,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     }
 
     public func stop() {
-        // Tear down capture first (stop feeding the engine), then discovery, then
-        // the engine itself.
+        // Stop delivering levels; the whole-system capture tap itself is torn down by
+        // the ORDERED `captureControlQueue` stop below — NOT eagerly here (C1). An
+        // eager caller-thread `captureCoordinator?.stop()` did a `queue.sync` + HAL
+        // teardown inline, blocking the caller (main, on the quit path) behind
+        // coreaudiod and behind any in-flight start; the ordered stop is the
+        // documented final word and reaches the same state off the caller thread.
+        // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
-        captureCoordinator?.stop()
         // Per-app routing (T6): stop every process tap and drain the mixer. Both are
         // off `stateQueue` (teardown may block on Core Audio), matching the
         // whole-system tap's stop above. Callbacks stay wired — they only fire while
@@ -627,10 +648,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
         systemVolume.onExternalChange = nil
         systemVolume.stop()
 
+        // Engine teardown stays fire-and-forget so `stop()` never blocks its caller,
+        // but the Task is now STORED (C1) so the app layer can await it via
+        // `stopAndWait(timeout:)` on the terminate path — otherwise process exit
+        // outruns the RTSP/RTP teardown and the AirPlay sessions are cut un-gracefully.
         let engine = self.engine
-        Task { await engine.stop() }
+        let engineStop = Task { await engine.stop() }
 
         stateQueue.async {
+            self.engineStopTask = engineStop
             // stateStreamTask is confined to stateQueue (finding 8): a start()
             // immediately followed by stop() would otherwise race the assignment in
             // subscribeStateStream (which now also runs on stateQueue) against this
@@ -642,14 +668,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
             self.captureRunning = false
-            // Give `captureControlQueue` the last word, too. The eager stop above
-            // runs on the CALLER's thread, so it is unordered against a start still
-            // queued from a just-prior setOutputSet — that start would land after
-            // it and leave the tap running (muting the Mac) with the backend torn
-            // down. Enqueued from inside this critical section, this stop is
-            // ordered after every gate decision that preceded it, so the FIFO's
-            // final op is always the stop. Idempotent, hence harmless when the
-            // eager stop already won.
+            // `captureControlQueue` gets the last word — and, since the eager
+            // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
+            // caller-thread stop would be unordered against a start still queued from
+            // a just-prior setOutputSet — that start would land after it and leave the
+            // tap running (muting the Mac) with the backend torn down. Enqueued from
+            // inside this critical section, this stop is ordered after every gate
+            // decision that preceded it, so the FIFO's final op is always the stop.
+            // Idempotent.
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }
@@ -689,6 +715,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
             self.pendingRetries.removeAll()
             self.bufferReAdding.removeAll()
             for id in ids { self.emit(.deviceRemoved(id: id)) }
+        }
+    }
+
+    /// Await the engine teardown that ``stop()`` fired, bounded by `timeout` (C1).
+    ///
+    /// ``stop()`` kicks engine teardown off as a detached Task so it never blocks its
+    /// caller; on a normal app quit that Task can be outrun by process exit, cutting
+    /// the AirPlay RTSP/RTP sessions un-gracefully (receivers are left to time the
+    /// session out on their own). `applicationShouldTerminate` (T3, a later task —
+    /// wired via the ``OutputBackend`` seam) calls this AFTER ``stop()`` to give that
+    /// teardown a bounded window to finish gracefully.
+    ///
+    /// Returns as soon as EITHER the engine teardown completes OR `timeout` elapses,
+    /// whichever is first — it never blocks on a wedged engine (coreaudiod / a stuck
+    /// RTSP socket must not hang the quit). The detached teardown Task keeps running
+    /// regardless; this only bounds how long the caller waits on it. Call after
+    /// ``stop()``; a no-op (returns immediately) if no teardown is in flight.
+    public func stopAndWait(timeout: Duration) async {
+        guard let task = stateQueue.sync(execute: { self.engineStopTask }) else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = ResumeOnce(continuation)
+            // Whichever finishes first resumes; the other resume is swallowed.
+            Task { await task.value; gate.resume() }
+            Task { try? await Task.sleep(for: timeout); gate.resume() }
         }
     }
 
@@ -1376,6 +1426,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
                     try await engine.addOutput(outputID)
+                    // Snapshot the Mac's output volume OFF `stateQueue` (B3) for the
+                    // seed below: the blocking HAL read must not run inside the
+                    // critical section. Read here (converge loop's own thread), pass
+                    // the value into `connectVolumeSeed`.
+                    let systemLevelSnapshot = systemVolume.currentVolume()
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
@@ -1404,7 +1459,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                         // `connectVolumeSeed`.
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
-                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
+                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot)
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
                             if let seededVolume { $0.volume = seededVolume }
@@ -1517,24 +1572,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// Add the current local output device to the model and emit `deviceAdded`.
     /// On `stateQueue`. Idempotent-ish: only appended once per `start()` (cleared
     /// on `stop()` with everything else).
-    private func surfaceLocalDevice() {
+    private func surfaceLocalDevice(name: String, volume: Int?, muted: Bool?) {
         let id = Self.localDeviceID
         guard known[id] == nil else { return }
         let device = Device(
             id: id,
-            name: Self.currentOutputDeviceName(),
+            name: name,
             kind: .localMac,
             isAvailable: true,
             supportsAirPlay2: false,       // mirrors MockBackend's local fixture
             // Seed from the HARDWARE, not a fixture: the row must open showing where
             // the Mac's volume actually is, or the first slider touch would jump it.
-            // These reads are lock-free and work before `systemVolume.start()`
-            // (SystemOutputVolume's contract), which is what lets this run here — the
-            // local row is surfaced before the rest of `start()` wires anything up.
-            // The fallbacks cover outputs with no readable volume/mute control (many
-            // aggregate + digital/HDMI devices), where `nil` means "unreadable".
-            volume: systemVolume.currentVolume() ?? 65,
-            isMuted: systemVolume.currentMuted() ?? false,
+            // The reads happen in `start()` BEFORE the `stateQueue` hop (B3) — off the
+            // queue so a blocking HAL read can't stall the main-thread `devices`
+            // getter — and are passed in here. The fallbacks cover outputs with no
+            // readable volume/mute control (many aggregate + digital/HDMI devices),
+            // where `nil` means "unreadable".
+            volume: volume ?? 65,
+            isMuted: muted ?? false,
             isLocalDevice: true
         )
         known[id] = device
@@ -1932,6 +1987,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// contract), so we diff against the last-known device before emitting to
     /// de-dupe. On `stateQueue`.
     private func applyEngineState(outputID: OutputID, state: OutputState) {
+        // Snapshot the Mac's output volume OFF `stateQueue` (B3): the
+        // `.connected`/`.streaming` branch below reseeds an out-of-band reconnect from
+        // it, and the blocking HAL read must not run inside the critical section the
+        // main-thread `devices` getter waits on. This runs on the state-stream
+        // consumer's own task thread, ahead of the queue hop. Read unconditionally —
+        // cheap, and the good-transition branch that consumes it is the common path.
+        let systemLevelSnapshot = systemVolume.currentVolume()
         // A good transition (.streaming/.connected) for a device the user has since
         // turned OFF must NOT re-wedge it ON — instead re-kick converge to tear the
         // stale session down. We compute any needed re-kick under the lock and fire
@@ -1975,7 +2037,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
                 // Suppressed during an `applyStartBuffer` re-add so a buffer change
                 // whose good-state event races this branch can't reset the level —
                 // see `connectVolumeSeed`.
-                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
+                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot) {
                     device.volume = seededVolume
                 }
             case .failed, .passwordRequired:
@@ -2267,9 +2329,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
     /// removed at every real teardown — makes that whole class of drift impossible:
     /// there is no second set that can be stuck-set while `added` is clear, so every
     /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
-    private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
+    ///
+    /// The system-volume HAL read is NOT done here: `systemLevel` is snapshotted by
+    /// each caller BEFORE it takes `stateQueue` (B3), so the blocking Core Audio read
+    /// never runs inside the critical section that the main-thread `devices` getter
+    /// waits on. The value being a few µs staler than the `added` edge is immaterial —
+    /// only WHERE the read happens moved, not WHEN the seed fires. `nil` still means
+    /// "unreadable" and maps to 0% (deliberate silence, not a guessed level).
+    private func connectVolumeSeed(_ id: String, outputID: OutputID, systemLevel: Int?) -> Int? {   // on stateQueue
         guard !bufferReAdding.contains(id) else { return nil }
-        let seed = systemVolume.currentVolume() ?? 0
+        let seed = systemLevel ?? 0
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
             stashedVolume[id] = seed
@@ -2335,6 +2404,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, AppRouteCo
 
     private func emit(_ event: BackendEvent) {   // on stateQueue
         for continuation in continuations.values { continuation.yield(event) }
+    }
+}
+
+/// One-shot resume guard for a `CheckedContinuation` raced between two Tasks
+/// (`stopAndWait`'s teardown-vs-timeout race). Whichever Task calls `resume()`
+/// first wins; every later call is a no-op, so the continuation is resumed exactly
+/// once no matter which branch finishes first (double-resume would trap).
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+    func resume() {
+        lock.lock()
+        let c = continuation
+        continuation = nil
+        lock.unlock()
+        c?.resume()
     }
 }
 

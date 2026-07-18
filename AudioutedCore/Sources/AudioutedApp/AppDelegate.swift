@@ -111,6 +111,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stream finishes cleanly and we don't leak it past app exit.
     private var eventTask: Task<Void, Never>?
 
+    /// Set once `applicationShouldTerminate` has begun tearing down (C1). A second
+    /// Quit while the first is still waiting on `stopAndWait` must not re-enter
+    /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
+    /// `reply(toApplicationShouldTerminate:)` per terminate request.
+    private var isTerminating = false
+
+    /// The "Disconnecting…" indicator shown while the terminate reply is pending
+    /// (C1, user-requested). Owned here so it can be closed before the reply fires.
+    private var quittingIndicator: QuittingIndicatorPanel?
+
     // MARK: Lifecycle
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -328,11 +338,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    /// Gives graceful AirPlay teardown a bounded window before the process exits
+    /// (C1). A plain `applicationWillTerminate` fires `backend.stop()` and then the
+    /// process dies immediately — `stop()`'s engine teardown is deliberately
+    /// fire-and-forget (see its doc comment), so process exit routinely outran the
+    /// RTSP/RTP goodbye, leaving receivers with stale sessions that make the next
+    /// reconnect flaky. `.terminateLater` holds the process open just long enough to
+    /// await `stopAndWait(timeout:)` (bounded at 2s so a wedged engine can never hang
+    /// the quit), then replies to let AppKit finish terminating.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+
         eventTask?.cancel()
         eventTask = nil
         backend.stop()
         log("Audiouted terminating")
+
+        // Only show the indicator if the wait is actually slow (~300ms) — an instant
+        // quit must never flash UI.
+        let indicatorDelay = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.isTerminating else { return }
+            self.quittingIndicator = QuittingIndicatorPanel.showCentered()
+        }
+
+        Task { @MainActor [weak self] in
+            await self?.backend.stopAndWait(timeout: .seconds(2))
+            indicatorDelay.cancel()
+            self?.quittingIndicator?.close()
+            self?.quittingIndicator = nil
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+
+        return .terminateLater
     }
 
     // MARK: Backend event plumbing
@@ -440,5 +479,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func log(_ message: String) {
         audioutedEmergencyWriteStderr("[Audiouted] \(message)\n")
+    }
+}
+
+/// Small floating "Disconnecting…" indicator shown while `applicationShouldTerminate`
+/// waits on `stopAndWait(timeout:)` (C1, user-requested) — so a multi-hundred-ms quit
+/// reads as deliberate rather than a hang. Nonactivating so it never steals focus, and
+/// dies with the process regardless, but `AppDelegate` closes it explicitly before
+/// replying so the exit looks clean rather than an indicator vanishing mid-frame.
+@MainActor
+final class QuittingIndicatorPanel: NSPanel {
+
+    static func showCentered() -> QuittingIndicatorPanel {
+        let panel = QuittingIndicatorPanel()
+        panel.center()
+        panel.orderFrontRegardless()
+        return panel
+    }
+
+    private init() {
+        let size = NSSize(width: 220, height: 64)
+        super.init(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+        isFloatingPanel = true
+        level = .floating
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        hidesOnDeactivate = false
+
+        let effectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        effectView.material = .popover
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 12
+        effectView.layer?.masksToBounds = true
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: "Disconnecting…")
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        label.textColor = .labelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        effectView.addSubview(spinner)
+        effectView.addSubview(label)
+        NSLayoutConstraint.activate([
+            spinner.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 24),
+            spinner.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: spinner.trailingAnchor, constant: 12),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: effectView.trailingAnchor, constant: -16),
+            label.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
+        ])
+
+        contentView = effectView
     }
 }

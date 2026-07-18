@@ -221,6 +221,26 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
+    // MARK: - C4: a NaN/zero sample-rate tap format lands in .failed, never a trap.
+
+    /// A degenerate tap format (zero sample rate — the value a NaN ASBD rate
+    /// collapses to, and the value that makes the converter's resample ratio
+    /// infinite / its AVAudioFrameCount conversion trap) must be rejected into
+    /// `.failed`, not committed to `.capturing`.
+    func testZeroSampleRateFormatLandsInFailed() {
+        let tap = FakeTap()
+        tap.format = TapFormat(sampleRate: 0, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        guard case .failed(.formatReadFailed) = coordinator.state else {
+            return XCTFail("a zero/NaN sample-rate format must land in .failed(.formatReadFailed), got \(coordinator.state)")
+        }
+        // The invalid-format tap must not leak — it is torn down.
+        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "an invalid-format start must tear the tap down (no leak)")
+    }
+
     // MARK: - Device-change recreation failure surfaces as .failed.
 
     func testDeviceChangeRecreationFailureSurfacesError() {

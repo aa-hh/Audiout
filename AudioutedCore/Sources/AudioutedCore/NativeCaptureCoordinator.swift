@@ -179,18 +179,67 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     // MARK: Public lifecycle (idempotent)
 
-    // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
     /// Start capture: create the tap, read its real format, register the delivery
     /// callback + the default-output-device-change callback, and start the IOProc.
     /// Idempotent: `start()` while already creating/capturing is a no-op. `start()`
     /// from `.failed` resets and retries.
+    ///
+    /// Structured as claim-under-lock / create-off-lock / commit-under-lock — the
+    /// same shape `recreateTap()` uses — so the blocking `createAndStart` HAL call
+    /// never runs while holding `queue` (which would head-of-line block the `state`
+    /// getter, a concurrent `stop()`, and every buffer's `handleBuffer`). A `stop()`
+    /// racing in during the off-lock create must WIN: the commit re-checks the state
+    /// and, if `stop()` already moved us out of `.creatingTap`, discards the
+    /// just-created tap (torn down OUTSIDE the lock, since its IO callback also takes
+    /// `queue`).
     public func start() {
-        queue.sync {
+        // Claim: only proceed from idle/failed; move to .creatingTap and snapshot
+        // the exclusion pids (queue-confined) under a SHORT lock.
+        let claim: (proceed: Bool, excludedPIDs: Set<pid_t>) = queue.sync {
             switch _state {
             case .idle, .failed:
-                beginStart()
+                self.transition(to: .creatingTap)
+                return (true, resolveExcludedPIDs())
             default:
-                return // already in flight — idempotent
+                return (false, []) // already in flight — idempotent
+            }
+        }
+        guard claim.proceed else { return }
+
+        // Wire callbacks BEFORE creating the tap so no early buffer is dropped.
+        let newTap = makeTap()
+        newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
+        newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+
+        do {
+            // Blocking HAL work OUTSIDE the lock.
+            let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
+            try Self.validate(format)
+            let orphan: SystemAudioTap? = queue.sync {
+                // A stop() may have raced in while we were creating: don't clobber an
+                // idle/stopping state with a fresh capturing one — stop() wins.
+                guard case .creatingTap = _state else {
+                    return newTap // orphan; tear down OUTSIDE the lock
+                }
+                self.tap = newTap
+                self.converter = makeConverter(format)
+                self.transition(to: .capturing(format))
+                return nil
+            }
+            orphan?.teardown()
+        } catch {
+            // createAndStart may have created the tap/aggregate before failing on a
+            // later step; tear it down so we don't leak a system-wide process tap.
+            newTap.teardown()
+            let mapped: NativeCaptureError = (error as? NativeCaptureError)
+                ?? .tapCreationFailed(reason: String(describing: error))
+            queue.sync {
+                // Only surface the failure if we still own the start (a racing stop()
+                // that already reset us to idle/stopping wins).
+                guard case .creatingTap = _state else { return }
+                self.tap = nil
+                self.converter = nil
+                self.transition(to: .failed(mapped))
             }
         }
     }
@@ -256,33 +305,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     // MARK: Start sequence (on `queue`)
 
-    // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
-    private func beginStart() {   // on queue
-        transition(to: .creatingTap)
-        let tap = makeTap()
-        self.tap = tap
-        let excludedPIDs = resolveExcludedPIDs()   // currentExcludedBundleIDs is queue-confined; already on queue here
-
-        // Wire the delivery + device-change callbacks BEFORE creating the tap so
-        // no early buffer is dropped.
-        tap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
-        tap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
-
-        do {
-            // STABILITY(C5): start() holds the state lock across blocking HAL work — see dev/notes/stability-audit-2026-07-18.md
-            let format = try tap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: excludedPIDs)
-            self.converter = makeConverter(format)
-            transition(to: .capturing(format))
-        } catch let error as NativeCaptureError {
-            // createAndStart may have created the tap/aggregate before failing on a
-            // later step; tear it down so we don't leak a system-wide process tap.
-            tap.teardown()
-            self.tap = nil
-            transition(to: .failed(error))
-        } catch {
-            tap.teardown()
-            self.tap = nil
-            transition(to: .failed(.tapCreationFailed(reason: String(describing: error))))
+    /// Reject a tap format the converter/aggregate can't safely consume before it
+    /// commits to `.capturing`. A non-positive sample rate makes the converter's
+    /// resample ratio infinite and its `AVAudioFrameCount` conversion trap; the
+    /// real tap's `createTapAndReadFormat` already guards the raw ASBD (incl. NaN,
+    /// which can't survive the `Int` narrowing into `TapFormat`), but validating
+    /// here also covers an injected/degenerate format and keeps the failure on the
+    /// `.failed` state path rather than a crash.
+    static func validate(_ format: TapFormat) throws {
+        guard format.sampleRate > 0 else {
+            throw NativeCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(format.sampleRate)")
         }
     }
 
@@ -369,17 +402,24 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
-            queue.sync {
+            try Self.validate(format)
+            let orphan: SystemAudioTap? = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
                 guard case .creatingTap = _state else {
-                    newTap.teardown()
-                    return
+                    // stop() won. Return the just-created tap and tear it down OUTSIDE
+                    // this lock: newTap's IO callback (handleBuffer) synchronously
+                    // takes `queue`, so teardown() — which blocks on in-flight IO —
+                    // would deadlock if run inside queue.sync (the file's one rule:
+                    // "teardown OUTSIDE the state lock").
+                    return newTap
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.transition(to: .capturing(format))
+                return nil
             }
+            orphan?.teardown()
         } catch {
             newTap.teardown()   // createAndStart already tears down internally; idempotent.
             let mapped: NativeCaptureError = (error as? NativeCaptureError)
@@ -628,6 +668,16 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
 
+    /// Private serial queue the HAL dispatches the default-output-device listener
+    /// block onto. Registering with a `nil` queue lands the block on Core Audio's
+    /// internal notification-delivery thread, where the block's blocking tap
+    /// teardown+recreate (which itself generates HAL notifications) re-enters the
+    /// HAL and can stall or deadlock. Owning the queue moves that work off the
+    /// HAL's thread. The SAME queue instance must be handed to both the add and
+    /// the remove call — a mismatched queue on remove silently fails to
+    /// deregister (mirrors `SystemOutputVolume`'s discipline).
+    private let listenerQueue = DispatchQueue(label: "com.audiouted.native.capture.device-listener")
+
     init(name: String) { self.name = name }
 
     /// Backstop against leaking a system-wide process tap / aggregate device if
@@ -684,6 +734,16 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let fErr = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
         guard fErr == noErr else {
             throw NativeCaptureError.formatReadFailed(reason: "read kAudioTapPropertyFormat \(fErr)")
+        }
+        // Guard the sample rate before it reaches `Int(asbd.mSampleRate.rounded())`:
+        // a misbehaving driver can hand back NaN/±inf, and `Int(Float.nan)` TRAPS
+        // in Swift (mirrors `SystemOutputVolume.volumeInt(fromScalar:)`'s rationale).
+        // A zero/negative rate is just as poisonous downstream — it makes the
+        // converter's resample ratio infinite and its `AVAudioFrameCount`
+        // conversion trap. Fail loud into `.formatReadFailed` instead.
+        guard asbd.mSampleRate.isFinite, asbd.mSampleRate > 0 else {
+            throw NativeCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(asbd.mSampleRate)")
         }
         self.asbd = asbd
         self.format = TapFormat(
@@ -836,7 +896,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         }
         self.deviceChangeBlock = block
         AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+            AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
     }
 
     private func removeDefaultDeviceListener() {
@@ -846,7 +906,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+            AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
         deviceChangeBlock = nil
     }
 
@@ -1032,7 +1092,14 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
             }
         }
 
-        // Output capacity sized for the resampled frame count (round up).
+        // Output capacity sized for the resampled frame count (round up). Guard the
+        // input rate: a zero/non-finite `inFmt.sampleRate` makes `ratio` infinite
+        // and the `AVAudioFrameCount(...)` conversion below TRAP. The tap-format
+        // guard in `createTapAndReadFormat` should prevent this ever being reached,
+        // but a converter built from a bad format must fail soft (drop the buffer),
+        // never crash the capture thread.
+        guard inFmt.sampleRate.isFinite, inFmt.sampleRate > 0,
+              outFmt.sampleRate.isFinite else { return nil }
         let ratio = Double(outFmt.sampleRate) / Double(inFmt.sampleRate)
         let outCapacity = AVAudioFrameCount(Double(buffer.frameCount) * ratio) + 1
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: outCapacity) else {

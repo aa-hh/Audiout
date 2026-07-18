@@ -17,11 +17,21 @@ public struct Group: Identifiable, Equatable, Codable, Sendable {
     /// group was saved with, not whatever the devices happen to be at.
     public var memberVolumes: [String: Int]
 
-    public init(id: String = UUID().uuidString, name: String, memberIDs: [String], memberVolumes: [String: Int]) {
+    /// User-chosen SF Symbol name for this group's icon (persisted as a bare
+    /// string — resolved via `NSImage(systemSymbolName:)` at render time).
+    /// `nil` means "use the default"; an unrecognized name also falls back to
+    /// the default at render time rather than failing to decode.
+    public var iconSymbolName: String?
+
+    /// Fallback SF Symbol used when `iconSymbolName` is `nil` or unrecognized.
+    public static let defaultIconSymbolName = "rectangle.3.group"
+
+    public init(id: String = UUID().uuidString, name: String, memberIDs: [String], memberVolumes: [String: Int], iconSymbolName: String? = nil) {
         self.id = id
         self.name = name
         self.memberIDs = memberIDs
         self.memberVolumes = memberVolumes
+        self.iconSymbolName = iconSymbolName
     }
 }
 

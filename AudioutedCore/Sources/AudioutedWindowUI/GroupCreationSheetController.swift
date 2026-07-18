@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import AppKit
+import AudioutedCore
+import AudioutedSharedUI
+
+/// The "New Group" sheet (design revamp, SPEC.md §9 "Group setup"): group
+/// creation moves off the old in-pane unsaved draft
+/// (`GroupEditorViewController`'s `showNewDraft`/`isCreatingDraft` flow) onto a
+/// standard macOS sheet presented on the Groups window, the way Calendar
+/// presents "New Calendar". The Groups window is CONFIGURATION-ONLY under the
+/// revamp, and that constraint reaches this sheet too: it only ever edits a
+/// group's identity and membership, never activates it — no Main Out change,
+/// no routing. Activation lives in the app's popover, not here.
+///
+/// Layout, top to bottom, form capped to ``formWidth``:
+/// - a `Name` `NSTextField`, prefilled by the caller via ``configure``;
+/// - a "Speakers" label + a scrollable checklist of `MembershipRowView` rows.
+///   Candidates are ONLY devices with `isAvailable == true` — unlike the
+///   editor's existing-membership case (which must still show/remove an
+///   already-offline member), a brand-new group never offers joining a
+///   speaker that isn't reachable right now;
+/// - a live "N speaker(s) selected" count label in secondary color;
+/// - bottom-trailing Cancel (Escape) / Create (Return, the default button) —
+///   Create is enabled only once at least one row is checked, recomputed on
+///   every toggle.
+///
+/// On Create: builds `memberVolumes` from each checked device's current volume
+/// (mirrors `GroupEditorViewController.commitDraft`) and calls
+/// `GroupController.createGroup(name:memberIDs:memberVolumes:iconSymbolName:)`,
+/// which dedups an identical member set onto the existing group rather than
+/// making a copy (and in that case leaves the existing group's icon alone).
+/// ``onComplete`` reports the outcome (`nil` on cancel); the caller decides
+/// whether to select the new/resolved group in the sidebar — this controller
+/// never activates it.
+///
+/// An icon well sits beside the Name field: a bordered square button showing
+/// ``Group/defaultIconSymbolName`` until the user picks something else via an
+/// anchored `IconPickerViewController` popover (same construction as the
+/// group editor's icon well). The chosen name (`nil` = default) is threaded
+/// through ``commit()`` into `createGroup`.
+public final class GroupCreationSheetController: NSViewController {
+
+    private let groupController: GroupController
+    /// Resolves membership-row icons to any per-device override; `nil` when
+    /// the caller doesn't care to show overrides (rows fall back to each
+    /// device's kind-derived default).
+    private let deviceIconController: DeviceIconController?
+
+    /// Fired once, either with the created/resolved group (`alreadyExisted`
+    /// true when `createGroup` deduped onto an existing group instead of
+    /// making a copy), or `nil` when the user cancelled.
+    public var onComplete: (((group: Group, alreadyExisted: Bool)?) -> Void)?
+
+    /// Form width cap (approved design: ~380–420pt for a creation sheet).
+    private static let formWidth: CGFloat = 400
+    /// Caps the checklist's height before it scrolls, so a long fleet doesn't
+    /// grow the sheet past a reasonable size.
+    private static let checklistMaxHeight: CGFloat = 220
+
+    /// Icon well square size (matches `IconPickerViewController`'s curated
+    /// grid cells so the well previews at the same scale as the grid it opens).
+    private static let iconWellSize: CGFloat = 32
+
+    private let nameField = NSTextField(string: "")
+    private let iconWellButton = NSButton()
+    private let stackView = NSStackView()
+    private let scrollView = NSScrollView()
+    private let countLabel = NSTextField(labelWithString: "")
+    private let cancelButton = NSButton()
+    private let createButton = NSButton()
+
+    /// The user's chosen icon override, `nil` meaning "use the default group
+    /// icon" (``Group/defaultIconSymbolName``). Threaded into ``commit()``.
+    private var selectedIconSymbolName: String?
+
+    /// Keeps the checklist scroll view exactly as tall as its rows (built
+    /// lazily in `loadView` — the document view must exist first). See the
+    /// comment at its activation site.
+    private lazy var checklistHugsContentConstraint: NSLayoutConstraint = {
+        let c = scrollView.heightAnchor.constraint(
+            equalTo: scrollView.documentView!.heightAnchor)
+        c.priority = .defaultHigh
+        return c
+    }()
+
+    /// Membership rows keyed by device id, so toggles and tests can find them.
+    private var rowsByID: [String: MembershipRowView] = [:]
+    /// The devices offered as membership candidates, in order — already
+    /// filtered to `isAvailable` by ``configure``.
+    private var candidateDevices: [Device] = []
+    /// Checked device ids (a subset of `candidateDevices`).
+    private var checkedIDs: Set<String> = []
+
+    public init(groupController: GroupController, deviceIconController: DeviceIconController? = nil) {
+        self.groupController = groupController
+        self.deviceIconController = deviceIconController
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    public override func loadView() {
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        nameField.placeholderString = "Group name"
+        nameField.target = self
+        nameField.action = #selector(nameFieldReturnPressed(_:))
+
+        iconWellButton.translatesAutoresizingMaskIntoConstraints = false
+        iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+        iconWellButton.heightAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
+        iconWellButton.bezelStyle = .regularSquare
+        iconWellButton.isBordered = true
+        iconWellButton.imagePosition = .imageOnly
+        iconWellButton.toolTip = "Choose icon"
+        iconWellButton.target = self
+        iconWellButton.action = #selector(iconWellTapped(_:))
+        updateIconWell()
+
+        let speakersLabel = NSTextField(labelWithString: "Speakers")
+        speakersLabel.translatesAutoresizingMaskIntoConstraints = false
+        speakersLabel.textColor = .secondaryLabelColor
+
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.distribution = .fill
+        stackView.spacing = 4
+
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stackView)
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        countLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        countLabel.textColor = .secondaryLabelColor
+
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        cancelButton.title = "Cancel"
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}"   // Escape
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelTapped(_:))
+
+        createButton.translatesAutoresizingMaskIntoConstraints = false
+        createButton.title = "Create"
+        createButton.bezelStyle = .rounded
+        createButton.keyEquivalent = "\r"       // default button (Return)
+        createButton.target = self
+        createButton.action = #selector(createTapped(_:))
+
+        let container = NSView()
+        for v in [iconWellButton, nameField, speakersLabel, scrollView, countLabel, cancelButton, createButton] {
+            container.addSubview(v)
+        }
+
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: Self.formWidth),
+
+            iconWellButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            iconWellButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+
+            nameField.centerYAnchor.constraint(equalTo: iconWellButton.centerYAnchor),
+            nameField.leadingAnchor.constraint(equalTo: iconWellButton.trailingAnchor, constant: 8),
+            nameField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+
+            speakersLabel.topAnchor.constraint(equalTo: iconWellButton.bottomAnchor, constant: 16),
+            speakersLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+
+            scrollView.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 6),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: Self.checklistMaxHeight),
+            // An NSScrollView has no intrinsic size, so without this the whole
+            // checklist collapses to zero under `fittingSize` (which is how the
+            // sheet sizes itself). Hug the checklist content at less-than-
+            // required priority so the ≤ maxHeight cap above can still win for
+            // long fleets (content taller than the cap → the list scrolls).
+            checklistHugsContentConstraint,
+
+            stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 4),
+            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            stackView.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -4),
+            documentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+
+            countLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
+            countLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+
+            createButton.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 16),
+            createButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            createButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+
+            cancelButton.centerYAnchor.constraint(equalTo: createButton.centerYAnchor),
+            cancelButton.trailingAnchor.constraint(equalTo: createButton.leadingAnchor, constant: -12),
+        ])
+
+        view = container
+    }
+
+    // MARK: Model
+
+    /// Configure the sheet before presenting it: prefill the name field with
+    /// `defaultName`, and build the membership checklist from `devices` — ONLY
+    /// `device.isAvailable` devices become candidates (approved rule: the
+    /// creation sheet never offers joining a speaker that isn't reachable
+    /// right now). `preselected` checks any candidate whose id is a member.
+    public func configure(defaultName: String, devices: [Device], preselected: Set<String> = []) {
+        nameField.stringValue = defaultName
+        candidateDevices = devices.filter(\.isAvailable)
+        checkedIDs = preselected.intersection(Set(candidateDevices.map(\.id)))
+        buildRows()
+        updateCountLabel()
+        updateCreateEnabled()
+    }
+
+    /// (Re)build the membership checklist rows from `candidateDevices`.
+    private func buildRows() {
+        for v in stackView.arrangedSubviews { stackView.removeArrangedSubview(v); v.removeFromSuperview() }
+        rowsByID.removeAll()
+        for device in candidateDevices {
+            let row = MembershipRowView(
+                device: device, checked: checkedIDs.contains(device.id),
+                iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.onToggle = { [weak self] deviceID, isChecked in
+                self?.handleToggle(deviceID: deviceID, isChecked: isChecked)
+            }
+            rowsByID[device.id] = row
+            stackView.addArrangedSubview(row)
+            row.leadingAnchor.constraint(equalTo: stackView.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: stackView.trailingAnchor).isActive = true
+        }
+    }
+
+    private func handleToggle(deviceID: String, isChecked: Bool) {
+        if isChecked {
+            checkedIDs.insert(deviceID)
+        } else {
+            checkedIDs.remove(deviceID)
+        }
+        updateCountLabel()
+        updateCreateEnabled()
+    }
+
+    private var isCreateEnabled: Bool { !checkedIDs.isEmpty }
+
+    private func updateCreateEnabled() {
+        createButton.isEnabled = isCreateEnabled
+    }
+
+    private func updateCountLabel() {
+        let count = checkedIDs.count
+        countLabel.stringValue = count == 1 ? "1 speaker selected" : "\(count) speakers selected"
+    }
+
+    // MARK: Actions
+
+    @objc private func nameFieldReturnPressed(_ sender: NSTextField) {
+        // Return in the name field commits the sheet exactly like clicking
+        // Create — but only when Create would itself be enabled.
+        guard isCreateEnabled else { return }
+        commit()
+    }
+
+    @objc private func createTapped(_ sender: NSButton) {
+        commit()
+    }
+
+    @objc private func cancelTapped(_ sender: NSButton) {
+        cancel()
+    }
+
+    @objc private func iconWellTapped(_ sender: NSButton) {
+        let picker = IconPickerViewController()
+        picker.configure(currentSymbolName: selectedIconSymbolName, defaultSymbolName: Group.defaultIconSymbolName)
+        picker.onPick = { [weak self] name in
+            self?.pickIcon(name)
+        }
+        present(picker, asPopoverRelativeTo: sender.bounds, of: sender,
+                preferredEdge: .maxY, behavior: .transient)
+    }
+
+    /// Apply a picked icon (`nil` = default) and refresh the well's glyph.
+    /// Shared by the real popover callback and ``test_pickIcon(_:)``.
+    private func pickIcon(_ name: String?) {
+        selectedIconSymbolName = name
+        updateIconWell()
+    }
+
+    /// Refresh the icon well's glyph from ``selectedIconSymbolName``, falling
+    /// back through ``DeviceIcon/resolve(_:default:)`` exactly like every
+    /// other icon-rendering site — a stale override never shows a blank glyph.
+    private func updateIconWell() {
+        let symbolName = DeviceIcon.resolve(selectedIconSymbolName, default: Group.defaultIconSymbolName)
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        image?.isTemplate = true
+        iconWellButton.image = image
+        iconWellButton.contentTintColor = .secondaryLabelColor
+    }
+
+    /// Persist the checked candidates as a new group via
+    /// ``GroupController/createGroup`` (which dedups by member set). Mirrors
+    /// `GroupEditorViewController.commitDraft`'s volume-seeding: each member's
+    /// `memberVolumes` entry is that device's current backend volume.
+    private func commit() {
+        guard isCreateEnabled else { return }
+        let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "New Group" : trimmed
+        let memberIDs = candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
+        let memberVolumes = Dictionary(uniqueKeysWithValues: memberIDs.compactMap { id -> (String, Int)? in
+            candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
+        })
+        guard let result = try? groupController.createGroup(
+            name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
+            iconSymbolName: selectedIconSymbolName
+        ) else { return }
+        finish((group: result.group, alreadyExisted: result.alreadyExisted))
+    }
+
+    private func cancel() {
+        finish(nil)
+    }
+
+    /// Report the outcome and dismiss. Dismissing only when actually presented
+    /// (`view.window != nil`) lets a headless test drive `commit()`/`cancel()`
+    /// directly without a hosting window — mirrors
+    /// `GroupEditorViewController.test_confirmDelete`'s bypass of the
+    /// sheet-only path.
+    private func finish(_ result: (group: Group, alreadyExisted: Bool)?) {
+        onComplete?(result)
+        if view.window != nil { dismiss(self) }
+    }
+
+    // MARK: Test-support hooks
+    //
+    // No synthesized clicks in headless runs (`../AGENTS.md`) — these drive
+    // the same code paths a real UI interaction would.
+
+    /// Simulate typing a new name into the name field (no commit).
+    public func test_setName(_ name: String) {
+        nameField.stringValue = name
+    }
+
+    /// Simulate ticking/unticking a candidate's membership checkbox.
+    public func test_setMembership(deviceID: String, isChecked: Bool) {
+        guard let row = rowsByID[deviceID] else { return }
+        row.isChecked = isChecked
+        handleToggle(deviceID: deviceID, isChecked: isChecked)
+    }
+
+    /// Checked candidate device ids, in candidate order.
+    public var test_checkedDeviceIDs: [String] {
+        candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
+    }
+
+    /// All candidate device ids offered as membership rows (available devices
+    /// only — see ``configure``).
+    public var test_candidateDeviceIDs: [String] { candidateDevices.map(\.id) }
+
+    /// Whether Create is currently enabled (>= 1 row checked).
+    public var test_isCreateEnabled: Bool { isCreateEnabled }
+
+    /// The live selection-count label's current text.
+    public var test_countText: String { countLabel.stringValue }
+
+    /// Simulate clicking Create (no-op when disabled, exactly like the real
+    /// button).
+    public func test_commit() { commit() }
+
+    /// Simulate clicking Cancel.
+    public func test_cancel() { cancel() }
+
+    /// The icon well's currently-resolved symbol name (``Group/defaultIconSymbolName``
+    /// until a pick overrides it, resolved through ``DeviceIcon/resolve(_:default:)``
+    /// exactly like the rendered glyph).
+    public var test_iconWellSymbolName: String {
+        DeviceIcon.resolve(selectedIconSymbolName, default: Group.defaultIconSymbolName)
+    }
+
+    /// Simulate picking an icon from the picker (`nil` = "use default icon"),
+    /// bypassing the popover exactly like `IconPickerViewController`'s own
+    /// `test_pickCurated`/`test_useDefault` hooks bypass presentation.
+    public func test_pickIcon(_ name: String?) { pickIcon(name) }
+}
+
+/// A flipped document view so the checklist scrolls from the top rather than
+/// bottom-gravitating with dead space above the rows. File-scoped like
+/// the retired mixer pane's identical helper once was — file-scoped on purpose.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}

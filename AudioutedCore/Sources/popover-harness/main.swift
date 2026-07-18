@@ -109,6 +109,10 @@ func run() -> Int32 {
     let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
                                          loadPersisted: false)
     let popover = PopoverController(appRouting: appRouting)
+    // A closed popover deliberately never rebuilds on `update(devices:)`
+    // (audit B8); the harness has no real open, so opt into the shown-repaint
+    // path via the designated headless hook.
+    popover.test_isShownOverride = true
 
     backend.start()
     guard waitForFleet(backend, count: 7) else {
@@ -378,6 +382,10 @@ func runConnectionStatusChecks(_ checks: Checks) {
                                      routingStore: RoutingStore(directory: tempDir()),
                                      loadPersisted: false)
     let popover = PopoverController()
+    // A closed popover deliberately never rebuilds on `update(devices:)`
+    // (audit B8); the harness has no real open, so opt into the shown-repaint
+    // path via the designated headless hook.
+    popover.test_isShownOverride = true
 
     backend.start()
     guard waitForFleet(backend, count: 7) else {

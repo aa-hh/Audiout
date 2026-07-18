@@ -2,19 +2,29 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
-/// The group editor pane (SPEC §9 "Group setup (REVISED 2026-07-13)": renaming,
-/// membership checkboxes, reordering, and "Delete group…" live in the mixer
-/// window — this is the editing home the menu's quick-create feeds into). This
-/// is the absorbed T-U3: the in-menu editable field is impossible (menu item
+/// The group editor pane (design revamp: the Groups window is
+/// CONFIGURATION-ONLY — renaming, membership, and "Delete group…" live here,
+/// but activation/routing never do; that stays in the popover only). This is
+/// the absorbed T-U3: the in-menu editable field is impossible (menu item
 /// views get no keyboard events — `dev/notes/p1-menu-brief.md` §3), so a real
 /// `NSTextField` works fine HERE, in a normal window.
 ///
-/// Layout, top to bottom:
-/// - a rename `NSTextField` (real first responder — legal in a window);
-/// - a "Speakers" list of `NSButton(checkboxWithTitle:)`, one per discovered
-///   device, checked when the device is a member (per HIG — checkboxes for
-///   membership, not switches);
+/// EDIT-ONLY: this view controller never creates a group. Creation moved to a
+/// standard macOS sheet (a parallel task); this editor only ever shows an
+/// already-persisted group.
+///
+/// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
+/// design feedback 2026-07-18: groups and devices share the identical
+/// large-icon header, the only difference being that a group's TITLE is
+/// editable and a device's is not):
+/// - a large (``DeviceIconWellView/size``pt) group icon with the shared
+///   Contacts-style hover scrim; clicking it opens the icon picker;
+/// - the group name as an editable borderless title field (centered under the
+///   icon, capped width — commits on Return/focus loss, like a Finder rename);
+/// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
+///   (per HIG — checkboxes for membership, not switches);
 /// - a "Delete group…" `NSButton`.
 ///
 /// Edits write straight through the injected `GroupController`
@@ -22,42 +32,62 @@ import AudioutedCore
 /// `saveGroup`; the delete button calls `deleteGroup`. The parent window is
 /// notified via `onDidEditGroup` / `onDidDeleteGroup` so it can refresh the
 /// sidebar labels + toolbar presets.
+///
+/// The header icon shows `group.iconSymbolName` (resolved through
+/// `DeviceIcon.resolve`, so a stale override still renders the default rather
+/// than a blank glyph). Picking a symbol (or "use default") persists instantly
+/// through `saveGroup`, exactly like a rename — this window never gates a
+/// group edit behind a separate "Save" step.
 public final class GroupEditorViewController: NSViewController {
 
+    /// Caps the form's content column width so long rows/fields don't stretch
+    /// edge-to-edge in a wide window.
+    private static let contentMaxWidth: CGFloat = 400
+
     private let groupController: GroupController
+
+    /// Resolves/persists per-device icon overrides for `MembershipRowView`
+    /// rows. Optional and nil-tolerant (`../../AGENTS.md`'s "depends on the
+    /// model, never the reverse" — a host without one still renders default
+    /// device glyphs, just no per-device overrides).
+    public var deviceIconController: DeviceIconController?
 
     /// Called after a rename or membership change persisted (refresh sidebar +
     /// toolbar labels in place).
     public var onDidEditGroup: (() -> Void)?
     /// Called after the group was deleted (pop back to the mixer).
     public var onDidDeleteGroup: (() -> Void)?
-    /// Called after a *new* group is created via the draft "New Group" flow —
-    /// `alreadyExisted` is true when the chosen member set matched an existing
-    /// group and was resolved to instead of creating a duplicate (SPEC.md §9
-    /// dedup). The window activates + selects `group` in the sidebar.
-    public var onDidCreateGroup: ((_ group: Group, _ alreadyExisted: Bool) -> Void)?
-    /// Called when the user cancels the draft "New Group" flow (pop back to the
-    /// mixer, no group created).
-    public var onDidCancelCreate: (() -> Void)?
 
-    /// The group currently being edited, nil before `show` (or in create mode —
-    /// a draft has no persisted id yet).
+    /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
 
-    /// True while the editor is showing an unsaved draft (the "New Group" flow).
-    public private(set) var isCreatingDraft = false
-
+    private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = NSStackView()
     private let deleteButton = NSButton()
-    private let saveButton = NSButton()
-    private let cancelButton = NSButton()
-    private let titleLabel = NSTextField(labelWithString: "Group")
 
-    /// Membership checkboxes keyed by device id, so a test can read/drive them.
-    private var checkboxesByID: [String: NSButton] = [:]
-    /// The devices offered as membership candidates, in order.
+    /// Width cap for the editable title field (design feedback 2026-07-18:
+    /// the full-width Name bar was "unnecessarily long").
+    private static let titleFieldMaxWidth: CGFloat = 260
+
+    /// Kept alive across a picker session so it can be dismissed/replaced;
+    /// nil when no picker is currently presented.
+    private var iconPickerPopover: NSPopover?
+
+    /// The symbol name last resolved into the icon well's image (mirrors
+    /// `iconWellButton.image`, but as the plain string a test can assert
+    /// against without relying on `NSImage`'s internal name-tracking).
+    private var iconWellSymbolName: String?
+
+    /// Membership rows keyed by device id, so a test can read/drive them.
+    private var rowsByID: [String: MembershipRowView] = [:]
+    /// The devices currently offered as membership candidates, in order
+    /// (available devices, plus unavailable devices only while they remain
+    /// members of this group — see ``rebuildCandidates(devices:)``).
     private var candidateDevices: [Device] = []
+    /// The full device set last passed to `show`, so membership toggles can
+    /// rebuild the candidate list (an unchecked unavailable device drops out).
+    private var allDevices: [Device] = []
 
     public init(groupController: GroupController) {
         self.groupController = groupController
@@ -67,16 +97,28 @@ public final class GroupEditorViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
+        iconWell.translatesAutoresizingMaskIntoConstraints = false
+        iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.setAccessibilityLabel("Edit group icon")
+        iconWell.onClick = { [weak self] in
+            guard let self else { return }
+            self.presentIconPicker(anchoredTo: self.iconWell)
+        }
 
-        let nameLabel = NSTextField(labelWithString: "Name")
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.textColor = .secondaryLabelColor
-
+        // The editable title: styled like the detail pane's name label (header
+        // parity) but a real first responder. Borderless label-look that edits
+        // in place — bezel-less so the text baseline sits exactly where the
+        // static label's does (the bezeled field drew its text visibly
+        // off-center — live-test feedback 2026-07-18).
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
+        nameField.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
+        nameField.alignment = .center
+        nameField.isBezeled = false
+        nameField.drawsBackground = false
+        nameField.usesSingleLineMode = true
+        nameField.lineBreakMode = .byTruncatingTail
         nameField.target = self
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
@@ -97,56 +139,49 @@ public final class GroupEditorViewController: NSViewController {
         deleteButton.action = #selector(deleteTapped(_:))
         deleteButton.hasDestructiveAction = true
 
-        // Draft-mode buttons (create flow). Hidden while editing an existing
-        // group; the delete button is hidden while creating a draft.
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-        saveButton.title = "Save"
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"        // default button (Return)
-        saveButton.target = self
-        saveButton.action = #selector(saveDraftTapped(_:))
-
-        cancelButton.translatesAutoresizingMaskIntoConstraints = false
-        cancelButton.title = "Cancel"
-        cancelButton.bezelStyle = .rounded
-        cancelButton.keyEquivalent = "\u{1b}"  // Escape
-        cancelButton.target = self
-        cancelButton.action = #selector(cancelDraftTapped(_:))
-
         let container = NSView()
-        for v in [titleLabel, nameLabel, nameField, speakersLabel, membershipStack,
-                  deleteButton, saveButton, cancelButton] {
+        // The form column: capped to `contentMaxWidth`, leading-aligned,
+        // pinned below the safe area. Everything hangs off this column's
+        // edges rather than the container's, so the cap applies uniformly.
+        let column = NSView()
+        column.translatesAutoresizingMaskIntoConstraints = false
+
+        for v in [iconWell, nameField, speakersLabel, membershipStack] {
+            column.addSubview(v)
+        }
+        for v in [column, deleteButton] {
             container.addSubview(v)
         }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
-            nameLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 16),
-            nameLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            // Header parity with DeviceDetailViewController: centered large
+            // icon, centered (editable) title beneath it.
+            iconWell.topAnchor.constraint(equalTo: column.topAnchor),
+            iconWell.centerXAnchor.constraint(equalTo: column.centerXAnchor),
 
-            nameField.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
-            nameField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            nameField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            nameField.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
+            nameField.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            // FIXED width, not a cap: an EDITABLE text field has no intrinsic
+            // width, so a "<=" alone lets auto layout collapse it to zero (it
+            // rendered invisible — snapshot-caught 2026-07-18).
+            nameField.widthAnchor.constraint(equalToConstant: Self.titleFieldMaxWidth),
 
-            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 16),
-            speakersLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 20),
+            speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
 
             membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 8),
-            membershipStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
+            membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
             deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 16),
             deleteButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
-
-            // Save/Cancel sit at the bottom-trailing (standard sheet-style order:
-            // Cancel then default Save at the far trailing edge).
-            saveButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            saveButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
-            cancelButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -12),
-            cancelButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
         ])
 
         view = container
@@ -154,65 +189,61 @@ public final class GroupEditorViewController: NSViewController {
 
     // MARK: Model
 
-    /// Show the editor for `groupID`, building the membership checkbox list from
-    /// `devices` (offer every known device as a candidate — a group can gain any
-    /// speaker). No-op if the group no longer exists.
+    /// Show the editor for `groupID`, building the membership row list from
+    /// `devices` (every known device is a candidate for an available row; an
+    /// unavailable device is offered only while it remains a member — see
+    /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
     public func show(groupID: String, devices: [Device]) {
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
         editingGroupID = groupID
-        isCreatingDraft = false
-        candidateDevices = devices
+        allDevices = devices
 
-        titleLabel.stringValue = "Edit Group"
         nameField.stringValue = group.name
-        buildCheckboxes(devices: devices, memberSet: Set(group.memberIDs))
-        applyModeButtons()
+        refreshIconWell(group: group)
+        rebuildCandidates(memberSet: Set(group.memberIDs))
     }
 
-    /// Show the editor on an EMPTY draft group (SPEC.md §9 — manual creation is
-    /// the PRIMARY path). `preselected` seeds the membership checklist (e.g. the
-    /// devices multi-selected in the window); pass `[]` for a blank checklist.
-    /// Save → ``createGroup``; Cancel → discard. The name field is prefilled with
-    /// `defaultName` (the caller supplies the next "Group N").
-    public func showNewDraft(defaultName: String, devices: [Device], preselected: [String] = []) {
-        editingGroupID = nil
-        isCreatingDraft = true
-        candidateDevices = devices
-
-        titleLabel.stringValue = "New Group"
-        nameField.stringValue = defaultName
-        buildCheckboxes(devices: devices, memberSet: Set(preselected))
-        applyModeButtons()
+    /// Refresh the header icon's image from `group.iconSymbolName`, resolved
+    /// through `DeviceIcon.resolve` so a stale/unrecognized override still
+    /// renders the default rather than a blank glyph.
+    private func refreshIconWell(group: Group) {
+        let symbolName = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+        iconWellSymbolName = symbolName
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        image?.isTemplate = true
+        iconWell.iconImageView.image = image
+        iconWell.iconImageView.contentTintColor = .secondaryLabelColor
     }
 
-    /// (Re)build the membership checkbox list, checking members of `memberSet`.
-    private func buildCheckboxes(devices: [Device], memberSet: Set<String>) {
+    /// Recompute `candidateDevices` from `allDevices` — available devices,
+    /// plus any unavailable device still in `memberSet` — and rebuild the
+    /// membership rows from that list. Called on `show` and after every
+    /// membership toggle, so an unchecked unavailable member disappears.
+    private func rebuildCandidates(memberSet: Set<String>) {
+        candidateDevices = allDevices.filter { $0.isAvailable || memberSet.contains($0.id) }
+        buildRows(memberSet: memberSet)
+    }
+
+    /// (Re)build the membership row list, checking members of `memberSet`.
+    private func buildRows(memberSet: Set<String>) {
         for v in membershipStack.arrangedSubviews { membershipStack.removeArrangedSubview(v); v.removeFromSuperview() }
-        checkboxesByID.removeAll()
-        for device in devices {
-            let checkbox = NSButton(checkboxWithTitle: device.name,
-                                    target: self, action: #selector(membershipToggled(_:)))
-            checkbox.state = memberSet.contains(device.id) ? .on : .off
-            checkbox.identifier = NSUserInterfaceItemIdentifier(device.id)
-            checkboxesByID[device.id] = checkbox
-            membershipStack.addArrangedSubview(checkbox)
+        rowsByID.removeAll()
+        for device in candidateDevices {
+            let row = MembershipRowView(
+                device: device,
+                checked: memberSet.contains(device.id),
+                iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.onToggle = { [weak self] deviceID, isChecked in
+                self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
+            }
+            rowsByID[device.id] = row
+            membershipStack.addArrangedSubview(row)
         }
-    }
-
-    /// Toggle which action buttons are visible for the current mode: edit mode
-    /// shows "Delete group…"; draft mode shows Save/Cancel.
-    private func applyModeButtons() {
-        deleteButton.isHidden = isCreatingDraft
-        saveButton.isHidden = !isCreatingDraft
-        cancelButton.isHidden = !isCreatingDraft
     }
 
     // MARK: Actions
 
     @objc private func nameCommitted(_ sender: NSTextField) {
-        // In draft mode a Return commits the draft (the field is the default
-        // path to "Save"); in edit mode it persists the rename.
-        if isCreatingDraft { commitDraft(); return }
         commitRename()
     }
 
@@ -226,12 +257,11 @@ public final class GroupEditorViewController: NSViewController {
         onDidEditGroup?()
     }
 
-    @objc private func membershipToggled(_ sender: NSButton) {
+    private func membershipToggled(deviceID: String, isChecked: Bool) {
         guard let editingGroupID,
-              var group = groupController.groups.first(where: { $0.id == editingGroupID }),
-              let deviceID = sender.identifier?.rawValue else { return }
+              var group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
 
-        if sender.state == .on {
+        if isChecked {
             if !group.memberIDs.contains(deviceID) {
                 group.memberIDs.append(deviceID)
                 // Remember the device's current volume for this membership.
@@ -244,37 +274,45 @@ public final class GroupEditorViewController: NSViewController {
             group.memberVolumes[deviceID] = nil
         }
         _ = try? groupController.saveGroup(group)
+        // Rebuild: an unchecked unavailable device drops out of the list.
+        rebuildCandidates(memberSet: Set(group.memberIDs))
         onDidEditGroup?()
     }
 
-    // MARK: Draft (create) actions
+    /// Build and present `IconPickerViewController` anchored to `anchor`,
+    /// wiring its `onPick` to ``pickIcon(_:)``. Guarded on `anchor.window !=
+    /// nil` (`PopoverController.presentUnsupportedExplanation`'s pattern) so a
+    /// headless test never needs a real `NSWindow` — ``test_pickIcon(_:)``
+    /// drives ``pickIcon(_:)`` directly instead.
+    private func presentIconPicker(anchoredTo anchor: NSView) {
+        guard let editingGroupID,
+              let group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
 
-    @objc private func saveDraftTapped(_ sender: NSButton) {
-        commitDraft()
+        let picker = IconPickerViewController()
+        picker.configure(currentSymbolName: group.iconSymbolName, defaultSymbolName: Group.defaultIconSymbolName)
+        picker.onPick = { [weak self] name in
+            self?.pickIcon(name)
+        }
+
+        guard anchor.window != nil else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = picker
+        popover.contentSize = picker.view.fittingSize
+        iconPickerPopover = popover
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
     }
 
-    @objc private func cancelDraftTapped(_ sender: NSButton) {
-        guard isCreatingDraft else { return }
-        isCreatingDraft = false
-        onDidCancelCreate?()
-    }
-
-    /// Persist the draft as a new group via ``GroupController/createGroup`` (which
-    /// dedups by member set). Notifies the window with the resolved group. A
-    /// draft with no checked members is not saved (no empty groups).
-    private func commitDraft() {
-        guard isCreatingDraft else { return }
-        let members = test_checkedDeviceIDs      // checked ids, in candidate order
-        guard !members.isEmpty else { return }
-        let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty ? "New Group" : trimmed
-        let volumes = Dictionary(uniqueKeysWithValues: members.compactMap { id -> (String, Int)? in
-            candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
-        })
-        guard let result = try? groupController.createGroup(name: name, memberIDs: members, memberVolumes: volumes) else { return }
-        isCreatingDraft = false
-        editingGroupID = result.group.id
-        onDidCreateGroup?(result.group, result.alreadyExisted)
+    /// Persist `name` as the editing group's icon override (`nil` reverts to
+    /// the default) and refresh the well — instant-apply, like a rename.
+    private func pickIcon(_ name: String?) {
+        guard let editingGroupID,
+              var group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
+        guard group.iconSymbolName != name else { return }
+        group.iconSymbolName = name
+        _ = try? groupController.saveGroup(group)
+        refreshIconWell(group: group)
+        onDidEditGroup?()
     }
 
     @objc private func deleteTapped(_ sender: NSButton) {
@@ -304,12 +342,12 @@ public final class GroupEditorViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// Membership checkbox ids currently checked, in candidate order.
+    /// Membership row ids currently checked, in candidate order.
     public var test_checkedDeviceIDs: [String] {
-        candidateDevices.map(\.id).filter { checkboxesByID[$0]?.state == .on }
+        candidateDevices.map(\.id).filter { rowsByID[$0]?.test_isChecked == true }
     }
 
-    /// All candidate device ids offered as membership checkboxes.
+    /// All candidate device ids currently offered as membership rows.
     public var test_candidateDeviceIDs: [String] { candidateDevices.map(\.id) }
 
     /// The current text in the rename field.
@@ -321,33 +359,26 @@ public final class GroupEditorViewController: NSViewController {
         commitRename()
     }
 
-    /// Simulate ticking/unticking a membership checkbox for a device.
+    /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {
-        guard let checkbox = checkboxesByID[deviceID] else { return }
-        checkbox.state = member ? .on : .off
-        membershipToggled(checkbox)
+        guard let row = rowsByID[deviceID], row.test_isChecked != member else { return }
+        row.test_toggle()
     }
 
-    /// Simulate typing the draft's name (create mode; no commit).
-    public func test_setDraftName(_ name: String) {
-        nameField.stringValue = name
+    /// The SF Symbol name currently resolved for the icon well's image, or
+    /// `nil` if it has none loaded yet (before `show`).
+    public var test_iconWellSymbolName: String? { iconWellSymbolName }
+
+    /// Simulate picking `name` from the icon picker (`nil` = "use default"),
+    /// bypassing the anchored popover — drives the exact same
+    /// ``pickIcon(_:)`` path `IconPickerViewController.onPick` would.
+    public func test_pickIcon(_ name: String?) {
+        pickIcon(name)
     }
 
-    /// Simulate clicking "Save" in the draft (create) flow.
-    public func test_commitDraft() {
-        commitDraft()
-    }
-
-    /// Simulate clicking "Cancel" in the draft (create) flow.
-    public func test_cancelDraft() {
-        cancelDraftTapped(cancelButton)
-    }
-
-    /// True when "Delete group…" is currently visible (edit mode).
+    /// True when "Delete group…" is currently visible (always true — the
+    /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
-
-    /// True when the Save/Cancel draft buttons are currently visible (create mode).
-    public var test_draftButtonsVisible: Bool { !saveButton.isHidden && !cancelButton.isHidden }
 
     /// Simulate confirming the delete (bypasses the confirmation sheet).
     public func test_confirmDelete() {
@@ -361,11 +392,8 @@ public final class GroupEditorViewController: NSViewController {
 // MARK: - NSTextFieldDelegate
 
 extension GroupEditorViewController: NSTextFieldDelegate {
-    /// Commit the rename when the field loses focus, not just on Return. In draft
-    /// (create) mode the name is only persisted on explicit Save, so focus loss
-    /// does nothing here.
+    /// Commit the rename when the field loses focus, not just on Return.
     public func controlTextDidEndEditing(_ obj: Notification) {
-        guard !isCreatingDraft else { return }
         commitRename()
     }
 }

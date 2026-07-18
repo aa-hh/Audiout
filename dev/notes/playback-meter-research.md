@@ -596,11 +596,29 @@ Rough effort: **~1–2 days** (mostly the capture-side emit + IPC choice).
 4. No UI change — Phase A already consumes `.level` identically for mock and
    real.
 
-### Phase 2 (future) — true per-device levels
+### Phase 2 — per-device AND per-app levels (shipped 2026-07-17)
 
-When a native AirPlay-2 sender replaces the OwnTone/FIFO fan-out, each device can
-carry its own level; feed distinct `rms` per id through the *same*
-`BackendEvent.level` — the meter view and all plumbing are unchanged.
+The native AirPlay-2 backend now carries **distinct per-device and per-app levels**:
+
+- **Per-device metering**: `BackendEvent.level(id:rms:)` now includes the MAX of the
+  whole-system tap RMS (for Selected Devices) and each per-app mixed stream's RMS
+  (for redirect targets), attributed via `NativeBackend.streamBindings` /
+  `latestStreamRMS`. Drives the leading `LevelMeterView` column on device rows
+  and the Main Out row.
+- **Per-app metering**: `BackendEvent.appLevel(bundleID:rms:)` carries live RMS for
+  routed apps, with distinct sources per route type:
+  - `.device`-routed apps: `AppRouteMixer.onAppLevel` emits POST-volume RMS
+  - `.currentDevice`-routed apps: `LocalPlaybackEngine.onAppLevel` emits PRE-volume
+    (raw capture) RMS
+  - `.noRedirect` apps: `PerAppCaptureCoordinator` (metering-only tap, marked
+    `.unmuted`) emits RMS
+  - All three gated by `setMeteringActive(true/false)` (popover open/close).
+  Drives the leading `LevelMeterView` column on Applications rows (`AppRowView`,
+  `showsMeter` flag).
+- Excluded apps (Settings denylist) are never metered in any path.
+
+The meter view and UI plumbing remain unchanged across all backends — per-device
+and per-app levels feed the *same* `BackendEvent` API.
 
 ---
 

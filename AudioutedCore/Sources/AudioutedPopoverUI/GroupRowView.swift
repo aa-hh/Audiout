@@ -46,6 +46,7 @@ public final class GroupRowView: NSView {
 
     private let activateButton = NSButton()
     private let chevronButton = NSButton()
+    private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
@@ -101,6 +102,16 @@ public final class GroupRowView: NSView {
             accessibilityDescription: isExpanded ? "Collapse group" : "Expand group"
         )
 
+        // Group identity glyph — same resolve-with-fallback as every other icon
+        // surface (SidebarViewController, DeviceRowView): an unrecognized/removed
+        // symbol name falls back to `Group.defaultIconSymbolName` at render time
+        // rather than persisting anything beyond the bare name string.
+        let iconSymbolName = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+        iconView.image = NSImage(
+            systemSymbolName: iconSymbolName,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+
         // SPEC §9 revised: the master slider + readout show on EVERY group, not
         // just the active one — a non-active group's master sets its members'
         // preset levels.
@@ -118,6 +129,11 @@ public final class GroupRowView: NSView {
 
         configureIconButton(activateButton, action: #selector(activateClicked(_:)))
         configureIconButton(chevronButton, action: #selector(chevronClicked(_:)))
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.lineBreakMode = .byTruncatingTail
@@ -154,6 +170,7 @@ public final class GroupRowView: NSView {
 
         addSubview(activateButton)
         addSubview(chevronButton)
+        addSubview(iconView)
         addSubview(nameLabel)
         addSubview(readoutLabel)
         addSubview(muteButton)
@@ -178,7 +195,12 @@ public final class GroupRowView: NSView {
             chevronButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             chevronButton.widthAnchor.constraint(equalToConstant: 14),
 
-            nameLabel.leadingAnchor.constraint(equalTo: chevronButton.trailingAnchor, constant: 6),
+            iconView.leadingAnchor.constraint(equalTo: chevronButton.trailingAnchor, constant: 6),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+
+            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 6),
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             // Name yields to the mute button (which sits between name and slider)
             // so it truncates instead of pushing the aligned controls out of place.
@@ -228,7 +250,7 @@ public final class GroupRowView: NSView {
     // interactive controls), so clicking the name also toggles expansion.
     public override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
-        if hit === nameLabel || hit === readoutLabel { return self }
+        if hit === nameLabel || hit === readoutLabel || hit === iconView { return self }
         return hit
     }
 

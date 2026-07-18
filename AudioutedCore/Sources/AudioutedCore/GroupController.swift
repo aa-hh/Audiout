@@ -440,15 +440,18 @@ public final class GroupController {
     /// Create a group from an explicit member list + optional per-member volumes
     /// (the window's "New Group" / "New Group from Selection" paths). Dedups by
     /// member set: if a group with an identical set already exists, resolves to
-    /// it (`alreadyExisted == true`) rather than making a copy. Pure model op —
-    /// it does NOT route (routing is via Main Out); the caller activates if it
-    /// wants (the window does, via its own `activateGroup` callback).
+    /// it (`alreadyExisted == true`) rather than making a copy — in that case
+    /// `iconSymbolName` is NOT applied, since the existing group's own icon
+    /// (chosen when it was first created) must win. Pure model op — it does NOT
+    /// route (routing is via Main Out); the caller activates if it wants (the
+    /// window does, via its own `activateGroup` callback).
     ///
     /// Member volumes default to each device's current backend volume.
     @discardableResult
     public func createGroup(name: String,
                             memberIDs: [String],
                             memberVolumes: [String: Int]? = nil,
+                            iconSymbolName: String? = nil,
                             id: String = UUID().uuidString) throws -> CreateResult {
         if let existing = group(matchingMemberSet: memberIDs) {
             return CreateResult(group: existing, alreadyExisted: true)
@@ -456,7 +459,8 @@ public final class GroupController {
         let volumes = memberVolumes ?? Dictionary(uniqueKeysWithValues: memberIDs.compactMap { id in
             device(id).map { (id, $0.volume) }
         })
-        let group = Group(id: id, name: name, memberIDs: memberIDs, memberVolumes: volumes)
+        let group = Group(id: id, name: name, memberIDs: memberIDs, memberVolumes: volumes,
+                          iconSymbolName: iconSymbolName)
         let saved = try saveGroup(group)
         return CreateResult(group: saved, alreadyExisted: false)
     }

@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutedCore
+import AudioutedSharedUI
 
 /// What the user selected in the sidebar. Drives which detail pane the window
 /// shows (a group → its editor; a device / nothing → the mixer).
@@ -30,6 +31,7 @@ public final class SidebarViewController: NSViewController {
             case header(String)             // "Groups" / "Devices" (isGroupItem)
             case group(Group)               // a saved group (expandable)
             case device(Device)             // a device row (leaf)
+            case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
         }
         let payload: Payload
         var children: [Node]
@@ -54,6 +56,11 @@ public final class SidebarViewController: NSViewController {
     /// selected device ids (SPEC.md §9 — "click on speakers and multiselect to
     /// create a group").
     public var onNewGroupFromSelection: (([String]) -> Void)?
+
+    /// Resolves per-device icon overrides (set via the icon picker) so sidebar
+    /// device rows show the same glyph as the popover/mixer. `nil` (the
+    /// default) falls back to `Device.Kind.symbolName` — old behavior.
+    public var deviceIconController: DeviceIconController?
 
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
@@ -88,8 +95,6 @@ public final class SidebarViewController: NSViewController {
         outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
-        // Right-click context menu ("New Group from Selection").
-        outlineView.menu = makeContextMenu()
 
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
@@ -97,14 +102,18 @@ public final class SidebarViewController: NSViewController {
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Bottom add bar with a "+" button — the standard macOS source-list add
-        // affordance (SPEC.md §9). Plain: new empty group. With devices
-        // selected: new group from that selection.
+        // Bottom add bar with a labeled "New Group" affordance — the standard
+        // macOS source-list add control (SPEC.md §9), styled like Notes'
+        // bottom-left "New Folder" button: borderless, system font, glyph +
+        // title. Plain: new empty group. With devices selected: new group
+        // from that selection.
         addButton.translatesAutoresizingMaskIntoConstraints = false
-        addButton.bezelStyle = .smallSquare
+        addButton.bezelStyle = .recessed
         addButton.isBordered = false
-        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Group")
-        addButton.imagePosition = .imageOnly
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        addButton.imagePosition = .imageLeading
+        addButton.title = "New Group"
+        addButton.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         addButton.target = self
         addButton.action = #selector(addTapped(_:))
         addButton.toolTip = "New Group"
@@ -131,22 +140,10 @@ public final class SidebarViewController: NSViewController {
 
             addButton.leadingAnchor.constraint(equalTo: addBar.leadingAnchor, constant: 8),
             addButton.centerYAnchor.constraint(equalTo: addBar.centerYAnchor),
-            addButton.widthAnchor.constraint(equalToConstant: 20),
-            addButton.heightAnchor.constraint(equalToConstant: 20),
+            addButton.heightAnchor.constraint(equalToConstant: 24),
         ])
 
         view = container
-    }
-
-    private func makeContextMenu() -> NSMenu {
-        let menu = NSMenu()
-        let item = NSMenuItem(title: "New Group from Selection",
-                              action: #selector(newGroupFromSelectionTapped(_:)),
-                              keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
-        menu.delegate = self
-        return menu
     }
 
     // MARK: Add / new-group actions
@@ -171,12 +168,6 @@ public final class SidebarViewController: NSViewController {
         }
     }
 
-    @objc private func newGroupFromSelectionTapped(_ sender: NSMenuItem) {
-        let selected = selectedDeviceIDs
-        guard !selected.isEmpty else { return }
-        onNewGroupFromSelection?(selected)
-    }
-
     // MARK: Model
 
     /// Rebuild the tree from the current groups + devices and reload. Preserves
@@ -188,9 +179,13 @@ public final class SidebarViewController: NSViewController {
 
         var newRoots: [Node] = []
 
-        // 1. Groups section — each group expands to its member devices.
-        if !groups.isEmpty {
-            let groupsHeader = Node(.header("Groups"))
+        // 1. Groups section — always shown (this window is groups-configuration
+        //    only), each group expands to its member devices. Zero groups gets a
+        //    non-selectable "No groups yet" placeholder row instead of vanishing.
+        let groupsHeader = Node(.header("Groups"))
+        if groups.isEmpty {
+            groupsHeader.children = [Node(.emptyState("No groups yet"))]
+        } else {
             for group in groups {
                 let groupNode = Node(.group(group))
                 groupNode.children = group.memberIDs.compactMap { id in
@@ -198,8 +193,8 @@ public final class SidebarViewController: NSViewController {
                 }
                 groupsHeader.children.append(groupNode)
             }
-            newRoots.append(groupsHeader)
         }
+        newRoots.append(groupsHeader)
 
         // 2. Devices section — devices not in the active group (matches the
         //    menu's "ungrouped" split; falls back to all devices when nothing is
@@ -232,7 +227,7 @@ public final class SidebarViewController: NSViewController {
 
     private func selection(for node: Node) -> SidebarSelection? {
         switch node.payload {
-        case .header: return nil
+        case .header, .emptyState: return nil
         case .group(let g): return .group(id: g.id)
         case .device(let d): return .device(id: d.id)
         }
@@ -269,10 +264,24 @@ public final class SidebarViewController: NSViewController {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
 
-    /// Number of group rows under the "Groups" header.
+    /// True when the "Groups" header's only child is the "No groups yet"
+    /// non-selectable placeholder row (i.e. there are zero saved groups).
+    public var test_hasGroupsEmptyStateRow: Bool {
+        guard let groupsHeader = roots.first(where: {
+            if case .header("Groups") = $0.payload { return true } else { return false }
+        }) else { return false }
+        return groupsHeader.children.contains {
+            if case .emptyState = $0.payload { return true } else { return false }
+        }
+    }
+
+    /// Number of group rows under the "Groups" header (excludes the "no groups
+    /// yet" placeholder row).
     public var test_groupRowCount: Int {
         roots.first { if case .header("Groups") = $0.payload { return true } else { return false } }?
-            .children.count ?? 0
+            .children.filter {
+                if case .group = $0.payload { return true } else { return false }
+            }.count ?? 0
     }
 
     /// Number of device rows under the "Devices" header (ungrouped).
@@ -330,18 +339,6 @@ public final class SidebarViewController: NSViewController {
     }
 }
 
-// MARK: - NSMenuDelegate (context menu)
-
-extension SidebarViewController: NSMenuDelegate {
-    public func menuNeedsUpdate(_ menu: NSMenu) {
-        // "New Group from Selection" is only meaningful with ≥1 device selected.
-        let hasDevices = !selectedDeviceIDs.isEmpty
-        for item in menu.items where item.action == #selector(newGroupFromSelectionTapped(_:)) {
-            item.isEnabled = hasDevices
-        }
-    }
-}
-
 // MARK: - NSOutlineViewDataSource
 
 extension SidebarViewController: NSOutlineViewDataSource {
@@ -372,8 +369,11 @@ extension SidebarViewController: NSOutlineViewDelegate {
     }
 
     public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        // Section headers aren't selectable (source-list convention).
-        !self.outlineView(outlineView, isGroupItem: item)
+        // Section headers and the "no groups yet" placeholder aren't selectable
+        // (source-list convention; the placeholder carries no identity to select).
+        guard let node = item as? Node else { return false }
+        if case .emptyState = node.payload { return false }
+        return !self.outlineView(outlineView, isGroupItem: item)
     }
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
@@ -381,11 +381,15 @@ extension SidebarViewController: NSOutlineViewDelegate {
         switch node.payload {
         case .header(let title):
             return makeLabel(title, identifier: "header", secondary: true)
+        case .emptyState(let text):
+            return makeLabel(text, identifier: "emptyState", secondary: true)
         case .group(let group):
-            return makeIconLabel(symbol: "rectangle.3.group",
+            let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+            return makeIconLabel(symbol: symbol,
                                  text: group.name, identifier: "group")
         case .device(let device):
-            return makeIconLabel(symbol: device.kind.symbolName,
+            let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+            return makeIconLabel(symbol: symbol,
                                  text: device.name, identifier: "device",
                                  dimmed: !device.isAvailable)
         }

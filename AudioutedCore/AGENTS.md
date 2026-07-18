@@ -80,6 +80,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - Known stability findings in this package carry `STABILITY(id)` inline
   markers — details and fix sketches in
   [../dev/notes/stability-audit-2026-07-18.md](../dev/notes/stability-audit-2026-07-18.md).
+- `Group.iconSymbolName` is an optional bare SF Symbol name string, added
+  with no schema/version bump — `nil` decodes cleanly from any
+  pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
+  Resolution (including render-time fallback for a stale/unrecognized name)
+  lives in `AudioutedSharedUI.DeviceIcon`, not here.
 
 ## Map
 
@@ -92,6 +97,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `AppRoutingController` | Per-app routing state/destinations; `onRoutesDidChange` is the table-changed signal T7 wires to the backend. |
 | `AppRouteConfiguring` | Optional backend capability (T6/T7): `updateAppRoutes` streams a routed app to its device. `NativeBackend` only. |
 | `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence. |
+| `DeviceIconStore` | Persists per-device icon overrides (bare SF Symbol name strings only) for `AudioutedSharedUI.DeviceIconController`. |
 | `BackendEvent` | Backend→UI push channel: add/remove/update/level/volume-changed/routedApps. |
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |

@@ -15,7 +15,7 @@ import AudioutedCore
 ///
 /// It lives in `AudioutedSharedUI` (not the popover target) so the
 /// window target can link it without pulling in the whole dropdown; both
-/// `PopoverController` (popover) and `MixerViewController` (window) reuse it.
+/// `PopoverController` (the popover) is its host (the window's mixer pane was retired 2026-07-18).
 ///
 /// The custom-view rules below (`draw`/highlight/tracking) still support the
 /// legacy `NSMenuItem` host branch; in the popover and window there is no
@@ -233,13 +233,20 @@ public final class DeviceRowView: NSView {
     ///     the row isn't blank while a redirect is pending. Only `NativeBackend`
     ///     ever populates this; `MockBackend`/`OwnToneBackend` leave it empty
     ///     unless a test/demo explicitly injects it.
+    ///   - iconSymbolName: an explicit SF Symbol name override for the icon
+    ///     glyph, resolved through ``DeviceIcon/resolve(_:default:)`` (so an
+    ///     unknown/invalid name falls back to `device.kind.symbolName`).
+    ///     Defaults to `nil`, in which case the row behaves exactly as before —
+    ///     `device.kind.symbolName` is used directly. Existing callers all omit
+    ///     this, so their behavior is byte-for-byte unchanged.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
                       blocked: Bool = false,
                       blockReason: String? = nil,
                       routedAppNames: [String] = [],
-                      liveAppNames: [String] = []) {
+                      liveAppNames: [String] = [],
+                      iconSymbolName: String? = nil) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -259,8 +266,12 @@ public final class DeviceRowView: NSView {
             ? Self.unsupportedExplanation
             : ((showsToggle && blocked) ? blockReason : nil)
 
+        // `nil` (every existing caller) resolves straight to the kind default —
+        // `DeviceIcon.resolve` short-circuits on a `nil` override — so behavior
+        // is unchanged unless a caller passes an explicit override name.
+        let resolvedSymbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
         iconView.image = NSImage(
-            systemSymbolName: device.kind.symbolName,
+            systemSymbolName: resolvedSymbolName,
             accessibilityDescription: device.name
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,

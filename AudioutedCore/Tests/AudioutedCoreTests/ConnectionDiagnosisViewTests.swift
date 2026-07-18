@@ -102,6 +102,19 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         XCTAssertTrue(fired)
     }
 
+    func testTapDismissFiresOnDismissExactlyOnce() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .timedOut), deviceName: "Porch")
+        var fireCount = 0
+        view.onDismiss = { fireCount += 1 }
+        view.test_tapDismiss()
+        XCTAssertEqual(fireCount, 1)
+    }
+
+    func testHasDismissButton() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .vanished), deviceName: "Yard")
+        XCTAssertTrue(view.test_hasDismissButton)
+    }
+
     // MARK: Appearance adaptivity — the tint is a static CGColor on the layer
 
     func testBackgroundTintReResolvesOnAppearanceChange() {

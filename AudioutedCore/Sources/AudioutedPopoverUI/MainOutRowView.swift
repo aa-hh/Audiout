@@ -46,8 +46,17 @@ public final class MainOutRowView: NSView {
         public let target: MainOutTarget
         /// A non-selectable section header (disabled, small caps) vs a real choice.
         public let isHeader: Bool
-        public init(title: String, target: MainOutTarget = .selectedDevices, isHeader: Bool = false) {
+        /// An optional SHORTER label to show on the collapsed pop-up button when
+        /// this option is the current selection, while the open menu keeps the
+        /// full `title`. Used for "Selected Devices (n)" (menu) vs "Selected (n)"
+        /// (button), so the live count survives the fixed trailing-control width
+        /// instead of being truncated to "Selected Device…". `nil` ⇒ the button
+        /// shows `title` like every other option.
+        public let buttonTitle: String?
+        public init(title: String, target: MainOutTarget = .selectedDevices,
+                    isHeader: Bool = false, buttonTitle: String? = nil) {
             self.title = title; self.target = target; self.isHeader = isHeader
+            self.buttonTitle = buttonTitle
         }
     }
 
@@ -97,11 +106,13 @@ public final class MainOutRowView: NSView {
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false) {
         self.options = options
         muteButton.state = isMuted ? .on : .off
+        updateMuteTint()
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
         selectedTitle = nil
         var currentItem: NSMenuItem?
+        var currentButtonTitle: String?
         for option in options {
             let item = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
             if option.isHeader {
@@ -117,7 +128,11 @@ public final class MainOutRowView: NSView {
                 item.action = #selector(selectionChanged(_:))
                 let isCurrent = option.target == current
                 item.state = isCurrent ? .on : .off
-                if isCurrent { selectedTitle = option.title; currentItem = item }
+                if isCurrent {
+                    selectedTitle = option.title
+                    currentItem = item
+                    currentButtonTitle = option.buttonTitle
+                }
             }
             menu.addItem(item)
         }
@@ -126,6 +141,19 @@ public final class MainOutRowView: NSView {
         // (SoundSource-style named dropdown, task B). The pop-up truncates a long
         // title with a tail ellipsis via its fixed max width + cell line break.
         if let currentItem { destinationPopUp.select(currentItem) }
+        // A distinct `buttonTitle` (e.g. "Selected (n)") is shown on the COLLAPSED
+        // button while the open menu keeps the full `title` ("Selected Devices (n)").
+        // `usesItemFromMenu = false` + a display-only cell item is the documented way
+        // to make the button label differ from the selected menu item; re-set every
+        // `apply` (both branches) so a later selection without an override reverts.
+        if let cell = destinationPopUp.cell as? NSPopUpButtonCell {
+            if let currentButtonTitle {
+                cell.usesItemFromMenu = false
+                cell.menuItem = NSMenuItem(title: currentButtonTitle, action: nil, keyEquivalent: "")
+            } else {
+                cell.usesItemFromMenu = true
+            }
+        }
 
         if !isDraggingMaster { slider.integerValue = master }
         readoutLabel.stringValue = "\(master)%"
@@ -169,21 +197,23 @@ public final class MainOutRowView: NSView {
         slider.isContinuous = true
         slider.target = self
         slider.action = #selector(masterChanged(_:))
+        // Master slider remains enabled while muted to support immediate volume adjustments (audit A5).
+        slider.isEnabled = true
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, but the glyph itself stays
         // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
-        // — ahh wants the icon to never change on toggle).
+        // — ahh wants the icon to never change on toggle). Muted state is shown by
+        // tint color only.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
         muteButton.imagePosition = .imageOnly
         let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                   accessibilityDescription: "Mute Main Out")?
+                                   accessibilityDescription: "Mute Audio Out")?
             .withSymbolConfiguration(muteConfig)
-        muteButton.contentTintColor = .secondaryLabelColor
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -274,6 +304,18 @@ public final class MainOutRowView: NSView {
         ])
     }
 
+    // MARK: Private Helpers
+
+    /// Updates the mute button's tint color and accessibility label based on current state.
+    private func updateMuteTint() {
+        if muteButton.state == .on {
+            muteButton.contentTintColor = .controlAccentColor
+        } else {
+            muteButton.contentTintColor = .secondaryLabelColor
+        }
+        configureAccessibility()
+    }
+
     // MARK: Actions
 
     @objc private func selectionChanged(_ sender: NSPopUpButton) {
@@ -283,6 +325,7 @@ public final class MainOutRowView: NSView {
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
+        updateMuteTint()
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
@@ -309,10 +352,11 @@ public final class MainOutRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Main Out, master volume \(slider.integerValue) percent")
+        setAccessibilityLabel("Audio Out, master volume \(slider.integerValue) percent")
         slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("Main Out master volume")
-        destinationPopUp.setAccessibilityLabel("Main Out destination")
+        slider.setAccessibilityLabel("Audio Out master volume")
+        muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Audio Out" : "Mute Audio Out")
+        destinationPopUp.setAccessibilityLabel("Audio Out destination")
         destinationPopUp.setAccessibilityValue(selectedTitle ?? "")
     }
 
@@ -324,8 +368,19 @@ public final class MainOutRowView: NSView {
     public var test_selectableTargets: [MainOutTarget] { options.filter { !$0.isHeader }.map(\.target) }
     /// The currently shown master value.
     public var test_masterValue: Int { slider.integerValue }
-    /// The currently checkmarked selection title (the destination the button shows).
+    /// The currently checkmarked selection title (the full menu title).
     public var test_selectedTitle: String? { selectedTitle }
+    /// The label actually shown on the COLLAPSED pop-up button — the current
+    /// option's `buttonTitle` when it set one (e.g. "Selected (n)"), else the
+    /// full selected title. Lets tests assert the button/menu split (A2). Reads
+    /// the display-only cell item when `usesItemFromMenu` is off, exactly what
+    /// the button renders.
+    public var test_buttonTitle: String? {
+        guard let cell = destinationPopUp.cell as? NSPopUpButtonCell else {
+            return destinationPopUp.titleOfSelectedItem
+        }
+        return cell.usesItemFromMenu ? destinationPopUp.titleOfSelectedItem : cell.menuItem?.title
+    }
     /// Whether the master mute button is currently in its muted (`.on`) state.
     public var test_isMasterMuted: Bool { muteButton.state == .on }
 

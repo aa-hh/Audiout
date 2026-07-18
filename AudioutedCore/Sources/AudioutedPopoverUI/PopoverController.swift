@@ -259,6 +259,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// auto-driven off the connection-state transitions.
     private var openDiagnosisIDs: Set<String> = []
 
+    /// Ids whose diagnosis panel the user explicitly DISMISSED (the ✕, B2)
+    /// during the CURRENT failure episode. Distinct from `openDiagnosisIDs` (the
+    /// open intent) and mutually exclusive with it: a dismissed id is recorded
+    /// here so no mere repaint/rebuild can resurrect its panel, and cleared at
+    /// every episode boundary — leaving `.failed` (`→ .connected`/`→ .off`) OR a
+    /// fresh `→ .failed` edge (a NEW episode whose auto-expand wins). See
+    /// `handleConnectionTransitions` / `dismissDiagnosisPanel`.
+    private var dismissedDiagnosisIDs: Set<String> = []
+
     /// The mounted `ConnectionDiagnosisView` per device id — the view-layer
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     private var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
@@ -287,6 +296,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
     /// the retired "+ Add application…" row as the card's add affordance).
     private let applicationsFooter = ApplicationsFooterView()
+
+    /// Whether the LAST `rebuild()` mounted the Devices card's "Looking for
+    /// devices…" empty-state placeholder (V2) — recorded per rebuild so tests can
+    /// assert it appears with no devices and vanishes once devices arrive.
+    private var devicesPlaceholderShown = false
+
+    /// Whether the LAST `rebuild()` mounted the Applications card's "No apps
+    /// routed…" empty-state placeholder (V11).
+    private var applicationsPlaceholderShown = false
 
     /// The previous device snapshot's ids-that-were-valid-AirPlay-targets, so
     /// `update(devices:)` can detect a routed device disappearing or going
@@ -341,7 +359,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         panel.controller = self
         mainOutRow.delegate = self
         // Header bar actions (task A): the "Open Groups editor" button opens the
-        // mixer window (where group membership editing lives); Settings is stubbed.
+        // mixer window (where group membership editing lives); Settings forwards
+        // to `onOpenSettings` (the app wires it to the Settings window).
         panel.setHeaderActions(
             onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
             onOpenSettings: { [weak self] in self?.onOpenSettings?() },
@@ -565,19 +584,40 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         panel.addRow(mainOutRow)
         refreshMainOutRow()
 
-        // 2. Selected Devices card — split into Current Device + AirPlay.
+        // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
+        // present now (V2): when no devices have been discovered yet the card
+        // still builds, showing a single non-interactive "Looking for devices…"
+        // placeholder so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
-        if !locals.isEmpty || !airplay.isEmpty {
-            // Combined header row (change 1): "Devices" title on the left,
-            // "VOLUME" over the slider and "Selected" over the membership
-            // checkbox on the right. Collapsible (main merge) — the collapse key
-            // must equal the display header, since cards are looked up by header
-            // title.
-            panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Selected",
-                            collapsible: true,
-                            collapsed: collapsedState(for: "Devices", default: false),
-                            onToggle: { [weak self] in self?.toggleCard("Devices") })
+        devicesPlaceholderShown = false
+        // Combined header row (change 1): "Devices" title on the left, "VOLUME"
+        // over the slider and "Selected" over the membership checkbox on the
+        // right. Collapsible (main merge) — the collapse key must equal the
+        // display header, since cards are looked up by header title. The
+        // trailing accessory (F1) saves the current Selected Devices set as a
+        // group; its enabled state tracks `canSaveCurrentSetup` and is kept
+        // fresh in place via `refreshDevicesAccessory()` on selection repaints.
+        panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Selected",
+                        trailingAccessory: PopoverPanelViewController.HeaderAccessory(
+                            symbol: "plus",
+                            label: "Save Selected Devices as group",
+                            action: { [weak self] in self?.saveCurrentSetup() },
+                            isEnabled: canSaveCurrentSetup),
+                        collapsible: true,
+                        collapsed: collapsedState(for: "Devices", default: false),
+                        onToggle: { [weak self] in self?.toggleCard("Devices") })
+        // A1 dormancy: while Audio Out targets a saved GROUP the Selected
+        // Devices set isn't what's playing — annotate the card (a header-region
+        // note that survives collapse) and dim every membership checkbox (inside
+        // `applySelectionState`, via `isDevicesCardDormant`).
+        if let dormantGroupName = activeGroupNameIfDormant() {
+            panel.addCardNote("Inactive — Audio Out is using '\(dormantGroupName)'")
+        }
+        if locals.isEmpty && airplay.isEmpty {
+            panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
+            devicesPlaceholderShown = true
+        } else {
             if !locals.isEmpty {
                 panel.addSubsectionHeader("Current Device")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
@@ -594,8 +634,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // row; the card is always present even with no routes since the
         // footer's "+" segment is always available).
         //
-        // Collapsible (T-4/T-5): collapse DEFAULT is "expanded iff ≥1 app is
-        // redirected" (`applicationsDefaultExpanded`), recomputed on every OPEN
+        // Collapsible (T-4/T-5): collapse DEFAULT is "expanded iff ≥1 app route
+        // exists" (`applicationsDefaultExpanded`, C5), recomputed on every OPEN
         // and preserved across mid-open rebuilds by `collapsedState(for:default:)`
         // — same machinery as the other two cards. `collapsed:` is the negation of
         // the expanded default.
@@ -613,8 +653,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
-        for route in appRouting.appRoutes where !isAppExcluded(route.bundleID) {
+        let renderedRoutes = appRouting.appRoutes.filter { !isAppExcluded($0.bundleID) }
+        for route in renderedRoutes {
             panel.addRow(makeAppRow(route, devices: allDevices))
+        }
+        // V11 empty state: when no routes actually render (none, or all excluded),
+        // show a single non-interactive placeholder BEFORE the ± footer.
+        applicationsPlaceholderShown = false
+        if renderedRoutes.isEmpty {
+            panel.addRow(makePlaceholderRow(text: "No apps routed — use + below to route an app."))
+            applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
         panel.addRow(applicationsFooter)
@@ -657,12 +705,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         return value
     }
 
-    /// The Applications card's collapse default (PLAN §B): expanded iff at
-    /// least one app is currently redirected. Exposed so the later task that
-    /// wires the card (T-8) only needs to call `collapsedState(for:
+    /// The Applications card's collapse default (C5): expanded iff ANY app route
+    /// exists at all — a routed app is worth surfacing on open even while it's
+    /// still on the neutral "No Redirect" default, since the user added it on
+    /// purpose. Exposed so the card-wiring only needs `collapsedState(for:
     /// Self.applicationsCardTitle, default: !applicationsDefaultExpanded)`.
     private var applicationsDefaultExpanded: Bool {
-        appRouting.appRoutes.contains { $0.destination != .noRedirect }
+        !appRouting.appRoutes.isEmpty
     }
 
     /// Chevron/title click handler for a card (T-4 affordance): flips the
@@ -679,9 +728,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func refreshMainOutRow() {
         guard let controller = groupController else { return }
+        // A2: the "Selected Devices" option carries a live count of every checked
+        // row (the Mac included). `MainOutRowView` matches options by TARGET, not
+        // title, so a changing title is safe; the count feeds both the dropdown
+        // item and the popup's collapsed title, staying in sync because
+        // `refreshMainOutRow` re-runs on every selection change. The open menu
+        // shows the full "Selected Devices (n)"; the collapsed button shows the
+        // shorter "Selected (n)" (via `buttonTitle`) so the count isn't truncated
+        // to "Selected Device…" by the fixed trailing-control width — the "DEVICE"
+        // column header already supplies the "Devices" word.
+        let selectedCount = controller.selectedDeviceIDs.count
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices,
+                  buttonTitle: "Selected (\(selectedCount))"),
         ]
         if !controller.groups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))
@@ -716,11 +776,31 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         !appRouting.routedAppNames(for: id).isEmpty
     }
 
+    /// Whether the Devices card is currently DORMANT (A1): Audio Out targets a
+    /// saved GROUP, so the Selected Devices set isn't what's playing. Drives both
+    /// the card's dormancy note and the per-row checkbox dimming.
+    private var isDevicesCardDormant: Bool {
+        if case .group = groupController?.mainOut { return true }
+        return false
+    }
+
+    /// The name of the saved group Audio Out is routing to while the Devices card
+    /// is dormant (A1), or `nil` when Selected Devices is the target. Falls back
+    /// to a generic label if the group id no longer resolves to a saved group.
+    private func activeGroupNameIfDormant() -> String? {
+        guard let controller = groupController,
+              case .group(let id) = controller.mainOut else { return nil }
+        return controller.groups.first(where: { $0.id == id })?.name ?? "a group"
+    }
+
     /// Push the current membership + local-block state into a device row.
     private func applySelectionState(to row: DeviceRowView, device: Device) {
+        // A1: under a group target every checkbox dims (but stays clickable).
+        let dimmed = isDevicesCardDormant
         guard let controller = groupController else {
             // No controller ⇒ nothing routable ⇒ not controllable.
             row.apply(device, selected: false, controllable: false,
+                      selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
                       iconSymbolName: deviceIconController?.symbolName(for: device))
@@ -734,6 +814,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
                   blocked: blocked,
                   blockReason: blocked ? GroupController.localMixRefusalReason : nil,
+                  selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
                   iconSymbolName: deviceIconController?.symbolName(for: device))
@@ -744,6 +825,40 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
         }
+        // F1: keep the Devices "Save as group" accessory's enabled state fresh on
+        // in-place repaints (a rebuild sets it from `canSaveCurrentSetup` too).
+        refreshDevicesAccessory()
+    }
+
+    /// Sync the Devices card's "Save Selected Devices as group" accessory enabled
+    /// state with `canSaveCurrentSetup` in place — no-op if the card isn't built.
+    private func refreshDevicesAccessory() {
+        panel.setAccessoryEnabled(title: "Devices", enabled: canSaveCurrentSetup)
+    }
+
+    /// A non-interactive placeholder body row (V2 Devices empty state / V11
+    /// Applications empty state): `text` in a tertiary-label, row-height view
+    /// whose label leading edge aligns with the name column (past the icon).
+    private func makePlaceholderRow(text: String) -> NSView {
+        let label = NSTextField(labelWithString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .menuFont(ofSize: 0)
+        label.textColor = .tertiaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(label)
+        let nameColumnLeading = PopoverColumnGrid.leadingInset
+            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        NSLayoutConstraint.activate([
+            wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
+            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
+                                            constant: -PopoverColumnGrid.leadingInset),
+            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+        ])
+        return wrapper
     }
 
     // MARK: Connection failures + diagnosis panels (brief §7.3)
@@ -773,26 +888,39 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 // Edge-triggered on ENTERING failed: a later in-episode update
                 // (the diagnosis replacing the backend's first guess is still
                 // `.failed`, just with a better cause) must not re-run the
-                // cleanup or force a closed panel back open.
+                // cleanup or force a closed panel back open. This same guard is
+                // what keeps a mid-episode dismissal honored — a still-`.failed`
+                // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
+                // A fresh `→ .failed` edge is a NEW episode: its auto-expand wins
+                // over any prior dismissal, so clear the dismissal record before
+                // (re)opening. This is what re-surfaces the panel on a
+                // "Try again → fails again" (`.failed → .connecting → .failed`).
+                dismissedDiagnosisIDs.remove(device.id)
                 if groupController?.isSpeakerSelected(device.id) == true {
                     groupController?.setDeviceSelected(device.id, false)
                 }
                 openDiagnosisIDs.insert(device.id)
             case .connected, .off:
+                // Leaving `.failed` ends the episode — clear both the open intent
+                // and the dismissal record so a future failure re-expands afresh.
                 openDiagnosisIDs.remove(device.id)
+                dismissedDiagnosisIDs.remove(device.id)
             case .connecting, .reconnecting:
                 // In-flight: leave any open panel alone (a retry keeps its
-                // context on screen until the attempt resolves).
+                // context on screen until the attempt resolves). Deliberately
+                // does NOT clear `dismissedDiagnosisIDs` — a retry that fails
+                // again resolves through the fresh `→ .failed` edge above.
                 break
             }
         }
 
-        // Devices gone from the snapshot: drop their tracking + panel.
+        // Devices gone from the snapshot: drop their tracking + panel + dismissal.
         let liveIDs = Set(devices.map(\.id))
         for id in lastConnectionStates.keys where !liveIDs.contains(id) {
             lastConnectionStates.removeValue(forKey: id)
             openDiagnosisIDs.remove(id)
+            dismissedDiagnosisIDs.remove(id)
         }
     }
 
@@ -805,7 +933,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             diagnosisPanelsByID.removeValue(forKey: id)
             panel.removeRow(view, animated: animated)
         }
-        for id in openDiagnosisIDs {
+        for id in openDiagnosisIDs where !dismissedDiagnosisIDs.contains(id) {
             guard let device = devicesByID[id],
                   case .failed(let failure) = device.connectionState else { continue }
             if let view = diagnosisPanelsByID[id] {
@@ -824,8 +952,21 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let view = ConnectionDiagnosisView(failure: failure, deviceName: device.name)
         view.onRetry = { [weak self] in self?.retryConnection(for: id) }
         view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
+        view.onDismiss = { [weak self] in self?.dismissDiagnosisPanel(for: id) }
         diagnosisPanelsByID[id] = view
         panel.insertRow(view, after: row, animated: animated)
+    }
+
+    /// The diagnosis panel's ✕ (B2): retract the open intent and record the
+    /// dismissal for this episode, then reconcile so the mounted view is torn
+    /// down. The panel won't reappear from repaints/rebuilds (`openDiagnosisIDs`
+    /// no longer holds `id`), nor from a mid-episode `→ .failed` re-report (the
+    /// still-`.failed` guard in `handleConnectionTransitions` short-circuits) —
+    /// but a genuinely NEW failure episode re-expands it.
+    private func dismissDiagnosisPanel(for id: String) {
+        openDiagnosisIDs.remove(id)
+        dismissedDiagnosisIDs.insert(id)
+        reconcileDiagnosisPanels(animated: true)
     }
 
     /// "Try again": re-adding the id to the Selected Devices set IS the retry
@@ -921,11 +1062,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   title: "No Redirect",
                   isLocal: true,
                   symbolName: nil,
-                  isStandalone: true),
+                  isStandalone: true,
+                  subtitle: "Follows the system audio output"),
             .init(id: Self.currentDeviceDestinationID,
                   title: currentDeviceTitle(devices: devices),
                   isLocal: true,
-                  symbolName: Device.Kind.localMac.symbolName),
+                  symbolName: Device.Kind.localMac.symbolName,
+                  subtitle: "Plays locally with its own volume"),
         ]
         for device in availableAirPlayDestinations(devices: devices) {
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
@@ -1053,8 +1196,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// there's nothing to additionally disable. Choosing an item calls
     /// `pickApp`.
     func presentAddApplicationPicker(relativeTo view: NSView) {
+        makeAddApplicationMenu().popUp(positioning: nil,
+                                       at: NSPoint(x: 0, y: view.bounds.height), in: view)
+    }
+
+    /// Build the "+ Add application…" menu (C6): one selectable item per available
+    /// app, or — when none are available — a single DISABLED "No applications
+    /// available" item so the menu is never blank.
+    private func makeAddApplicationMenu() -> NSMenu {
         let menu = NSMenu()
-        for app in availableAppsForPicker() {
+        let available = availableAppsForPicker()
+        guard !available.isEmpty else {
+            let item = NSMenuItem(title: "No applications available", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return menu
+        }
+        for app in available {
             let item = NSMenuItem(title: app.displayName, action: #selector(addApplicationMenuItemSelected(_:)),
                                   keyEquivalent: "")
             item.target = self
@@ -1062,7 +1220,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             item.representedObject = app
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.bounds.height), in: view)
+        return menu
     }
 
     @objc private func addApplicationMenuItemSelected(_ sender: NSMenuItem) {
@@ -1088,6 +1246,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // must bounce the switch back to its real state).
         refreshDeviceRows()
         refreshMainOutRow()
+
+        // A4: an auto-swap toggled the LOCAL row's membership for the user (not a
+        // direct click on that row), so flash it once to draw the eye. Must run
+        // AFTER the repaint above so it targets the currently-mounted row instance
+        // (this path does no rebuild, so `deviceRowsByID`'s local row is live);
+        // `flashRow()` is a no-op under Reduce Motion and when no row exists.
+        if result.autoSwappedCurrentDevice,
+           let localID = devicesByID.values.first(where: \.isLocalDevice)?.id {
+            deviceRowsByID[localID]?.flashRow()
+        }
     }
 
     private func presentRefusal(_ reason: String) {
@@ -1260,6 +1428,45 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }
+
+    // MARK: Empty-state / card-note / accessory test hooks (V2 / V11 / A1 / F1)
+
+    /// Whether the Devices card's "Looking for devices…" placeholder is currently
+    /// mounted (V2).
+    public var test_devicesPlaceholderShown: Bool { devicesPlaceholderShown }
+    /// Whether the Applications card's "No apps routed…" placeholder is currently
+    /// mounted (V11).
+    public var test_applicationsPlaceholderShown: Bool { applicationsPlaceholderShown }
+    /// The card-note texts (`addCardNote`) for `title`, in add order — the A1
+    /// dormancy annotation's assertion surface.
+    public func test_cardNoteTexts(title: String) -> [String] {
+        panel.test_cardNotes(title: title).map(\.stringValue)
+    }
+    /// Whether the header accessory for `title` is enabled (`nil` if none) — F1.
+    public func test_cardAccessoryEnabled(title: String) -> Bool? {
+        panel.test_accessoryEnabled(title: title)
+    }
+    /// Fire the header accessory action for `title` the way a real click would
+    /// (proves it never triggers the card's collapse) — F1. Returns whether the
+    /// card had an accessory to fire.
+    @discardableResult
+    public func test_fireCardAccessory(title: String) -> Bool {
+        panel.test_fireAccessoryAction(title: title)
+    }
+    /// Whether device row `id`'s Selected checkbox is currently dimmed (A1).
+    /// `nil` if no such row.
+    public func test_deviceRowSelectionDimmed(id: String) -> Bool? {
+        deviceRowsByID[id]?.test_isSelectionDimmed
+    }
+    /// Whether device row `id` is mid attention-flash (A4). `nil` if no such row.
+    public func test_deviceRowFlashing(id: String) -> Bool? {
+        deviceRowsByID[id]?.test_isFlashing
+    }
+    /// The "+ Add application…" picker's menu item titles, including the disabled
+    /// "No applications available" placeholder when nothing is available (C6).
+    public func test_addApplicationPickerTitles() -> [String] {
+        makeAddApplicationMenu().items.map(\.title)
+    }
     /// The Main Out row (for selector / master assertions).
     public var test_mainOutRow: MainOutRowView { mainOutRow }
 
@@ -1476,6 +1683,40 @@ extension PopoverController: AppRowView.Delegate {
         guard selectedAppBundleID != appID else { return }
         selectedAppBundleID = appID
         rebuild()
+    }
+
+    /// V14 host half: ↑/↓ from the selected app row moves the selection to the
+    /// previous/next route in `appRoutes` order, clamped at the ends (no wrap).
+    /// The move is relative to `appID` (the first responder that fired the key),
+    /// so it works even if that's not `selectedAppBundleID`. Repaints via the
+    /// same state-preserving `rebuild()` all app-row callbacks use, then promotes
+    /// the newly-selected (freshly-recreated) row to first responder so
+    /// Delete/↑/↓ keep working — done AFTER the rebuild so it targets the live
+    /// row instance. The footer's remove-enabled stays true (selection moved to
+    /// another existing route).
+    public func appRow(_ row: AppRowView, didRequestMoveSelection direction: AppRowView.MoveDirection,
+                       for appID: String) {
+        let routes = appRouting.appRoutes
+        guard let index = routes.firstIndex(where: { $0.bundleID == appID }) else { return }
+        let targetIndex: Int
+        switch direction {
+        case .up:   targetIndex = index - 1
+        case .down: targetIndex = index + 1
+        }
+        guard routes.indices.contains(targetIndex) else { return }   // clamp at ends
+        let newSelection = routes[targetIndex].bundleID
+        guard newSelection != selectedAppBundleID else { return }
+        selectedAppBundleID = newSelection
+        rebuild()   // re-pushes isSelected into every row and syncs the ± footer
+        promoteFirstResponder(toAppRow: newSelection)
+    }
+
+    /// Make `bundleID`'s (freshly rebuilt) app row the window's first responder so
+    /// keyboard removal/movement continues on it. No-op headless (`window == nil`)
+    /// or if the row is missing.
+    private func promoteFirstResponder(toAppRow bundleID: String) {
+        guard let row = appRowsByBundleID[bundleID], let window = row.window else { return }
+        window.makeFirstResponder(row)
     }
 
     // MARK: - App-row selection lifecycle (deselect discipline)

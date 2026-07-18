@@ -171,7 +171,11 @@ private var connectionStatesFleet: [Device] {
 /// `ConnectScript` timing entirely — the fleet's `Device` values already carry
 /// their target `connectionState`, so a single `update(devices:)` call is all
 /// it takes for the panel to reconcile (including the auto-expand-once-on-
-/// `.failed` transition in `PopoverController`).
+/// `.failed` transition in `PopoverController`). Construct PopoverController
+/// with AppRoutingController backed by a temp-directory AppRouteStore (T-11),
+/// so the snapshot tool never touches real Application Support. After update,
+/// call test_simulateOpen() to rebuild the panel as if reopened, ensuring the
+/// Devices card renders with the current state.
 @MainActor
 func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let fleet = connectionStatesFleet
@@ -181,7 +185,11 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
                                      store: GroupStore(directory: tempDir()),
                                      routingStore: RoutingStore(directory: tempDir()),
                                      loadPersisted: false)
-    let popover = PopoverController()
+    // Construct PopoverController with AppRoutingController backed by a temp-directory
+    // AppRouteStore (T-11), so the snapshot tool never touches real Application Support.
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
     backend.start()
     guard waitForFleet(backend, count: fleet.count) else {
         print("  SETUP FAIL: fleet did not fully discover"); return
@@ -204,6 +212,7 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
     // also what auto-expands the failed row's diagnosis panel (§7.3: the
     // `.off → .failed` transition on this first `update` call).
     popover.update(devices: fleet)
+    popover.test_simulateOpen()   // reopen-style rebuild so the Devices card renders
 
     let appearance = NSAppearance(named: appearanceName)
     let panelView = popover.test_panelView

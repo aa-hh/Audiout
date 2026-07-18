@@ -295,8 +295,10 @@ final class PopoverControllerTests: XCTestCase {
         let group = controller.groups[0]
 
         popover.test_selectMainOut(.selectedDevices); await drain()
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
-                       "the named dropdown shows the current target")
+        // A2: the Selected Devices option now carries a live count (here {office}
+        // after the auto-swap dropped the local device ⇒ 1).
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
+                       "the named dropdown shows the current target with its live count")
         popover.test_selectMainOut(.group(id: group.id)); await drain()
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown")
@@ -1205,19 +1207,29 @@ final class PopoverControllerTests: XCTestCase {
                        "dropping an unrelated device leaves the route untouched")
     }
 
-    /// The Applications card's collapse default (extends the T-5 tests to the real
-    /// card): expanded on open iff `routedAppCount > 0`.
-    func testApplicationsCardExpandedOnOpenIffRedirected() async throws {
-        // No redirected app ⇒ collapsed on open.
-        let empty = tempAppRoutingController()
-        empty.addRoute(bundleID: "com.example.music", displayName: "Music") // .noRedirect ⇒ not redirected
-        let (popoverEmpty, _, _) = try await makePopover(appRouting: empty,
-                                                          runningAppsProvider: routedApps)
-        popoverEmpty.test_simulateOpen()
-        XCTAssertEqual(popoverEmpty.test_isCardCollapsed(title: "Applications"), true,
-                       "no redirected app (routedAppCount == 0) ⇒ Applications starts collapsed")
+    /// The Applications card's collapse default (C5, updated from the old
+    /// "redirected app" rule): expanded on open iff ANY app route exists — even a
+    /// route still on the neutral "No Redirect" default counts (the user added it
+    /// on purpose). Only a truly empty route list starts collapsed.
+    func testApplicationsCardExpandedOnOpenIffAnyRouteExists() async throws {
+        // No routes at all ⇒ collapsed on open.
+        let none = tempAppRoutingController()
+        let (popoverNone, _, _) = try await makePopover(appRouting: none,
+                                                        runningAppsProvider: routedApps)
+        popoverNone.test_simulateOpen()
+        XCTAssertEqual(popoverNone.test_isCardCollapsed(title: "Applications"), true,
+                       "no routes ⇒ Applications starts collapsed")
 
-        // At least one redirected app ⇒ expanded on open.
+        // A route on the neutral "No Redirect" default ⇒ NOW expanded (C5 change).
+        let neutral = tempAppRoutingController()
+        neutral.addRoute(bundleID: "com.example.music", displayName: "Music") // .noRedirect
+        let (popoverNeutral, _, _) = try await makePopover(appRouting: neutral,
+                                                           runningAppsProvider: routedApps)
+        popoverNeutral.test_simulateOpen()
+        XCTAssertEqual(popoverNeutral.test_isCardCollapsed(title: "Applications"), false,
+                       "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
+
+        // A redirected app ⇒ expanded on open (unchanged).
         let redirected = tempAppRoutingController()
         seedRoute(redirected, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
@@ -1225,7 +1237,7 @@ final class PopoverControllerTests: XCTestCase {
                                                      runningAppsProvider: routedApps)
         popover.test_simulateOpen()
         XCTAssertEqual(popover.test_isCardCollapsed(title: "Applications"), false,
-                       "≥1 redirected app (routedAppCount > 0) ⇒ Applications starts expanded")
+                       "≥1 redirected app ⇒ Applications starts expanded")
     }
 
     // MARK: T9 — live per-device streaming indicator (`BackendEvent.routedApps`)
@@ -1333,6 +1345,329 @@ final class PopoverControllerTests: XCTestCase {
         popover.update(devices: backend.devices)
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
                        "the fixture's event reached the row via the same plumbing AppDelegate uses")
+    }
+
+    // MARK: V2 — Devices card empty-state placeholder
+
+    /// With no devices discovered, the Devices card still builds and shows the
+    /// "Looking for devices…" placeholder; once devices arrive it disappears.
+    func testDevicesCardEmptyStatePlaceholder() async throws {
+        let (popover, _, backend) = try await makePopover()
+        // Devices present initially ⇒ no placeholder, card exists.
+        XCTAssertFalse(popover.test_devicesPlaceholderShown, "devices present ⇒ no placeholder")
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Devices"), "the Devices card exists")
+
+        // Clear the fleet ⇒ card still present, placeholder shown.
+        popover.update(devices: [])
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Devices"),
+                        "the Devices card is still built when empty (V2)")
+        XCTAssertTrue(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
+        XCTAssertEqual(popover.test_deviceSectionRowCount, 0, "no interactive device rows")
+
+        // Devices arrive again ⇒ placeholder gone.
+        popover.update(devices: backend.devices)
+        XCTAssertFalse(popover.test_devicesPlaceholderShown, "devices arrived ⇒ placeholder gone")
+        XCTAssertEqual(popover.test_deviceSectionRowCount, 7, "device rows restored")
+    }
+
+    // MARK: V11 — Applications card empty-state placeholder
+
+    /// With no rendered app routes the Applications card shows the "No apps
+    /// routed…" placeholder; adding a route removes it.
+    func testApplicationsCardEmptyStatePlaceholder() async throws {
+        let appRouting = tempAppRoutingController()
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                    runningAppsProvider: routedApps)
+        XCTAssertTrue(popover.test_applicationsPlaceholderShown, "no routes ⇒ placeholder shown")
+        XCTAssertEqual(popover.test_appRowCount, 0, "no app rows")
+
+        popover.test_pickApp(bundleID: "com.example.music")
+        XCTAssertFalse(popover.test_applicationsPlaceholderShown, "a route exists ⇒ placeholder gone")
+        XCTAssertEqual(popover.test_appRowCount, 1, "one app row now")
+    }
+
+    // MARK: C6 — Add-application picker empty state
+
+    /// When no unrouted running apps remain, the picker shows a single disabled
+    /// "No applications available" item rather than a blank menu.
+    func testAddApplicationPickerShowsDisabledItemWhenEmpty() async throws {
+        let appRouting = tempAppRoutingController()
+        // Route BOTH provider apps so the picker's candidate list is empty.
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        appRouting.addRoute(bundleID: "com.example.safari", displayName: "Safari")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                    runningAppsProvider: routedApps)
+        XCTAssertEqual(popover.test_addApplicationPickerTitles(), ["No applications available"],
+                       "empty candidate list ⇒ one disabled placeholder item")
+
+        // Remove one route ⇒ that app becomes available again.
+        popover.test_selectAppRow(bundleID: "com.example.music")
+        popover.test_tapApplicationsFooterRemove()
+        XCTAssertEqual(popover.test_addApplicationPickerTitles(), ["Music"],
+                       "a freed-up app reappears as a selectable item")
+    }
+
+    // MARK: A1 — dormant Devices card (group target)
+
+    /// Under a saved-group Main Out target the Devices card is DORMANT: it shows
+    /// the "Inactive — Audio Out is using '<group>'" note and dims every
+    /// membership checkbox (still clickable). Switching back to Selected Devices
+    /// clears both live.
+    func testDormantDevicesCardNoteAndDimming() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+
+        // Point Main Out at the group ⇒ dormant.
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"),
+                       ["Inactive — Audio Out is using '\(group.name)'"],
+                       "dormant card carries the group's name in its note")
+        XCTAssertEqual(popover.test_deviceRowSelectionDimmed(id: "office"), true,
+                       "a device checkbox dims under a group target")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_isEnabledOn ?? false, true,
+                       "office is still a member — dim is cosmetic, the checkbox stays interactive")
+
+        // Back to Selected Devices ⇒ no note, no dim.
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+                       "no dormancy note under Selected Devices")
+        XCTAssertEqual(popover.test_deviceRowSelectionDimmed(id: "office"), false,
+                       "checkboxes undim under Selected Devices")
+    }
+
+    // MARK: A2 — live Selected Devices count
+
+    /// The "Selected Devices (n)" title tracks the count of checked rows and
+    /// updates as toggles change it — visible on both the dropdown item and the
+    /// popup's collapsed title.
+    func testSelectedDevicesCountUpdatesOnToggle() async throws {
+        let (popover, _, _) = try await makePopover()
+        // Default selection is {local-mac} ⇒ 1.
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)")
+
+        // Toggle office on (auto-swap drops local) ⇒ {office} still 1.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
+                       "auto-swap kept the count at 1")
+
+        // Add a second AirPlay device ⇒ {office, homepod-bed} = 2.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (2)",
+                       "the count rose to 2 on the toggle")
+        // The full count lives in the menu title; the collapsed button shows the
+        // shorter "Selected (n)" so the count survives the fixed trailing width.
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected (2)",
+                       "the collapsed button shows the count in the short form")
+
+        // Remove one ⇒ back to 1.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false)
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
+                       "the count fell to 1 on the untoggle")
+    }
+
+    // MARK: A4 — auto-swap flashes the local row
+
+    /// Turning an AirPlay device ON while the Mac is the sole selected member
+    /// auto-unchecks the Mac; the local row flashes once (a no-op under Reduce
+    /// Motion, per the same mapping `DeviceRowConnectionStateTests` uses).
+    func testAutoSwapFlashesLocalRow() async throws {
+        let (popover, _, _) = try await makePopover()
+        XCTAssertEqual(popover.test_deviceRowFlashing(id: "local-mac"), false,
+                       "no flash before the swap")
+
+        let result = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        XCTAssertTrue(result.autoSwappedCurrentDevice, "the toggle auto-swapped the local device")
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        XCTAssertEqual(popover.test_deviceRowFlashing(id: "local-mac"), !reduceMotion,
+                       "the auto-unchecked local row flashes (unless Reduce Motion)")
+    }
+
+    // MARK: B2 — dismissible diagnosis panel + episode semantics
+
+    /// The ✕ tears the panel down.
+    func testDismissRemovesDiagnosisPanel() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .timedOut))]),
+        ])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"), "auto-expanded")
+        panel.test_tapDismiss()
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "the ✕ removed the panel")
+    }
+
+    /// A dismissed panel is NOT resurrected by a mid-episode repaint/update while
+    /// the device stays `.failed`.
+    func testDismissedPanelSurvivesRepaint() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .notResponding))]),
+        ])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        try XCTUnwrap(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
+
+        // A plain repaint (still .failed) and a diagnosis-replacement update must
+        // both leave it dismissed.
+        popover.update(devices: backend.devices)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"), "repaint didn't resurrect it")
+        var replaced = backend.devices
+        for i in replaced.indices where replaced[i].id == "office" {
+            replaced[i].connectionState = .failed(ConnectionFailure(cause: .vanished))
+        }
+        popover.update(devices: replaced)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"),
+                     "an in-episode diagnosis replacement didn't resurrect a dismissed panel")
+    }
+
+    /// Leaving `.failed` (→ `.connected`) ends the episode and clears the
+    /// dismissal, so a genuinely NEW failure episode re-expands the panel even
+    /// though the prior one was dismissed.
+    func testLeavingFailedClearsDismissalAndNewEpisodeReExpands() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+                .connect(after: 0.05),
+                .fail(after: 0.05, ConnectionFailure(cause: .timedOut)),
+            ]),
+        ])
+        // Episode 1: fail, then dismiss.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        try XCTUnwrap(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
+
+        // Retry by re-adding to Selected Devices (the panel is dismissed, so its
+        // "Try again" button is gone — re-toggling IS the retry path). Connects
+        // ⇒ leaves .failed ⇒ clears the dismissal.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        popover.update(devices: backend.devices)
+
+        // Episode 2: a fresh toggle-on fails again ⇒ re-expands.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"),
+                        "a NEW failure episode re-expands despite the earlier dismissal")
+    }
+
+    /// "Try again → fails again" (`.failed → .connecting → .failed` in one
+    /// gesture) counts as a new episode and re-surfaces a dismissed panel.
+    func testRetryThatFailsAgainReExpandsDismissedPanel() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+                .fail(after: 0.5, ConnectionFailure(cause: .timedOut)),
+            ]),
+        ])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        try XCTUnwrap(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
+
+        // Retry by re-adding to Selected Devices (the dismissed panel's "Try
+        // again" is gone — re-toggling IS the retry path). Record the
+        // intermediate .connecting so the next .failed reads as a fresh edge (a
+        // NEW episode), then let it fail again.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office") {
+            if case .connecting = $0 { return true }; return false
+        }
+        popover.update(devices: backend.devices)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"),
+                     "still dismissed while the retry is in flight")
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"),
+                        "the retry failing again re-surfaces the panel")
+    }
+
+    // MARK: F1 — Devices "Save as group" header accessory
+
+    /// The Devices card's accessory saves the current selection as a group; firing
+    /// it never collapses the card, and its enabled state tracks
+    /// `canSaveCurrentSetup`.
+    func testDevicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Devices"), true,
+                       "a non-empty, not-yet-saved selection ⇒ accessory enabled")
+        let wasCollapsed = popover.test_isCardCollapsed(title: "Devices")
+
+        XCTAssertTrue(popover.test_fireCardAccessory(title: "Devices"), "the accessory fired")
+        XCTAssertEqual(controller.groups.count, 1, "firing the accessory created a group")
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), wasCollapsed,
+                       "the accessory click did NOT collapse the card")
+        // The just-saved selection now equals a group ⇒ accessory disables (dedup).
+        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Devices"), false,
+                       "selection already saved as a group ⇒ accessory disables in place")
+    }
+
+    // MARK: V14 — keyboard selection movement (host half)
+
+    /// ↑/↓ move the app-row selection through `appRoutes` order, clamped at the
+    /// ends; the selection survives the repaint and the ± footer's remove stays
+    /// enabled throughout.
+    func testMoveAppSelectionUpDownWithClamping() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        appRouting.addRoute(bundleID: "com.example.safari", displayName: "Safari")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                    runningAppsProvider: routedApps)
+        popover.test_selectAppRow(bundleID: "com.example.music")
+        XCTAssertTrue(popover.test_applicationsFooterRemoveEnabled, "remove enabled with a selection")
+
+        // Down ⇒ next route.
+        popover.test_appRow(for: "com.example.music")?.test_pressDownArrow()
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.safari", "moved down to Safari")
+        XCTAssertEqual(popover.test_appRowIsSelected(for: "com.example.safari"), true,
+                       "selection survived the repaint on the new row")
+        XCTAssertTrue(popover.test_applicationsFooterRemoveEnabled, "remove stays enabled")
+
+        // Down again at the end ⇒ clamps (no wrap).
+        popover.test_appRow(for: "com.example.safari")?.test_pressDownArrow()
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.safari", "clamped at the last row")
+
+        // Up ⇒ previous route.
+        popover.test_appRow(for: "com.example.safari")?.test_pressUpArrow()
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music", "moved up to Music")
+
+        // Up again at the start ⇒ clamps.
+        popover.test_appRow(for: "com.example.music")?.test_pressUpArrow()
+        XCTAssertEqual(popover.test_selectedAppBundleID, "com.example.music", "clamped at the first row")
+        XCTAssertTrue(popover.test_applicationsFooterRemoveEnabled, "remove enabled after all moves")
+    }
+
+    // MARK: A3 — destination microcopy subtitles
+
+    /// The "No Redirect" and "Current Device" destination entries carry tooltip
+    /// subtitles; AirPlay device entries get none.
+    func testDestinationEntriesCarrySubtitleTooltips() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                    runningAppsProvider: routedApps)
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+
+        let noRedirect = try XCTUnwrap(
+            row.test_destinationPopUpMenuItem(forDestinationID: PopoverController.noRedirectDestinationID))
+        XCTAssertEqual(noRedirect.toolTip, "Follows the system audio output",
+                       "No Redirect carries its clarifying tooltip")
+        let currentDevice = try XCTUnwrap(
+            row.test_destinationPopUpMenuItem(forDestinationID: PopoverController.currentDeviceDestinationID))
+        XCTAssertEqual(currentDevice.toolTip, "Plays locally with its own volume",
+                       "Current Device carries its clarifying tooltip")
+        // An AirPlay device entry has no subtitle.
+        let airplay = try XCTUnwrap(row.test_destinationPopUpMenuItem(forDestinationID: "office"))
+        XCTAssertNil(airplay.toolTip, "AirPlay device entries carry no subtitle tooltip")
     }
 }
 

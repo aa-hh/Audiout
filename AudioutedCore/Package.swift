@@ -63,10 +63,20 @@ let package = Package(
         .package(path: "../AirPlayEngine"),
     ],
     targets: [
+        // Block-based Objective-C exception catcher. Swift's `catch` cannot
+        // see NSException at all (AVFAudio's
+        // play/scheduleBuffer/connect and NSThread.start raise it, not
+        // NSError — a confirmed crash class here). This is the one
+        // ObjC-language target allowed to @try/@catch; `AudioutedCore`
+        // wraps it in `catchingObjCException` for normal Swift call sites.
+        .target(
+            name: "ObjCExceptionShim"
+        ),
         .target(
             name: "AudioutedCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                "ObjCExceptionShim",
             ]
         ),
         .executableTarget(

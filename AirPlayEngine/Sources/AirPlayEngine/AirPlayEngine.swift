@@ -597,10 +597,30 @@ public actor AirPlayEngine {
         if liveState == .stopped { knownOutputs[id] = .stopped; return }
 
         let terminal = try await startOp(id: id) { device, cbId in
+            // TOCTOU guard: a receiver-side RTSP drop can free the session and
+            // NULL device->session (shims/outputs.c outputs_device_session_remove)
+            // between the liveState check above and this closure running on the
+            // engine thread, while the device is still registered (FAILED, not
+            // yet .stopped). The vendored airplay_device_stop dereferences
+            // device->session unconditionally (`session->callback_id = ...` at
+            // offset 8 of NULL) — mirror the null guard airplay_set_volume_one
+            // already has in C (airplay.c:1879) here in the Swift host instead of
+            // touching vendored C. N<=0 disarms cleanly (~:843-849) and resolves
+            // .stopped.
+            guard Self.stopSessionIsLive(device) else { return 0 }
             guard let stopFn = output_airplay.device_stop else { return -1 }
             return stopFn(device, cbId)
         }
         knownOutputs[id] = terminal
+    }
+
+    /// Test seam for the `removeOutput` TOCTOU guard: true iff the vendored C
+    /// device still has a live session pointer. `startOp` swaps in
+    /// `issueOverride` in headless test mode, so the guard above never runs
+    /// under test unless it's extracted like this — exercise it directly
+    /// against a registry device instead.
+    static func stopSessionIsLive(_ device: UnsafeMutablePointer<output_device>) -> Bool {
+        device.pointee.session != nil
     }
 
     /// Flush any buffered/in-flight audio for `id` — the primitive a future
@@ -614,7 +634,9 @@ public actor AirPlayEngine {
     /// stable API surface to target without a redesign. When pause/seek lands,
     /// the body becomes a `startOp` over `output_airplay.device_flush` (which
     /// already exists in the vendored sender, `airplay_device_flush`), mirroring
-    /// `removeOutput`. Throws `unknownOutput` if `id` isn't registered so a
+    /// `removeOutput` — including its `stopSessionIsLive` guard, since
+    /// `airplay_device_flush` also dereferences device->session unconditionally
+    /// (airplay.c:4187). Throws `unknownOutput` if `id` isn't registered so a
     /// caller can't silently flush a device the engine never saw.
     public func flushOutput(_ id: OutputID) async throws {
         try requireStarted()

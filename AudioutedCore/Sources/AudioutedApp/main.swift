@@ -12,9 +12,42 @@
 // targets don't use when a `main.swift` is present).
 
 import AppKit
+import os
 
 // Associated-object key that keeps the delegate alive for the app's lifetime.
 private nonisolated(unsafe) var delegateKey = 0
+
+// MARK: - Process-level crash-safety bootstrap (D1/D2)
+//
+// These two calls MUST run before anything else touches a socket, a pipe, or
+// Objective-C exception machinery — including `AppDelegate` construction
+// below, which can log to stderr.
+
+// D1. Mask SIGPIPE process-wide, at the very first instruction. The native
+// engine also masks SIGPIPE once it starts (AirPlayEngine.swift, mirroring
+// OwnTone's main()), but that happens well into launch and only on the
+// native backend — mock/owntone backends and the whole pre-engine-start
+// window are otherwise exposed. A dead stderr pipe (routine for a dev
+// launch from a terminal) or any closed socket write would otherwise kill
+// the process outright on the default SIGPIPE disposition. `SIG_IGN` here is
+// idempotent with the engine's later `engine_mask_sigpipe()` call.
+signal(SIGPIPE, SIG_IGN)
+
+// D2. Install an uncaught-exception handler so an aborting ObjC exception
+// leaves a breadcrumb before this dockless accessory app silently vanishes
+// from the menu bar. Diagnostic only: it logs and lets the abort proceed —
+// it does not attempt recovery or continuation.
+private let bootstrapLog = Logger(subsystem: "com.audiouted.Audiouted", category: "uncaught-exception")
+
+NSSetUncaughtExceptionHandler { exception in
+    let name = exception.name.rawValue
+    let reason = exception.reason ?? "<no reason>"
+    let stack = exception.callStackSymbols.joined(separator: "\n")
+    let message = "[Audiouted] FATAL uncaught exception: \(name): \(reason)\n\(stack)\n"
+
+    audioutedEmergencyWriteStderr(message)
+    bootstrapLog.fault("FATAL uncaught exception: \(name, privacy: .public): \(reason, privacy: .public)\n\(stack, privacy: .public)")
+}
 
 // Bootstrap on the main actor. `main.swift`'s top-level code runs on the main
 // thread, but the compiler treats it as non-isolated, so we hop onto the main

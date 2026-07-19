@@ -138,16 +138,29 @@ fi
 # Middle tier: a light/dark appearance-aware icon, built from Icon Composer's
 # two flattened 1024 renders as a plain Xcode asset-catalog appiconset (NOT
 # the Icon Composer .icon/Liquid Glass format above). This is a much older,
-# stable actool code path (macOS appearance-aware app icons, supported since
-# roughly Xcode 12 / macOS Big Sur) — distinct from the actively-regressed
+# stable actool code path — distinct from the actively-regressed
 # Icon-Composer-specific compiler (see the Liquid Glass block's failure log,
 # and https://github.com/expo/expo/issues/46121 / FB20183399 for the known
 # Xcode 26.5 actool crash on ANY .icon input, confirmed content-independent).
 # Not true dynamic Liquid Glass (no specular/refraction), but a real, correct
-# light/dark-switching icon using both of Icon Composer's exported renders —
-# and it works on any Xcode with actool, not gated to Xcode 26+.
-if [ "$ICON_MODE" = "icns" ] && [ -f "$ICON_SOURCE" ] && [ -f "$ICON_SOURCE_DARK" ]; then
-  echo "==> Attempting light/dark appearance-aware icon compile via actool"
+# light/dark-switching icon using both of Icon Composer's exported renders.
+#
+# GATED TO XCODE 16+: a confirmed real-world example (an "Add dark mode app
+# icon for macOS Sequoia" PR — github.com/manaflow-ai/cmux/pull/702) uses this
+# exact schema, and macOS Sequoia paired with roughly Xcode 16. LEARNED THE
+# HARD WAY: on Xcode 15.4, actool ACCEPTS this schema and exits 0 with
+# Assets.car produced — silently WITHOUT actually encoding a usable dark
+# trait. Loading the compiled icon straight from the bundle's own asset
+# catalog (Bundle(path:).image(forResource:)) and forcing both
+# NSAppearance.aqua/.darkAqua drawing contexts rendered byte-identical PNGs —
+# a real functional failure that a bare `[ -f Assets.car ]` check can't catch.
+# So: gate on Xcode major version AND functionally verify light vs dark
+# actually render differently before trusting this tier; fall through to the
+# classic .icns fallback on either the version gate or the verification
+# failing, rather than silently shipping a non-functional "success".
+if [ "$ICON_MODE" = "icns" ] && [ -f "$ICON_SOURCE" ] && [ -f "$ICON_SOURCE_DARK" ] \
+   && [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 16 ]; then
+  echo "==> Xcode $XCODE_MAJOR detected — attempting light/dark appearance-aware icon compile via actool"
   XCASSETS_DIR="$(mktemp -d)/Icons.xcassets"
   APPICONSET_DIR="$XCASSETS_DIR/AppIcon.appiconset"
   mkdir -p "$APPICONSET_DIR"
@@ -194,8 +207,41 @@ PYEOF
       --notices --warnings \
       "$XCASSETS_DIR" >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
-    echo "    actool compiled Assets.car — using light/dark appearance-aware icon"
-    ICON_MODE="lightdark"
+    echo "    actool compiled Assets.car — verifying light and dark actually render differently"
+    VERIFY_SWIFT="$(mktemp -d)/verify_appearance.swift"
+    cat > "$VERIFY_SWIFT" << 'SWIFTEOF'
+import AppKit
+import CryptoKit
+let appPath = CommandLine.arguments[1]
+guard let bundle = Bundle(path: appPath), let image = bundle.image(forResource: "AppIcon") else {
+    print("LOADFAIL"); exit(1)
+}
+func hash(_ appearanceName: NSAppearance.Name) -> String {
+    var data: Data? = nil
+    NSAppearance(named: appearanceName)!.performAsCurrentDrawingAppearance {
+        let size = NSSize(width: 256, height: 256)
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256,
+                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        data = rep.representation(using: .png, properties: [:])
+    }
+    guard let d = data else { return "NONE" }
+    return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+}
+print(hash(.aqua) == hash(.darkAqua) ? "IDENTICAL" : "DIFFERS")
+SWIFTEOF
+    VERIFY_RESULT="$(swift "$VERIFY_SWIFT" "$APP_BUNDLE" 2>/dev/null | tail -1)"
+    if [ "$VERIFY_RESULT" = "DIFFERS" ]; then
+      echo "    verified: light and dark render differently — using light/dark appearance-aware icon"
+      ICON_MODE="lightdark"
+    else
+      echo "    verification result='$VERIFY_RESULT' (expected DIFFERS) — actool silently produced a non-functional appearance-aware icon on this toolchain; falling back to classic .icns"
+      rm -f "$RESOURCES_DIR/Assets.car"
+    fi
   else
     echo "    actool did not produce Assets.car for light/dark catalog — falling back to classic .icns (log below)"
     sed 's/^/    actool: /' "$ACTOOL_LD_TMP/actool.log" || true

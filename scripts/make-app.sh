@@ -40,6 +40,11 @@ OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
+RESOURCES_DIR="$CONTENTS/Resources"
+# Flattened 1024 "Default" (light) render exported from Icon Composer. See the
+# app-icon step below for why we bake a classic .icns from this instead of
+# compiling the .icon bundle directly.
+ICON_SOURCE="$SCRIPT_DIR/AudioOuter-MacOS-Default-1024x1024@1x.png"
 
 # --- Build (release) ------------------------------------------------------
 echo "==> Building $EXECUTABLE (release)"
@@ -54,6 +59,25 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR"
 cp "$BUILT_BINARY" "$MACOS_DIR/$EXECUTABLE"
 chmod +x "$MACOS_DIR/$EXECUTABLE"
+
+# --- App icon (.icns) -----------------------------------------------------
+# The official icon is authored in Icon Composer (scripts/AudioOuter.icon), but
+# that Liquid Glass .icon bundle can only be compiled by Xcode 26's actool, and
+# Liquid Glass only renders on macOS 26. On this toolchain (Xcode 15) and on
+# macOS < 26, the app uses a classic .icns — so bake one from the flattened 1024
+# "Default" render Icon Composer exported. When this repo moves to Xcode 26,
+# replace this block with `xcrun actool "$SCRIPT_DIR/AudioOuter.icon" --compile
+# "$RESOURCES_DIR" ...` + a CFBundleIconName key. NOTE: this is a menu-bar app
+# (LSUIElement) so it has no Dock icon; this icon is what Finder, Get Info, the
+# About box, notifications, and any Store/distribution listing use.
+echo "==> Generating app icon (.icns)"
+test -f "$ICON_SOURCE" || { echo "error: icon source not found at $ICON_SOURCE" >&2; exit 1; }
+mkdir -p "$RESOURCES_DIR"
+ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET_DIR"
+for s in 16 32 128 256 512; do d=$((s * 2)); sips -z "$s" "$s" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}.png" >/dev/null; sips -z "$d" "$d" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}@2x.png" >/dev/null; done
+iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
+test -f "$RESOURCES_DIR/AppIcon.icns" || { echo "error: AppIcon.icns not generated" >&2; exit 1; }
 
 # --- Info.plist -----------------------------------------------------------
 # LSUIElement=true makes it a menu-bar-only accessory (no Dock icon, no menu
@@ -72,6 +96,9 @@ PLIST="$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MIN_MACOS" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PLIST"
+# Point the bundle at Resources/AppIcon.icns (baked in the app-icon step above).
+# Value is the basename without extension, per CFBundleIconFile convention.
+/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST"
 # The text macOS shows INSIDE the system-audio permission dialog. Without this
 # key the prompt is a bare "wants to record" ask with no reason attached — and
 # the permission lives in the "Screen & System Audio Recording" bucket, so the

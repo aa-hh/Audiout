@@ -43,3 +43,4 @@ TCC-gated audio capture):
 GPL-2.0-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE) — the
 AirPlay 2 sender is derived in part from OwnTone and bundles third-party
 code under GPL, BSD, and MIT terms.
+# Audiouter

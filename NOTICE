@@ -42,3 +42,20 @@ All third-party files retain their original copyright notices and
 license headers in source. This NOTICE file is a summary; the source
 files themselves are authoritative. See
 AirPlayEngine/docs/license-inventory.md for the full per-file audit.
+
+## Runtime dependencies (not bundled)
+
+AirPlayEngine's C target links against these libraries at build/run time
+via Homebrew (see AirPlayEngine/Package.swift). None of their source or
+binaries are copied into this repository or into the built `.app` —
+`scripts/make-app.sh` dynamically loads them from the user's own
+Homebrew install rather than bundling them, so their license terms for
+redistributed binaries do not apply here. Listed for attribution and so
+contributors know what to `brew install`:
+
+- libevent (BSD-3-Clause)
+- libsodium (ISC)
+- libgcrypt, libgpg-error (LGPL-2.1-or-later)
+- libplist (LGPL-2.1-or-later)
+- ffmpeg (LGPL-2.1-or-later / GPL-2.0-or-later depending on build
+  configuration) — libavcodec, libavutil, libswresample

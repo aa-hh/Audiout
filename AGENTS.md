@@ -4,7 +4,7 @@
 
 A native AppKit macOS app for sending system audio to several AirPlay 2 speakers
 at once — per-device volume, mute, saved groups, per-app routing, multi-room
-sync. [SPEC.md](SPEC.md) is the source of truth for *what* to build; this file
+sync. [docs/SPEC.md](docs/SPEC.md) is the source of truth for *what* to build; this file
 orients an agent to where things live and the rules that apply everywhere.
 
 ## What belongs in an AGENTS.md (HARD RULE)
@@ -48,8 +48,8 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
   `.app` with a stable bundle id and ad-hoc signature. Required for the `native`
   backend's TCC-gated process tap; a bare `swift run` loses the grant.
-- [SPEC.md](SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
-- `PLAN-*.md` — the phased execution plans and their resolved decisions.
+- [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
+- `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
 
 ## Rules (all targets)
 

@@ -13,3 +13,16 @@ dev/owntone-src/
 # vendored + shimmed sources under AirPlayEngine/Sources/ are NOT ignored.
 AirPlayEngine/.build/
 AirPlayEngine/.swiftpm/
+
+# SwiftPM build artifacts for the other local packages (same reasoning).
+AudiouterCore/.build/
+AudiouterCore/.swiftpm/
+dev/audiocap/.build/
+dev/audiocap/.swiftpm/
+
+# Xcode / SwiftPM local state, in case anyone opens this via Xcode.
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+.swiftpm/xcode/

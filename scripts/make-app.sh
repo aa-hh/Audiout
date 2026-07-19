@@ -204,6 +204,18 @@ plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 
+# --- Strip extended attributes ---------------------------------------------
+# codesign refuses to sign anything carrying AppleDouble/resource-fork-style
+# metadata ("resource fork, Finder information, or similar detritus not
+# allowed") — e.g. a legacy FinderInfo custom-icon flag or an iCloud-sync
+# attribute picked up by one of the icon assets (SVGs/PNGs) or the built
+# .icns/Assets.car. Observed when building from a repo checkout under
+# ~/Documents, which iCloud Drive commonly syncs and tags. `xattr -cr` strips
+# extended attributes recursively across the whole bundle; harmless when
+# there's nothing to strip.
+echo "==> Stripping extended attributes from bundle"
+xattr -cr "$APP_BUNDLE"
+
 # --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2
 # swaps this for a real signing identity + notarization.

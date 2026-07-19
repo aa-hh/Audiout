@@ -94,24 +94,53 @@ else
   echo "==> Skipping dylib bundling (set AUDIOUTER_BUNDLE_DYLIBS=1 to bundle for a Homebrew-less target Mac)"
 fi
 
-# --- App icon (.icns) -----------------------------------------------------
-# The official icon is authored in Icon Composer (scripts/AudioOuter.icon), but
-# that Liquid Glass .icon bundle can only be compiled by Xcode 26's actool, and
-# Liquid Glass only renders on macOS 26. On this toolchain (Xcode 15) and on
-# macOS < 26, the app uses a classic .icns — so bake one from the flattened 1024
-# "Default" render Icon Composer exported. When this repo moves to Xcode 26,
-# replace this block with `xcrun actool "$SCRIPT_DIR/AudioOuter.icon" --compile
-# "$RESOURCES_DIR" ...` + a CFBundleIconName key. NOTE: this is a menu-bar app
-# (LSUIElement) so it has no Dock icon; this icon is what Finder, Get Info, the
-# About box, notifications, and any Store/distribution listing use.
-echo "==> Generating app icon (.icns)"
-test -f "$ICON_SOURCE" || { echo "error: icon source not found at $ICON_SOURCE" >&2; exit 1; }
+# --- App icon --------------------------------------------------------------
+# The official icon is authored in Icon Composer (scripts/AudioOuter.icon) as a
+# Liquid Glass icon. Compiling that bundle standalone (outside an .xcodeproj)
+# requires Xcode 26's actool, and Liquid Glass only renders on macOS 26 anyway.
+# actool's CLI contract for a bare .icon bundle isn't Apple-documented yet (this
+# is a brand-new Xcode 26 feature), so we ATTEMPT it opportunistically and fall
+# back automatically to a classic .icns baked from Icon Composer's flattened
+# 1024 "Default" render — this keeps the script working unmodified on an
+# Xcode-15 machine (falls back every time) and an Xcode-26 machine (uses the
+# real Liquid Glass icon whenever the actool invocation below is accepted).
+# NOTE: this is a menu-bar app (LSUIElement) so it has no Dock icon; this icon
+# is what Finder, Get Info, the About box, notifications, and any
+# Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
-ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
-mkdir -p "$ICONSET_DIR"
-for s in 16 32 128 256 512; do d=$((s * 2)); sips -z "$s" "$s" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}.png" >/dev/null; sips -z "$d" "$d" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}@2x.png" >/dev/null; done
-iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
-test -f "$RESOURCES_DIR/AppIcon.icns" || { echo "error: AppIcon.icns not generated" >&2; exit 1; }
+ICON_MODE="icns"
+ICON_BUNDLE_SRC="$SCRIPT_DIR/AudioOuter.icon"
+XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
+if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
+  echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"
+  ACTOOL_TMP="$(mktemp -d)"
+  if xcrun actool \
+      --compile "$RESOURCES_DIR" \
+      --platform macosx \
+      --minimum-deployment-target "$MIN_MACOS" \
+      --app-icon "$(basename "$ICON_BUNDLE_SRC" .icon)" \
+      --output-partial-info-plist "$ACTOOL_TMP/partial-info.plist" \
+      --output-format human-readable-text \
+      --notices --warnings \
+      "$ICON_BUNDLE_SRC" >"$ACTOOL_TMP/actool.log" 2>&1 \
+    && [ -f "$RESOURCES_DIR/Assets.car" ]; then
+    echo "    actool compiled Assets.car — using Liquid Glass icon"
+    ICON_MODE="liquidglass"
+  else
+    echo "    actool did not produce Assets.car — falling back to classic .icns (log below)"
+    sed 's/^/    actool: /' "$ACTOOL_TMP/actool.log" || true
+  fi
+fi
+
+if [ "$ICON_MODE" = "icns" ]; then
+  echo "==> Generating app icon (.icns fallback)"
+  test -f "$ICON_SOURCE" || { echo "error: icon source not found at $ICON_SOURCE" >&2; exit 1; }
+  ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET_DIR"
+  for s in 16 32 128 256 512; do d=$((s * 2)); sips -z "$s" "$s" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}.png" >/dev/null; sips -z "$d" "$d" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}@2x.png" >/dev/null; done
+  iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
+  test -f "$RESOURCES_DIR/AppIcon.icns" || { echo "error: AppIcon.icns not generated" >&2; exit 1; }
+fi
 
 # --- Info.plist -----------------------------------------------------------
 # LSUIElement=true makes it a menu-bar-only accessory (no Dock icon, no menu
@@ -130,9 +159,15 @@ PLIST="$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MIN_MACOS" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PLIST"
-# Point the bundle at Resources/AppIcon.icns (baked in the app-icon step above).
-# Value is the basename without extension, per CFBundleIconFile convention.
-/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST"
+# Point the bundle at whichever icon the app-icon step above produced:
+# CFBundleIconName for the compiled Liquid Glass Assets.car (actool convention —
+# name matches the --app-icon value passed above), CFBundleIconFile for the
+# classic .icns fallback (basename without extension, per convention).
+if [ "$ICON_MODE" = "liquidglass" ]; then
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string $(basename "$ICON_BUNDLE_SRC" .icon)" "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST"
+fi
 # The text macOS shows INSIDE the system-audio permission dialog. Without this
 # key the prompt is a bare "wants to record" ask with no reason attached — and
 # the permission lives in the "Screen & System Audio Recording" bucket, so the
@@ -168,6 +203,25 @@ plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
+
+# --- Strip extended attributes ---------------------------------------------
+# codesign refuses to sign anything carrying AppleDouble/resource-fork-style
+# metadata ("resource fork, Finder information, or similar detritus not
+# allowed") — e.g. a legacy FinderInfo custom-icon flag or an iCloud-sync
+# attribute picked up by one of the icon assets (SVGs/PNGs) or the built
+# .icns/Assets.car. Observed when building from a repo checkout under
+# ~/Documents, which iCloud Drive commonly syncs and tags. `xattr -cr` strips
+# extended attributes recursively across the whole bundle; harmless when
+# there's nothing to strip.
+#
+# xattr -cr alone was NOT enough on an actual iCloud-synced checkout: the
+# codesign error persisted even after it ran. That's because an AppleDouble
+# sidecar (a literal hidden `._name` file living NEXT TO `name`, or a stray
+# `.DS_Store`) is a separate file, not an extended attribute on an existing
+# one — xattr has nothing to strip it of. Delete those outright too.
+echo "==> Stripping extended attributes from bundle"
+xattr -cr "$APP_BUNDLE"
+find "$APP_BUNDLE" \( -name '._*' -o -name '.DS_Store' \) -delete
 
 # --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2

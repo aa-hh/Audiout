@@ -1,6 +1,6 @@
 # Per-app routing live-verification runbook — T11
 
-A copy-paste checklist for Alec to verify per-app AirPlay routing works end-to-end
+A copy-paste checklist for ahh to verify per-app AirPlay routing works end-to-end
 against real hardware and real apps. Unit tests (476+ core / 108 engine, 0 failures)
 prove the logic; this runbook proves the audio actually moves to the right speaker
 and the UI correctly shows what's happening.

@@ -709,7 +709,7 @@ public final class GroupController {
     // or this mirror's target set. Each redirected app also already has its own
     // independent volume control (the Applications card slider, `AppRoute.volume`),
     // so mapping the Mac's physical volume keys onto it too would be a second,
-    // confusing way to change the same audio's loudness. Decision (Alec,
+    // confusing way to change the same audio's loudness. Decision (ahh,
     // 2026-07-17): volume keys drive Main Out only.
 
     /// The ratio snapshot an in-flight mirror burst is scaling from, plus the exact

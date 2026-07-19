@@ -287,10 +287,11 @@ stability.
 **FULL end-to-end un-defer (2026-07-13):** on a live network with real AirPlay 2
 devices (Sonos Port "Pool", Yamaha RX-A4A "Cinema"), the COMPLETE Phase 1 path
 ran on real hardware, **user-confirmed audible on Cinema**: Mac system audio →
-audiocap Core-Audio tap → S16LE FIFO → OwnTone → **AirPlay 2 + PTP → Cinema**
-(`dev/verify-realpath-cinema.sh`). Both the capture half and the AirPlay-2-send
-half, together, on a genuine receiver. ⇒ every core technical bet is now proven
-on real gear.
+audiocap Core-Audio tap → S16LE FIFO → OwnTone → **AirPlay 2 + PTP → Cinema**.
+Both the capture half and the AirPlay-2-send half, together, on a genuine
+receiver. ⇒ every core technical bet is now proven on real gear. (The
+verification script this used, `dev/verify-realpath-cinema.sh`, was removed
+once that Cinema receiver was no longer available to test against.)
 - **Config finding (shipped-app requirement):** OwnTone's `pipe_autostart`
   defaults ON and RACES the explicit clear→add→play sequence when the FIFO
   starts filling (DB-lock + failed start → silent speaker). MUST be OFF; drive

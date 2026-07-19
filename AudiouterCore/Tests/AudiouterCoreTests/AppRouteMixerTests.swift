@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
+// Copyright (C) 2026 ahh and contributors.
 
 import XCTest
 @testable import AudiouterCore
@@ -504,7 +504,7 @@ final class AppRouteMixerTests: XCTestCase {
 
     /// Proves the reported level is a SOURCE/program level (PRE-volume): the app's
     /// routing-volume slider must NOT change it, so a low slider can't leave the
-    /// bar stuck near-empty while the source is loud (Alec's meter feedback).
+    /// bar stuck near-empty while the source is loud (ahh's meter feedback).
     func testMeteringReportsSourceLevelIndependentOfRoutingVolume() {
         let fullVolume = singleContributorLevel(forVolume: 100)
         let halfVolume = singleContributorLevel(forVolume: 50)

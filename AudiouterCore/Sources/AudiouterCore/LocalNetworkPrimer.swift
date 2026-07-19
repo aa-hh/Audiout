@@ -41,7 +41,7 @@ public struct NoopLocalNetworkPrimer: LocalNetworkPriming {
 /// takes longer than `browseSeconds` to answer resolves `false` this pass — but
 /// ``SetupModel/refreshStatuses()`` re-probes on the next window focus and picks
 /// up the grant, so the slow-answer case self-heals. When the grant already
-/// exists (Alec's case), the browse reaches `.ready`/results immediately and
+/// exists (ahh's case), the browse reaches `.ready`/results immediately and
 /// reports `true` with no prompt.
 public final class LocalNetworkPrimer: LocalNetworkPriming, @unchecked Sendable {
 

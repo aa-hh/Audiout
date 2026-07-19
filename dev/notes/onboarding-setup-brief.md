@@ -17,7 +17,7 @@ grants the app needs (or will need): System Audio (the Core Audio tap), Local
 Network (Bonjour), and Remote Control (Accessibility — primed ahead of the
 not-yet-merged speaker-side transport-control feature on branch
 `claude/speaker-input-responsiveness-b8123f`, so the grant is already in place
-when it ships rather than a cold third prompt later; see Alec's decision,
+when it ships rather than a cold third prompt later; see ahh's decision,
 2026-07-18).
 
 ## The resolved open question (don't re-litigate)
@@ -114,7 +114,7 @@ now fixed in code; a third is a thing to WATCH on the next run.
    answering the prompt. If it shows Denied right after you granted, that's this race
    — fix is to re-probe once after the prompt resolves (or block on the decision).
 
-## ⚠️ Gated live-verify recipe (Alec, signed build)
+## ⚠️ Gated live-verify recipe (ahh, signed build)
 
 The self-test tone can't be exercised in CI / an agent shell: an unsigned/ad-hoc
 binary has no stable TCC identity, and a shell-launched process inherits the

@@ -280,7 +280,7 @@ final class PermissionRowView: NSView {
 /// An accent-filled push button (`bezelColor`) whose title stays legible whether
 /// or not its window is key.
 ///
-/// The bug this exists to fix (Alec, deselecting the setup window): AppKit drops
+/// The bug this exists to fix (ahh, deselecting the setup window): AppKit drops
 /// a `bezelColor` fill to a plain bezel when the window resigns key — correct,
 /// that's how macOS de-emphasises controls in inactive windows — but, UNLIKE a
 /// true default button, it does NOT recolor the title to match. So a

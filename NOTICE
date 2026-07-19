@@ -1,0 +1,61 @@
+# Third-Party Licenses and Attribution
+
+Audiouter (including AirPlayEngine) is licensed under the GNU General
+Public License, version 2 or later (GPL-2.0-or-later). See LICENSE for
+the full text.
+
+The AirPlayEngine sender is derived in part from OwnTone
+(https://github.com/owntone/owntone-server) and bundles code under three
+licenses, all compatible with GPL-2.0-or-later:
+
+## GPL-2.0-or-later components
+
+- `airplay.c`, `airplay_events.c`, `rtp_common.c`, `rtp_common.h`
+  (AirPlayEngine/Sources/CAirPlayEngine/src/outputs/)
+- Derived from OwnTone Server
+- Copyright (C) 2019- Espen Jürgensen and the OwnTone Project
+
+## BSD-2-Clause components
+
+- `rtsp.c`, `evrtsp.h`, `log.h`, `rtsp-internal.h`
+  (AirPlayEngine/Sources/CAirPlayEngine/src/evrtsp/)
+- Based on libevent's evhttp
+- Copyright (C) 2010 Julien BLACHE
+- Copyright (c) 2000-2006 Niels Provos
+- See the individual source files for the full BSD license text and
+  disclaimer.
+
+## MIT components
+
+- `pair.c`, `pair.h`, `pair_fruit.c`, `pair_homekit.c`, `pair-internal.h`,
+  `pair-tlv.c`, `pair-tlv.h` (AirPlayEngine/Sources/CAirPlayEngine/src/pair_ap/)
+  - Includes adaptations of Tom Cocagne's csrp (SRP6a) and
+    maximkulkin's esp-homekit (TLV encoding)
+- `airptp.h` and everything under
+  `AirPlayEngine/Sources/CAirPlayEngine/src/libairptp/`
+  - Copyright (c) 2026 OwnTone
+  - Severable: this PTP helper links no GPL code and may be
+    redistributed standalone under MIT alone (see
+    `src/libairptp/LICENSE`).
+
+All third-party files retain their original copyright notices and
+license headers in source. This NOTICE file is a summary; the source
+files themselves are authoritative. See
+AirPlayEngine/docs/license-inventory.md for the full per-file audit.
+
+## Runtime dependencies (not bundled)
+
+AirPlayEngine's C target links against these libraries at build/run time
+via Homebrew (see AirPlayEngine/Package.swift). None of their source or
+binaries are copied into this repository or into the built `.app` —
+`scripts/make-app.sh` dynamically loads them from the user's own
+Homebrew install rather than bundling them, so their license terms for
+redistributed binaries do not apply here. Listed for attribution and so
+contributors know what to `brew install`:
+
+- libevent (BSD-3-Clause)
+- libsodium (ISC)
+- libgcrypt, libgpg-error (LGPL-2.1-or-later)
+- libplist (LGPL-2.1-or-later)
+- ffmpeg (LGPL-2.1-or-later / GPL-2.0-or-later depending on build
+  configuration) — libavcodec, libavutil, libswresample

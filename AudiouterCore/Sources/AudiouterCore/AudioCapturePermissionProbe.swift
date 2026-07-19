@@ -68,7 +68,7 @@ public struct UnsupportedAudioCaptureProbe: AudioCapturePermissionProbing {
 /// 4. Tear everything down promptly (the tap lives < 0.5 s), so no lingering
 ///    system tap or muted state.
 ///
-/// ## ⚠️ GATED — needs Alec's live verification
+/// ## ⚠️ GATED — needs ahh's live verification
 /// Every other part of the setup flow is unit-tested, but this file drives real
 /// Core Audio and the TCC prompt, which cannot run in CI or an agent shell
 /// (unsigned/ad-hoc binaries don't get a stable TCC identity, and a shell-

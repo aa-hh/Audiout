@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
+// Copyright (C) 2026 ahh and contributors.
 
 import Foundation
 
@@ -330,7 +330,7 @@ public final class AppRouteMixer: @unchecked Sendable {
             // The per-app meter is a SOURCE/program level: RMS the PRE-volume
             // converted buffer (`pcm`), so the bar reflects how loud the app is
             // actually playing, independent of its routing-volume slider — the
-            // meter shows the source, not the attenuated output (Alec's meter
+            // meter shows the source, not the attenuated output (ahh's meter
             // feedback: a low slider used to leave the bar stuck near-empty even
             // when the source was loud). Skipped entirely unless a meter listens.
             let level: Float? = meteringActive ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil

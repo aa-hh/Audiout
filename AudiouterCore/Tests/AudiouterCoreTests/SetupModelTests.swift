@@ -152,7 +152,7 @@ final class SetupModelTests: XCTestCase {
     }
 
     func testPrimeLocalNetworkReachableBecomesGranted() async {
-        // The case Alec hit: it's actually working, so we must NOT lie with a
+        // The case ahh hit: it's actually working, so we must NOT lie with a
         // sticky "Requested" — a browse that reaches the network proves the grant.
         let (model, spy, _, _) = makeModel(audio: .granted)
         spy.reachable = true

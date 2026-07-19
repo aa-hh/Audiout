@@ -8,7 +8,8 @@
 # Keeps OwnTone volume low. Auto-stops after the duration.
 set -uo pipefail
 
-REPO="/Users/alechenderson/Projects/Audiouter"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 AC="$REPO/dev/audiocap/.build/release/audiocap"
 FIFO="$REPO/dev/owntone/media/spike.fifo"
 API="http://localhost:3689/api"

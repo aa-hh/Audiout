@@ -213,8 +213,15 @@ plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 # ~/Documents, which iCloud Drive commonly syncs and tags. `xattr -cr` strips
 # extended attributes recursively across the whole bundle; harmless when
 # there's nothing to strip.
+#
+# xattr -cr alone was NOT enough on an actual iCloud-synced checkout: the
+# codesign error persisted even after it ran. That's because an AppleDouble
+# sidecar (a literal hidden `._name` file living NEXT TO `name`, or a stray
+# `.DS_Store`) is a separate file, not an extended attribute on an existing
+# one — xattr has nothing to strip it of. Delete those outright too.
 echo "==> Stripping extended attributes from bundle"
 xattr -cr "$APP_BUNDLE"
+find "$APP_BUNDLE" \( -name '._*' -o -name '.DS_Store' \) -delete
 
 # --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
 # Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2

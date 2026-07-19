@@ -114,9 +114,6 @@
       ],
       "blur-material-specializations" : [
         {
-          "value" : null
-        },
-        {
           "appearance" : "dark",
           "value" : 1
         },
@@ -266,9 +263,6 @@
       ],
       "blur-material-specializations" : [
         {
-          "value" : null
-        },
-        {
           "appearance" : "tinted",
           "value" : 1
         }
@@ -401,13 +395,6 @@
     {
       "blend-mode" : "normal",
       "blur-material-specializations" : [
-        {
-          "value" : null
-        },
-        {
-          "appearance" : "dark",
-          "value" : null
-        },
         {
           "appearance" : "tinted",
           "value" : 0.5

@@ -60,6 +60,40 @@ mkdir -p "$MACOS_DIR"
 cp "$BUILT_BINARY" "$MACOS_DIR/$EXECUTABLE"
 chmod +x "$MACOS_DIR/$EXECUTABLE"
 
+# --- Bundle Homebrew dylibs (opt-in) ---------------------------------------
+# The executable currently links Homebrew dylibs (libevent, libsodium,
+# libgcrypt, libgpg-error, libplist, ffmpeg + its transitive chain — see
+# AirPlayEngine/Package.swift's brewLibFlags) via absolute paths under
+# /opt/homebrew or /usr/local, which don't exist on a Mac without Homebrew.
+# scripts/bundle-dylibs.sh copies every such dylib (walked transitively via
+# otool -L, not a hardcoded list) into Contents/Frameworks and repoints the
+# load commands at @rpath, making the bundle self-contained.
+#
+# Gated behind AUDIOUTER_BUNDLE_DYLIBS=1 (default: skip) because it's a
+# non-trivial extra step (walks + copies + relinks a whole dependency tree)
+# that plain local dev builds don't need — Homebrew is already on the dev
+# machine, so the fast unbundled build launches fine there. Set this env var
+# for a release/distribution build that has to run on a machine without
+# Homebrew. NOT signed here — codesign below still ad-hoc-signs the whole
+# bundle (including these newly-added Frameworks) in one pass.
+#
+# PROVING it worked is a SEPARATE, deliberately manual step — NOT run here.
+# `otool -L` / `codesign` below confirm the load commands LOOK right, but only
+# on THIS machine, which has Homebrew. To actually prove the bundle launches on
+# a Mac WITHOUT Homebrew, run:  scripts/verify-standalone-app.sh <this .app>
+# It temporarily renames the Homebrew keg dirs this bundle used and launches the
+# app with them gone. That's intentionally left out of the build because it
+# moves real directories on the developer's disk (restored via a trap) and is
+# slow/invasive — you don't want it firing on every AUDIOUTER_BUNDLE_DYLIBS=1
+# build. Invoke it by hand before shipping a distribution build.
+if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
+  echo "==> Bundling Homebrew dylibs (AUDIOUTER_BUNDLE_DYLIBS=1)"
+  "$SCRIPT_DIR/bundle-dylibs.sh" "$APP_BUNDLE"
+  echo "    (to PROVE this launches with no Homebrew present, run: scripts/verify-standalone-app.sh \"$APP_BUNDLE\")"
+else
+  echo "==> Skipping dylib bundling (set AUDIOUTER_BUNDLE_DYLIBS=1 to bundle for a Homebrew-less target Mac)"
+fi
+
 # --- App icon (.icns) -----------------------------------------------------
 # The official icon is authored in Icon Composer (scripts/AudioOuter.icon), but
 # that Liquid Glass .icon bundle can only be compiled by Xcode 26's actool, and
@@ -145,14 +179,36 @@ plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 # dylib into the process and inherit that grant. The hardened runtime makes dyld
 # ignore DYLD_* env vars, closing that vector — as long as we withhold the
 # allow-dyld-environment-variables entitlement (we do). Library validation is
-# deliberately DISABLED in scripts/Audiouter.entitlements because the app links
-# Homebrew dylibs signed under a different Team ID (with it on, dyld aborts at
-# launch); the DYLD_INSERT protection does NOT depend on library validation. See
-# that file for the full rationale and the Phase 2 plan to re-enable it.
+# deliberately DISABLED in scripts/Audiouter.entitlements even though bundled
+# dylibs are re-signed here (inside-out): ad-hoc signatures have no Team ID, so
+# library validation would reject them. Developer ID would allow re-enabling it.
+# The DYLD_INSERT protection does NOT depend on library validation.
 #
 # NOT `--deep`: it is deprecated by Apple and signs nested code with the wrong
-# (inherited) options. The bundle currently has a single Mach-O; when helpers get
-# embedded, sign them explicitly inside-out before this line.
+# (inherited) options. When AUDIOUTER_BUNDLE_DYLIBS=1 the bundle now has ~20
+# Mach-Os (main executable + every Homebrew dylib bundle-dylibs.sh copied into
+# Contents/Frameworks) — so sign them explicitly INSIDE-OUT before this line,
+# same rule this comment has always stated, now actually exercised.
+#
+# WHY ORDER MATTERS: `codesign --verify --strict` on the outer .app bundle
+# checks the bundle's own signature AND that any nested code it embeds is
+# itself validly signed. install_name_tool (in bundle-dylibs.sh) rewrote each
+# dylib's LC_ID_DYLIB and every referencing load command — that invalidates
+# whatever signature the dylib had from Homebrew, so each one must be
+# (re-)signed before the outer bundle is signed. Sign the outer bundle first
+# and `--verify --strict` fails (or, worse, silently ignores unsigned nested
+# code depending on codesign version) — sign inside-out and it can't.
+if [ -d "$CONTENTS/Frameworks" ] && [ -n "$(ls -A "$CONTENTS/Frameworks" 2>/dev/null)" ]; then
+  echo "==> Ad-hoc codesigning bundled dylibs in Contents/Frameworks (inside-out, before the app)"
+  # --options runtime for consistency with the hardened-runtime posture below;
+  # these are library code, not the entitled executable, so no --entitlements
+  # here — only the main executable needs the audio-capture / local-network /
+  # disable-library-validation entitlements.
+  find "$CONTENTS/Frameworks" -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
+    echo "    signing $(basename "$dylib")"
+    codesign --force --options runtime --sign - "$dylib"
+  done
+fi
 echo "==> Ad-hoc codesigning (hardened runtime)"
 ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
@@ -171,5 +227,16 @@ printf '%s\n' "$SIG_INFO" | grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' || { echo
 # key is present rather than trusting codesign's exit code.
 EMBEDDED_ENTS="$(codesign -d --entitlements - "$APP_BUNDLE" 2>/dev/null || true)"
 printf '%s' "$EMBEDDED_ENTS" | grep -q 'com.apple.security.cs.disable-library-validation' || { echo "ERROR: entitlements did not embed (AMFI likely rejected the plist) — app would fail to load Homebrew dylibs" >&2; exit 1; }
+
+# Final nested-code check. `--verify --strict` above only checked the OUTER
+# bundle's own signature; it does not recurse into Contents/Frameworks. Run a
+# --deep verify now to prove every nested Mach-O (all the bundled dylibs, when
+# present) is validly signed too — this is read-only VERIFICATION, which is
+# fine; the `--deep` ban above is specifically about SIGNING with --deep
+# (wrong inherited options), not about verifying with it. If this fails, the
+# inside-out signing above didn't actually cover something nested.
+echo "==> Verifying nested code (deep verify)"
+codesign --verify --strict --verbose=4 "$APP_BUNDLE" || { echo "ERROR: codesign --verify --strict failed on $APP_BUNDLE" >&2; exit 1; }
+codesign --verify --deep --strict "$APP_BUNDLE" || { echo "ERROR: codesign --verify --deep --strict failed — some nested Mach-O (likely a dylib in Contents/Frameworks) is unsigned or invalidly signed" >&2; exit 1; }
 
 echo "==> Done: $APP_BUNDLE"

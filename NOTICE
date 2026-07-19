@@ -43,15 +43,37 @@ license headers in source. This NOTICE file is a summary; the source
 files themselves are authoritative. See
 AirPlayEngine/docs/license-inventory.md for the full per-file audit.
 
-## Runtime dependencies (not bundled)
+## Bundled runtime libraries
 
 AirPlayEngine's C target links against these libraries at build/run time
-via Homebrew (see AirPlayEngine/Package.swift). None of their source or
-binaries are copied into this repository or into the built `.app` —
-`scripts/make-app.sh` dynamically loads them from the user's own
-Homebrew install rather than bundling them, so their license terms for
-redistributed binaries do not apply here. Listed for attribution and so
-contributors know what to `brew install`:
+via Homebrew (see AirPlayEngine/Package.swift). In a release/distribution
+build (`scripts/make-app.sh` run with `AUDIOUTER_BUNDLE_DYLIBS=1`), these
+libraries are copied into `Contents/Frameworks/` inside the shipped
+`.app` so it can run without a Homebrew install present. A plain local
+dev build (the flag unset) still links them from the developer's own
+Homebrew install and does not bundle anything.
+
+Because libgcrypt, libgpg-error, and libplist are
+LGPL-2.1-or-later, and ffmpeg may be LGPL-2.1-or-later or
+GPL-2.0-or-later depending on build configuration, bundling these
+libraries into the app does trigger LGPL redistribution obligations
+that did not apply when they were only dynamically loaded from a
+user-managed Homebrew install.
+
+The compliance mechanism used: each library ships as its own separate,
+individually replaceable `.dylib` file inside `Contents/Frameworks/` —
+never statically merged into AirPlayEngine's or Audiouter's own binary.
+This is intended to satisfy LGPL §6's requirement that a user be able to
+relink or substitute a compatible version of the library. This is not a
+legal guarantee; it is the mechanism this project relies on for
+compliance.
+
+Separately, the whole app is already GPL-2.0-or-later (per the GPL
+sender cluster above), so a GPL-built ffmpeg is license-compatible
+either way — bundling ffmpeg does not introduce any GPL/LGPL conflict.
+
+Libraries, listed for attribution and so contributors know what to
+`brew install` for a dev build:
 
 - libevent (BSD-3-Clause)
 - libsodium (ISC)
@@ -59,3 +81,13 @@ contributors know what to `brew install`:
 - libplist (LGPL-2.1-or-later)
 - ffmpeg (LGPL-2.1-or-later / GPL-2.0-or-later depending on build
   configuration) — libavcodec, libavutil, libswresample
+
+Note: the exact set of files that land in `Contents/Frameworks/` —
+especially ffmpeg's transitive dependencies (libraries such as x264,
+aom, dav1d, or others depending on how ffmpeg was built) — is
+determined by an `otool -L` dependency walk performed at build time by
+`scripts/make-app.sh`, and can vary with the Homebrew version used to
+build. This NOTICE describes the top-level libraries and the bundling
+mechanism; the authoritative exact file list for any given build is
+whatever is actually present in that build's `Contents/Frameworks/`,
+not a list frozen here.

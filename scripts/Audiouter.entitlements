@@ -2,12 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Hardened-runtime entitlements. Full rationale in scripts/make-app.sh.
-         disable-library-validation is TRUE only because the app links Homebrew
-         dylibs (different Team ID); the DYLD_INSERT protection comes from the
-         hardened runtime plus keeping allow-dyld-environment-variables FALSE, so
-         NEVER set that (or the two below) to true. Keep this comment free of the
-         two-hyphen sequence: AMFI rejects it in an entitlements plist. -->
+    <!-- Hardened-runtime entitlements. See scripts/make-app.sh for full rationale.
+         disable-library-validation is TRUE: bundled dylibs are re-signed ad-hoc
+         (no Team ID), so library validation would reject them. Developer ID would
+         allow re-enabling. DYLD_INSERT protection comes from hardened runtime +
+         keeping allow-dyld-environment-variables FALSE, not library validation.
+         Never set those to true. Avoid two-hyphen sequences; AMFI rejects them. -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>

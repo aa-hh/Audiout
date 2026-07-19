@@ -316,6 +316,51 @@ Audiouter/
 
 ---
 
+## Addendum: bundled runtime libraries (distribution model change)
+
+**Updated:** 2026-07-19
+
+The runtime C libraries used by AirPlayEngine's sender (libevent,
+libsodium, libgcrypt, libgpg-error, libplist, and ffmpeg's libavcodec /
+libavutil / libswresample) were originally distributed as "not
+bundled" — `scripts/make-app.sh` linked them dynamically from the
+user's own Homebrew install, and the built `.app` never carried copies
+of them. Under that model, redistribution obligations for the LGPL
+components (libgcrypt, libgpg-error, libplist; ffmpeg conditionally)
+did not apply, since nothing was actually being redistributed.
+
+That model has changed. `scripts/make-app.sh` now supports an
+`AUDIOUTER_BUNDLE_DYLIBS=1` release/distribution mode that copies these
+libraries into `Contents/Frameworks/` inside the shipped `.app`, so end
+users can run it without installing Homebrew themselves. (A plain dev
+build without the flag still links from Homebrew and bundles nothing.)
+
+This means bundling now **does** trigger LGPL-2.1-or-later
+redistribution obligations for libgcrypt, libgpg-error, and libplist,
+and potentially for ffmpeg depending on its build configuration
+(LGPL-2.1-or-later vs. GPL-2.0-or-later).
+
+The reasoning for why this remains compliant is the same as elsewhere
+in this document: the whole app is already GPL-2.0-or-later (see the
+GPL-2.0-or-later Distribution Obligations section above), so a
+GPL-built ffmpeg is compatible regardless. For the LGPL libraries
+specifically, the compliance mechanism relied on is that each one ships
+as a separate, individually replaceable `.dylib` inside
+`Contents/Frameworks/` rather than being statically merged into the
+app's own binary — which is intended to satisfy LGPL §6's relinking /
+substitution requirement. This is the mechanism the project relies on,
+not a legal determination.
+
+The precise set of files copied into `Contents/Frameworks/` (including
+ffmpeg's transitive dependencies, which may include libraries such as
+x264, aom, or dav1d depending on the build machine's Homebrew state) is
+produced by an `otool -L` walk in `scripts/make-app.sh` at build time
+and is not fixed here — see NOTICE's "Bundled runtime libraries"
+section and the actual `Contents/Frameworks/` contents of a given build
+for the authoritative list.
+
+---
+
 ## Conclusion
 
 **No showstoppers found.** All assumptions in PLAN-PHASE-2.md Q4 are confirmed:

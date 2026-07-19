@@ -248,7 +248,7 @@ public final class SetupModel {
 
     /// Ask for + functionally check Local Network. The browse fires the system
     /// prompt (if undetermined) and reports whether the network was reachable:
-    /// reachable ⇒ `.granted` (it demonstrably works — the case Alec hit, where
+    /// reachable ⇒ `.granted` (it demonstrably works — the case ahh hit, where
     /// it was already allowed and "Requested" was a lie); not reachable ⇒
     /// `.requested` (asked, but we can't prove it — no speakers, or denied).
     public func primeLocalNetwork() async {

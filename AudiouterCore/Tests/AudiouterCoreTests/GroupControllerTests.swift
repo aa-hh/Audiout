@@ -899,7 +899,7 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertTrue(spy.volumeWrites.isEmpty)
     }
 
-    /// T7 NOTE (superseding the pre-merge version of this test, Alec 2026-07-17):
+    /// T7 NOTE (superseding the pre-merge version of this test, ahh 2026-07-17):
     /// a per-app redirect used to open its AirPlay session via the whole-system
     /// output-set union, so the tap-mute bug this file's mirror fixes ("if nothing
     /// is connected to the audio out and I hit the volume buttons, the audio out

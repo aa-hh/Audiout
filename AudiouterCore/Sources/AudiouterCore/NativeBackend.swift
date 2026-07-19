@@ -433,7 +433,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
     //     apps `.device`-routed to it). A device fed by both shows the larger
     //     (product decision). Every meter input is a SOURCE/program level — never
-    //     scaled by a routing/output volume (Alec: a low slider must not empty a bar).
+    //     scaled by a routing/output volume (ahh: a low slider must not empty a bar).
     //   - Per-app `.appLevel` for EVERY listed app, all PRE-volume source levels,
     //     one source by route kind:
     //       `.device`        -> `routeMixer.onAppLevel`          (pre-volume source)
@@ -1567,7 +1567,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// One per-app engine binding transition, computed under `stateQueue` and run on
     /// the `bindTail` FIFO. A device moving between streams is a plain stop→re-add
-    /// (`.rebind`) — Alec has accepted the brief (~1 s) audible gap, so there is no
+    /// (`.rebind`) — ahh has accepted the brief (~1 s) audible gap, so there is no
     /// gap-hiding machinery here on purpose.
     private enum StreamBindOp {
         case bind(OutputID, UInt32)      // device newly bound to a per-app stream

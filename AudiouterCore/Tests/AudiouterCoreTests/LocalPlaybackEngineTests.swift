@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 Alec Henderson and contributors.
+// Copyright (C) 2026 ahh and contributors.
 
 import XCTest
 @testable import AudiouterCore

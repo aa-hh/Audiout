@@ -13,7 +13,7 @@ EACCES (errno 13). EADDRINUSE means the ports are *already bound*, not
 
 `lsof` identified the holder: **our own OwnTone** (pid 82557), which is holding
 both `*:319` and `*:320` right now. OwnTone started as root, bound the ports, and
-dropped privileges to `alechenderson` — i.e. it is *already doing exactly what our
+dropped privileges to `ahh` — i.e. it is *already doing exactly what our
 helper will do*, successfully, on this macOS version. That is stronger proof than
 an abstract probe: a real AirPlay 2 sender binds 319/320 here.
 

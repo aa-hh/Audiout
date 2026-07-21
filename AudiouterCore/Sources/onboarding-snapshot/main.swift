@@ -36,12 +36,21 @@ struct SnapshotRemoteControl: RemoteControlPriming {
     func isTrusted() -> Bool { false }
 }
 
+/// Fake PTP helper manager — never touches `SMAppService`.
+struct SnapshotPTPHelper: PTPHelperManaging {
+    let statusToReport: PTPHelperStatus
+    var status: PTPHelperStatus { statusToReport }
+    func register() throws {}
+    func openSystemSettingsLoginItems() {}
+}
+
 @MainActor
 func makeViewController() -> OnboardingViewController {
     let suite = UserDefaults(suiteName: "onboarding-snapshot-\(UUID().uuidString)")!
     let model = SetupModel(audioProbe: SnapshotAudioProbe(result: .granted),
                            localNetwork: SnapshotLocalNetwork(),
                            remoteControl: SnapshotRemoteControl(),
+                           ptpHelper: SnapshotPTPHelper(statusToReport: .enabled),
                            settings: AppSettings(defaults: suite))
     return OnboardingViewController(model: model,
                                     onOpenSettings: { _ in },

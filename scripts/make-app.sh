@@ -31,16 +31,26 @@ AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send 
 # (_airplay._tcp / _raop._tcp) to find AirPlay speakers; say that plainly.
 LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
 
+# The privileged root PTP helper (T2/T5, ptp-helper-design.md §2). Lives in
+# the AirPlayEngine package, not AudiouterCore — a separate `swift build`
+# invocation below. Label MUST equal the LaunchDaemons plist's own filename
+# (SMAppService.daemon(plistName:) resolves it by exact name match).
+HELPER_EXECUTABLE="ptp-helper"
+HELPER_LABEL="com.audiouter.Audiouter.ptphelper"
+
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_DIR="$REPO_ROOT/AudiouterCore"
+ENGINE_PACKAGE_DIR="$REPO_ROOT/AirPlayEngine"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
+LAUNCH_DAEMONS_DIR="$CONTENTS/Library/LaunchDaemons"
+HELPER_PLIST_SOURCE="$SCRIPT_DIR/ptp-helper.plist"
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
@@ -53,12 +63,36 @@ BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
+# Separate package (AirPlayEngine), separate `swift build` invocation — see
+# HELPER_EXECUTABLE comment above for why this binary is built and signed
+# apart from the app executable.
+echo "==> Building $HELPER_EXECUTABLE (release)"
+swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE"
+HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
+BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
+test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
+
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR"
 cp "$BUILT_BINARY" "$MACOS_DIR/$EXECUTABLE"
 chmod +x "$MACOS_DIR/$EXECUTABLE"
+
+# ptp-helper ships alongside the app executable; the launchd plist below
+# points BundleProgram at this exact bundle-relative path.
+cp "$BUILT_HELPER" "$MACOS_DIR/$HELPER_EXECUTABLE"
+chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
+
+# --- SMAppService launchd daemon plist -------------------------------------
+# Ships from scripts/ptp-helper.plist verbatim (see that file for the SMAppService
+# shape rationale — ptp-helper-design.md §2.2). The filename here MUST equal
+# Label + ".plist"; SMAppService.daemon(plistName:) resolves the plist by that
+# exact name, not by content.
+echo "==> Installing LaunchDaemons plist"
+test -f "$HELPER_PLIST_SOURCE" || { echo "error: helper plist not found at $HELPER_PLIST_SOURCE" >&2; exit 1; }
+mkdir -p "$LAUNCH_DAEMONS_DIR"
+cp "$HELPER_PLIST_SOURCE" "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
 
 # --- Bundle Homebrew dylibs (opt-in) ---------------------------------------
 # The executable currently links Homebrew dylibs (libevent, libsodium,
@@ -263,6 +297,26 @@ if [ -d "$CONTENTS/Frameworks" ] && [ -n "$(ls -A "$CONTENTS/Frameworks" 2>/dev/
     codesign --force --options runtime --sign - "$dylib"
   done
 fi
+# ptp-helper is a second Mach-O living directly in Contents/MacOS (not nested
+# inside a Frameworks/Plugins bundle), so `codesign --deep` on the outer app
+# would NOT reach it (--deep only recurses into nested bundles) — sign it
+# explicitly here, inside-out, same rule as the Frameworks dylibs above and
+# same reason ("WHY ORDER MATTERS" comment above still applies verbatim: this
+# binary was copied after its own build, no re-signing-invalidation risk here,
+# but the outer app's --verify --strict still expects everything under
+# Contents to already carry a valid signature by the time IT is signed).
+#
+# No --entitlements: this is a plain root PTP/UDP daemon launched by launchd,
+# not sandboxed, holds no TCC grant (no audio capture, no Bonjour/network-client
+# API) and needs no keychain/JIT/etc access — the app's audio-capture and
+# local-network entitlements are scoped to the main executable only. Confirmed
+# by reading AirPlayEngine/Sources/ptp-helper/main.c: it only calls
+# airptp_daemon_bind/airptp_daemon_start/airptp_end plus libc signal/socket
+# calls. Do not add entitlements to this binary speculatively.
+echo "==> Ad-hoc codesigning ptp-helper (inside-out, before the app)"
+codesign --force --options runtime --sign - "$MACOS_DIR/$HELPER_EXECUTABLE"
+codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE"
+
 echo "==> Ad-hoc codesigning (hardened runtime)"
 ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
@@ -292,5 +346,11 @@ printf '%s' "$EMBEDDED_ENTS" | grep -q 'com.apple.security.cs.disable-library-va
 echo "==> Verifying nested code (deep verify)"
 codesign --verify --strict --verbose=4 "$APP_BUNDLE" || { echo "ERROR: codesign --verify --strict failed on $APP_BUNDLE" >&2; exit 1; }
 codesign --verify --deep --strict "$APP_BUNDLE" || { echo "ERROR: codesign --verify --deep --strict failed — some nested Mach-O (likely a dylib in Contents/Frameworks) is unsigned or invalidly signed" >&2; exit 1; }
+
+# ptp-helper isn't nested code (§ above), so the --deep verify above never looked
+# at it — assert its bundled artifacts directly instead of trusting the copy step.
+test -x "$MACOS_DIR/$HELPER_EXECUTABLE" || { echo "ERROR: $MACOS_DIR/$HELPER_EXECUTABLE missing after assembly" >&2; exit 1; }
+test -f "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist" || { echo "ERROR: $LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist missing after assembly" >&2; exit 1; }
+codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE" || { echo "ERROR: codesign --verify --strict failed on ptp-helper" >&2; exit 1; }
 
 echo "==> Done: $APP_BUNDLE"

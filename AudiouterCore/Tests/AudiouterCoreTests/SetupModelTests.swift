@@ -40,6 +40,30 @@ final class SetupModelTests: XCTestCase {
         func isTrusted() -> Bool { trusted }
     }
 
+    /// Records `register()`/`openSystemSettingsLoginItems()` calls and returns a
+    /// canned ``PTPHelperStatus`` — never touches the real `SMAppService`.
+    private final class FakePTPHelper: PTPHelperManaging, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _registerCount = 0
+        private var _openSettingsCount = 0
+        /// What `.status` reports after `register()` (default: requires approval,
+        /// the expected first-run outcome once registration succeeds).
+        var statusAfterRegister: PTPHelperStatus = .requiresApproval
+        /// What `register()` throws, if anything (default: succeeds).
+        var registerError: Error?
+        /// What `.status` reports BEFORE `register()` has been called.
+        var status: PTPHelperStatus = .notRegistered
+        var registerCount: Int { lock.withLock { _registerCount } }
+        var openSettingsCount: Int { lock.withLock { _openSettingsCount } }
+
+        func register() throws {
+            lock.withLock { _registerCount += 1 }
+            if let registerError { throw registerError }
+            status = statusAfterRegister
+        }
+        func openSystemSettingsLoginItems() { lock.withLock { _openSettingsCount += 1 } }
+    }
+
     /// Counts `onChange` fires (reference type so the escaping closure mutates it).
     private final class ChangeCounter { var count = 0 }
 
@@ -64,12 +88,14 @@ final class SetupModelTests: XCTestCase {
 
     private func makeModel(audio: PermissionStatus,
                            localNetwork: SpyLocalNetwork = SpyLocalNetwork(),
-                           remoteControl: SpyRemoteControl = SpyRemoteControl())
+                           remoteControl: SpyRemoteControl = SpyRemoteControl(),
+                           ptpHelper: FakePTPHelper = FakePTPHelper())
         -> (SetupModel, SpyLocalNetwork, SpyRemoteControl, ChangeCounter) {
         let counter = ChangeCounter()
         let model = SetupModel(audioProbe: CannedAudioProbe(result: audio),
                                localNetwork: localNetwork,
                                remoteControl: remoteControl,
+                               ptpHelper: ptpHelper,
                                settings: AppSettings(defaults: defaults))
         model.onChange = { counter.count += 1 }
         return (model, localNetwork, remoteControl, counter)
@@ -119,6 +145,7 @@ final class SetupModelTests: XCTestCase {
         let model = SetupModel(audioProbe: denyThenAllow,
                                localNetwork: SpyLocalNetwork(),
                                remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()
         XCTAssertEqual(model.audioStatus, .denied)
@@ -178,6 +205,100 @@ final class SetupModelTests: XCTestCase {
         XCTAssertEqual(model.remoteControlStatus, .requested)
     }
 
+    // MARK: PTP helper daemon (T6 — SMAppService registration + approval)
+
+    func testInitialPTPHelperStatusIsNotRegistered() {
+        let (model, _, _, _) = makeModel(audio: .granted)
+        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
+    }
+
+    func testRegisterPTPHelperCallsRegisterAndAdoptsRequiresApproval() {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .requiresApproval
+        let (model, _, _, counter) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+
+        model.registerPTPHelper()
+
+        XCTAssertEqual(ptpHelper.registerCount, 1)
+        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval,
+                       "requiresApproval → the explainer + Open Login Items… button")
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    func testRegisterPTPHelperCanReachEnabledDirectly() {
+        // Covers the injected-fake path for "enabled → available": a fake that
+        // reports already-approved right after register() (as a real daemon
+        // would on a signed build once the user had already approved it once).
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .enabled
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+
+        model.registerPTPHelper()
+
+        XCTAssertEqual(model.ptpHelperStatus, .enabled)
+    }
+
+    func testRegisterPTPHelperFailureLogsAndReadsRealStatus() {
+        // A throwing register() (e.g. a loose dev binary) must not crash or lie —
+        // it still reads back whatever `.status` really is afterward.
+        struct Boom: Error {}
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.registerError = Boom()
+        ptpHelper.status = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+
+        model.registerPTPHelper()
+
+        XCTAssertEqual(ptpHelper.registerCount, 1)
+        XCTAssertEqual(model.ptpHelperStatus, .notFound)
+    }
+
+    func testOpenPTPHelperLoginItemsDelegatesToTheSeam() {
+        let ptpHelper = FakePTPHelper()
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.openPTPHelperLoginItems()
+        XCTAssertEqual(ptpHelper.openSettingsCount, 1)
+    }
+
+    func testRefreshPTPHelperStatusPicksUpApprovalWithoutReregistering() {
+        // The poll while `.requiresApproval` waits for the user to flip Login
+        // Items — it must re-read `.status`, never call `register()` again.
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .requiresApproval
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval)
+
+        ptpHelper.status = .enabled   // user approved it in Login Items
+        model.refreshPTPHelperStatus()
+
+        XCTAssertEqual(model.ptpHelperStatus, .enabled, "enabled → available")
+        XCTAssertEqual(ptpHelper.registerCount, 1, "poll never re-registers")
+    }
+
+    func testRefreshPTPHelperStatusIsQuietWhenUnchanged() {
+        let ptpHelper = FakePTPHelper()
+        let (model, _, _, counter) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        counter.count = 0
+        model.refreshPTPHelperStatus()
+        XCTAssertEqual(counter.count, 0, "no transition ⇒ no onChange noise")
+    }
+
+    func testRefreshStatusesSilentlyRereadsPTPHelperStatus() async {
+        // `refreshStatuses()` (window-focus path) must ALSO pick up the PTP
+        // helper's live status, without touching `register()`.
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.status = .requiresApproval
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        await model.refreshStatuses()
+        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval)
+
+        ptpHelper.status = .enabled
+        await model.refreshStatuses()
+        XCTAssertEqual(model.ptpHelperStatus, .enabled)
+        XCTAssertEqual(ptpHelper.registerCount, 0, "refreshStatuses never registers")
+    }
+
     // MARK: Live status refresh (reflect reality on window focus)
 
     func testRefreshUpgradesRemoteControlWhenGrantedInSettings() async {
@@ -209,6 +330,7 @@ final class SetupModelTests: XCTestCase {
         let net = SpyLocalNetwork()
         let model = SetupModel(audioProbe: audio, localNetwork: net,
                                remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.refreshStatuses()
         XCTAssertEqual(audio.probeCount, 0, "audio not re-probed while unknown")

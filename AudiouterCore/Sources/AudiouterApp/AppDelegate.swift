@@ -351,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
             localNetwork: LocalNetworkPrimerFactory.makeDefault(),
             remoteControl: RemoteControlPrimerFactory.makeDefault(),
+            ptpHelper: SMAppServicePTPHelper(),
             settings: settings)
         let controller = OnboardingWindowController(model: model) { [weak self] in
             self?.onboardingWindowController = nil

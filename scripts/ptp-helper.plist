@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SMAppService launchd daemon plist for the ptp-helper binary (T5,
+     AirPlayEngine/docs/ptp-helper-design.md §2.2). Copied verbatim by
+     scripts/make-app.sh into Contents/Library/LaunchDaemons/ — the filename
+     there MUST equal Label + ".plist" (SMAppService.daemon(plistName:)
+     resolves the plist by that exact name). Never edit this in place without
+     mirroring the copy destination in make-app.sh. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.audiouter.Audiouter.ptphelper</string>
+
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/ptp-helper</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.audiouter.Audiouter</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

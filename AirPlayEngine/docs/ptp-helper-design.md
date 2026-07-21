@@ -18,9 +18,11 @@ empirical check that must run **before** any helper code is written.
 ## 0. TL;DR
 
 - **The helper is a tiny MIT root daemon that owns UDP 319/320 and the PTP master
-  clock, and nothing else.** It is `libairptp/daemon/airptpd.c` re-homed under an
-  `SMAppService` launchd daemon: `airptp_daemon_bind(NULL)` [root] then
-  `airptp_daemon_start(seed, is_shared=true)`. No audio, no RTSP, no pairing, no
+  clock, and nothing else.** As shipped (T2), it is a freshly-written
+  `Sources/ptp-helper/main.c` — the vendored tree never actually contains a
+  `daemon/airptpd.c` to re-home (see §6.1) — that links only `Clibairptp` +
+  libevent and calls `airptp_daemon_bind(NULL)` [root] then
+  `airptp_daemon_start(hdl, seed, is_shared=true)`. No audio, no RTSP, no pairing, no
   PCM — exactly nqptp's remit (ptp-study §3).
 - **The unprivileged engine is a pure PTP client.** It consumes clock state via
   read-only `airptp_daemon_find()` (`shm_open(/airptp_shm, O_RDONLY)` + mmap) and
@@ -68,9 +70,13 @@ stop (mirrors nqptp — ptp-study §3).
 
 ### 1.3 What the unprivileged engine does
 
-The shipped engine is a pure **client** (mode 3, ptp-study §1). Its `ptpd.h`
-shim (T-SHIM-1) reimplements OwnTone's six `ptpd_*` wrappers pointed
-**find-only**:
+The shipped engine is a pure **client** (mode 3, ptp-study §1), as landed in
+`AirPlayEngine/Sources/CAirPlayEngine/shims/ptpd.c` (T-SHIM-1). By default it
+is **find-only** — it never calls `airptp_daemon_bind`. A dev/CI-only escape
+hatch, `AUDIOUTER_PTP_INPROC_BIND=1`, restores the old in-process bind so the
+engine can still be exercised end-to-end before the root helper is installed
+(see §6.3); the shipped default has no such fallback. The shim reimplements
+OwnTone's six `ptpd_*` wrappers pointed **find-only**:
 
 - `ptpd_find_or_bind()` → `airptp_daemon_find()` **only** — never binds (the
   helper owns the ports). Read-only mmap of `/airptp_shm`.
@@ -134,7 +140,8 @@ names.
 
 ### 2.2 The launchd plist (shape)
 
-A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`:
+Shipped verbatim as `scripts/ptp-helper.plist`, installed by
+`scripts/make-app.sh` at `Contents/Library/LaunchDaemons/<Label>.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -143,7 +150,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.<team>.audiouter.ptphelper</string>
+    <string>com.audiouter.Audiouter.ptphelper</string>
 
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>   <!-- path is relative to the app bundle -->
@@ -155,7 +162,7 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
     <true/>                                       <!-- see §2.4: restart-on-crash -->
 
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
-    <string>com.<team>.audiouter</string>
+    <string>com.audiouter.Audiouter</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>                  <!-- low-latency: PTP is timing-sensitive -->
@@ -166,9 +173,14 @@ A minimal daemon plist bundled at `Contents/Library/LaunchDaemons/<label>.plist`
 Notes:
 - `BundleProgram` (not `Program`) — SMAppService daemons reference the executable
   by a bundle-relative path.
-- The daemon runs **foreground** under launchd; the study says drop `airptpd.c`'s
-  `daemonize()` — launchd owns backgrounding (ptp-study §3, "reuse airptpd.c
-  almost verbatim").
+- `make-app.sh` requires `Label` + ".plist" to equal the plist's own filename
+  (`$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist`) — `SMAppService.daemon(plistName:)`
+  resolves the plist by that exact name.
+- The daemon runs **foreground** under launchd — `Sources/ptp-helper/main.c` has
+  no `daemonize()` call at all; launchd owns backgrounding (ptp-study §3's
+  survey of OwnTone's upstream daemon reached the same conclusion, "reuse
+  airptpd.c almost verbatim", but the shipped helper is a fresh file, not a
+  port of that daemon — see §6.1).
 - No `Sockets`/socket-activation: PTP must own 319/320 for its whole lifetime, so
   bind-on-start under `RunAtLoad` + `KeepAlive` is correct, not launchd on-demand
   socket handoff. (And socket-activation can't hand off a *bound* privileged
@@ -290,8 +302,12 @@ Justification (ptp-study §3):
    to speakers directly — the engine never polls a live offset. **Do not "fix"
    the shm to match nqptp** (ptp-study §5.5).
 
-The helper side needs **no bespoke shim at all** — it is essentially stock
-`airptpd.c` (ptp-study §3). All shim work (T-SHIM-1) is engine-side `ptpd.h`.
+The helper side needs **no bespoke shim at all** — `Sources/ptp-helper/main.c`
+is a thin `bind→start(shared)→wait-for-signal→end` driver directly over
+`airptp_daemon_bind`/`airptp_daemon_start`/`airptp_end` (§6.1), the same shape
+the study found in OwnTone's own daemon (ptp-study §3). All shim work
+(T-SHIM-1) is engine-side, in
+`AirPlayEngine/Sources/CAirPlayEngine/shims/ptpd.c`.
 
 ---
 
@@ -360,18 +376,35 @@ Cap: 32 simultaneous PTP peers (`AIRPTP_MAX_PEERS`, ptp-study §2) — far above
 `libairptp` is **MIT** (`LICENSE` ©2026 OwnTone; every file carries the MIT
 header — ptp-study §3), cleanly separable from the **GPL-2.0+** sender cluster.
 So the helper ships as **its own MIT binary** — matching RESOLVED DECISIONS Q4
-("the tiny SMAppService PTP helper ships MIT") and SPEC §4.1. What we keep
-unchanged: all of `libairptp/src/*` (the clock engine) and the bulk of
-`daemon/airptpd.c` (bind→start(shared)→event loop). What we add/change
-(ptp-study §3):
-- package as a Developer-ID-signed Mach-O launchd daemon under SMAppService
-  (plist §2.2, signing, firewall allowlist);
-- drop `daemonize()` — launchd owns backgrounding; run foreground;
-- feed a real per-host clock-id seed instead of `airptpd.c`'s hardcoded
-  `0xdeadbeef`;
-- `airptpd.c`'s signal loop already uses **kqueue** on non-Linux, so it is
-  macOS-ready as-is; `shm_open`/`shm_unlink`/`getaddrinfo("localhost")` all work
-  unchanged.
+("the tiny SMAppService PTP helper ships MIT") and SPEC §4.1.
+
+As landed (T1/T2), the vendored `libairptp/` tree checked into this repo
+(`AirPlayEngine/Sources/CAirPlayEngine/libairptp/`) never actually included a
+`daemon/airptpd.c` to reuse — only `src/{airptp,daemon,utils,ptp_msg_handle}.c`
+plus `airptp.h`. `ptp-study.md`'s survey of upstream OwnTone assumed that
+standalone daemon would be re-homed verbatim; instead:
+
+- `libairptp/src/*` (the clock engine) moved into its **own SwiftPM target**,
+  `Clibairptp` (see `AirPlayEngine/Package.swift`), so both the helper and the
+  engine's shim can depend on it without duplicating compilation;
+- the helper itself is a **freshly-written** `bind→start(shared)→wait-for-signal→end`
+  driver, `AirPlayEngine/Sources/ptp-helper/main.c` — not a port of any
+  `airptpd.c` — that depends only on `Clibairptp` (+ libevent transitively),
+  so it stays small enough to read line-by-line (SPEC §4.1);
+- it is packaged as a Developer-ID-signed Mach-O launchd daemon under
+  SMAppService (plist §2.2, signing, firewall allowlist);
+- it has no `daemonize()` call — launchd owns backgrounding; it runs foreground;
+- it derives a real per-host clock-id seed via `gethostuuid()` (folded to a
+  u64), stable across restarts on the same host — never a hardcoded constant
+  and never passed in from the app;
+- its signal handling uses a `sig_atomic_t` flag checked in a plain
+  `pause()`-style wait loop (SIGTERM/SIGINT), not the vendored library's own
+  event loop primitives; `shm_open`/`shm_unlink`/`getaddrinfo("localhost")` all
+  work unchanged on macOS.
+
+A `AUDIOUTER_PTP_PORTS` env var (parsed in `main.c`, applied via
+`airptp_ports_override()` before binding) lets the helper itself run on high,
+unprivileged ports for the same CI/dev path described in §6.2.
 
 ### 6.2 Which side runs what in the two-host harness (clarified)
 
@@ -395,13 +428,21 @@ For CI / unprivileged smoke tests of the shim (no root, no second host),
 ports with **no privilege** (ptp-study §3 interim) — this validates the
 engine↔daemon IPC without touching 319/320 or the firewall.
 
-### 6.3 Interim dev launch (pre-helper)
+### 6.3 Interim dev launch (pre-helper / pre-signing)
 
-Until the SMAppService helper exists, run the built `airptpd` (or the engine's own
-in-process `airptp_daemon_bind`) under an **`osascript` admin-privilege prompt**
-with ahh present (RESOLVED DECISIONS; ptp-study §3 interim). This is the live-test
-stand-in for the signed launchd daemon and lets live two-host runs proceed before
-the packaging work lands.
+Two dev fallbacks exist, both bypassing the SMAppService/root path:
+
+- run the built `ptp-helper` binary directly under an **`osascript`
+  admin-privilege prompt** with ahh present (RESOLVED DECISIONS; ptp-study §3
+  interim) — the live-test stand-in for the signed launchd daemon;
+- or set `AUDIOUTER_PTP_INPROC_BIND=1` so the engine's own shim
+  (`shims/ptpd.c`) falls back to an in-process `airptp_daemon_bind`, skipping
+  the helper/IPC path entirely (§1.3).
+
+**Neither is a substitute for the real `SMAppService.register()` → root-bind
+path**, which needs a Developer-ID-signed build to exercise live — this repo
+is still ad-hoc signed, so that path is build/bundle/unprivileged-IPC-verified
+only, not live-tested, until Developer-ID signing lands.
 
 ### 6.4 Verification checklist for this design
 

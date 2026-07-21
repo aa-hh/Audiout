@@ -81,7 +81,14 @@ ptpd_slave_remove(uint32_t slave_id)
   airptp_peer_remove(slave_id, ptpd_hdl);
 }
 
-// Thread: main (root privileges may be required for binding)
+// Thread: main (normal privileges in the shipped find-only path; root only
+// under the AUDIOUTER_PTP_INPROC_BIND dev fallback below)
+//
+// FIND-ONLY BY DEFAULT (T3): the shipped path never binds 319/320 itself — a
+// separate root launchd helper (T-elsewhere) owns that in is_shared mode, and
+// this engine is just its client. Set AUDIOUTER_PTP_INPROC_BIND=1 to restore
+// the old in-process root-bind fallback for sudo/dev live-testing when no
+// helper is installed yet; leave it unset for the shipped default.
 int
 ptpd_find_or_bind(void)
 {
@@ -94,12 +101,18 @@ ptpd_find_or_bind(void)
   airptp_callbacks_register(&cb);
 
   // Check if the host has an instance of airptp running we can use, otherwise
-  // try to bind ourselves
+  // fall back per AUDIOUTER_PTP_INPROC_BIND (see comment above)
   ptpd_hdl = airptp_daemon_find();
   if (ptpd_hdl)
     {
       DPRINTF(E_INFO, L_AIRPLAY, "Using host's ptp daemon\n");
       return 0;
+    }
+
+  if (!getenv("AUDIOUTER_PTP_INPROC_BIND"))
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "PTP daemon not found; running clock-unavailable (no in-process bind)\n");
+      return -1;
     }
 
   DPRINTF(E_INFO, L_AIRPLAY, "Creating own ptp service\n");

@@ -1,0 +1,18 @@
+// Module map for the Clibairptp C target (T1, ptp-helper-design.md).
+//
+// Hand-written rather than auto-generated: SwiftPM's default generator
+// treats publicHeadersPath "." as an umbrella *directory* scan, which would
+// pull libairptp/src's private headers (airptp_internal.h, daemon.h, ...)
+// into the module's self-contained-compile check even though only
+// airptp.h is meant to be reachable from outside this target. Also,
+// `airptp.h` itself (vendored MIT, kept byte-identical) uses `bool`
+// without including <stdbool.h> — fine when textually #include'd from a
+// .c file that already pulled in <stdbool.h> (every libairptp/src/*.c and
+// shims/ptpd.c does), but a *modular* ("header") declaration requires the
+// header to compile standalone, which this one does not. Declaring it
+// `textual header` instead opts it out of that self-containment check
+// without editing the vendored header.
+module Clibairptp {
+    textual header "airptp.h"
+    export *
+}

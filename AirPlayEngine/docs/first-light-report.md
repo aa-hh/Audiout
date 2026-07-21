@@ -137,9 +137,11 @@ the fixes required a vendored-C change — see `docs/VENDORED-DIFFS.md`'s
 Phase 2b (`PLAN-PHASE-2B.md`) picked up immediately after this report and is
 now complete: `NativeBackend : OutputBackend` (in-process engine + app-owned
 `NativeDiscovery` over both `_airplay._tcp`/`_raop._tcp`), an in-process Core
-Audio process-tap capture path (`NativeCaptureCoordinator`), the
-`AIRPLAY_BACKEND=native` resolver wiring, and dimmed/disabled AP1-only device
-rows in the popover with a "coming soon" explanation. See
+Audio process-tap capture path (`NativeCaptureCoordinator`), and the
+`AIRPLAY_BACKEND=native` resolver wiring. AP1-only device rows originally
+shipped dimmed/disabled with a "coming soon" explanation (D6); that gate has
+since been retired (see the AP1 (RAOP) first light section below) — AP1
+receivers are now driven through the same engine as AP2. See
 `dev/notes/p2b-nativebackend-runbook.md` for how to run it and the gated
 live-verification checklist (D7) — that gated session (multi-room 2-output
 sync, native end-to-end on a real speaker, volume A/B, real-fleet discovery
@@ -147,10 +149,21 @@ watch, teardown stress) is the one piece of Phase 2b that still requires
 ahh present with real hardware; everything else is headless-verified.
 
 Deferred beyond Phase 2b (see the roadmap briefs in `dev/notes/p2b-*.md`,
-indexed in `dev/AGENTS.md`): the AP1 (`raop.c`) sender port (D6 — AP1-only
-devices are discovered and shown, but never driven; deferred to the next
-iteration since the current fleet is all AP2-capable); multistream
-`stream_id` design for per-app routing (`p2b-multistream-brief.md`); synced
-local output (`p2b-synced-local-brief.md`); SMAppService helper
-productionization — requires a paid Developer ID cert for the sanctioned
-install path (`p2b-helper-productionization-brief.md`).
+indexed in `dev/AGENTS.md`): multistream `stream_id` design for per-app
+routing (`p2b-multistream-brief.md`); synced local output
+(`p2b-synced-local-brief.md`); SMAppService helper productionization —
+requires a paid Developer ID cert for the sanctioned install path
+(`p2b-helper-productionization-brief.md`).
+
+## AP1 (RAOP) first light — pending
+
+The AP1 (`raop.c`) sender port and its engine-side wiring (T1/T3–T9; see
+`docs/raop-seam-brief.md` and `docs/VENDORED-DIFFS.md` Entry 3) are complete
+and headless-verified — `output_raop` compiles, links, and dispatches
+alongside `output_airplay`, and `NativeBackend` now drives AP1 receivers
+exactly like AP2 ones. What this report's AP2 first light gave AP2 (a
+human-confirmed, by-ear session against real hardware) AP1 has not yet had:
+no gated live test against a real classic-AirPlay (RAOP) receiver has been
+run. This section is a placeholder for that result — fill in the date,
+receiver, and outcome (pass/fail, any hosting-layer bugs found, by analogy
+with the six AP2 bugs above) once ahh runs it.

@@ -80,6 +80,7 @@ struct conffile_config
   long int    timing_port;
   long int    control_port;
   long int    max_volume; /* per-device default, served when no override */
+  int         uncompressed_alac; /* airplay_shared.uncompressed_alac (RAOP) */
 };
 
 static struct conffile_config config = {
@@ -94,6 +95,13 @@ static struct conffile_config config = {
   .timing_port  = 0,                     /* 0 => ephemeral bind */
   .control_port = 0,                     /* 0 => ephemeral bind */
   .max_volume   = 11,
+  .uncompressed_alac = 1,                /* [AirPlayEngine vendored change
+                                          * 2026-07-19] RAOP (sender/raop.c)
+                                          * reads airplay_shared.uncompressed_alac
+                                          * in raop_init. Default TRUE so the
+                                          * AirPlay-1 send path uses raop.c's own
+                                          * inline uncompressed-ALAC encoder and
+                                          * never touches the ffmpeg encoder. */
 };
 
 /* cfg_s stays opaque in the header; a trivial complete type here. The two
@@ -222,6 +230,13 @@ cfg_getbool(cfg_t *sec, const char *name)
 
   if (strcmp(name, "ipv6") == 0)
     return config.ipv6;
+
+  // [AirPlayEngine vendored change 2026-07-19] airplay_shared.uncompressed_alac,
+  // read once by raop_init (sender/raop.c). Unlike the per-device bool keys this
+  // is a genuine global, so it is served here (default true) rather than tripping
+  // the unknown-key path.
+  if (strcmp(name, "uncompressed_alac") == 0)
+    return config.uncompressed_alac;
 
   // All per-device bool keys (exclude/permanent/exclusive/airplay2_disable/
   // ptp_disable) are only read behind a `devcfg && ...` guard in airplay.c, and

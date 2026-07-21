@@ -287,6 +287,31 @@ final class EngineProbeParsingTests: XCTestCase {
         XCTAssertTrue(a.problems[0].contains("--pcm is missing its value"))
     }
 
+    // MARK: - --raop (AirPlay 1 / RAOP target mode)
+
+    /// --raop is per-device, exactly like --ipv6: only the slot it amends
+    /// targets output_raop.
+    func testRaopIsPerDevice() {
+        let a = parseProbeArgs(["--address", "10.0.0.1", "--device-id", "AA:AA",
+                                "--raop", "--address", "10.0.0.2", "--device-id", "BB:BB"])
+        XCTAssertEqual(a.problems, [])
+        XCTAssertEqual(a.devices.count, 2)
+        XCTAssertFalse(a.devices[0].raop)
+        XCTAssertTrue(a.devices[1].raop)
+    }
+
+    /// --raop before the first --address sets the default for every later
+    /// device, same as any other per-device option (grammar note in
+    /// ProbeArgParsing.swift).
+    func testRaopBeforeFirstAddressIsADefault() {
+        let a = parseProbeArgs(["--raop", "--address", "10.0.0.1", "--device-id", "AA:AA",
+                                "--name", "Two", "--address", "10.0.0.2", "--device-id", "BB:BB"])
+        XCTAssertEqual(a.problems, [])
+        XCTAssertEqual(a.devices.count, 2)
+        XCTAssertTrue(a.devices[0].raop)
+        XCTAssertTrue(a.devices[1].raop)
+    }
+
     // MARK: - Trivia
 
     func testEmptyArgvIsCleanAndDeviceless() {

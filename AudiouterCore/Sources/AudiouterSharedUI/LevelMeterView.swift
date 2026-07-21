@@ -113,10 +113,31 @@ public final class LevelMeterView: NSView {
     /// growing from the bottom, inside a disabled-action transaction so
     /// per-frame updates never trigger implicit Core Animation animations or
     /// Auto Layout passes.
+    /// The quietest level (dBFS) shown as any fill. Raw RMS for normal program
+    /// material reads very low (music RMS ≈ 0.03–0.15 ≈ −30…−16 dBFS), so mapping
+    /// it LINEARLY onto the bar made real audio a near-invisible sliver
+    /// (live-observed 2026-07-22). Tunable by eye.
+    static let meterFloorDB: Float = -54
+
+    /// Map a raw linear RMS level (0…1) to a bar-fill fraction (0…1) on a
+    /// perceptual dB scale — dBFS across [`meterFloorDB`, 0] → [0, 1] — so typical
+    /// listening levels fill a healthy portion of the meter, like a hardware
+    /// VU/PPM meter, instead of a linear sliver. Ballistics still ease in raw-RMS
+    /// space (`displayed`/`target` are unchanged); only the final HEIGHT is shaped,
+    /// so `setLevel`/`test_meterLevel` keep round-tripping the raw value.
+    static func displayHeight(forLevel rms: CGFloat) -> CGFloat {
+        let x = Float(rms)
+        guard x > 0 else { return 0 }
+        let dbfs = 20 * log10(x)
+        if dbfs <= meterFloorDB { return 0 }
+        if dbfs >= 0 { return 1 }
+        return CGFloat((dbfs - meterFloorDB) / (0 - meterFloorDB))
+    }
+
     private func redrawFill() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let height = bounds.height * displayed
+        let height = bounds.height * Self.displayHeight(forLevel: displayed)
         fillLayer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
         CATransaction.commit()
     }

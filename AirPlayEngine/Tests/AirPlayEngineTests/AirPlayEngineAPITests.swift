@@ -366,6 +366,43 @@ final class AirPlayEngineAPITests: XCTestCase {
         XCTAssertEqual(mappedID?.rawValue, 0xAABBCCDDEEFF)
     }
 
+    func testDescriptorDefaultsToAirplayKind() {
+        // Existing (pre-RAOP) call sites don't pass `kind`; they must still
+        // route to output_airplay.
+        let desc = DeviceDescriptor(
+            name: "Living Room", address: "192.168.1.50", family: .ipv4, port: 7000,
+            txtRecord: ["deviceid": "AA:BB:CC:DD:EE:FF"]
+        )
+        XCTAssertEqual(desc.kind, .airplay)
+    }
+
+    func testRaopDescriptorMapsDeviceIDAndFeedsRaopBackend() async {
+        // Same shape as testDiscoveryDescriptorMapsDeviceID, but for an AP1/
+        // RAOP descriptor (kind: .raop) — routed to airplayengine_feed_raop_device
+        // instead of airplayengine_feed_device (T6).
+        let desc = DeviceDescriptor(
+            name: "Kitchen",
+            hostname: "kitchen.local",
+            address: "192.168.1.51",
+            family: .ipv4,
+            port: 5000,
+            kind: .raop,
+            txtRecord: ["deviceid": "11:22:33:44:55:66"]
+        )
+        XCTAssertEqual(desc.kind, .raop)
+        XCTAssertEqual(desc.parsedID?.rawValue, 0x112233445566)
+
+        let engine = AirPlayEngine()
+        // Without a real raop_init the captured raop_device_cb doesn't exist yet,
+        // so the feed is a no-op that returns -1 — same caveat as the AP2 test
+        // above; this proves the Swift-side parse/dispatch path (routing by
+        // `kind`) doesn't crash and the id still resolves correctly. Real
+        // registry-under-output_raop insertion is covered end-to-end only in
+        // the gated live run.
+        let mappedID = await engine.feedDescriptorForTest(desc)
+        XCTAssertEqual(mappedID?.rawValue, 0x112233445566)
+    }
+
     func testDescriptorWithoutDeviceIDIsInvalid() {
         let desc = DeviceDescriptor(
             name: "NoID", address: "10.0.0.1", family: .ipv4, port: 7000,

@@ -439,24 +439,27 @@ public final class NativeDiscovery: @unchecked Sendable {
         // address, port, TXT all stay put — so the row doesn't cosmetically flip
         // to the raop-decorated name just because the device powered off. It's
         // the same physical device at the same address; only availability changed.
-        var built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+        let built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
             ? entry.device.descriptor
             : descriptor(from: source)
-        // When the descriptor comes from `_raop._tcp` (no `_airplay._tcp`
-        // advertisement to prefer instead), the instance name is often MAC-
-        // decorated by the receiver's stack ("6B2E52B73717@Dev Speaker" — see
-        // `deriveIDFromInstanceName`'s doc comment). That raw form is only
-        // needed for id derivation (which reads `service.name` directly, not
-        // this descriptor) and — for AP2 devices — for the engine's own
-        // name-keyed device tracking (`AirPlayEngine.feedDescriptor`). A
-        // raop-only source is AP1-only by construction (`classify` above) and
-        // is therefore NEVER handed to `updateDiscovery`/`removeDiscovery`
-        // (`NativeBackend` gates both on `isAirPlay2Supported`), so stripping
-        // the prefix here only affects the human-facing name shown in the UI.
-        // `_airplay._tcp`-sourced names are untouched.
-        if entry.airplay == nil {
-            built.name = strippedRaopDisplayName(built.name)
-        }
+        // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
+        // must stay the RAW resolved instance name — never stripped here. When
+        // the descriptor comes from `_raop._tcp` (no `_airplay._tcp` advert to
+        // prefer instead), that name is often MAC-decorated by the receiver's
+        // stack ("6B2E52B73717@Dev Speaker" — see `deriveIDFromInstanceName`).
+        // The vendored RAOP backend re-parses exactly this form:
+        // `raop_device_cb` (raop.c) does `safe_hextou64(name, &id)` then
+        // `strchr(name, '@')` — it reads NO `deviceid` TXT key (unlike
+        // `airplay.c`), so a raop device whose descriptor name had the prefix
+        // stripped would fail id extraction and never register on real hardware.
+        // Since the AP1 un-gating (T7) DOES hand raop-only descriptors to
+        // `updateDiscovery` → `feedDescriptor` → `airplayengine_feed_raop_device`,
+        // the prefix must survive to the engine. The id `raop.c` parses from the
+        // hex prefix matches the `OutputID` the Swift side already derived from the
+        // same `service.name` (`deriveIDFromInstanceName`), keeping the two in sync.
+        // The human-facing (stripped) name is applied downstream where the
+        // user-visible `Device` is built (`NativeBackend.mapDiscovered`), not here.
+        // `_airplay._tcp`-sourced names have no such prefix and are untouched.
         return DiscoveredDevice(
             id: id,
             descriptor: built,
@@ -481,10 +484,11 @@ public final class NativeDiscovery: @unchecked Sendable {
     }
 
     /// Classify AP2-capable vs AP1-only. Mirrors the vendored sender's own gate
-    /// (`airplay.c` ~:4031-4052) EXACTLY so discovery and the engine never
+    /// (`airplay.c` ~:4139-4147) EXACTLY so discovery and the engine never
     /// disagree: a device is AP2 iff it advertises on `_airplay._tcp` with a
-    /// `features` TXT key whose bits include BOTH SupportsAirPlayAudio (bit 9)
-    /// AND SupportsCoreUtilsPairingAndEncryption (bit 38 || 43 || 46 || 48).
+    /// `features` TXT key whose bits include BOTH SupportsAirPlayAudio (bit 9,
+    /// `features_map` ~:412) AND SupportsCoreUtilsPairingAndEncryption (bit
+    /// 38 || 43 || 46 || 48, `features_map` ~:438).
     /// A raop-only device (`entry.airplay == nil`) is AP1-only by construction —
     /// classic AirPlay never advertises `_airplay._tcp`.
     static func classify(airplay: ResolvedService?) -> Bool {
@@ -502,7 +506,7 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// either a single 32-bit hex value (`0x444F8A00`) or two comma-separated
     /// 32-bit hex values `LOW,HIGH` (`0x445D0A00,0x1C340`) where LOW is the low
     /// 32 bits and HIGH the high 32 bits — matching the vendored
-    /// `features_parse` (`airplay.c` ~:3865): it writes the first value into the
+    /// `features_parse` (`airplay.c` ~:3959): it writes the first value into the
     /// low `uint32_t` of a `uint64_t` and the second past the comma into the high
     /// `uint32_t`. We reproduce that bit layout here rather than in C.
     static func parseFeatures(_ text: String) -> UInt64? {
@@ -580,14 +584,52 @@ public final class NativeDiscovery: @unchecked Sendable {
     }
 
     /// Build the engine-facing ``DeviceDescriptor`` from a resolved service.
+    ///
+    /// Two things this MUST get right for classic RAOP hardware to register
+    /// live (both were silent gaps before): the descriptor's `kind` and a
+    /// non-nil `parsedID`.
+    ///
+    /// 1. `kind`: routes `feedDescriptor` (AirPlayEngine) to the right backend —
+    ///    `.raop` → `airplayengine_feed_raop_device` (`output_raop`), `.airplay`
+    ///    → `airplayengine_feed_device` (`output_airplay`, the AP2 gate). Left at
+    ///    its `.airplay` default, a real `_raop._tcp` device was fed to the AP2
+    ///    backend and never registered.
+    ///
+    /// 2. `parsedID`: `AirPlayEngine.updateDiscovery` throws `invalidDescriptor`
+    ///    unless `descriptor.parsedID != nil`, and `parsedID` reads ONLY the
+    ///    `deviceid`/`DeviceID` TXT key. Real classic `_raop._tcp` gear
+    ///    (shairport-sync, AirPort Express) carries NO `deviceid` TXT — its id
+    ///    lives in the instance-name prefix — so such a device threw and was
+    ///    never registered. For a `.raop` service with no `deviceid`/`DeviceID`
+    ///    TXT, inject the id derived from the instance name.
+    ///
+    /// Safe / in-sync: `deriveIDFromInstanceName("6B2E52B73717@Dev Speaker")`
+    /// yields id "6B:2E:52:B7:37:17" (uppercase colon-hex) + OutputID
+    /// 0x6B2E52B73717. `parsedID` strips the colons and parses to the SAME
+    /// OutputID; and `raop_device_cb` runs `safe_hextou64("6B2E52B73717")` off
+    /// the raw `name` prefix to the SAME 64-bit value. So the injected `deviceid`
+    /// keeps the Swift OutputID, `parsedID`, and the C-side name-parsed id all
+    /// equal. We do NOT inject for AP2 (they carry a real `deviceid`) and NEVER
+    /// override an existing `deviceid`/`DeviceID`.
     private static func descriptor(from service: ResolvedService) -> DeviceDescriptor {
-        DeviceDescriptor(
+        let kind: DeviceDescriptor.ServiceKind =
+            service.serviceType == .raop ? .raop : .airplay
+
+        var txt = service.txtRecord
+        if service.serviceType == .raop,
+           txt["deviceid"] == nil, txt["DeviceID"] == nil,
+           let derived = deriveIDFromInstanceName(service.name)?.id {
+            txt["deviceid"] = derived
+        }
+
+        return DeviceDescriptor(
             name: service.name,
             hostname: service.hostname,
             address: service.address,
             family: service.family,
             port: service.port,
-            txtRecord: service.txtRecord
+            kind: kind,
+            txtRecord: txt
         )
     }
 }

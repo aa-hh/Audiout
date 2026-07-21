@@ -522,6 +522,95 @@ safe_hextou64(const char *str, uint64_t *val)
   return 0;
 }
 
+/* [AirPlayEngine vendored change 2026-07-19] Ported near-verbatim from OwnTone
+ * misc.c for the RAOP sender (sender/raop.c) — parses the decimal SETUP
+ * transport ports and the sr/ss/ch quality TXT values. */
+int
+safe_atoi32(const char *str, int32_t *val)
+{
+  char *end;
+  long intval;
+
+  if (str == NULL)
+    {
+      DPRINTF(E_SPAM, L_MISC, "Input to safe_atoi32 is NULL\n");
+      return -1;
+    }
+
+  errno = 0;
+  intval = strtol(str, &end, 10);
+
+  if (((errno == ERANGE) && ((intval == LONG_MAX) || (intval == LONG_MIN)))
+      || ((errno != 0) && (intval == 0)))
+    {
+      DPRINTF(E_DBG, L_MISC, "Invalid i32 in string (%s): %s\n", str, strerror(errno));
+      return -1;
+    }
+
+  if (end == str)
+    {
+      DPRINTF(E_DBG, L_MISC, "No i32 found in string (%s)\n", str);
+      return -1;
+    }
+
+  if (intval > INT32_MAX)
+    {
+      DPRINTF(E_DBG, L_MISC, "i32 value out of range (%s)\n", str);
+      return -1;
+    }
+
+  *val = (int32_t)intval;
+
+  return 0;
+}
+
+/* [AirPlayEngine vendored change 2026-07-19] Self-contained RFC-4648 base64
+ * encoder for the RAOP sender's SDP handshake (sender/raop.c). OwnTone's
+ * upstream b64_encode wraps ffmpeg's av_base64_encode; we keep the misc shim
+ * free of any ffmpeg header dependency and implement the encode directly. The
+ * output includes '=' padding — raop.c strips it itself where the protocol
+ * wants it stripped. Returns a malloc'd NUL-terminated string, or NULL. */
+char *
+b64_encode(const uint8_t *src, int srclen)
+{
+  static const char b64_alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  char *out;
+  int outlen;
+  int i;
+  int o;
+
+  if (src == NULL || srclen < 0)
+    return NULL;
+
+  // 4 output chars per 3 input bytes (rounded up), plus the NUL terminator.
+  outlen = 4 * ((srclen + 2) / 3) + 1;
+
+  out = malloc(outlen);
+  if (!out)
+    return NULL;
+
+  for (i = 0, o = 0; i < srclen; i += 3)
+    {
+      uint32_t triple = (uint32_t)src[i] << 16;
+      int rem = srclen - i;
+
+      if (rem > 1)
+	triple |= (uint32_t)src[i + 1] << 8;
+      if (rem > 2)
+	triple |= (uint32_t)src[i + 2];
+
+      out[o++] = b64_alphabet[(triple >> 18) & 0x3f];
+      out[o++] = b64_alphabet[(triple >> 12) & 0x3f];
+      out[o++] = (rem > 1) ? b64_alphabet[(triple >> 6) & 0x3f] : '=';
+      out[o++] = (rem > 2) ? b64_alphabet[triple & 0x3f] : '=';
+    }
+
+  out[o] = '\0';
+
+  return out;
+}
+
 /* ---------------------------- Key/value (TXT) ----------------------------- */
 
 struct keyval *

@@ -557,10 +557,12 @@ final class NativeDiscoveryTests: XCTestCase {
         XCTAssertEqual(device.id, "6B:2E:52:B7:37:17")
         XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
         XCTAssertFalse(device.isAirPlay2Supported, "a raop-only device must classify AP1-only")
-        // The descriptor name is the human-facing display name — the MAC prefix
-        // used to derive the id is stripped for display; the id itself (asserted
-        // above) still carries the full MAC.
-        XCTAssertEqual(device.descriptor.name, "Dev Speaker")
+        // The engine-facing descriptor keeps the RAW instance name (with the
+        // "<12-hex>@" MAC prefix) so the vendored `raop_device_cb` can re-parse
+        // the id from it; the human-facing display name is stripped downstream
+        // (`NativeBackend.mapDiscovered`), NOT on the descriptor.
+        XCTAssertEqual(device.descriptor.name, "6B2E52B73717@Dev Speaker")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name), "Dev Speaker")
         XCTAssertEqual(device.descriptor.address, "192.168.1.42")
 
         discovery.stop()
@@ -586,10 +588,10 @@ final class NativeDiscoveryTests: XCTestCase {
         XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717"), "6B2E52B73717")
     }
 
-    /// A raop-only device's `.appeared` display name has the MAC@ prefix stripped
-    /// ("6B2E52B73717@Dev Speaker" -> "Dev Speaker") while the derived id keeps the
-    /// full MAC in canonical colon-hex form — the fallback id derivation is
-    /// unaffected by the display-name strip.
+    /// A raop-only device keeps the RAW MAC-prefixed instance name on its
+    /// engine-facing descriptor ("6B2E52B73717@Dev Speaker"), while the derived id
+    /// keeps the full MAC in canonical colon-hex form. The human-facing strip
+    /// ("Dev Speaker") is applied downstream, NOT on the descriptor.
     func testRaopOnlyDisplayNameStripsMACPrefix() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
@@ -602,8 +604,51 @@ final class NativeDiscoveryTests: XCTestCase {
         guard case .appeared(let device)? = events.wait(count: 1).first else {
             return XCTFail("expected .appeared")
         }
-        XCTAssertEqual(device.descriptor.name, "Dev Speaker", "the MAC@ prefix must be stripped for display")
+        XCTAssertEqual(device.descriptor.name, "6B2E52B73717@Dev Speaker",
+                       "the engine descriptor must keep the RAW MAC-prefixed name")
+        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name), "Dev Speaker",
+                       "the MAC@ prefix is stripped only for the human-facing display name")
         XCTAssertEqual(device.id, "6B:2E:52:B7:37:17", "id derivation must still use the full raw name")
+        XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
+
+        discovery.stop()
+    }
+
+    /// REGRESSION GUARD (the bug this fix repairs): a `_raop._tcp`-only
+    /// `DiscoveredDevice`'s engine-facing `descriptor.name` MUST still carry the
+    /// raw "<12-hex>@<display>" instance-name form. The vendored RAOP backend's
+    /// `raop_device_cb` (raop.c) derives the device id from that prefix via
+    /// `safe_hextou64(name, &id)` — it reads NO `deviceid` TXT key — so a descriptor
+    /// name that had been stripped to just "Dev Speaker" would fail id extraction
+    /// and the real receiver would silently never register/connect. This also
+    /// asserts the SYNC INVARIANT: the hex prefix `raop.c` re-parses equals the
+    /// `OutputID` the Swift side already derived from the same instance name.
+    func testRaopOnlyDescriptorKeepsRawHexPrefixForEngineIDParse() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Dev Speaker"))
+
+        guard case .appeared(let device)? = events.wait(count: 1).first else {
+            return XCTFail("expected .appeared")
+        }
+        XCTAssertFalse(device.isAirPlay2Supported, "sanity: this is a raop-only device")
+
+        // (a) The engine descriptor still carries the 12-hex "@" prefix that
+        // `raop_device_cb`'s `safe_hextou64` + `strchr(name, '@')` parse.
+        let name = device.descriptor.name
+        let parts = name.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        XCTAssertEqual(parts.count, 2, "descriptor name must retain the '@' the C backend looks for")
+        let hexPrefix = String(parts[0])
+        XCTAssertEqual(hexPrefix.count, 12, "descriptor name must retain the 12-hex id prefix")
+        XCTAssertNotNil(UInt64(hexPrefix, radix: 16), "the prefix must be hex-parseable like safe_hextou64 does")
+
+        // (b) SYNC INVARIANT: the hex prefix the C side parses equals the OutputID
+        // the Swift side derived from the same instance name.
+        XCTAssertEqual(UInt64(hexPrefix, radix: 16), device.outputID.rawValue)
         XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
 
         discovery.stop()
@@ -648,7 +693,8 @@ final class NativeDiscoveryTests: XCTestCase {
         guard case .appeared(let first)? = events.wait(count: 1).first else {
             return XCTFail("expected .appeared")
         }
-        XCTAssertEqual(first.descriptor.name, "Raop Name", "raop-only so far, so the MAC prefix is already stripped for display")
+        XCTAssertEqual(first.descriptor.name, "6B2E52B73717@Raop Name",
+                       "raop-only so far, so the engine descriptor keeps the RAW MAC-prefixed name")
 
         // Now the airplay advert resolves with a clean name -- it must win.
         browser.resolve(airplayService(id: id, name: "Airplay Name", features: ap2Features))

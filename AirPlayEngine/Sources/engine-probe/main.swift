@@ -1,12 +1,14 @@
 // engine-probe — the gated multi-device AirPlay session probe (T-API-1 artifact,
-// extended for multi-room by T-ENG-MULTIROOM-CLI-1).
+// extended for multi-room by T-ENG-MULTIROOM-CLI-1, extended for AirPlay 1 /
+// RAOP targets per --raop, raop-seam-brief §6.6/§9 step 7).
 //
-// PURPOSE. This CLI WOULD drive one or more real AirPlay 2 sessions end-to-end,
-// in sync: start the engine, feed each device's discovery descriptor
-// (discovery-in), addOutput each (await the RTSP/PTP setup completion), set
-// volume, pump ONE shared PCM file to all of them off a single advancing pts,
-// then stop. It is the artifact a human (ahh) runs LATER, in a GATED session —
-// it is NOT run by the T-API-1 / T-ENG-MULTIROOM-CLI-1 build tasks.
+// PURPOSE. This CLI WOULD drive one or more real AirPlay 2 (or, per-device
+// --raop, classic AirPlay 1 / RAOP) sessions end-to-end, in sync: start the
+// engine, feed each device's discovery descriptor (discovery-in), addOutput
+// each (await the RTSP/PTP setup completion), set volume, pump ONE shared PCM
+// file to all of them off a single advancing pts, then stop. It is the
+// artifact a human (ahh) runs LATER, in a GATED session — it is NOT run by
+// the T-API-1 / T-ENG-MULTIROOM-CLI-1 build tasks.
 //
 // WHY GATED. A live run needs ALL of:
 //   1. One or more real AirPlay 2 receivers on the LAN (Sonos / HomePod /
@@ -51,7 +53,8 @@ if args.devices.isEmpty {
 } else {
     for (idx, d) in args.devices.enumerated() {
         let addr = d.address.isEmpty ? "<MISSING --address>" : d.address
-        print("  [\(idx)] \(d.deviceName) @ \(addr):\(d.port) (\(d.ipv6 ? "IPv6" : "IPv4"))")
+        let proto = d.raop ? "RAOP/AirPlay-1" : "AirPlay 2"
+        print("  [\(idx)] \(d.deviceName) @ \(addr):\(d.port) (\(d.ipv6 ? "IPv6" : "IPv4"), \(proto))")
         print("       deviceid : \(d.deviceID.isEmpty ? "<MISSING --device-id>" : d.deviceID)")
     }
 }
@@ -114,23 +117,58 @@ func runLiveSession(_ args: ProbeArgs) async {
 
         var ids: [OutputID] = []
         for d in args.devices {
-            var txt: [String: String] = [
-                "deviceid": d.deviceID,
-                "features": d.features,
-                "model": d.model,
-            ]
+            let kind: DeviceDescriptor.ServiceKind = d.raop ? .raop : .airplay
+
+            // The descriptor's `name` and `txtRecord` shape depend on which
+            // vendored discovery callback (seam-map §4 / raop-seam-brief §6.6)
+            // will actually parse them. Building an AP2-shaped descriptor and
+            // just flipping `kind` would NOT exercise AirPlay 1 — raop.c's
+            // `raop_device_cb` (raop.c:4217) parses the device id straight out
+            // of the mDNS instance `name` itself (`safe_hextou64(name, &id)`,
+            // then `strchr(name, '@')` for the display name) and never reads
+            // a `deviceid` TXT key at all; a real `_raop._tcp` TXT record also
+            // has no `features` key (that's AP2-only — airplay_device_cb reads
+            // it, raop_device_cb doesn't).
+            let feedName: String
+            var txt: [String: String]
+            switch kind {
+            case .airplay:
+                feedName = d.deviceName
+                txt = [
+                    "deviceid": d.deviceID,
+                    "features": d.features,
+                    "model": d.model,
+                ]
+            case .raop:
+                // Encode the id into `name` the way a real AirPlay-1 receiver's
+                // Bonjour advertisement does: "<hex-id-no-colons>@<name>".
+                // `deviceid` is ALSO included in txtRecord, but only so
+                // DeviceDescriptor.parsedID (the engine's own OutputID
+                // bookkeeping, AirPlayEngine.swift's updateDiscovery) resolves
+                // to the SAME id raop_device_cb re-derives from `name` above —
+                // if these two ever disagree, addOutput/setVolume will look up
+                // the wrong (or no) C-side device via outputs_device_get. No
+                // `features`/`model`: a genuine RAOP TXT record has neither.
+                let hexID = d.deviceID.replacingOccurrences(of: ":", with: "")
+                feedName = "\(hexID)@\(d.deviceName)"
+                txt = [
+                    "deviceid": d.deviceID,
+                    "tp": "UDP",   // required: raop_device_cb rejects tp without "UDP"
+                ]
+            }
             if let pw = d.password { txt["pw"] = "true"; _ = pw }
 
             let descriptor = DeviceDescriptor(
-                name: d.deviceName,
+                name: feedName,
                 hostname: d.address,
                 address: d.address,
                 family: d.ipv6 ? .ipv6 : .ipv4,
                 port: d.port,
+                kind: kind,
                 txtRecord: txt
             )
 
-            print("[probe] feeding discovery descriptor for \(d.deviceName)...")
+            print("[probe] feeding \(kind == .raop ? "RAOP/AirPlay-1" : "AirPlay 2") discovery descriptor for \(d.deviceName)...")
             let id = try await engine.updateDiscovery(descriptor)
 
             print("[probe] addOutput \(d.deviceName) (awaiting RTSP/PTP setup completion)...")

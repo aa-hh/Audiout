@@ -34,6 +34,17 @@ public enum AddressFamily: Sendable {
 /// the AP2 gate, and the reconnect/keep-alive heuristic all run in the vetted C
 /// code rather than being reimplemented in Swift.
 public struct DeviceDescriptor: Sendable {
+    /// Which mDNS service (and therefore which vendored backend, T5's
+    /// `output_raop` vs `output_airplay`) this descriptor was resolved from.
+    public enum ServiceKind: Sendable, Equatable {
+        /// `_raop._tcp` — classic AirPlay 1 / RAOP (AirTunes v2), routed to
+        /// `output_raop` via `airplayengine_feed_raop_device`.
+        case raop
+        /// `_airplay._tcp` — AirPlay 2, routed to `output_airplay` via
+        /// `airplayengine_feed_device`. The long-standing default.
+        case airplay
+    }
+
     /// The mDNS service instance name — also the identity key used when the
     /// device disappears (removal matches on this name; seam-map §4).
     public var name: String
@@ -45,6 +56,9 @@ public struct DeviceDescriptor: Sendable {
     public var family: AddressFamily
     /// The RTSP port advertised by the receiver.
     public var port: Int
+    /// Which backend this descriptor targets. Defaults to `.airplay` so
+    /// existing AP2-only call sites are unaffected.
+    public var kind: ServiceKind
 
     /// The raw DNS-SD TXT record key/value pairs. At minimum this must carry
     /// `deviceid` (colon-hex MAC form, e.g. `AA:BB:CC:DD:EE:FF`) and `features`
@@ -59,6 +73,7 @@ public struct DeviceDescriptor: Sendable {
         address: String,
         family: AddressFamily,
         port: Int,
+        kind: ServiceKind = .airplay,
         txtRecord: [String: String]
     ) {
         self.name = name
@@ -66,6 +81,7 @@ public struct DeviceDescriptor: Sendable {
         self.address = address
         self.family = family
         self.port = port
+        self.kind = kind
         self.txtRecord = txtRecord
     }
 

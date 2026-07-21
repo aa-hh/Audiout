@@ -177,6 +177,18 @@ final class StateStreamTests: XCTestCase {
         await engine.stop()
     }
 
+    // MARK: - PTP clock availability (T4)
+    //
+    // Headless mode never calls start() (no engine thread, no ptpd_find_or_bind),
+    // so the only thing assertable without a real/gated session is the default:
+    // ptpClockAvailable stays `true` until a real start() determines otherwise,
+    // matching every pre-T4 caller's existing (unchanged) behavior.
+    func testPtpClockAvailableDefaultsTrueBeforeStart() async {
+        let engine = AirPlayEngine()
+        let available = await engine.ptpClockAvailable
+        XCTAssertTrue(available, "clock availability must default healthy until a real start() says otherwise")
+    }
+
     // MARK: - internal helpers
 
     /// Fire a synthetic completion once the waiter is armed (same pattern as

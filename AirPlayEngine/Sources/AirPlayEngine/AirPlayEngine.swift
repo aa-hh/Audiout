@@ -219,6 +219,23 @@ public actor AirPlayEngine {
     // cancellation `uninstall()` performs in production.
     private var headlessMode = false
 
+    /// Whether a PTP clock is available to this session, per the last
+    /// `start()`'s `ptpd_find_or_bind()` result (T4, T-HELPER-DESIGN-1): `true`
+    /// if a shared `airptpd` was found (or, under `AUDIOUTER_PTP_INPROC_BIND`,
+    /// this process bound 319/320 itself), `false` if neither happened — the
+    /// shipped find-only default when no root helper is installed yet. This is
+    /// NON-FATAL by design (mirrors OwnTone: `airplay_init`'s own `ptpd_init`
+    /// still runs and falls back to NTP), so `start()` does not throw on
+    /// `false` — but a receiver that requires PTP (Sonos et al, SPEC.md §8 0b)
+    /// will fail to stream, and the app should surface that degradation rather
+    /// than silently proceeding as if the clock were healthy. Defaults to
+    /// `true` (optimistic/unknown) before the first real `start()` — headless
+    /// tests never call `ptpd_find_or_bind()` at all, so this stays at its
+    /// default for them, matching pre-T4 behavior exactly.
+    public private(set) var ptpClockAvailable = true
+
+    private let ptpLog = Logger(subsystem: "com.airplayengine", category: "ptp-clock")
+
     // MARK: Init
 
     public init(config: EngineConfig = EngineConfig()) {
@@ -296,12 +313,17 @@ public actor AirPlayEngine {
         engineThreadHolder.set(engineThread)
 
         // Everything below touches the C cluster -> must run on the engine thread.
-        let initResult: Int32 = try await engineThread.run { [self] in
+        // The tuple's second element carries ptpd_find_or_bind()'s result out to
+        // the actor (T4): `ptpClockAvailable` is set from it once we're back off
+        // the engine thread, below. Early-failure paths (before the PTP step
+        // even runs) report `false` — moot either way, since `initResult != 0`
+        // throws and start() never reaches "started".
+        let (initResult, ptpAvailable): (Int32, Bool) = try await engineThread.run { [self] in
             // 0. App-side crypto init (libgcrypt + libsodium). pair_ap only
             //    CHECKS initialization (is_initialized, pair.c); without this
             //    every pair_setup_new() fails — gated first-light 2026-07-16.
             if engine_crypto_init() != 0 {
-                return -102 // crypto init failed
+                return (-102, false) // crypto init failed
             }
 
             // 0b. Mask SIGPIPE process-wide (first-light backlog #2) before any
@@ -322,7 +344,7 @@ public actor AirPlayEngine {
             // 2. Wire the deferred dispatcher event to the base, and install the
             //    completion hook that resumes our async waiters.
             if outputs_dispatcher_init() != 0 {
-                return -100 // dispatcher wiring failed
+                return (-100, false) // dispatcher wiring failed
             }
             completions.install()
             stateHub.install() // device-state stream hook (T-ENG-STATESTREAM-1)
@@ -340,13 +362,28 @@ public actor AirPlayEngine {
             //     falls back to NTP — which Sonos refuses (SPEC.md §8 0b).
             //     Non-fatal by design, mirroring OwnTone: NTP-only receivers
             //     still work unprivileged. Gated first-light 2026-07-16.
-            _ = ptpd_find_or_bind()
+            //
+            //     T4: CAPTURE the result instead of discarding it — 0 means a
+            //     clock was found/bound (`ptpd_find_or_bind` shim contract,
+            //     shims/ptpd.h), anything else (today only -1, T3's find-only
+            //     default with no helper installed) means clock-unavailable.
+            let ptpFound = (ptpd_find_or_bind() == 0)
 
             // 4. Start the backend: output_airplay.init == airplay_init. This also
             //    calls mdns_browse -> our shim captures airplay_device_cb so
             //    discovery-in works afterwards.
-            guard let initFn = output_airplay.`init` else { return -101 }
-            return initFn()
+            guard let initFn = output_airplay.`init` else { return (-101, ptpFound) }
+            return (initFn(), ptpFound)
+        }
+
+        // T4: publish the clock-availability flag whether or not init itself
+        // succeeded (a caller reading it right after a thrown start() still gets
+        // an honest last-known value rather than a stale `true`). Log ONLY the
+        // unavailable transition — the healthy path is silent, matching every
+        // other non-fatal step in this method.
+        ptpClockAvailable = ptpAvailable
+        if !ptpAvailable {
+            ptpLog.warning("PTP clock unavailable: no shared airptpd found (see AUDIOUTER_PTP_INPROC_BIND for dev fallback); PTP-only receivers will fail to stream")
         }
 
         if initResult != 0 {

@@ -142,6 +142,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var continuations: [UUID: AsyncStream<BackendEvent>.Continuation] = [:]
     private var started = false
 
+    /// Whether the engine's last `start()` found a PTP clock (T4). Read from
+    /// ``EngineControlling/ptpClockAvailable`` once `engine.start()` resolves
+    /// and confined to `stateQueue` like every other piece of backend state;
+    /// `true` before the first `start()` completes (optimistic, matching the
+    /// engine's own pre-start default — see ``AirPlayEngine/ptpClockAvailable``).
+    /// Exposed publicly so the app can surface a degraded "clock unavailable"
+    /// state (T6 owns the actual UI); this task only makes the fact observable.
+    private var ptpClockAvailable = true
+
     /// The colon-hex `Device.id` ⟷ ``OutputID`` lookup, populated from discovery.
     /// Kept so `setOutputSet`/`setVolume` can translate the UI's string ids to the
     /// engine handle without reparsing (and without ever reformatting the id).
@@ -620,6 +629,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { order.compactMap { known[$0] } }
     }
 
+    /// Whether the engine's last `start()` found a PTP clock (T4). `true`
+    /// before the first `start()` resolves. A `false` reading is NOT itself an
+    /// error — NTP-only receivers still work — but a PTP-only receiver (Sonos
+    /// et al, SPEC.md §8 0b) will fail to stream despite the engine/backend
+    /// otherwise looking healthy, so a degraded-state UI (T6) can key off this.
+    public var isPTPClockAvailable: Bool {
+        stateQueue.sync { ptpClockAvailable }
+    }
+
     public func makeEventStream() -> AsyncStream<BackendEvent> {
         AsyncStream { continuation in
             let key = UUID()
@@ -746,6 +764,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.markAllUnavailable()
                 return
             }
+
+            // 2b. T4: capture the engine's PTP clock-availability verdict from
+            //     this same `start()` (the ONLY time it's determined — the
+            //     engine doesn't re-check mid-session). A `false` reading here
+            //     does not stop the app from proceeding (PTP-only receivers
+            //     simply won't stream; NTP-only ones are unaffected) — it's
+            //     surfaced, not fatal, exactly like the engine's own non-fatal
+            //     handling of the same fact.
+            let ptpAvailable = await self.engine.ptpClockAvailable
+            self.stateQueue.async { self.ptpClockAvailable = ptpAvailable }
 
             // 3. Subscribe the engine's device-state stream: every transition
             //    (armed-op terminal AND out-of-band, e.g. RTSP drop → .failed) maps
@@ -900,6 +928,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.latestAppLevel.removeAll()
             self.lastExcludedBundleIDs.removeAll()
             self.meteringTapTargets.removeAll()
+            // T4: a later start() re-determines clock availability from
+            // scratch — reset to the same optimistic default `start()` reads
+            // before its own engine.start() resolves.
+            self.ptpClockAvailable = true
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -3080,6 +3112,16 @@ protocol EngineControlling: Sendable {
     /// no-op so a conformer that doesn't route per-app streams compiles unchanged.
     func write(pcm: Data, streamId: UInt32, pts: timespec)
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
+
+    /// Whether a PTP clock was available as of the engine's last `start()`
+    /// (T4 — mirrors `AirPlayEngine/ptpClockAvailable`). `false` means no
+    /// shared root PTP helper was found (the shipped find-only default, T3),
+    /// so PTP-only receivers (Sonos et al) will fail to stream even though
+    /// the engine itself came up fine (NTP-only receivers are unaffected).
+    /// Default `true` so a conformer that predates T4 (any existing
+    /// `NativeBackendTests` spy) compiles unchanged and keeps its prior
+    /// all-healthy behavior.
+    var ptpClockAvailable: Bool { get async }
 }
 
 extension EngineControlling {
@@ -3093,6 +3135,13 @@ extension EngineControlling {
     /// Default: drop the buffer. ``EngineAdapter`` overrides this to forward to the
     /// real engine; a conformer that never receives per-app mixed audio ignores it.
     func write(pcm: Data, streamId: UInt32, pts: timespec) {}
+
+    /// Default: healthy (T4). ``EngineAdapter`` overrides this to forward to the
+    /// real engine's `ptpClockAvailable`; a conformer that predates T4 (existing
+    /// `NativeBackendTests` spies) compiles unchanged and reports "available".
+    var ptpClockAvailable: Bool {
+        get async { true }
+    }
 }
 
 /// Adapts the concrete ``AirPlayEngine`` actor to ``EngineControlling``. Thin —
@@ -3119,6 +3168,9 @@ struct EngineAdapter: EngineControlling {
         engine.write(pcm: pcm, streamId: streamId, pts: pts)
     }
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { engine.makeStateStream() }
+    var ptpClockAvailable: Bool {
+        get async { await engine.ptpClockAvailable }
+    }
 }
 
 /// The slice of ``NativeDiscovery`` ``NativeBackend`` drives. Extracted as a

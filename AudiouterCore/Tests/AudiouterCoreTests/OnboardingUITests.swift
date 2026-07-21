@@ -23,6 +23,16 @@ final class OnboardingUITests: XCTestCase {
         func prime() {}
         func isTrusted() -> Bool { false }
     }
+    /// Reports a fixed ``PTPHelperStatus`` and records `register()`/
+    /// `openSystemSettingsLoginItems()` calls — never touches `SMAppService`.
+    private final class FakePTPHelper: PTPHelperManaging {
+        var status: PTPHelperStatus
+        private(set) var registerCount = 0
+        private(set) var openSettingsCount = 0
+        init(status: PTPHelperStatus = .notRegistered) { self.status = status }
+        func register() throws { registerCount += 1 }
+        func openSystemSettingsLoginItems() { openSettingsCount += 1 }
+    }
     private final class ChangeCounter { var count = 0 }
 
     private var suiteName: String!
@@ -41,10 +51,12 @@ final class OnboardingUITests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeModel(audio: PermissionStatus) -> SetupModel {
+    private func makeModel(audio: PermissionStatus,
+                           ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
                    localNetwork: NoopLocalNetwork(),
                    remoteControl: NoopRemoteControl(),
+                   ptpHelper: ptpHelper,
                    settings: AppSettings(defaults: defaults))
     }
 
@@ -120,6 +132,111 @@ final class OnboardingUITests: XCTestCase {
                               remoteControl: .unknown)
         // Unsupported is not a user-fixable state — no button, just a message.
         XCTAssertEqual(vc.test_audioRowButtonTitles, [])
+    }
+
+    // MARK: PTP helper row (T6)
+
+    func testNotRegisteredShowsNoButton() {
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notRegistered)),
+                                          onOpenSettings: { _ in }, onDone: {})
+        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
+                              remoteControl: .unknown, ptpHelper: .notRegistered)
+        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .notRegistered)
+        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [],
+                       "notRegistered: registration is automatic, nothing to tap")
+    }
+
+    func testRequiresApprovalShowsTheExplainerAndOpenLoginItemsButton() {
+        // requiresApproval → the explainer row is showing, with the deep-link
+        // button that opens Login Items.
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .requiresApproval)),
+                                          onOpenSettings: { _ in }, onDone: {})
+        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
+                              remoteControl: .unknown, ptpHelper: .requiresApproval)
+        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .requiresApproval)
+        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, ["Open Login Items…"])
+    }
+
+    func testEnabledShowsNoButtonAndIsAvailable() {
+        // enabled → available: a plain "Enabled" chip, no button.
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .enabled)),
+                                          onOpenSettings: { _ in }, onDone: {})
+        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
+                              remoteControl: .unknown, ptpHelper: .enabled)
+        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .enabled)
+        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [])
+    }
+
+    func testNotFoundShowsNoButton() {
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notFound)),
+                                          onOpenSettings: { _ in }, onDone: {})
+        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
+                              remoteControl: .unknown, ptpHelper: .notFound)
+        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .notFound)
+        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [],
+                       "notFound is a packaging bug, not user-fixable")
+    }
+
+    func testOpenLoginItemsButtonRoutesToTheModelSeam() {
+        let ptpHelper = FakePTPHelper(status: .requiresApproval)
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
+                                          onOpenSettings: { _ in }, onDone: {})
+        vc.test_refresh()   // bind the row to the real (requiresApproval) model state
+        vc.test_ptpHelperRow.test_tapOpenLoginItems()
+        XCTAssertEqual(ptpHelper.openSettingsCount, 1)
+    }
+
+    func testViewDidLoadRegistersThePTPHelper() {
+        let ptpHelper = FakePTPHelper(status: .notRegistered)
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
+                                          onOpenSettings: { _ in }, onDone: {})
+        _ = vc.test_rootView   // forces loadView + viewDidLoad
+        XCTAssertEqual(ptpHelper.registerCount, 1)
+    }
+
+    // MARK: Presentation reason (`.permissionLost` banner)
+
+    func testFirstRunRendersNoBanner() {
+        let vc = OnboardingViewController(model: makeModel(audio: .granted),
+                                          reason: .firstRun,
+                                          onOpenSettings: { _ in }, onDone: {})
+        XCTAssertFalse(vc.test_showsPermissionLostBanner)
+        XCTAssertNil(vc.test_permissionLostBannerText)
+    }
+
+    func testPermissionLostRendersBannerNamingTheUnmetPermission() {
+        let vc = OnboardingViewController(model: makeModel(audio: .denied),
+                                          reason: .permissionLost([.audioCapture]),
+                                          onOpenSettings: { _ in }, onDone: {})
+        XCTAssertTrue(vc.test_showsPermissionLostBanner)
+        let text = vc.test_permissionLostBannerText
+        XCTAssertNotNil(text)
+        XCTAssertTrue(text?.contains("System Audio") ?? false,
+                      "banner names the specific unmet permission: \(text ?? "nil")")
+    }
+
+    func testPermissionLostBannerNamesMultipleUnmetPermissions() {
+        let vc = OnboardingViewController(model: makeModel(audio: .denied),
+                                          reason: .permissionLost([.audioCapture, .ptpHelper]),
+                                          onOpenSettings: { _ in }, onDone: {})
+        let text = vc.test_permissionLostBannerText ?? ""
+        XCTAssertTrue(text.contains("System Audio"), text)
+        XCTAssertTrue(text.contains("PTP helper"), text)
+    }
+
+    func testWindowControllerThreadsReasonThroughToTheContentViewController() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .denied),
+                                            reason: .permissionLost([.localNetwork]),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        XCTAssertTrue(wc.test_contentViewController.test_showsPermissionLostBanner)
+    }
+
+    func testWindowControllerDefaultsToFirstRun() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        XCTAssertFalse(wc.test_contentViewController.test_showsPermissionLostBanner)
     }
 
     // MARK: Window controller dismissal contract

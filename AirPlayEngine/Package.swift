@@ -104,24 +104,117 @@ let package = Package(
         // The gated one-device probe CLI (T-API-1). Builds green; it only
         // opens a real session when run with --i-have-a-receiver-and-owntone-is-stopped.
         .executable(name: "engine-probe", targets: ["engine-probe"]),
+        // The privileged root PTP helper (T2, ptp-helper-design.md). Links
+        // ONLY Clibairptp + libevent - never the GPL sender cluster - so the
+        // one process that runs as root stays small enough to read
+        // line-by-line (SPEC.md §4.1). A future SMAppService launchd daemon
+        // bundles this binary; today it is built + link-tested here and run
+        // manually via AUDIOUTER_PTP_PORTS for the unprivileged IPC path.
+        .executable(name: "ptp-helper", targets: ["ptp-helper"]),
     ],
     targets: [
+        // The MIT PTP clock library, split into its OWN target (T1,
+        // ptp-helper-design.md) so a future root SMAppService helper can
+        // link ONLY this + libevent — never the GPL sender cluster
+        // (ffmpeg/libplist/libgcrypt/RTSP/ALAC). This is the security
+        // linchpin: the code that runs privileged must be small enough to
+        // read line-by-line. Deliberately NOT relocated on disk — "path"
+        // points at the existing Sources/CAirPlayEngine/libairptp
+        // directory so libairptp/airptp.h's physical location, and every
+        // existing `#include "libairptp/airptp.h"` (shims/ptpd.c), keep
+        // resolving unchanged; only the SwiftPM target boundary and the
+        // compiled-sources list ("src" only) are new.
+        .target(
+            name: "Clibairptp",
+            path: "Sources/CAirPlayEngine/libairptp",
+            exclude: [
+                // Not a source file — SwiftPM would otherwise try to treat
+                // it as one since it has no recognized extension to skip.
+                "LICENSE",
+            ],
+            sources: [
+                "src",
+            ],
+            // publicHeadersPath "." exposes airptp.h (this target's root)
+            // to CAirPlayEngine automatically once it depends on this
+            // target, without widening the C-target-boundary of the
+            // umbrella header to also include the private src/ headers.
+            publicHeadersPath: ".",
+            cSettings: [
+                // "." (this target's root) resolves airptp_internal.h's
+                // own "../airptp.h"; "src" is redundant with same-directory
+                // relative includes within libairptp/src/*.c but kept for
+                // parity with how CAirPlayEngine listed it before the split.
+                .headerSearchPath("."),
+                .headerSearchPath("src"),
+                // compat/ (config.h + endian_compat.h) stays put as a
+                // CAirPlayEngine-level shared resource — both this target
+                // and the sender cluster force-include the same config.h.
+                // Reached via a relative path across the (sibling) target
+                // boundary since the file itself did not move.
+                .headerSearchPath("../compat"),
+
+                // --- Force-include the hand-written config.h (same as
+                // CAirPlayEngine): guarantees HAVE_LIBKERN_OSBYTEORDER_H
+                // (libairptp/src/utils.h endian branch) and HAVE_CONFIG_H
+                // (the `#ifdef HAVE_CONFIG_H #include <config.h>` guard in
+                // utils.h) are defined here too, without touching the MIT
+                // vendored sources. ---
+                .unsafeFlags(["-include", "config.h", "-DHAVE_CONFIG_H"]),
+
+                // libairptp per-packet tx/rx logging (log_sent/log_received
+                // are compiled-out no-ops without these). Enabled for the
+                // gated first-light bring-up (2026-07-16) to watch the PTP
+                // exchange; cheap (E_DBG level) and gated by
+                // AIRPLAYENGINE_LOG_LEVEL at runtime, so safe to leave on.
+                .define("AIRPTP_LOG_SENT", to: "1"),
+                .define("AIRPTP_LOG_RECEIVED", to: "1"),
+
+                // libevent headers (airptp_internal.h: <event2/event.h>).
+                // Portable brew prefix resolved at the top of this file.
+                .unsafeFlags(["-I\(brewPrefix)/opt/libevent/include"]),
+            ],
+            // NO libevent linkerSettings here on purpose. Clibairptp is a
+            // static-library target — it does not resolve its own external
+            // symbols; each final executable that links it does. Keeping the
+            // libevent link OUT of this shared target is what lets its two
+            // consumers link libevent DIFFERENTLY: CAirPlayEngine (the app
+            // path) links the Homebrew libevent *dylib* (its own linkerSettings
+            // below), while ptp-helper *statically* links libevent_core.a +
+            // libevent_pthreads.a. The helper must static-link because it is a
+            // hardened-runtime Developer-ID root daemon with Library Validation
+            // ON (no disable-library-validation entitlement, unlike the app):
+            // dyld refuses to load the ad-hoc-signed Homebrew libevent *dylib*
+            // into it ("different Team IDs"), which crashed the launchd daemon
+            // at load time (OS_REASON_DYLD) — found in the first Developer-ID
+            // live test, 2026-07-21. Static-linking removes the runtime dylib
+            // dependency entirely, so there is nothing external to validate.
+            linkerSettings: []
+        ),
+
         // The vendored + shimmed C cluster — see header comment above for
         // why this is one target with license-labeled subdirectories
         // rather than one SwiftPM target per license.
         .target(
             name: "CAirPlayEngine",
+            dependencies: ["Clibairptp"],
             path: "Sources/CAirPlayEngine",
             exclude: [
                 // Not a source file — SwiftPM would otherwise try to treat
                 // it as one since it has no recognized extension to skip.
+                // Still listed here (rather than only under Clibairptp)
+                // because this target's path is the CAirPlayEngine root,
+                // which contains the whole libairptp/ subtree on disk.
                 "libairptp/LICENSE",
             ],
             sources: [
                 "sender",
                 "evrtsp",
                 "pair_ap",
-                "libairptp",
+                // libairptp/src/* now compiles exactly once, in the
+                // Clibairptp target above (T1, ptp-helper-design.md).
+                // libairptp/airptp.h itself is still reached from here via
+                // the "." header search path below, unchanged.
                 "shims",
             ],
             publicHeadersPath: "include",
@@ -130,16 +223,15 @@ let package = Package(
                 // #includes resolve (e.g. airplay.c -> "evrtsp/evrtsp.h",
                 // "pair_ap/pair.h", "rtp_common.h", and every shims/*.h).
                 // "." (the CAirPlayEngine root) is needed for the
-                // subdir-qualified includes like "evrtsp/evrtsp.h" and
-                // "pair_ap/pair.h"; the per-subdir paths below are for the
-                // bare-filename includes within each cluster (e.g.
+                // subdir-qualified includes like "evrtsp/evrtsp.h",
+                // "pair_ap/pair.h", and shims/ptpd.c's own
+                // "libairptp/airptp.h"; the per-subdir paths below are for
+                // the bare-filename includes within each cluster (e.g.
                 // rtp_common.c's own "rtp_common.h"). ---
                 .headerSearchPath("."),
                 .headerSearchPath("sender"),
                 .headerSearchPath("evrtsp"),
                 .headerSearchPath("pair_ap"),
-                .headerSearchPath("libairptp"),
-                .headerSearchPath("libairptp/src"),
                 .headerSearchPath("shims"),
                 // compat/ holds the hand-written config.h (replacing OwnTone's
                 // autotools-generated one) and endian_compat.h (macOS
@@ -151,12 +243,12 @@ let package = Package(
                 // translation unit (T-BUILD-1). This mirrors what autotools
                 // does (`-include config.h`) and is more robust than editing
                 // each vendored .c to add the include: it guarantees
-                // PACKAGE_NAME (airplay_events.c:218), HAVE_LIBKERN_OSBYTEORDER_H
-                // (libairptp/src/utils.h endian branch), and HAVE_DECL_PLIST_NEW_INT
-                // (plist_wrap.h) are defined everywhere they're read, without
-                // touching the GPL/MIT vendored sources. Also defines
-                // HAVE_CONFIG_H so the `#ifdef HAVE_CONFIG_H #include <config.h>`
-                // guards in misc.h/utils.h/rtp_common.c activate cleanly. ---
+                // PACKAGE_NAME (airplay_events.c:218) and
+                // HAVE_DECL_PLIST_NEW_INT (plist_wrap.h) are defined
+                // everywhere they're read, without touching the GPL/MIT
+                // vendored sources. Also defines HAVE_CONFIG_H so the
+                // `#ifdef HAVE_CONFIG_H #include <config.h>` guards in
+                // misc.h/rtp_common.c activate cleanly. ---
                 .unsafeFlags(["-include", "config.h", "-DHAVE_CONFIG_H"]),
 
                 // --- pair_ap crypto backend selection (seam-map §7.3):
@@ -164,13 +256,6 @@ let package = Package(
                 // so pair_ap is built with CONFIG_GCRYPT (+ libsodium
                 // always), NOT CONFIG_OPENSSL. Avoids an openssl dep. ---
                 .define("CONFIG_GCRYPT"),
-                // libairptp per-packet tx/rx logging (log_sent/log_received are
-                // compiled-out no-ops without these). Enabled for the gated
-                // first-light bring-up (2026-07-16) to watch the PTP exchange;
-                // cheap (E_DBG level) and gated by AIRPLAYENGINE_LOG_LEVEL at
-                // runtime, so safe to leave on during bring-up.
-                .define("AIRPTP_LOG_SENT", to: "1"),
-                .define("AIRPTP_LOG_RECEIVED", to: "1"),
 
                 // --- Brew include paths for the deps the cluster needs
                 // (seam-map §7 + Appendix A): libevent, libsodium, libgcrypt
@@ -253,9 +338,58 @@ let package = Package(
             path: "Sources/engine-probe"
         ),
 
+        // The privileged root PTP helper's executable (T2,
+        // ptp-helper-design.md §0/§1/§6.1). Depends ONLY on Clibairptp (+
+        // libevent, via that target's own linker settings) - deliberately
+        // NOT on CAirPlayEngine, so the GPL sender cluster (RTSP/ALAC/
+        // pairing/ffmpeg/libplist/libgcrypt) never links into the one binary
+        // that runs as root. No extra cSettings needed: airptp.h is a public,
+        // config.h-independent header (just <inttypes.h> + a `bool`),
+        // reached by bare name via Clibairptp's own publicHeadersPath "."
+        // (libairptp/module.modulemap), which SwiftPM adds automatically for
+        // a dependent target.
+        .executableTarget(
+            name: "ptp-helper",
+            dependencies: ["Clibairptp"],
+            path: "Sources/ptp-helper",
+            linkerSettings: [
+                // STATIC-link libevent into the root daemon (see the long note
+                // on Clibairptp's empty linkerSettings above). Passing the .a
+                // archive paths directly to the linker links them statically,
+                // so the shipped helper has NO libevent dylib dependency —
+                // `otool -L` shows only libSystem — and Library Validation on
+                // the hardened Developer-ID daemon has nothing external to
+                // reject. libevent_core.a = the event loop; libevent_pthreads.a
+                // = evthread_use_pthreads() (needed so cross-thread
+                // event_base_once() wakes the kevent-blocked master loop).
+                .unsafeFlags([
+                    "\(brewPrefix)/opt/libevent/lib/libevent_core.a",
+                    "\(brewPrefix)/opt/libevent/lib/libevent_pthreads.a",
+                ]),
+            ]
+        ),
+
+        // TEST-ONLY shim (T7, ptp-helper-design.md §6.2): re-exposes
+        // Clibairptp's airptp_* API to Swift. Needed because
+        // Clibairptp/module.modulemap declares airptp.h as a `textual
+        // header` (opts the vendored header out of Clang's modular
+        // self-containment check — see that file's comment), and a
+        // textual header is invisible to a Swift `import`. This target's
+        // OWN public header is a normal, self-contained modular header
+        // that just forwards to airptp_*, so PTPHelperIPCTests can drive
+        // the real bind/start/find/peer calls without touching the
+        // vendored module map. See Sources/PTPHelperTestSupport/include/
+        // ptp_test_support.h for the full rationale.
+        .target(
+            name: "PTPHelperTestSupport",
+            dependencies: ["Clibairptp"],
+            path: "Sources/PTPHelperTestSupport",
+            publicHeadersPath: "include"
+        ),
+
         .testTarget(
             name: "AirPlayEngineTests",
-            dependencies: ["AirPlayEngine", "EngineProbeParsing"],
+            dependencies: ["AirPlayEngine", "EngineProbeParsing", "PTPHelperTestSupport"],
             path: "Tests/AirPlayEngineTests"
         ),
     ]

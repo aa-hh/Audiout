@@ -3,6 +3,21 @@
 import AppKit
 import AudiouterCore
 
+/// Why the onboarding window is being presented right now — drives whether the
+/// "a permission got turned off" banner renders.
+///
+/// `.firstRun` (the default, used by every existing call site) is the
+/// original screen, unchanged. `.permissionLost` is used when the app finds
+/// — via ``SetupModel/auditRequiredPermissions()`` on reactivate/wake — that
+/// one of the three REQUIRED permissions (``RequiredPermission``; Remote
+/// Control is deliberately excluded, it's an enhancement not a requirement)
+/// was revoked after setup had already completed, and force-reopens this
+/// window rather than silently degrading.
+public enum OnboardingReason: Equatable, Sendable {
+    case firstRun
+    case permissionLost([RequiredPermission])
+}
+
 /// The single-screen first-run onboarding content: a welcome header, the
 /// reassurance copy that reframes the OS's "recording" language before any system
 /// prompt fires, one row per permission (``PermissionRowView``), and a Done
@@ -23,12 +38,19 @@ public final class OnboardingViewController: NSViewController {
     static let contentWidth: CGFloat = 500
 
     private let model: SetupModel
+    private let reason: OnboardingReason
     private let onOpenSettings: (SystemSettingsPane) -> Void
     private let onDone: () -> Void
 
     private var audioRow: PermissionRowView!
     private var networkRow: PermissionRowView!
     private var remoteControlRow: PermissionRowView!
+    private var ptpHelperRow: PTPHelperRowView!
+
+    /// The `.permissionLost` banner, if this presentation built one (nil for
+    /// `.firstRun`). Held for test inspection.
+    private var permissionBannerView: NSView?
+    private var permissionBannerLabel: NSTextField?
 
     /// Polls the silent Accessibility trust read while the window is open, so a
     /// grant made in System Settings shows up even if `AXIsProcessTrusted()` only
@@ -38,16 +60,25 @@ public final class OnboardingViewController: NSViewController {
     /// the AIRPLAY_DEBUG_SETUP log disambiguates.
     private var remoteControlPoll: Timer?
 
+    /// Polls the PTP helper's `SMAppService.status` while the window is open, so
+    /// approving it in Login Items (System Settings, not this window) is picked
+    /// up without needing a re-focus. Stops once `.enabled`. Same rationale as
+    /// `remoteControlPoll` — see T6/PROGRESS.md for the Developer-ID gating that
+    /// keeps this from ever reaching `.enabled` on an ad-hoc-signed build.
+    private var ptpHelperPoll: Timer?
+
     public init(model: SetupModel,
+                reason: OnboardingReason = .firstRun,
                 onOpenSettings: @escaping (SystemSettingsPane) -> Void,
                 onDone: @escaping () -> Void) {
         self.model = model
+        self.reason = reason
         self.onOpenSettings = onOpenSettings
         self.onDone = onDone
         super.init(nibName: nil, bundle: nil)
     }
 
-    deinit { remoteControlPoll?.invalidate() }
+    deinit { remoteControlPoll?.invalidate(); ptpHelperPoll?.invalidate() }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -108,6 +139,21 @@ public final class OnboardingViewController: NSViewController {
             // can't. (macOS gives no way to highlight an app row via URL.)
             onOpenSettings: { [weak self] in self?.model.primeRemoteControl() })
 
+        // T6: the privileged PTP helper daemon (SMAppService, not a TCC
+        // permission) — its own row type/status (see PTPHelperRowView's doc
+        // comment) rather than a fourth PermissionStatus case.
+        ptpHelperRow = PTPHelperRowView(
+            onOpenLoginItems: { [weak self] in self?.model.openPTPHelperLoginItems() })
+
+        // `.permissionLost` gets a banner ABOVE the header; `.firstRun` renders
+        // exactly as before (no banner at all).
+        if case .permissionLost(let unmet) = reason {
+            let banner = makeBanner(unmet: unmet)
+            permissionBannerView = banner
+            content.addArrangedSubview(banner)
+            content.setCustomSpacing(18, after: banner)
+        }
+
         let header = makeHeader()
         content.addArrangedSubview(header)
         content.addArrangedSubview(makeReassurance())
@@ -146,12 +192,15 @@ public final class OnboardingViewController: NSViewController {
         }
         let separator1 = textInsetSeparator()
         let separator2 = textInsetSeparator()
+        let separator3 = textInsetSeparator()
 
         card.addSubview(audioRow)
         card.addSubview(separator1)
         card.addSubview(networkRow)
         card.addSubview(separator2)
         card.addSubview(remoteControlRow)
+        card.addSubview(separator3)
+        card.addSubview(ptpHelperRow)
 
         // Separators start after the icon tile, aligned with the row text —
         // exactly how System Settings insets its grouped-row dividers.
@@ -176,7 +225,15 @@ public final class OnboardingViewController: NSViewController {
             remoteControlRow.topAnchor.constraint(equalTo: separator2.bottomAnchor),
             remoteControlRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             remoteControlRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            remoteControlRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+
+            separator3.topAnchor.constraint(equalTo: remoteControlRow.bottomAnchor),
+            separator3.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: textInset),
+            separator3.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+
+            ptpHelperRow.topAnchor.constraint(equalTo: separator3.bottomAnchor),
+            ptpHelperRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            ptpHelperRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            ptpHelperRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
 
             card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
         ])
@@ -193,7 +250,13 @@ public final class OnboardingViewController: NSViewController {
         // Reflect real current state up front — surfaces an Accessibility grant the
         // user already had (silent check), without prompting anything untouched.
         refreshStatuses()
+        // Register the PTP helper daemon once, at load (T6): unlike the three
+        // probes above, registering shows no system prompt of its own, so it's
+        // safe to run unconditionally rather than waiting for a tap — see
+        // `SetupModel.registerPTPHelper()`'s doc comment.
+        model.registerPTPHelper()
         startRemoteControlPoll()
+        startPTPHelperPoll()
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
     }
@@ -207,6 +270,20 @@ public final class OnboardingViewController: NSViewController {
                 guard let self else { timer.invalidate(); return }
                 self.model.refreshRemoteControlStatus()
                 if self.model.remoteControlStatus == .granted { timer.invalidate(); self.remoteControlPoll = nil }
+            }
+        }
+    }
+
+    /// Poll the PTP helper's `SMAppService.status` every ~1.5 s until it's
+    /// `.enabled`, so approving it in Login Items lands on the row without a
+    /// re-focus. Same shape as `startRemoteControlPoll()`.
+    private func startPTPHelperPoll() {
+        guard ptpHelperPoll == nil else { return }
+        ptpHelperPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                self.model.refreshPTPHelperStatus()
+                if self.model.ptpHelperStatus == .enabled { timer.invalidate(); self.ptpHelperPoll = nil }
             }
         }
     }
@@ -254,6 +331,72 @@ public final class OnboardingViewController: NSViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.setCustomSpacing(14, after: tile)
         return fullWidth(stack)
+    }
+
+    /// The `.permissionLost` banner: a stock system-orange inset card (reusing
+    /// ``RoundedContainerView``, the same grouped-container look the
+    /// permission card below uses) with a warning glyph and copy naming the
+    /// specific permission(s) that got turned off. System colors only — no
+    /// custom drawing beyond the shared rounded-rect container this screen
+    /// already uses.
+    private func makeBanner(unmet: [RequiredPermission]) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                             accessibilityDescription: "Warning")
+        icon.symbolConfiguration = .init(pointSize: 16, weight: .semibold)
+        icon.contentTintColor = .systemOrange
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let text = NSTextField(wrappingLabelWithString: Self.bannerText(for: unmet))
+        text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        text.textColor = .labelColor
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.preferredMaxLayoutWidth = Self.contentWidth - 56 - 32 - 16
+        permissionBannerLabel = text
+
+        let row = NSStackView(views: [icon, text])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = RoundedContainerView(fill: NSColor.systemOrange.withAlphaComponent(0.14),
+                                        border: NSColor.systemOrange.withAlphaComponent(0.4))
+        card.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
+        ])
+        return card
+    }
+
+    /// The specific unmet permission(s), named plainly, so the user knows
+    /// exactly what to look for below without hunting through all three rows.
+    private static func bannerText(for unmet: [RequiredPermission]) -> String {
+        let names = unmet.map(displayName(for:))
+        let joined: String
+        switch names.count {
+        case 0: joined = "a permission"   // shouldn't happen — reason is only built with a non-empty set
+        case 1: joined = names[0]
+        case 2: joined = "\(names[0]) and \(names[1])"
+        default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
+        }
+        let plural = names.count > 1 ? "permissions" : "permission"
+        return "Audiouter needs the \(joined) \(plural), currently turned off. "
+            + "Re-enable it below so the app can keep working."
+    }
+
+    private static func displayName(for permission: RequiredPermission) -> String {
+        switch permission {
+        case .audioCapture: return "System Audio"
+        case .localNetwork: return "Local Network"
+        case .ptpHelper:    return "PTP helper"
+        }
     }
 
     private func makeReassurance() -> NSView {
@@ -330,6 +473,7 @@ public final class OnboardingViewController: NSViewController {
         audioRow.update(status: model.audioStatus, isProbing: model.isProbingAudio)
         networkRow.update(status: model.localNetworkStatus, isProbing: false)
         remoteControlRow.update(status: model.remoteControlStatus, isProbing: false)
+        ptpHelperRow.update(status: model.ptpHelperStatus)
     }
 
     private func allowAudio() {
@@ -354,6 +498,7 @@ public final class OnboardingViewController: NSViewController {
     public var test_audioRowButtonTitles: [String] { _ = view; return audioRow.test_buttonTitles }
     public var test_networkRowButtonTitles: [String] { _ = view; return networkRow.test_buttonTitles }
     public var test_remoteControlRowButtonTitles: [String] { _ = view; return remoteControlRow.test_buttonTitles }
+    public var test_ptpHelperRowButtonTitles: [String] { _ = view; return ptpHelperRow.test_buttonTitles }
 
     /// Drive the model as the audio "Allow…" button would, then await the probe.
     public func test_allowAudio() async { _ = view; await model.requestAudioCapture() }
@@ -364,6 +509,9 @@ public final class OnboardingViewController: NSViewController {
     /// Drive the model as the remote-control "Allow…" button would.
     public func test_allowRemoteControl() { _ = view; model.primeRemoteControl() }
 
+    /// Drive the model as the load-time PTP helper registration would.
+    public func test_registerPTPHelper() { _ = view; model.registerPTPHelper() }
+
     /// Re-read model status into the rows (the `viewWillAppear` bind, headless).
     public func test_refresh() { _ = view; refresh() }
 
@@ -372,11 +520,13 @@ public final class OnboardingViewController: NSViewController {
     public func test_applyStatuses(audio: PermissionStatus,
                                    isProbingAudio: Bool,
                                    network: PermissionStatus,
-                                   remoteControl: PermissionStatus) {
+                                   remoteControl: PermissionStatus,
+                                   ptpHelper: PTPHelperStatus = .enabled) {
         _ = view
         audioRow.update(status: audio, isProbing: isProbingAudio)
         networkRow.update(status: network, isProbing: false)
         remoteControlRow.update(status: remoteControl, isProbing: false)
+        ptpHelperRow.update(status: ptpHelper)
     }
 
     /// Invoke Done.
@@ -389,8 +539,16 @@ public final class OnboardingViewController: NSViewController {
         return view
     }
 
-    /// The three rows, for asserting status rendering directly.
+    /// The three permission rows, for asserting status rendering directly.
     var test_audioRow: PermissionRowView { _ = view; return audioRow }
     var test_networkRow: PermissionRowView { _ = view; return networkRow }
     var test_remoteControlRow: PermissionRowView { _ = view; return remoteControlRow }
+    /// The PTP helper row (its own type — see ``PTPHelperRowView``).
+    var test_ptpHelperRow: PTPHelperRowView { _ = view; return ptpHelperRow }
+
+    /// Whether this presentation rendered the `.permissionLost` banner.
+    public var test_showsPermissionLostBanner: Bool { _ = view; return permissionBannerView != nil }
+
+    /// The banner's copy, if shown (nil for `.firstRun`).
+    public var test_permissionLostBannerText: String? { _ = view; return permissionBannerLabel?.stringValue }
 }

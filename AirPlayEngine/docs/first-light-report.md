@@ -155,15 +155,43 @@ routing (`p2b-multistream-brief.md`); synced local output
 requires a paid Developer ID cert for the sanctioned install path
 (`p2b-helper-productionization-brief.md`).
 
-## AP1 (RAOP) first light — pending
+## AP1 (RAOP) first light — PASSED (2026-07-22)
 
-The AP1 (`raop.c`) sender port and its engine-side wiring (T1/T3–T9; see
-`docs/raop-seam-brief.md` and `docs/VENDORED-DIFFS.md` Entry 3) are complete
-and headless-verified — `output_raop` compiles, links, and dispatches
-alongside `output_airplay`, and `NativeBackend` now drives AP1 receivers
-exactly like AP2 ones. What this report's AP2 first light gave AP2 (a
-human-confirmed, by-ear session against real hardware) AP1 has not yet had:
-no gated live test against a real classic-AirPlay (RAOP) receiver has been
-run. This section is a placeholder for that result — fill in the date,
-receiver, and outcome (pass/fail, any hosting-layer bugs found, by analogy
-with the six AP2 bugs above) once ahh runs it.
+Run by ear against a real **shairport-sync** receiver over the LAN, then
+confirmed end-to-end in the built app. shairport-sync is a genuine classic
+AirPlay-1 (RAOP) receiver — the reference open-source implementation of the
+exact protocol `raop.c` speaks — so this is a full, legitimate AP1 first light,
+not a stand-in. **Result: passed.** Clean RTSP handshake (OPTIONS → ANNOUNCE →
+SETUP → RECORD), RTP/ALAC audio, volume across the whole slider, true mute, and
+live meters all confirmed working; per-app routing correctly excludes AP1 (see
+below). AP1 support is proven and shipped.
+
+Hosting-layer bugs found + fixed on the way to (and during) this session —
+same "suspect the seam" pattern as the six AP2 bugs above:
+
+1. **Three discovery-seam bugs** in `NativeDiscovery.descriptor(from:)` /
+   `buildDevice`, all invisible to unit tests (which hand-built already-correct
+   descriptors): the engine descriptor stripped the `<hex>@` name prefix that
+   `raop_device_cb` parses the id from; `descriptor.kind` defaulted `.airplay`
+   so AP1 mis-routed to the AP2 gate and was dropped; `updateDiscovery` rejected
+   name-only classic gear that lacks a `deviceid` TXT key.
+2. **`start()` never called `output_raop.init`** (`raop_init`) → the RAOP
+   discovery callback was never captured → `addOutput` failed `unknownOutput`.
+3. **Session ops hardcoded to `output_airplay.*`** → a RAOP-typed device ran the
+   AP2 handshake; now dispatched by backend via `outputs_device_*`/`outputs_write`.
+4. **Volume "cliff at ~50%"** — NOT a sender bug. Our sender emits the correct
+   standard −30..0 dB AirPlay volume; shairport-sync's default software volume
+   stretches that range across the receiver's full (~100 dB) mixer, so a linear
+   slider's bottom half is inaudible. Fixed with an AP1-only perceptual curve
+   (`NativeBackend.engineVolumeAP1`); AP2/Sonos linear behavior untouched.
+5. **AP1 mute only reached −30 dB** (still audible); now sends −144 dB true
+   silence.
+6. **Meters read as a near-invisible sliver** — raw linear RMS mapped straight
+   to bar height; fixed with a perceptual dB scale (`LevelMeterView.displayHeight`).
+
+**Device-coverage caveat (the real remaining gap, not an AP1-first-light gap):**
+shairport-sync accepts *unauthenticated* classic RAOP, which is what our sender
+speaks today. Some receivers require an **auth-setup / pairing** step first and
+reject a plain RAOP `ANNOUNCE` with `403 Forbidden` — e.g. an AirPort Express on
+its 2018 AirPlay-2 firmware. Broadening to those receivers is the main deferred
+follow-up (auth-setup/MFi); it does not affect the AP1 first-light result above.

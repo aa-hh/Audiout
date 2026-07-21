@@ -757,9 +757,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices,
                   buttonTitle: "Selected (\(selectedCount))"),
         ]
-        if !controller.groups.isEmpty {
+        // Only groups that actually have a device are offered as routing targets —
+        // an empty group can't be activated (and shouldn't exist under the
+        // membership invariant, but a group left empty by an older build is
+        // filtered here defensively rather than shown as a dead entry).
+        let routableGroups = controller.groups.filter { !$0.memberIDs.isEmpty }
+        if !routableGroups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))
-            for group in controller.groups {
+            for group in routableGroups {
                 options.append(.init(title: group.name, target: .group(id: group.id)))
             }
         }

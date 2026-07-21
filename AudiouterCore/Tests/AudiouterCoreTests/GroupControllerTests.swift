@@ -284,6 +284,45 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.groups.count, 1)
     }
 
+    // MARK: Empty-membership invariant (a group must keep ≥1 device)
+
+    func testCreateGroupWithNoMembersIsRejected() async throws {
+        let (controller, _) = try await makeController()
+        XCTAssertThrowsError(try controller.createGroup(name: "Empty", memberIDs: [])) { error in
+            XCTAssertEqual(error as? GroupController.GroupError, .emptyMembership)
+        }
+        XCTAssertTrue(controller.groups.isEmpty, "no empty group should have been persisted")
+    }
+
+    func testSaveGroupWithNoMembersIsRejectedAndLeavesGroupsUntouched() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"], memberVolumes: [:]))
+
+        // Attempting to save the same group emptied out must throw AND must not
+        // mutate the persisted group (the guard runs before any mutation).
+        XCTAssertThrowsError(
+            try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: [], memberVolumes: [:]))
+        ) { error in
+            XCTAssertEqual(error as? GroupController.GroupError, .emptyMembership)
+        }
+        XCTAssertEqual(controller.groups.first(where: { $0.id == "g1" })?.memberIDs, ["office"],
+                       "the rejected empty save must leave the existing group intact")
+    }
+
+    func testSaveCurrentSetupAsGroupWithEmptySelectionIsRejected() async throws {
+        let (controller, _) = try await makeController()
+        // Default selection is {local}; clear it so the selected set is empty.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        // Reverse auto-swap may reseed {local}; force truly empty by removing again.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        guard controller.selectedDeviceIDs.isEmpty else {
+            throw XCTSkip("could not reach an empty selection on this fleet")
+        }
+        XCTAssertThrowsError(try controller.saveCurrentSetupAsGroup(name: "Nothing")) { error in
+            XCTAssertEqual(error as? GroupController.GroupError, .emptyMembership)
+        }
+    }
+
     func testActiveGroupTracksMainOutGroupTarget() async throws {
         let (controller, _) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Downstairs",

@@ -377,6 +377,31 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.groups.first { $0.id == saved.id }!.memberIDs.contains(extra))
     }
 
+    func testCannotRemoveLastMemberOfGroupInEditor() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // 2 members: sonos-move, office
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        // Removing one of two members is allowed — the group drops to a single member.
+        window.test_editor.test_setMembership(false, for: "office")
+        XCTAssertEqual(controller.groups.first { $0.id == saved.id }?.memberIDs, ["sonos-move"],
+                       "one member removed, one remains")
+
+        // The sole remaining member's checkbox is pinned (disabled) as the affordance.
+        XCTAssertFalse(window.test_editor.test_isMembershipRowEnabled(for: "sonos-move"),
+                       "the last member's checkbox is disabled so it can't be unchecked")
+
+        // Attempting to remove the last member is refused: the group keeps it and
+        // the row reverts to checked (delete the group instead to remove it).
+        window.test_editor.test_setMembership(false, for: "sonos-move")
+        XCTAssertEqual(controller.groups.first { $0.id == saved.id }?.memberIDs, ["sonos-move"],
+                       "removing the last member must be refused — the group stays non-empty")
+        XCTAssertTrue(window.test_editor.test_checkedDeviceIDs.contains("sonos-move"),
+                      "the reverted checkbox shows the member still belongs")
+    }
+
     func testDeleteInEditorCallsDeleteGroupAndReturnsToMixer() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)

@@ -130,6 +130,7 @@ public final class MainOutRowView: NSView {
             } else {
                 item.target = self
                 item.action = #selector(selectionChanged(_:))
+                item.representedObject = option.target
                 let isCurrent = option.target == current
                 item.state = isCurrent ? .on : .off
                 if isCurrent {
@@ -250,8 +251,6 @@ public final class MainOutRowView: NSView {
         destinationPopUp.pullsDown = false
         destinationPopUp.controlSize = .small
         destinationPopUp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        destinationPopUp.target = self
-        destinationPopUp.action = #selector(selectionChanged(_:))
         // Truncate a long target title with a tail ellipsis inside the fixed
         // dropdown width (task B — "truncated with '…' if long").
         (destinationPopUp.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
@@ -346,10 +345,9 @@ public final class MainOutRowView: NSView {
 
     // MARK: Actions
 
-    @objc private func selectionChanged(_ sender: NSPopUpButton) {
-        let index = sender.indexOfSelectedItem
-        guard index >= 0, index < options.count else { return }
-        delegate?.mainOutRow(self, didSelect: options[index].target)
+    @objc private func selectionChanged(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? MainOutTarget else { return }
+        delegate?.mainOutRow(self, didSelect: target)
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
@@ -418,8 +416,32 @@ public final class MainOutRowView: NSView {
     }
 
     /// Simulate the user choosing `target` from the selector.
+    ///
+    /// This is a *shortcut* that calls the delegate directly — it deliberately
+    /// bypasses AppKit's real menu-item action dispatch. To exercise the genuine
+    /// click path (each `NSMenuItem` carries its own target/action, and AppKit
+    /// invokes it with the menu item as sender), use ``test_menuItem(for:)`` and
+    /// fire its `action` — see `MainOutRowMenuDispatchTests`. A mismatch between
+    /// the handler's expected sender type and what AppKit passes is invisible to
+    /// this shortcut but breaks real clicks (it silently broke group activation).
     public func test_select(_ target: MainOutTarget) {
         delegate?.mainOutRow(self, didSelect: target)
+    }
+
+    /// The real `NSMenuItem` in the destination pop-up whose target is `target`,
+    /// or `nil` if no such selectable item exists. Exposes the live menu item —
+    /// including its `representedObject`, `target`, and `action` — so tests can
+    /// drive the actual AppKit dispatch path rather than the ``test_select``
+    /// shortcut. Mirrors `AppRowView.test_destinationPopUpMenuItem(forDestinationID:)`.
+    public func test_menuItem(for target: MainOutTarget) -> NSMenuItem? {
+        destinationPopUp.menu?.items.first { ($0.representedObject as? MainOutTarget) == target }
+    }
+
+    /// The raw `NSMenuItem` whose (plain) title matches `title`, or `nil`. Lets a
+    /// test reach a **header** item — which has no target, so `test_menuItem(for:)`
+    /// can't find it — to assert it is disabled and inert.
+    public func test_menuItem(titled title: String) -> NSMenuItem? {
+        destinationPopUp.menu?.items.first { $0.title == title }
     }
 
     /// Simulate a master drag to `value`.

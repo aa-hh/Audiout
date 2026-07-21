@@ -101,6 +101,34 @@ final class PopoverControllerTests: XCTestCase {
                       "groups are under an Output Groups header")
     }
 
+    func testEmptyGroupIsNotOfferedAsAMainOutOption() async throws {
+        // A group left empty by an older build (persisted directly, bypassing the
+        // current non-empty invariant) must not appear as a routing target.
+        let store = GroupStore(directory: tempDirectory())
+        try store.save([
+            Group(id: "ghost", name: "Ghost", memberIDs: [], memberVolumes: [:]),
+            Group(id: "real", name: "Kitchen", memberIDs: ["office"], memberVolumes: ["office": 50]),
+        ])
+
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        let controller = GroupController(backend: backend, store: store,
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: true)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        controller.ensureDefaultSelection()
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+
+        let targets = popover.test_mainOutRow.test_selectableTargets
+        XCTAssertTrue(targets.contains(.group(id: "real")), "the non-empty group is offered")
+        XCTAssertFalse(targets.contains(.group(id: "ghost")), "the empty group must not be offered")
+        XCTAssertFalse(popover.test_mainOutRow.test_optionTitles.contains("Ghost"),
+                       "the empty group's name must not appear in the menu")
+    }
+
     func testToggleComposesSelectedDevicesWithoutRoutingWhenTargetIsGroup() async throws {
         let (popover, controller, backend) = try await makePopover()
         // Build a group, point Main Out at it.

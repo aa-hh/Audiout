@@ -58,7 +58,7 @@ final class SettingsWindowControllerTests: XCTestCase {
         var fired = 0
         controller.onRunSetupAgain = { fired += 1 }
         controller.test_general.test_tapRunSetupAgain()
-        XCTAssertEqual(fired, 1, "Run Setup Again… routes from the General pane out to the app")
+        XCTAssertEqual(fired, 1, "Check Permissions… routes from the General pane out to the app")
     }
 
     /// The sizing-bug regression test: the assembled single-screen content must

@@ -24,7 +24,7 @@ public final class GeneralSettingsViewController: NSViewController {
     private let aboutButton = NSButton()
     private let aboutWindowController: AboutWindowController
 
-    /// Fired when "Run Setup Again…" is clicked, so the app can re-present the
+    /// Fired when "Check Permissions…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
@@ -58,16 +58,16 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
 
-        // "Run Setup Again…" re-opens the first-run permission-priming window —
+        // "Check Permissions…" re-opens the first-run permission-priming window —
         // the way a user re-checks the System Audio / Local Network grants after
         // changing them in System Settings (the flow itself deep-links there).
-        setupButton.title = "Run Setup Again…"
+        setupButton.title = "Check Permissions…"
         setupButton.bezelStyle = .rounded
         setupButton.target = self
         setupButton.action = #selector(runSetupAgainTapped)
         let setupRow = SettingsForm.row(
             title: "Setup",
-            subtitle: "Review what Audiouter needs and re-check permissions.",
+            subtitle: "Verify that required permissions are granted.",
             control: setupButton)
 
         // "About Audiouter…" opens the standalone About/Credits window (app
@@ -138,7 +138,7 @@ public final class GeneralSettingsViewController: NSViewController {
         launchToggled()
     }
 
-    /// Invoke "Run Setup Again…" as a click would.
+    /// Invoke "Check Permissions…" as a click would.
     public func test_tapRunSetupAgain() {
         _ = view
         runSetupAgainTapped()

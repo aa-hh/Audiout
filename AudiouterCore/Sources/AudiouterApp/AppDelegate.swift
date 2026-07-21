@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backendKind = BackendKind.resolved()
 
     /// The first-run onboarding/permission-priming window, retained while open
-    /// (first launch, or "Run Setup Again…" from Settings ▸ General).
+    /// (first launch, or "Check Permissions…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
@@ -453,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
-    /// and present it. Used for first-run, "Run Setup Again…", AND the
+    /// and present it. Used for first-run, "Check Permissions…", AND the
     /// automatic permission-revocation reopen (`auditRequiredPermissionsIfNeeded`).
     /// `onFinished` starts the backend if it hasn't already (first run) and is a
     /// guarded no-op on a re-run (backend already streaming).
@@ -599,7 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   wakeRestore: makeWakeRestoreSettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
-            // "Run Setup Again…" (General pane) re-opens the first-run priming
+            // "Check Permissions…" (General pane) re-opens the first-run priming
             // window; the backend is already running, so its onFinished is a
             // guarded no-op.
             controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }

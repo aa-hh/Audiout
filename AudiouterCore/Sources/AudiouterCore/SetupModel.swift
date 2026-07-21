@@ -354,7 +354,7 @@ public final class SetupModel {
     /// it just adds a disabled entry to Login Items. The user-facing step is
     /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
     /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Run Setup Again…").
+    /// Idempotent — safe to call again (e.g. "Check Permissions…").
     ///
     /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
     /// `register()` cannot validate and this will not progress past
@@ -437,6 +437,40 @@ public final class SetupModel {
             unmet.append(.ptpHelper)
         }
         return unmet
+    }
+
+    /// Which of the three REQUIRED permissions are NOT currently confirmed
+    /// granted/enabled, right now — the check behind onboarding's Done-tap
+    /// confirmation (`OnboardingViewController`), not to be confused with
+    /// ``unmetRequiredPermissions()`` above.
+    ///
+    /// The two methods answer different questions and deliberately disagree on
+    /// `.unknown`: ``unmetRequiredPermissions()`` exists to catch a
+    /// *regression* (something that WAS working and got turned off), so an
+    /// untouched `.unknown` row correctly never counts — "never engaged" isn't
+    /// "lost". This method exists to catch the opposite gap — a user who never
+    /// engaged a row at all and taps Done anyway — so `.unknown` (and every
+    /// other non-success state) DOES count here. Using
+    /// ``unmetRequiredPermissions()`` for the Done gate would silently let a
+    /// first-time user finish setup with zero permissions granted, since every
+    /// untouched row starts life as `.unknown`/`.notRegistered`.
+    ///
+    /// - Audio capture: granted only on `.granted` — `.unsupported` is excluded
+    ///   (pre-14.2 OS; no grant can fix it, so nagging about it would mislead).
+    /// - Local Network: granted only on `.granted`.
+    /// - PTP helper: granted only on `.enabled`.
+    public func requiredPermissionsNotGranted() -> [RequiredPermission] {
+        var notGranted: [RequiredPermission] = []
+        if audioStatus != .granted, audioStatus != .unsupported {
+            notGranted.append(.audioCapture)
+        }
+        if localNetworkStatus != .granted {
+            notGranted.append(.localNetwork)
+        }
+        if ptpHelperStatus != .enabled {
+            notGranted.append(.ptpHelper)
+        }
+        return notGranted
     }
 
     /// Refresh ONLY the three required permissions' statuses using SILENT/

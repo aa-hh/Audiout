@@ -55,7 +55,7 @@ public final class SettingsWindowController: NSWindowController {
         set { audioVC.onChange = newValue }
     }
 
-    /// Forwarded from the General section: fired when "Run Setup Again…" is
+    /// Forwarded from the General section: fired when "Check Permissions…" is
     /// clicked so the app can re-present the first-run onboarding flow.
     public var onRunSetupAgain: (() -> Void)? {
         get { generalVC.onRunSetupAgain }

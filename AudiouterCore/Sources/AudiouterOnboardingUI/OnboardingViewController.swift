@@ -308,9 +308,6 @@ public final class OnboardingViewController: NSViewController {
     // MARK: Sections
 
     private func makeHeader() -> NSView {
-        // An app-icon-style rounded tile (accent fill, white glyph) reads as "an
-        // app" far more than a bare glyph — the same first impression macOS's own
-        // setup screens open with.
         // Show the app's REAL icon (not a generic glyph) — a stronger first
         // impression for a paid product. Fetched from the running app so it
         // tracks whatever icon ships, with no hardcoded asset name to go stale.

@@ -239,6 +239,13 @@ public final class GroupEditorViewController: NSViewController {
             rowsByID[device.id] = row
             membershipStack.addArrangedSubview(row)
         }
+        // Pin the sole remaining member: a group needs at least one device, so
+        // its last member can't be unchecked here (delete the group instead).
+        // Only one member → that row's checkbox is disabled with an explanation.
+        if memberSet.count == 1, let onlyMemberID = memberSet.first {
+            rowsByID[onlyMemberID]?.setCheckboxEnabled(
+                false, tooltip: "A group needs at least one device. Use \u{201C}Delete group\u{2026}\u{201D} to remove it.")
+        }
     }
 
     // MARK: Actions
@@ -270,6 +277,14 @@ public final class GroupEditorViewController: NSViewController {
                 }
             }
         } else {
+            // A group must keep at least one device — refuse to remove the last
+            // member (to remove the group entirely, use "Delete group…"). Revert
+            // the checkbox so the row reflects the unchanged membership and bail
+            // before persisting an empty group.
+            guard group.memberIDs.contains(where: { $0 != deviceID }) else {
+                rowsByID[deviceID]?.isChecked = true
+                return
+            }
             group.memberIDs.removeAll { $0 == deviceID }
             group.memberVolumes[deviceID] = nil
         }
@@ -349,6 +364,13 @@ public final class GroupEditorViewController: NSViewController {
 
     /// All candidate device ids currently offered as membership rows.
     public var test_candidateDeviceIDs: [String] { candidateDevices.map(\.id) }
+
+    /// Whether the membership checkbox for `deviceID` is currently interactive.
+    /// The sole remaining member of a group is pinned (disabled) so it can't be
+    /// unchecked into an empty group.
+    public func test_isMembershipRowEnabled(for deviceID: String) -> Bool {
+        rowsByID[deviceID]?.test_isCheckboxEnabled ?? false
+    }
 
     /// The current text in the rename field.
     public var test_nameFieldValue: String { nameField.stringValue }

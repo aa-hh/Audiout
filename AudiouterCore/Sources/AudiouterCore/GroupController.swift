@@ -20,6 +20,16 @@ import Foundation
 /// second source of truth for volumes — it reads them back from `devices`.
 public final class GroupController {
 
+    /// Errors from group CRUD that a caller may want to surface or (for the
+    /// empty-membership invariant) simply rely on as a backstop.
+    public enum GroupError: Error, Equatable {
+        /// A group must always name at least one member device — an empty group
+        /// can't be activated and would show as a dead entry in the Main Out
+        /// selector. Creation and edits that would empty a group are refused;
+        /// removing a group entirely is `deleteGroup(id:)`, not emptying it.
+        case emptyMembership
+    }
+
     // MARK: Mute semantics
     //
     // A member is *effectively silent* when `explicitMute[id] == true`.
@@ -416,8 +426,13 @@ public final class GroupController {
     // MARK: Group CRUD + persistence
 
     /// Add or replace (by `id`) a group and persist the full set.
+    ///
+    /// Throws ``GroupError/emptyMembership`` if `group.memberIDs` is empty — a
+    /// group must always keep at least one device. The guard runs before any
+    /// mutation so a rejected save leaves `groups` untouched.
     @discardableResult
     public func saveGroup(_ group: Group) throws -> Group {
+        guard !group.memberIDs.isEmpty else { throw GroupError.emptyMembership }
         if let index = groups.firstIndex(where: { $0.id == group.id }) {
             groups[index] = group
         } else {
@@ -453,6 +468,7 @@ public final class GroupController {
                             memberVolumes: [String: Int]? = nil,
                             iconSymbolName: String? = nil,
                             id: String = UUID().uuidString) throws -> CreateResult {
+        guard !memberIDs.isEmpty else { throw GroupError.emptyMembership }
         if let existing = group(matchingMemberSet: memberIDs) {
             return CreateResult(group: existing, alreadyExisted: true)
         }

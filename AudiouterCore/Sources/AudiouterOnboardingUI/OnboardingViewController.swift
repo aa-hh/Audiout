@@ -310,10 +310,18 @@ public final class OnboardingViewController: NSViewController {
         // An app-icon-style rounded tile (accent fill, white glyph) reads as "an
         // app" far more than a bare glyph — the same first impression macOS's own
         // setup screens open with.
-        let tile = IconTileView(symbolName: "airplayaudio",
-                                tint: .controlAccentColor,
-                                accessibility: "Audiouter",
-                                side: 60, pointSize: 30, cornerRadius: 14)
+        // Show the app's REAL icon (not a generic glyph) — a stronger first
+        // impression for a paid product. Fetched from the running app so it
+        // tracks whatever icon ships, with no hardcoded asset name to go stale.
+        let tile = NSImageView()
+        tile.image = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        tile.imageScaling = .scaleProportionallyUpOrDown
+        tile.setAccessibilityLabel("Audiouter")
+        tile.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tile.widthAnchor.constraint(equalToConstant: 60),
+            tile.heightAnchor.constraint(equalToConstant: 60),
+        ])
 
         let title = NSTextField(labelWithString: "Welcome to Audiouter")
         title.font = .systemFont(ofSize: 22, weight: .bold)

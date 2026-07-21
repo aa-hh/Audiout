@@ -46,6 +46,18 @@ extern "C" {
  * umbrella header (airplay.c has no public header of its own). */
 extern struct output_definition output_airplay;
 
+/* [AirPlayEngine vendored change 2026-07-19] The RAOP (AirPlay 1) backend
+ * (struct output_definition output_raop, sender/raop.c). NON-static, the file's
+ * only external symbol — every raop_* helper is file-static, so it never clashes
+ * with airplay.c's identically-named statics. Declared here so the Swift wrapper
+ * (and the headless test) can reach it through the umbrella header the same way
+ * they reach output_airplay: read its fields and call through its
+ * .device_volume_to_pct / .device_probe / .write function pointers. The
+ * two-backend dispatch that fans engine ops to output_airplay OR output_raop by
+ * device->type is a later integration step (see docs/raop-seam-brief.md §6);
+ * this task only ports and links the backend. */
+extern struct output_definition output_raop;
+
 /* The player thread's libevent base (airplay.c:459, defined in shims/outputs.c).
  * The Swift wrapper sets this to the engine thread's event_base BEFORE
  * airplay_init, then calls outputs_dispatcher_init() (seam-map §8, risk R-B). */
@@ -93,6 +105,25 @@ int
 airplayengine_feed_device(const char *name, const char *hostname, int family,
                           const char *address, int port, struct keyval *txt);
 
+/* [AirPlayEngine vendored change 2026-07-19] RAOP (AirPlay 1) analogue of the
+ * two entries above (raop-seam-brief §6.6). True once raop_init has run and
+ * mdns_browse captured raop_device_cb ("_raop._tcp"). */
+bool
+airplayengine_raop_discovery_ready(void);
+
+/* Feed a resolved device descriptor into the RAOP backend's discovery path —
+ * same seam and shape as airplayengine_feed_device, but calls the captured
+ * raop_device_cb(name, "_raop._tcp", "local", hostname, family, address, port,
+ * txt) instead. A device that advertises both _airplay._tcp and _raop._tcp is
+ * fed to whichever backend(s) the app chooses by calling the matching feed
+ * entry (or both).
+ *
+ * Returns 0 if delivered, -1 if RAOP discovery isn't ready yet (raop_init not
+ * run). MUST be called on the engine thread. */
+int
+airplayengine_feed_raop_device(const char *name, const char *hostname, int family,
+                               const char *address, int port, struct keyval *txt);
+
 /* [AirPlayEngine vendored change 2026-07-17] P2b TEST/DIAGNOSTIC SEAM. These
  * accessors (defined in sender/airplay.c) expose the otherwise-static
  * master-session cache so the headless multi-stream test can prove that distinct
@@ -122,6 +153,35 @@ int
 airplay_test_master_session_count(void);
 void
 airplay_test_master_sessions_reset(void);
+
+/* [AirPlayEngine vendored change 2026-07-19] P2b TEST/DIAGNOSTIC SEAM for the
+ * RAOP/AirPlay-1 sender — mirror of the airplay_test_master_session_* accessors
+ * above (defined in sender/raop.c). Expose the otherwise-static RAOP
+ * master-session cache so the headless multi-stream test can prove distinct
+ * stream_ids bind to distinct master sessions, and that raop_write's fan-out
+ * routes a PCM blob only into the master session whose stream_id matches. NOT
+ * part of the shipping session API — do not call from production code.
+ *
+ *   _make  : build (or reuse) a master session for (stream_id, quality, encrypt),
+ *            returning an opaque pointer to it (the real master_session_make).
+ *   _stream_id : read a master session's stream_id back off that opaque pointer.
+ *   _input_buffer_samples : samples raop_write has accumulated into it.
+ *   _count : number of live master sessions.
+ *   _reset : tear every master session down (between test cases).
+ *   _write_one : drive the real raop_write with a one-entry output_buffer tagged
+ *                with the given stream_id/quality (proves the cross-talk gate). */
+void *
+raop_test_master_session_make(uint32_t stream_id, struct media_quality *quality, bool encrypt);
+uint32_t
+raop_test_master_session_stream_id(const void *rms);
+uint32_t
+raop_test_master_session_input_buffer_samples(const void *rms);
+int
+raop_test_master_session_count(void);
+void
+raop_test_master_sessions_reset(void);
+void
+raop_test_write_one(uint32_t stream_id, struct media_quality *quality, const void *pcm, size_t bufsize, uint32_t samples, uint32_t pts_sec);
 
 #ifdef __cplusplus
 }

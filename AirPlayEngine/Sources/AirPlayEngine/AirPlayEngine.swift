@@ -342,11 +342,18 @@ public actor AirPlayEngine {
             //     still work unprivileged. Gated first-light 2026-07-16.
             _ = ptpd_find_or_bind()
 
-            // 4. Start the backend: output_airplay.init == airplay_init. This also
-            //    calls mdns_browse -> our shim captures airplay_device_cb so
-            //    discovery-in works afterwards.
-            guard let initFn = output_airplay.`init` else { return -101 }
-            return initFn()
+            // 4. Start BOTH sender backends. output_airplay.init == airplay_init,
+            //    output_raop.init == raop_init. Each calls mdns_browse for its own
+            //    service type, so our shims capture airplay_device_cb AND
+            //    raop_device_cb — feedDescriptor's .airplay/.raop branches then both
+            //    reach a live backend. Omitting raop_init leaves
+            //    airplayengine_raop_device_cb NULL, so every RAOP feed silently
+            //    no-ops and addOutput fails `unknownOutput` (first-light 2026-07-19).
+            guard let airplayInitFn = output_airplay.`init` else { return -101 }
+            let airplayRc = airplayInitFn()
+            if airplayRc != 0 { return airplayRc }
+            guard let raopInitFn = output_raop.`init` else { return -103 }
+            return raopInitFn()
         }
 
         if initResult != 0 {
@@ -429,6 +436,10 @@ public actor AirPlayEngine {
             try? await engineThread.run { [self] in
                 if let deinitFn = output_airplay.deinit {
                     deinitFn()
+                }
+                // Symmetric with raop_init() in start() (step 4).
+                if let raopDeinitFn = output_raop.deinit {
+                    raopDeinitFn()
                 }
                 // Symmetric with ptpd_find_or_bind() in start(). NULL-safe:
                 // airptp_end() guards a never-bound handle.
@@ -551,7 +562,12 @@ public actor AirPlayEngine {
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in
-                    _ = airplayengine_feed_device(name, host, family, addr, port, kv)
+                    switch descriptor.kind {
+                    case .raop:
+                        _ = airplayengine_feed_raop_device(name, host, family, addr, port, kv)
+                    case .airplay:
+                        _ = airplayengine_feed_device(name, host, family, addr, port, kv)
+                    }
                 }
             }
         }
@@ -649,8 +665,9 @@ public actor AirPlayEngine {
         await applyStreamIdOnDevice(id: id, streamId: streamId)
 
         let terminal = try await startOp(id: id) { device, cbId in
-            guard let startFn = output_airplay.device_start else { return -1 }
-            return startFn(device, cbId)
+            // Dispatch by the device's backend (output_airplay OR output_raop)
+            // so a RAOP-typed device runs raop_device_start, not the AP2 sender.
+            return outputs_device_start(device, cbId)
         }
 
         knownOutputs[id] = terminal
@@ -694,7 +711,6 @@ public actor AirPlayEngine {
             // touching vendored C. N<=0 disarms cleanly (~:843-849) and resolves
             // .stopped.
             guard Self.stopSessionIsLive(device) else { return 0 }
-            guard let stopFn = output_airplay.device_stop else { return -1 }
             // CRASH GUARD (T5, EXC_BAD_ACCESS SIGSEGV at airplay.c:4271). The
             // idempotency check above reads device->state, but state and
             // device->session can disagree for a window: when a device
@@ -715,7 +731,7 @@ public actor AirPlayEngine {
             // CREATES the session, so device->session is legitimately NULL before
             // a start and guarding it there would break every connect.
             guard device.pointee.session != nil else { return 0 }
-            return stopFn(device, cbId)
+            return outputs_device_stop(device, cbId)
         }
         knownOutputs[id] = terminal
     }
@@ -765,8 +781,7 @@ public actor AirPlayEngine {
         await applyVolumeOnDevice(id: id, normalized: clamped)
 
         let terminal = try await startOp(id: id) { device, cbId in
-            guard let volFn = output_airplay.device_volume_set else { return -1 }
-            return volFn(device, cbId)
+            return outputs_device_volume_set(device, cbId)
         }
         // Volume completions are non-fatal; record but don't throw on non-stream.
         _ = terminal
@@ -783,10 +798,15 @@ public actor AirPlayEngine {
     /// it was always 0 — pinning every request to volume=0 => -30 dB (the quietest
     /// non-muted level), which reads as "no/inaudible sound" on the receiver.
     /// Map the normalized value straight onto the 0..100 percent the C layer wants.
+    /// Sentinel: a negative normalized value (used for AirPlay-1 true mute) is passed
+    /// through as -1, which raop_volume_from_pct interprets as out-of-range and maps
+    /// to -144 dB (true silence).
     private func applyVolumeOnDevice(id: OutputID, normalized: Double) async {
         let apply: () -> Void = {
             guard let device = outputs_device_get(id.rawValue) else { return }
-            device.pointee.volume = Int32((normalized * 100.0).rounded())
+            // For true mute on AirPlay-1, use sentinel value -1 to trigger -144 dB.
+            // Otherwise, map normalized 0.0–1.0 to device volume 0–100.
+            device.pointee.volume = Int32(normalized < 0 ? -1 : (normalized * 100.0).rounded())
         }
         if issueOverride != nil { apply() }
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
@@ -927,8 +947,6 @@ public actor AirPlayEngine {
 
         let body: () -> Void = {
             defer { prepared.forEach { $0.cbuf.deallocate() } }
-            guard let writeFn = output_airplay.write else { return }
-
             // Build a stack output_buffer. data[0] is the original (untranscoded)
             // PCM per outputs.h; each session's own ALAC encoder converts it.
             // The C array backing `data` is a tuple in Swift, but it's laid out
@@ -950,8 +968,10 @@ public actor AirPlayEngine {
                 }
             }
             // The slot right after the last real entry stays zeroed (buffer ==
-            // NULL): airplay_write loops `for (i; obuf->data[i].buffer; i++)`.
-            writeFn(&obuf)
+            // NULL): each backend's write loops `for (i; obuf->data[i].buffer; i++)`.
+            // outputs_write broadcasts to BOTH backends; each self-filters its own
+            // sessions by stream_id/quality, so RAOP and AP2 rooms stay disjoint.
+            outputs_write(&obuf)
         }
 
         // Headless test mode never starts the engine thread (`enterHeadlessTestMode`

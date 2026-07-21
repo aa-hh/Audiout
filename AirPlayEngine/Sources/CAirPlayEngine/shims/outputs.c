@@ -47,11 +47,35 @@ struct event_base *evbase_player = NULL;
  * (seam-map §8). */
 static struct output_device *device_list = NULL;
 
-/* The single backend the engine ships. airplay.c defines this
- * (airplay.c:4385); we reference it here only to reach its device_free_extra
- * hook (which frees airplay_extra: mdns_name + the struct). Declared extern
- * because the shim can't include airplay.h (there isn't one for the sender). */
+/* The two backends the engine ships. airplay.c defines output_airplay
+ * (airplay.c:4385, AP2); raop.c defines output_raop (AirPlay 1). Both are
+ * non-static globals — every helper inside each file is file-static, so the
+ * identically-named statics never clash (raop-seam-brief §1.12). Declared
+ * extern because the shim can't include a per-sender header (there isn't one).
+ * The engine registry is shared across both; per-device operations dispatch to
+ * the matching definition by device->type via backend_for() (raop-seam-brief
+ * §6.1). */
 extern struct output_definition output_airplay;
+extern struct output_definition output_raop;
+
+/* Pick the backend that owns `device`, keyed by the type stamped at discovery
+ * (airplay_device_cb -> OUTPUT_TYPE_AIRPLAY, raop_device_cb -> OUTPUT_TYPE_RAOP).
+ * The opaque device->session is a struct airplay_session* OR struct
+ * raop_session*; dispatch-by-type guarantees only the owning backend ever casts
+ * it (raop-seam-brief §6.1). Returns NULL for an unhandled type — callers treat
+ * that as a no-op and log the bug. */
+static struct output_definition *
+backend_for(struct output_device *device)
+{
+  switch (device->type)
+    {
+      case OUTPUT_TYPE_AIRPLAY: return &output_airplay;
+      case OUTPUT_TYPE_RAOP:    return &output_raop;
+      default:
+        DPRINTF(E_LOG, L_AIRPLAY, "BUG! No output backend for device type %d\n", device->type);
+        return NULL;
+    }
+}
 
 struct output_device *
 outputs_list(void)
@@ -161,14 +185,19 @@ outputs_device_free(struct output_device *device)
   if (device->session)
     DPRINTF(E_LOG, L_PLAYER, "BUG! Freeing device with active session?\n");
 
-  // device_free_extra frees airplay_extra (mdns_name + struct). Guard on
-  // extra_device_info: airplay.c always sets it on a real device, but a device
-  // created without it (e.g. a bare registry entry in a unit test, or a
-  // partially-built device on an early error path) would otherwise NULL-deref
-  // inside airplay_device_free_extra (which does `free(extra->mdns_name)`
+  // device_free_extra frees the backend's per-device extra (airplay_extra:
+  // mdns_name + struct; raop_extra: the struct) via the owning backend. Guard on
+  // extra_device_info: a real device always has it, but a device created without
+  // it (e.g. a bare registry entry in a unit test, or a partially-built device
+  // on an early error path) would otherwise NULL-deref inside
+  // airplay_device_free_extra (which does `free(extra->mdns_name)`
   // unconditionally). This guard is the registry's responsibility.
-  if (device->extra_device_info && output_airplay.device_free_extra)
-    output_airplay.device_free_extra(device);
+  if (device->extra_device_info)
+    {
+      struct output_definition *backend = backend_for(device);
+      if (backend && backend->device_free_extra)
+        backend->device_free_extra(device);
+    }
 
   if (device->stop_timer)
     event_free(device->stop_timer);
@@ -197,6 +226,112 @@ outputs_device_session_remove(uint64_t device_id)
   struct output_device *d = outputs_device_get(device_id);
   if (d)
     d->session = NULL;
+}
+
+/* ============================ TWO-BACKEND DISPATCH =========================
+ *
+ * The shared registry hosts AP1 (output_raop) and AP2 (output_airplay) devices
+ * side by side; each per-device operation forwards to the definition that owns
+ * the device (backend_for, above), preserving the backend's return value N — the
+ * count the async waiter keys on (raop-seam-brief §5/§6.2). The callback
+ * accounting below is BACKEND-AGNOSTIC: both raop_status and airplay's
+ * session_status feed the identical outputs_cb(callback_id, device_id, state),
+ * so a wrapper adds nothing to the N contract beyond passing the value through.
+ *
+ * A NULL backend (unhandled type — already logged by backend_for) is treated as
+ * "no callback promised": the int ops return -1 (register no waiter), the void
+ * ops no-op. The engine/Swift layer calls these in place of the previously
+ * hardcoded output_airplay.<op> calls. `write` is the exception — it is a
+ * broadcast, not a per-device op (§6.3). */
+
+int
+outputs_device_start(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_start(device, callback_id) : -1;
+}
+
+int
+outputs_device_stop(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_stop(device, callback_id) : -1;
+}
+
+int
+outputs_device_flush(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_flush(device, callback_id) : -1;
+}
+
+int
+outputs_device_probe(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_probe(device, callback_id) : -1;
+}
+
+int
+outputs_device_volume_set(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_volume_set(device, callback_id) : -1;
+}
+
+int
+outputs_device_authorize(struct output_device *device, const char *pin, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  return backend ? backend->device_authorize(device, pin, callback_id) : -1;
+}
+
+void
+outputs_device_cb_set(struct output_device *device, int callback_id)
+{
+  struct output_definition *backend = backend_for(device);
+  if (backend && backend->device_cb_set)
+    backend->device_cb_set(device, callback_id);
+}
+
+void
+outputs_device_free_extra(struct output_device *device)
+{
+  struct output_definition *backend;
+
+  /* Same extra_device_info guard as outputs_device_free: airplay_device_free_extra
+   * NULL-derefs (free(extra->mdns_name)) if extra is unset. */
+  if (!device->extra_device_info)
+    return;
+
+  backend = backend_for(device);
+  if (backend && backend->device_free_extra)
+    backend->device_free_extra(device);
+}
+
+/* Broadcast the buffer to BOTH backends (raop-seam-brief §6.3, contract-critical
+ * R1). Each backend's write iterates its OWN static master-session list and
+ * self-filters by quality/stream_id, so the same obuf fed to both is correct —
+ * RAOP sessions get RAOP packets, AP2 sessions get AP2 packets, no cross-talk,
+ * and a backend with no matching session no-ops. Order is irrelevant (the
+ * session sets are disjoint). Engine thread only (hot path). */
+void
+outputs_write(struct output_buffer *buffer)
+{
+  if (output_raop.write)
+    output_raop.write(buffer);
+  if (output_airplay.write)
+    output_airplay.write(buffer);
+}
+
+/* Test/diagnostic seam (NOT a shipping API): expose the routing decision so a
+ * headless test can prove a device dispatches to output_raop vs output_airplay
+ * by type WITHOUT opening a socket or running a session. The per-op wrappers
+ * above all route through backend_for(); this returns the same pointer. */
+const struct output_definition *
+outputs_backend_definition_for(struct output_device *device)
+{
+  return backend_for(device);
 }
 
 /* ============================ R-A CALLBACK DISPATCHER ======================

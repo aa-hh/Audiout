@@ -118,6 +118,22 @@ safe_hextou32(const char *str, uint32_t *val);
 int
 safe_hextou64(const char *str, uint64_t *val);
 
+/* [AirPlayEngine vendored change 2026-07-19] Added for the RAOP (AirPlay 1)
+ * sender (sender/raop.c). It parses decimal SETUP transport ports and the
+ * sr/ss/ch quality TXT values; airplay.c never needed it (it uses the hex
+ * parsers). Ported near-verbatim from OwnTone misc.c. */
+int
+safe_atoi32(const char *str, int32_t *val);
+
+/* [AirPlayEngine vendored change 2026-07-19] Added for the RAOP sender's SDP
+ * handshake (sender/raop.c): the RSA-wrapped AES key (a=rsaaeskey), the AES IV
+ * (a=aesiv) and the Apple-Challenge are all base64-encoded. airplay.c's
+ * plist-based path never needed base64. Standard RFC-4648 (with '=' padding;
+ * raop.c strips the padding itself). Returns a malloc'd NUL-terminated string
+ * the caller frees, or NULL on allocation failure. */
+char *
+b64_encode(const uint8_t *src, int srclen);
+
 /* ---------------------------- Key/value (TXT) ----------------------------- */
 
 struct onekeyval {

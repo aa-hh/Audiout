@@ -36,11 +36,15 @@ import AirPlayEngine
 ///   `deviceUpdated`. No polling.
 ///
 /// ## AirPlay 1 (D6)
-/// AP1-only receivers ARE discovered and surfaced (dimmed/disabled in the UI):
-/// they're emitted `deviceAdded` with `supportsAirPlay2 = false` and
-/// `isAvailable = false`, and are **NEVER** `addOutput`-ed (the engine is an
-/// AP2-only sender). The future raop (AP1) sender slots in behind
-/// ``AirPlay1Sending`` — see the seam comment at the bottom of this file.
+/// AP1-only receivers (raop-only from the start — they never advertised
+/// `_airplay._tcp`) are driven through the SAME shared engine as AP2: they're
+/// discovered, surfaced `isAvailable = true`, fed to `engine.updateDiscovery`,
+/// and `addOutput`-ed exactly like AP2 receivers, so volume/mute/select and the
+/// per-app `streamId` bindings all flow through the ordinary engine surface. The
+/// ONE thing that stays different is `supportsAirPlay2` — it remains `false` for
+/// an AP1 receiver because it means "no perfect multi-room sync", which is still
+/// true. That flag is no longer an "unsupported" gate; it only advertises the
+/// missing-sync fact, and AP1 devices are free to join mixed groups with AP2.
 public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringControlling, AppRouteConfiguring, @unchecked Sendable {
 
     // MARK: Injected dependencies (protocols so tests are hermetic)
@@ -656,14 +660,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // AirPlay discovery, and independent of whether the engine comes up.
             // It is NEVER fed to the engine or `addOutput`-ed: it's the local
             // output, not an AirPlay receiver (guarded everywhere by
-            // `isLocalDevice` / `supportsAirPlay2 == false`).
+            // `isLocalDevice`, and it has no `outputIDs` entry to add).
             self.surfaceLocalDevice(name: localName, volume: localVolume, muted: localMuted)
         }
 
-        // 1. Wire discovery → the app model + the engine descriptor feed. AP2
-        //    devices additionally get fed to `engine.updateDiscovery` so the engine
-        //    knows about them (a prerequisite for `addOutput`). AP1 devices are
-        //    surfaced but never fed to the engine.
+        // 1. Wire discovery → the app model + the engine descriptor feed. Every
+        //    reachable receiver — AP1 or AP2 — gets fed to `engine.updateDiscovery`
+        //    so the engine knows about it (a prerequisite for `addOutput`). Only the
+        //    local Mac output is never fed (it isn't a discovered receiver).
         discovery.onEvent = { [weak self] event in self?.handleDiscovery(event) }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
@@ -951,7 +955,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.applyLocal(id) { $0.volume = clamped }
             } else {
                 self.applyLocal(id) { $0.volume = clamped }
-                self.pushVolume(outputID, engineValue: Self.engineVolume(clamped))
+                self.pushVolume(outputID, engineValue: self.engineVolume(forID: id, uiVolume: clamped))
             }
         }
     }
@@ -978,7 +982,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.muted.insert(id)
                 if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
                 self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
-                self.pushVolume(outputID, engineValue: Self.engineVolume(0))
+                // For AirPlay-1 (RAOP) devices, send a sentinel value to trigger true silence (-144 dB).
+                // For AirPlay-2, use the standard 0 volume with stashed value.
+                let isAirPlay1 = !(self.known[id]?.supportsAirPlay2 ?? true)
+                let engineValue = isAirPlay1 ? -1.0 : Self.engineVolume(0)
+                self.pushVolume(outputID, engineValue: engineValue)
             } else {
                 self.muted.remove(id)
                 self.applyLocal(id) { $0.isMuted = false }
@@ -997,11 +1005,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             self.expectedSelected = ids
 
-            // AP1-only devices are NEVER added (D6): only ids we can actually stream
-            // to (known, AP2-capable, with an engine handle) can be desired-on.
+            // Only ids we can actually stream to — a known discovered receiver
+            // (AP1 or AP2) with an engine handle — can be desired-on. The local Mac
+            // is excluded (`isLocalDevice`, and it has no `outputIDs` entry); AP1
+            // receivers are NOT excluded any more (they drive through the same
+            // engine surface as AP2, `supportsAirPlay2` notwithstanding).
             var kicks: [(String, OutputID)] = []
             for id in self.order {
-                guard let device = self.known[id], device.supportsAirPlay2,
+                guard let device = self.known[id], !device.isLocalDevice,
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
 
@@ -1623,10 +1634,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.routedAppNames = newAppNames
 
             // --- stream binding diff (engine ops; only for discovered devices) ---
+            // T4b defensive guard: AirPlay-1 (RAOP) devices are never offered as a
+            // per-app routing target in the UI (`supportsAirPlay2 == false` is
+            // filtered out of `PopoverController.availableAirPlayDestinations`),
+            // but a stale/racing UI state could still hand one down here. Refuse it
+            // rather than proceed into `.bind`/`.rebind` — a rebind on an AP1 device
+            // re-anchors its clock (no shared timing protocol with AP2) and drifts
+            // it out of sync with the rest of a group, and some classic receivers
+            // briefly reject the RTSP reconnect. Skip silently (no-op): the device
+            // just doesn't get a per-app stream, same as if it were never offered.
+            let ap1DeviceIDs = Set(self.known.keys.filter { !(self.known[$0]?.supportsAirPlay2 ?? true) })
             var newBindings: [String: UInt32] = [:]
             for set in sets {
                 let stream = UInt32(set.streamID)
-                for deviceID in set.deviceIDs where self.outputIDs[deviceID] != nil {
+                for deviceID in set.deviceIDs
+                where self.outputIDs[deviceID] != nil && !ap1DeviceIDs.contains(deviceID) {
                     newBindings[deviceID] = stream
                 }
             }
@@ -1883,10 +1905,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // `supportsAirPlay2 == false` (mirroring MockBackend's local fixture,
     // MockBackend.swift:457). It is the "Current Device" the popover renders and
     // the target GroupController defaults Selected Devices to on launch
-    // (passthrough). Because `supportsAirPlay2 == false` it can never be desired-on
-    // in `setOutputSet` (which skips non-AP2 ids) and it is never fed to
-    // `engine.updateDiscovery` (only discovery events feed the engine), so it is
-    // structurally impossible for the local device to reach the engine.
+    // (passthrough). Because `isLocalDevice == true` (and it has no `outputIDs`
+    // entry) it can never be desired-on in `setOutputSet` (which skips the local
+    // id) and it is never fed to `engine.updateDiscovery` (only discovery events
+    // feed the engine), so it is structurally impossible for the local device to
+    // reach the engine. (`supportsAirPlay2 == false` no longer does this work —
+    // AP1 receivers share that flag but ARE engine-driven.)
 
     /// Stable sentinel id for the Mac's own output. A FIXED id (not the Core Audio
     /// UID) so it: (a) is stable across default-output changes, (b) can never
@@ -2061,7 +2085,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard self.added.contains(item.id) else { return nil }
                 let intended = self.stashedVolume[item.id] ?? self.known[item.id]?.volume ?? 0
                 let effective = self.muted.contains(item.id) ? 0 : intended
-                return (item.outputID, Self.engineVolume(effective))
+                return (item.outputID, self.engineVolume(forID: item.id, uiVolume: effective))
             }
         }
         for (outputID, value) in toPush {
@@ -2241,47 +2265,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func handleDiscovery(_ event: DiscoveryEvent) {
         switch event {
         case .appeared(let discovered):
-            feedEngineIfAP2(discovered, appearing: true)
+            feedEngineIfAvailable(discovered, appearing: true)
             stateQueue.async { self.addOrUpdate(discovered) }
         case .updated(let discovered):
-            if discovered.isAirPlay2Supported && discovered.isAvailable {
-                feedEngineIfAP2(discovered, appearing: true)
+            if discovered.isAvailable {
+                feedEngineIfAvailable(discovered, appearing: true)
             } else {
-                // Two cases reach here, both requiring the same engine teardown:
-                //
-                //  1. A sticky-AP2 device going OFFLINE (`isAirPlay2Supported`
-                //     stays true, `isAvailable == false`): it lost its
-                //     `_airplay._tcp` advert while its `_raop._tcp` record lingers
-                //     — a real AP2 receiver powering off, NOT an AP1 downgrade.
-                //     `supportsAirPlay2` STAYS true so the UI shows an unavailable
-                //     (retry-on-click) row, never the AP1 "coming soon" popover.
-                //
-                //  2. A genuine AP1-only device (`isAirPlay2Supported == false`):
-                //     never streamable (D6); if it was somehow added, drop it.
-                //     (In practice a never-AP2 device is never fed/added, so this
-                //     is a no-op belt-and-suspenders.)
+                // A reachable→unreachable transition (AP1 or AP2). In practice this
+                // is a sticky-AP2 device going OFFLINE: it lost its `_airplay._tcp`
+                // advert while its `_raop._tcp` record lingers — a real AP2 receiver
+                // powering off, NOT an AP1 downgrade. `supportsAirPlay2` STAYS true
+                // so the UI shows an unavailable (retry-on-click) row, never an AP1
+                // row. (A genuine AP1-only receiver reports `isAvailable == true`
+                // until it truly disappears, so it does not reach here.)
                 //
                 // Either way it is NOT `.disappeared`, so the removal path below
                 // never runs otherwise — tear down any live engine session and
                 // deregister its descriptor so we don't leak a live RTSP/PTP
-                // session. Safe/idempotent if it was never AP2 or never added.
+                // session. Safe/idempotent if it was never added.
                 teardownEngineOutput(id: discovered.id)
                 removeEngineDiscovery(id: discovered.id)
             }
             stateQueue.async { self.addOrUpdate(discovered) }
-        case .disappeared(let id, let wasAirPlay2Supported):
-            if wasAirPlay2Supported {
-                teardownEngineOutput(id: id)
-                removeEngineDiscovery(id: id)
-            }
+        case .disappeared(let id, _):
+            // Every receiver we surface — AP1 or AP2 — is now engine-fed and can be
+            // `addOutput`-ed, so tear down unconditionally on disappear. Both calls
+            // are idempotent no-ops if the id was never added / never fed.
+            teardownEngineOutput(id: id)
+            removeEngineDiscovery(id: id)
             stateQueue.async { self.markDisappeared(id) }
         }
     }
 
     /// Stop and drop any live engine session for `id` (if it was streaming). Used
-    /// on an AP2→AP1 downgrade and on disappearance so a device leaving the AP2
-    /// world doesn't leak its RTSP/PTP session. Best-effort — a failed removeOutput
-    /// is swallowed (the descriptor removal that follows deregisters it anyway).
+    /// when a receiver goes offline or disappears so it doesn't leak its RTSP/PTP
+    /// session. Best-effort — a failed removeOutput is swallowed (the descriptor
+    /// removal that follows deregisters it anyway).
     private func teardownEngineOutput(id: String) {
         let outputID: OutputID? = stateQueue.sync {
             // A future re-add must re-feed the engine's discovery (the descriptor is
@@ -2296,16 +2315,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Task { try? await engine.removeOutput(outputID) }
     }
 
-    /// Feed an AP2 device into the engine's discovery so it becomes `addOutput`-able.
-    /// AP1-only devices are NEVER fed (D6) — the engine is an AP2-only sender.
+    /// Feed a reachable receiver into the engine's discovery so it becomes
+    /// `addOutput`-able. Both AP1 and AP2 receivers are fed — the shared engine
+    /// drives them the same way; only a receiver that is not reachable right now
+    /// (a sticky-AP2 device gone offline) is skipped.
     ///
     /// This is the DISCOVERY-driven feed (fires on genuine appear/update events,
     /// not per toggle). It records what it fed into `fedDescriptors` so the
     /// converge path's `descriptorToFeed` can skip a redundant re-feed of the exact
     /// same descriptor (root cause 2). Only feeds when the descriptor is new or
     /// changed, so a repeated identical `.updated` doesn't re-add either.
-    private func feedEngineIfAP2(_ discovered: DiscoveredDevice, appearing: Bool) {
-        guard discovered.isAirPlay2Supported else { return }
+    private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, appearing: Bool) {
+        guard discovered.isAvailable else { return }
         let descriptor = discovered.descriptor
         let id = discovered.id
         let shouldFeed: Bool = stateQueue.sync {
@@ -2344,14 +2365,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func addOrUpdate(_ discovered: DiscoveredDevice) {
         let id = discovered.id                        // colon-hex TXT id, verbatim
         self.outputIDs[id] = discovered.outputID
-        // "Streamable right now" = AP2-capable AND currently reachable. A
-        // sticky-AP2 device that went offline (`supportsAirPlay2` true but
-        // `isAvailable` false) is NOT streamable right now — treat it like the
-        // AP2-advert-gone case (drop the descriptor/fed-memo, don't re-kick),
-        // but it KEEPS `supportsAirPlay2 == true` in the model (set in
-        // `mapDiscovered`/`merge`) so the UI never shows the AP1 "coming soon"
-        // row — it shows an unavailable/retry-on-click row instead.
-        let streamableNow = discovered.isAirPlay2Supported && discovered.isAvailable
+        // "Streamable right now" = currently reachable (AP1 or AP2 — both drive
+        // through the shared engine). A sticky-AP2 device that went offline
+        // (`supportsAirPlay2` true but `isAvailable` false) is NOT streamable right
+        // now — treat it like the AP2-advert-gone case (drop the descriptor/fed-memo,
+        // don't re-kick), but it KEEPS `supportsAirPlay2 == true` in the model (set
+        // in `mapDiscovered`/`merge`) so the UI shows an unavailable/retry-on-click
+        // row rather than losing its AP2 identity. A genuine AP1 receiver reports
+        // `isAvailable == true`, so it IS streamable and its descriptor is kept.
+        let streamableNow = discovered.isAvailable
         if streamableNow {
             self.lastDescriptors[id] = discovered.descriptor
             // Availability recovery (root cause 4): a fresh AP2 (re-)resolution is
@@ -2376,9 +2398,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 emit(.deviceUpdated(merged))
             }
         } else {
-            // AP1-only devices (D6): surfaced deviceAdded, isAvailable=false,
-            // supportsAirPlay2=false, and NEVER addOutput-ed. mapDiscovered already
-            // set those fields; here we just append + emit.
+            // First sighting: append + emit. mapDiscovered has already set the
+            // availability/AP2 fields — an AP1 receiver comes in available and
+            // engine-driveable, differing from AP2 only in `supportsAirPlay2`.
             known[id] = mapped
             order.append(id)
             emit(.deviceAdded(mapped))
@@ -2555,18 +2577,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let id = discovered.id
         let isMuted = muted.contains(id)
         let supportsAP2 = discovered.isAirPlay2Supported
-        // Availability rules:
-        //  - AP1-only (never AP2): surfaced but never controllable — available=false
-        //    (dimmed/disabled "coming soon"), NEVER addOutput-ed (D6).
+        // Availability rules (available == "streamable right now", drives + selects):
+        //  - AP1-only (never AP2): reachable and engine-driveable — available=true,
+        //    `supportsAirPlay2=false` only advertises the missing multi-room sync.
         //  - AP2 online: available.
         //  - AP2 OFFLINE (sticky-AP2, `discovered.isAvailable == false`): keeps
         //    supportsAP2=true but available=false — surfaced as an unavailable
-        //    (retry-on-click) row, NOT the AP1 "coming soon" row.
-        let isAvailable = supportsAP2 && discovered.isAvailable
+        //    (retry-on-click) row.
+        // Discovery already reports `isAvailable == true` for a live AP1 receiver
+        // and `false` only for a sticky-AP2 device gone offline, so this is a direct
+        // pass-through of discovery's own reachability fact.
+        let isAvailable = discovered.isAvailable
         let baseVolume = known[id]?.volume ?? 50
         return Device(
             id: id,
-            name: discovered.descriptor.name,
+            // The engine-facing `descriptor.name` is the RAW resolved instance
+            // name (for `_raop._tcp` devices it carries the "<12-hex>@" MAC
+            // prefix the vendored `raop_device_cb` re-parses for the device id —
+            // see `NativeDiscovery.buildDevice`). The user never sees that
+            // decoration, so strip it here for the display name. A no-op for
+            // AP2/local names, which have no such prefix.
+            name: NativeDiscovery.strippedRaopDisplayName(discovered.descriptor.name),
             kind: Self.kind(for: discovered),
             isAvailable: isAvailable,
             supportsAirPlay2: supportsAP2,
@@ -2586,9 +2617,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         result.name = discovered.name
         result.kind = discovered.kind
         result.supportsAirPlay2 = discovered.supportsAirPlay2
-        if discovered.supportsAirPlay2 && discovered.isAvailable {
-            // An AP2 device that re-resolved is reachable again (a dropped→
-            // returned device comes back available).
+        if discovered.isAvailable {
+            // A reachable receiver (AP1 or AP2) that re-resolved is streamable
+            // again (a dropped→returned device comes back available). Its
+            // volume/mute/selection and connection dot are left to the converge
+            // path — merge only restores availability.
             result.isAvailable = true
         } else if discovered.supportsAirPlay2 {
             // Sticky-AP2 device that went OFFLINE (lost its `_airplay._tcp`
@@ -2602,8 +2635,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             result.isSelected = false
             result.connectionState = .failed(ConnectionFailure(cause: .unknown))
         } else {
-            // Genuine AP1-only device (never AP2). Never routed (D6) and must
-            // never show a connecting/failed dot — force the dot to `.off`.
+            // An unavailable non-AP2 (AP1) receiver. A live AP1 device reports
+            // `isAvailable == true` (first branch) and only reaches here if it has
+            // genuinely gone away without a `.disappeared` — treat it as a clean,
+            // deliberate stop rather than a retryable failure.
             result.isAvailable = false
             result.isSelected = false
             result.connectionState = .off
@@ -2617,7 +2652,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static func kind(for discovered: DiscoveredDevice) -> Device.Kind {
         let txt = discovered.descriptor.txtRecord
         let model = (txt["model"] ?? txt["Model"] ?? "").lowercased()
-        let name = discovered.descriptor.name.lowercased()
+        // Match against the human-facing name, not the raw engine descriptor:
+        // a `_raop._tcp` descriptor name still carries the "<12-hex>@" MAC prefix
+        // (see `NativeDiscovery.buildDevice`), whose hex digits could otherwise
+        // pollute the substring heuristics below. No-op for AP2/local names.
+        let name = NativeDiscovery.strippedRaopDisplayName(discovered.descriptor.name).lowercased()
         let hay = model + " " + name
         if hay.contains("homepod") { return .homePod }
         if hay.contains("appletv") || hay.contains("apple tv") || name.contains(" tv") || name.hasSuffix("tv") { return .appleTV }
@@ -2634,6 +2673,38 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// / perceptual-curve fidelity is a gated real-hardware A/B (D7), not headless.
     static func engineVolume(_ uiVolume: Int) -> Double {
         Double(uiVolume.clampedToVolume) / 100.0
+    }
+
+    /// Perceptual floor for AirPlay-1 (RAOP) receivers, in dB of the AirPlay
+    /// −30…0 range. RAOP receivers (shairport-sync's default: software volume
+    /// spread across the output device's FULL mixer range, often ~100 dB) stretch
+    /// −30…0 across that whole range, so a linear slider's bottom half is
+    /// inaudible — the live-observed "cliff at ~50%" (2026-07-22). Compressing the
+    /// slider onto [MIN_DB, 0] keeps every position usable. NOT a protocol value:
+    /// a perceptual floor to TUNE BY EAR against real hardware (the
+    /// `AIRPLAYENGINE_LOG_LEVEL=5` "RAOP volume: … dB on wire" line prints what it
+    /// produces). −12 dB is a starting estimate.
+    static let airPlay1MinVolumeDB = -12.0
+
+    /// AirPlay-1 volume curve: UI 0–100 → engine normalized 0.0…1.0, remapped so
+    /// the C layer's linear map (`airplay_dB = −30 + 0.3·pct`) lands in
+    /// [``airPlay1MinVolumeDB``, 0] instead of the full −30…0 — keeping the whole
+    /// slider audible on wide-mixer RAOP receivers. AP1 only; AP2/Sonos stays on
+    /// the by-ear-verified linear ``engineVolume(_:)``.
+    static func engineVolumeAP1(_ uiVolume: Int) -> Double {
+        let x = Double(uiVolume.clampedToVolume) / 100.0
+        let shaped = pow(x, 0.6)                        // mild perceptual taper
+        let dB = airPlay1MinVolumeDB * (1.0 - shaped)  // x=1 → 0 dB, x=0 → MIN_DB
+        let pct = (dB + 30.0) / 0.3                     // invert the C map → device->volume pct
+        return max(0.0, min(1.0, pct / 100.0))
+    }
+
+    /// Pick the AP1 perceptual curve or the AP2 linear map by device. MUST be
+    /// called on `stateQueue` (reads `known`). Unknown id falls back to linear.
+    private func engineVolume(forID id: String, uiVolume: Int) -> Double {
+        (known[id]?.supportsAirPlay2 ?? true)
+            ? Self.engineVolume(uiVolume)
+            : Self.engineVolumeAP1(uiVolume)
     }
 
     /// Ids with a `setVolume` op currently in flight against the engine. Guards
@@ -2719,9 +2790,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // the engine's completions and state-stream transitions ARE ground truth, so
     // `.connecting → .connected`/`.failed` rides the SAME hooks that already drive
     // `isSelected`/`isAvailable` (converge success/failure, `applyEngineState`,
-    // discovery loss) rather than a separate poll-derived stability window. AP1-only
-    // devices are never routed (`setOutputSet` skips them entirely, D6) so they never
-    // reach these helpers and stay `.off` for their whole lifetime.
+    // discovery loss) rather than a separate poll-derived stability window. AP1 and
+    // AP2 receivers alike ride these hooks; only the local Mac output (never routed,
+    // `setOutputSet` skips it) stays `.off` for its whole lifetime.
 
     /// Current lifecycle state for an id; absence means `.off`.
     private func connectionState(of id: String) -> ConnectionState {   // on stateQueue
@@ -2750,7 +2821,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let intended = stashedVolume[id] ?? known[id]?.volume ?? 0
         stashedVolume[id] = nil
         applyLocal(id) { $0.volume = intended }
-        pushVolume(outputID, engineValue: Self.engineVolume(intended))
+        pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
     /// Seed a just-(re)connected engine output's starting volume from the Mac's
@@ -2814,28 +2885,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             stashedVolume[id] = seed
             pushVolume(outputID, engineValue: Self.engineVolume(0))
         } else {
-            pushVolume(outputID, engineValue: Self.engineVolume(seed))
+            pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: seed))
         }
         return seed
     }
 
     // MARK: Capture gate
 
-    /// Start/stop capture so the tap runs IF AND ONLY IF at least one real AP2
-    /// output is selected. On `stateQueue`, called only from `setOutputSet`.
+    /// Start/stop capture so the tap runs IF AND ONLY IF at least one real
+    /// receiver output is selected. On `stateQueue`, called only from `setOutputSet`.
     ///
     /// ## Why intent, not availability (deliberate)
     /// `want` reads `expectedSelected` — what the user ASKED for — and only checks
-    /// `supportsAirPlay2` (never `isAvailable`, `added`, or `converging`). A
-    /// selected receiver that transiently drops therefore KEEPS capture running
-    /// (the Mac stays muted) until it returns or the user deselects it. That's the
-    /// point: a brief dropout must not blast the Mac's speakers mid-song. The
-    /// `supportsAirPlay2` check is what excludes the two id classes that can never
-    /// stream — the local Mac device (`supportsAirPlay2 == false`, and already
-    /// filtered by `GroupController.applyRouting`) and AP1-only receivers (D6) —
-    /// so `want` means exactly "an id `setOutputSet` could actually `addOutput`".
-    /// An id not yet discovered reads `nil` ⇒ excluded, matching the converge loop
-    /// below, which only ever iterates `order` (known devices).
+    /// that the id is a discovered receiver (`!isLocalDevice`), never `isAvailable`,
+    /// `added`, or `converging`. A selected receiver that transiently drops
+    /// therefore KEEPS capture running (the Mac stays muted) until it returns or the
+    /// user deselects it. That's the point: a brief dropout must not blast the Mac's
+    /// speakers mid-song. The `!isLocalDevice` check excludes the one id class that
+    /// can never stream — the local Mac device (already filtered by
+    /// `GroupController.applyRouting`, and with no `outputIDs` entry) — while
+    /// including both AP1 and AP2 receivers, so `want` means exactly "an id
+    /// `setOutputSet` could actually `addOutput`". An id not yet discovered reads
+    /// `nil` ⇒ excluded, matching the converge loop below, which only ever iterates
+    /// `order` (known devices).
     ///
     /// ## Why the flag flips here but the call runs elsewhere
     /// `captureRunning` is flipped under `stateQueue` (so concurrent
@@ -2853,7 +2925,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // no receiver came back, so un-mute the Mac). Neither touches the selection
         // intent, so the gate re-engages the moment both clear.
         let want = !suspended && !wakeCaptureOverride
-            && expectedSelected.contains { known[$0]?.supportsAirPlay2 == true }
+            && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
         captureControlQueue.async {
@@ -3175,33 +3247,3 @@ extension CaptureControlling {
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
-
-// MARK: - Seam for the future AirPlay 1 (raop) sender (D6)
-//
-// AP1-only receivers are DISCOVERED and SURFACED today (dimmed/disabled, per D6),
-// but the engine is an AirPlay-2-only sender, so `NativeBackend` NEVER calls
-// `engine.addOutput` for them — it emits them `deviceAdded` with
-// `supportsAirPlay2 = false` / `isAvailable = false` and leaves them there.
-//
-// The next iteration (D1: "AP1 (raop.c) sender port: deferred to the NEXT
-// iteration, first in line") adds a classic-AirPlay sender. When it lands, it slots
-// in behind THIS protocol, parallel to how the AP2 path uses `EngineControlling`:
-// `NativeBackend` would hold an optional `AirPlay1Sending`, route AP1 ids in
-// `setOutputSet.converge` to it instead of the engine, flip AP1 devices'
-// `isAvailable`/`supportsAirPlay2` handling, and fold its own state transitions
-// into the same `deviceUpdated` path. The shape below is intentionally identical to
-// the AP2 primitives so `converge` can dispatch on device kind without a second
-// convergence engine.
-//
-// NOTE: this is a seam only — there is NO implementation and NO conformance in this
-// iteration. It exists so the wiring point is explicit and the next task has a
-// contract to fill rather than a redesign.
-protocol AirPlay1Sending: Sendable {
-    /// Begin streaming to an AP1 receiver, resolved from its colon-hex device id
-    /// (the same `Device.id` string the AP2 path keys on — never reformatted).
-    func addOutput(deviceID: String, descriptor: DeviceDescriptor) async throws
-    /// Stop streaming to an AP1 receiver.
-    func removeOutput(deviceID: String) async throws
-    /// Set volume 0.0…1.0 on an AP1 receiver (classic AirPlay volume model).
-    func setVolume(deviceID: String, _ volume: Double) async throws
-}

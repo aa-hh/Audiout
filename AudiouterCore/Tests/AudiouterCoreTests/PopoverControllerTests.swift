@@ -942,6 +942,30 @@ final class PopoverControllerTests: XCTestCase {
                        "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
     }
 
+    /// T4b (a deliberate product call, not a bug): an AirPlay-1-only (RAOP)
+    /// device must never appear as a per-app routing target — a per-app rebind
+    /// (`NativeBackend.performBindOp`'s `.rebind`, fired on a route change)
+    /// re-anchors an AP1 device's clock (no shared timing protocol with AP2),
+    /// drifting it out of sync with the rest of a group, and some classic
+    /// receivers briefly reject the RTSP reconnect. `demoFleet`'s "Mixer"
+    /// (`airport-mixer`) is `supportsAirPlay2 == false` — it must be excluded
+    /// from the destination menu even though it's a perfectly normal, selectable
+    /// Selected-Devices row (AP1 devices are still fine for whole-fleet output,
+    /// just not per-app redirect targets).
+    func testAppRowDestinationMenuExcludesAirPlay1OnlyDevices() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertFalse(titles.contains("Mixer"),
+                       "an AirPlay-1-only device (supportsAirPlay2 == false) must never be offered "
+                       + "as a per-app routing target")
+        XCTAssertTrue(titles.contains("Office"),
+                     "an AirPlay-2 device is still offered normally")
+    }
+
     /// Selecting an AirPlay destination on a row calls through to
     /// `AppRoutingController.setDestination` and repaints: the route is redirected,
     /// the row's selected id updates, and the slider un-dims.

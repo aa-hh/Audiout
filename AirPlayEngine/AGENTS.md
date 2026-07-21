@@ -48,8 +48,16 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 - **Firewall verdicts stick to already-bound sockets.** Allowlist the binary
   *before* it binds, or PTP is silently dropped — session succeeds, receiver
   stays silent.
-- **Not fully wired into the app.** Check `NativeBackend` and
-  `../dev/notes/p2b-nativebackend-seam-brief.md` before assuming closed.
+- **Two sender backends share one registry.** `sender/raop.c` (classic
+  AirPlay 1 / RAOP) is vendored alongside `sender/airplay.c` (AirPlay 2) as a
+  second `struct output_definition` (`output_raop`); `shims/outputs.c`'s
+  `backend_for(device->type)` dispatches every per-device op to whichever one
+  owns the device, and `outputs_write` broadcasts to both (each self-filters
+  its own session list). `NativeBackend` drives AP1 receivers through this
+  same engine surface as AP2 — `addOutput`, volume, mute, select all apply;
+  `supportsAirPlay2 == false` only means "no perfect multi-room sync", it is
+  not an unsupported gate. See `docs/raop-seam-brief.md` for the port design
+  and `docs/VENDORED-DIFFS.md` Entry 3 for the one vendored `raop.c` diff.
 
 ## Map
 
@@ -62,6 +70,7 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 | `Sources/CAirPlayEngine/` | Vendored+shimmed C cluster. |
 | `Sources/engine-probe/` | Gated one-device live-session CLI. |
 | `docs/seam-map.md` | Extraction blueprint, authoritative. |
+| `docs/raop-seam-brief.md` | RAOP (AirPlay 1) extraction blueprint, the seam-map's counterpart. |
 | `docs/first-light-report.md` | Live-hardware-test ledger, diagnostic method. |
 | `docs/VENDORED-DIFFS.md` | Exceptions to byte-identical vendored C. |
 | `docs/license-inventory.md`, `README.md` | Per-file license inventory; build/package-layout story. |

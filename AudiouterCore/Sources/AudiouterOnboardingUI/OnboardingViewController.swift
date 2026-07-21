@@ -230,13 +230,10 @@ public final class OnboardingViewController: NSViewController {
     // MARK: Sections
 
     private func makeHeader() -> NSView {
-        // An app-icon-style rounded tile (accent fill, white glyph) reads as "an
-        // app" far more than a bare glyph — the same first impression macOS's own
-        // setup screens open with.
-        let tile = IconTileView(symbolName: "airplayaudio",
-                                tint: .controlAccentColor,
-                                accessibility: "Audiouter",
-                                side: 60, pointSize: 30, cornerRadius: 14)
+        // Use the app's actual icon instead of a generic AirPlay symbol. The app
+        // icon is always available via NSApp.applicationIconImage and automatically
+        // tracks any future app-icon changes without needing code updates.
+        let tile = makeAppIconTile()
 
         let title = NSTextField(labelWithString: "Welcome to Audiouter")
         title.font = .systemFont(ofSize: 22, weight: .bold)
@@ -254,6 +251,42 @@ public final class OnboardingViewController: NSViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.setCustomSpacing(14, after: tile)
         return fullWidth(stack)
+    }
+
+    /// Create a rounded tile containing the app's actual icon image (not a
+    /// generic symbol). The icon is fetched from the running bundle, so it always
+    /// tracks the deployed app icon without needing hardcoded asset names.
+    private func makeAppIconTile() -> NSView {
+        let tile = NSView()
+        tile.wantsLayer = true
+        tile.translatesAutoresizingMaskIntoConstraints = false
+
+        // Set up the rounded corners and shadow styling to match the icon tile look.
+        tile.layer?.cornerRadius = 14
+        tile.layer?.cornerCurve = .continuous
+        tile.layer?.masksToBounds = true
+
+        // Get the app's icon from the running bundle. NSApp.applicationIconImage
+        // is always available and automatically reflects the current app icon.
+        let iconImage = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+
+        let imageView = NSImageView(image: iconImage ?? NSImage())
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+
+        tile.addSubview(imageView)
+
+        NSLayoutConstraint.activate([
+            tile.widthAnchor.constraint(equalToConstant: 60),
+            tile.heightAnchor.constraint(equalToConstant: 60),
+            imageView.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+            imageView.widthAnchor.constraint(equalTo: tile.widthAnchor),
+            imageView.heightAnchor.constraint(equalTo: tile.heightAnchor),
+        ])
+
+        return tile
     }
 
     private func makeReassurance() -> NSView {

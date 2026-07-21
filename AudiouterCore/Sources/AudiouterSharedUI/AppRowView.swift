@@ -701,6 +701,12 @@ public final class AppRowView: NSView {
     /// "No Redirect", secondary otherwise).
     public var test_readoutTextColor: NSColor? { readoutLabel.textColor }
 
+    /// The row's composed VoiceOver label — name, volume, routing destination,
+    /// and "not running" when applicable (`configureAccessibility()`). This
+    /// row is a single AX leaf (`setAccessibilityElement(true)`), so this is
+    /// the only text a VoiceOver user ever hears for it.
+    public var test_accessibilityLabel: String? { accessibilityLabel() }
+
     /// The cursor-rect regions `resetCursorRects()` marks `.pointingHand`
     /// (C3) — exposed since AppKit doesn't expose a live cursor-rect list and
     /// a headless/offscreen view never receives a real `resetCursorRects()`
@@ -826,7 +832,24 @@ public final class AppRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("\(nameLabel.stringValue), volume \(slider.integerValue) percent")
+
+        // Fold routing destination + running status into the row's ONE
+        // composed label — `setAccessibilityElement(true)` makes this row a
+        // single AX leaf, so a status-only badge/subview (like `offlineBadge`'s
+        // own "Not running" image description) is never independently reached
+        // by VoiceOver; it must be said here or not at all. Read live view
+        // state (`destinationPopUp`'s already-rebuilt selection,
+        // `offlineBadge`'s already-set visibility) rather than duplicating it
+        // into a second stored flag, same idiom as `DeviceRowView.isInMenu`.
+        var label = "\(nameLabel.stringValue), volume \(slider.integerValue) percent"
+        if let destinationTitle = destinationPopUp.selectedItem?.title, !destinationTitle.isEmpty {
+            label += ", routed to \(destinationTitle)"
+        }
+        if !offlineBadge.isHidden {
+            label += ", not running"
+        }
+        setAccessibilityLabel(label)
+
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(nameLabel.stringValue) volume")
         destinationPopUp.setAccessibilityLabel("\(nameLabel.stringValue) destination")

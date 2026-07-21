@@ -182,14 +182,60 @@ public final class IconPickerViewController: NSViewController {
         button.bezelStyle = .regularSquare
         button.imagePosition = .imageOnly
         button.toolTip = name
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: name)
+        // VoiceOver must never read a raw SF Symbol name ("hifispeaker.2.fill")
+        // aloud — `accessibilityLabel(forSymbol:)` maps every curated name to
+        // plain language; the button's own label is set explicitly too, since
+        // an `NSImage`'s `accessibilityDescription` alone isn't guaranteed to
+        // surface through a borderless, image-only `NSButton`.
+        let plainLabel = Self.accessibilityLabel(forSymbol: name)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: plainLabel)
         image?.isTemplate = true
         button.image = image
         button.contentTintColor = .secondaryLabelColor
         button.target = self
         button.action = #selector(curatedButtonTapped(_:))
         button.identifier = NSUserInterfaceItemIdentifier(name)
+        button.setAccessibilityLabel(plainLabel)
         return button
+    }
+
+    /// Plain-language VoiceOver labels for `DeviceIcon.curated` — every symbol
+    /// the grid can ever show a button for (the search field's free-text exact
+    /// match path previews a symbol but never becomes a grid cell). Falls back
+    /// to a space-separated humanization of the raw name for any curated
+    /// addition this map hasn't caught up with yet, so a future symbol is
+    /// merely less polished, never silent.
+    private static let curatedAccessibilityLabels: [String: String] = [
+        "hifispeaker.fill": "Speaker",
+        "hifispeaker.2.fill": "Stereo speakers",
+        "homepod.fill": "HomePod",
+        "homepod.2.fill": "Two HomePods",
+        "appletv.fill": "Apple TV",
+        "tv.fill": "TV",
+        "airpods": "AirPods",
+        "airpodspro": "AirPods Pro",
+        "headphones": "Headphones",
+        "speaker.wave.2.fill": "Speaker, medium volume",
+        "speaker.wave.3.fill": "Speaker, full volume",
+        "radio.fill": "Radio",
+        "music.note": "Music note",
+        "music.note.house.fill": "Music room",
+        "house.fill": "House",
+        "bed.double.fill": "Bedroom",
+        "sofa.fill": "Living room",
+        "fork.knife": "Kitchen",
+        "laptopcomputer": "Laptop",
+        "desktopcomputer": "Desktop computer",
+        "wifi.router.fill": "Wi-Fi router",
+        "guitars.fill": "Guitars",
+        "gamecontroller.fill": "Game controller",
+        "rectangle.3.group": "Grouped devices",
+    ]
+
+    private static func accessibilityLabel(forSymbol name: String) -> String {
+        curatedAccessibilityLabels[name] ?? name
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
     }
 
     // MARK: Configuration
@@ -320,6 +366,13 @@ public final class IconPickerViewController: NSViewController {
     /// `DeviceIcon.isValid`) when the search field is empty, or the live
     /// search-narrowed subset otherwise. Mirrors what the grid visibly shows.
     public var test_curatedSymbolNames: [String] { curatedNames }
+
+    /// The plain-language VoiceOver label a curated grid button reports for
+    /// `symbolName` — pure function, exposed so a test can assert coverage
+    /// without traversing `NSGridView`'s button subviews.
+    public static func test_accessibilityLabel(forCuratedSymbol name: String) -> String {
+        accessibilityLabel(forSymbol: name)
+    }
 }
 
 extension IconPickerViewController: NSSearchFieldDelegate {

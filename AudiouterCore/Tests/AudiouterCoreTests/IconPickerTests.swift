@@ -238,4 +238,33 @@ final class IconPickerTests: XCTestCase {
 
         XCTAssertEqual(count, 1)
     }
+
+    // MARK: Grid cell VoiceOver labels (A11Y-LABELS)
+
+    /// Every curated symbol gets a plain-language label — never the raw SF
+    /// Symbol name, which VoiceOver used to read verbatim ("hifispeaker point
+    /// 2 fill").
+    func testEveryCuratedSymbolHasAPlainLanguageAccessibilityLabel() {
+        for name in DeviceIcon.curated where DeviceIcon.isValid(name) {
+            let label = IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: name)
+            XCTAssertFalse(label.isEmpty, "\(name) must have a non-empty label")
+            XCTAssertNotEqual(label, name, "\(name)'s label must not be the raw symbol name")
+            XCTAssertFalse(label.contains("."), "\(name)'s label (\"\(label)\") must read as prose, not a dotted symbol name")
+        }
+    }
+
+    /// A spot check on a few well-known curated names, guarding against the
+    /// mapping silently regressing to the raw-name fallback.
+    func testKnownCuratedSymbolsMapToExpectedPlainLanguageLabels() {
+        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "homepod.fill"), "HomePod")
+        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "airpodspro"), "AirPods Pro")
+        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "laptopcomputer"), "Laptop")
+    }
+
+    /// An uncurated/unmapped name still produces a readable (non-crashing,
+    /// non-dotted) fallback label rather than silence.
+    func testUnmappedSymbolFallsBackToAHumanizedName() {
+        let label = IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "some.future-symbol")
+        XCTAssertEqual(label, "some future symbol")
+    }
 }

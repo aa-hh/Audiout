@@ -246,6 +246,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.popoverController.toggle(relativeTo: button)
         }
 
+        // Secondary (right/control) click on the menu-bar icon raises a small menu
+        // — the discoverable way to reach Settings, Groups, and Quit in a Dock-less
+        // app. A minimal main menu supplies ⌘Q / ⌘, while the app is active.
+        statusItemController.secondaryClickMenu = { [weak self] in self?.makeStatusMenu() }
+        installMainMenu()
+
         // The mixer model binds to the resolved backend, then the popover binds
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
@@ -494,6 +500,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindowController = controller
         controller.present()
     }
+
+    // MARK: Menu-bar secondary menu + app main menu (Quit / Settings discoverability)
+
+    /// The menu shown on a right/control-click of the status item — the
+    /// discoverable path to Settings, Groups, and Quit for a Dock-less app whose
+    /// only other quit affordance is the small power glyph in the popover header.
+    @MainActor
+    private func makeStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+        let settings = menu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settings.target = self
+        let groups = menu.addItem(withTitle: "Groups…", action: #selector(menuOpenGroups), keyEquivalent: "")
+        groups.target = self
+        menu.addItem(.separator())
+        let quit = menu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        return menu
+    }
+
+    /// A minimal application main menu. A menu-bar-only (`.accessory`) app shows
+    /// no menu bar, but a main menu still supplies working key equivalents while
+    /// the app is active — this is what makes ⌘Q (and ⌘,) work, which the app
+    /// otherwise lacked entirely.
+    @MainActor
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(.separator())
+        let quit = appMenu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        appItem.submenu = appMenu
+        NSApp.mainMenu = mainMenu
+    }
+
+    @MainActor @objc private func menuOpenSettings() { openSettings() }
+    @MainActor @objc private func menuOpenGroups() { openMixer() }
 
     /// "Open Mixer…" target — open/focus the full mixer window (SPEC §9, T-U4).
     /// Lazily built on first use, then reused; seeded with the current device

@@ -25,6 +25,12 @@ final class StatusItemController {
     /// popover relative to `button`.
     var onButtonClicked: ((NSStatusBarButton) -> Void)?
 
+    /// Supplies the menu to show on a SECONDARY click (right-click or
+    /// control-click) of the status button — the discoverable home for Quit,
+    /// Settings, and Groups in a menu-bar-only app that has no Dock menu.
+    /// Returning `nil` falls back to the ordinary primary-click behavior.
+    var secondaryClickMenu: (() -> NSMenu?)?
+
     init() {
         // Variable length so the button sizes to its content (brief §4).
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -40,9 +46,25 @@ final class StatusItemController {
         guard let button = statusItem.button else { return }
         button.target = self
         button.action = #selector(buttonClicked(_:))
+        // Fire on right-mouse too so a secondary click can raise the context menu
+        // instead of toggling the popover.
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
     @objc private func buttonClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isSecondary = event?.type == .rightMouseUp
+            || (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
+        if isSecondary, let menu = secondaryClickMenu?() {
+            // Assign the menu just for this click, let AppKit position + track it
+            // under the button, then clear it so ordinary clicks keep toggling the
+            // popover. This is the documented way to mix a click-action with an
+            // on-demand menu on one status item.
+            statusItem.menu = menu
+            sender.performClick(nil)
+            statusItem.menu = nil
+            return
+        }
         onButtonClicked?(sender)
     }
 

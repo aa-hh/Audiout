@@ -3,6 +3,21 @@
 import AppKit
 import AudiouterCore
 
+/// Why the onboarding window is being presented right now — drives whether the
+/// "a permission got turned off" banner renders.
+///
+/// `.firstRun` (the default, used by every existing call site) is the
+/// original screen, unchanged. `.permissionLost` is used when the app finds
+/// — via ``SetupModel/auditRequiredPermissions()`` on reactivate/wake — that
+/// one of the three REQUIRED permissions (``RequiredPermission``; Remote
+/// Control is deliberately excluded, it's an enhancement not a requirement)
+/// was revoked after setup had already completed, and force-reopens this
+/// window rather than silently degrading.
+public enum OnboardingReason: Equatable, Sendable {
+    case firstRun
+    case permissionLost([RequiredPermission])
+}
+
 /// The single-screen first-run onboarding content: a welcome header, the
 /// reassurance copy that reframes the OS's "recording" language before any system
 /// prompt fires, one row per permission (``PermissionRowView``), and a Done
@@ -23,6 +38,7 @@ public final class OnboardingViewController: NSViewController {
     static let contentWidth: CGFloat = 500
 
     private let model: SetupModel
+    private let reason: OnboardingReason
     private let onOpenSettings: (SystemSettingsPane) -> Void
     private let onDone: () -> Void
 
@@ -30,6 +46,11 @@ public final class OnboardingViewController: NSViewController {
     private var networkRow: PermissionRowView!
     private var remoteControlRow: PermissionRowView!
     private var ptpHelperRow: PTPHelperRowView!
+
+    /// The `.permissionLost` banner, if this presentation built one (nil for
+    /// `.firstRun`). Held for test inspection.
+    private var permissionBannerView: NSView?
+    private var permissionBannerLabel: NSTextField?
 
     /// Polls the silent Accessibility trust read while the window is open, so a
     /// grant made in System Settings shows up even if `AXIsProcessTrusted()` only
@@ -47,9 +68,11 @@ public final class OnboardingViewController: NSViewController {
     private var ptpHelperPoll: Timer?
 
     public init(model: SetupModel,
+                reason: OnboardingReason = .firstRun,
                 onOpenSettings: @escaping (SystemSettingsPane) -> Void,
                 onDone: @escaping () -> Void) {
         self.model = model
+        self.reason = reason
         self.onOpenSettings = onOpenSettings
         self.onDone = onDone
         super.init(nibName: nil, bundle: nil)
@@ -121,6 +144,15 @@ public final class OnboardingViewController: NSViewController {
         // comment) rather than a fourth PermissionStatus case.
         ptpHelperRow = PTPHelperRowView(
             onOpenLoginItems: { [weak self] in self?.model.openPTPHelperLoginItems() })
+
+        // `.permissionLost` gets a banner ABOVE the header; `.firstRun` renders
+        // exactly as before (no banner at all).
+        if case .permissionLost(let unmet) = reason {
+            let banner = makeBanner(unmet: unmet)
+            permissionBannerView = banner
+            content.addArrangedSubview(banner)
+            content.setCustomSpacing(18, after: banner)
+        }
 
         let header = makeHeader()
         content.addArrangedSubview(header)
@@ -301,6 +333,72 @@ public final class OnboardingViewController: NSViewController {
         return fullWidth(stack)
     }
 
+    /// The `.permissionLost` banner: a stock system-orange inset card (reusing
+    /// ``RoundedContainerView``, the same grouped-container look the
+    /// permission card below uses) with a warning glyph and copy naming the
+    /// specific permission(s) that got turned off. System colors only — no
+    /// custom drawing beyond the shared rounded-rect container this screen
+    /// already uses.
+    private func makeBanner(unmet: [RequiredPermission]) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                             accessibilityDescription: "Warning")
+        icon.symbolConfiguration = .init(pointSize: 16, weight: .semibold)
+        icon.contentTintColor = .systemOrange
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let text = NSTextField(wrappingLabelWithString: Self.bannerText(for: unmet))
+        text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        text.textColor = .labelColor
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.preferredMaxLayoutWidth = Self.contentWidth - 56 - 32 - 16
+        permissionBannerLabel = text
+
+        let row = NSStackView(views: [icon, text])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = RoundedContainerView(fill: NSColor.systemOrange.withAlphaComponent(0.14),
+                                        border: NSColor.systemOrange.withAlphaComponent(0.4))
+        card.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
+        ])
+        return card
+    }
+
+    /// The specific unmet permission(s), named plainly, so the user knows
+    /// exactly what to look for below without hunting through all three rows.
+    private static func bannerText(for unmet: [RequiredPermission]) -> String {
+        let names = unmet.map(displayName(for:))
+        let joined: String
+        switch names.count {
+        case 0: joined = "a permission"   // shouldn't happen — reason is only built with a non-empty set
+        case 1: joined = names[0]
+        case 2: joined = "\(names[0]) and \(names[1])"
+        default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
+        }
+        let plural = names.count > 1 ? "permissions" : "permission"
+        return "Audiouter needs the \(joined) \(plural), currently turned off. "
+            + "Re-enable it below so the app can keep working."
+    }
+
+    private static func displayName(for permission: RequiredPermission) -> String {
+        switch permission {
+        case .audioCapture: return "System Audio"
+        case .localNetwork: return "Local Network"
+        case .ptpHelper:    return "PTP helper"
+        }
+    }
+
     private func makeReassurance() -> NSView {
         // The one message this screen exists to land: reframe the OS's "recording"
         // label before the prompt does. Kept to two calm sentences.
@@ -447,4 +545,10 @@ public final class OnboardingViewController: NSViewController {
     var test_remoteControlRow: PermissionRowView { _ = view; return remoteControlRow }
     /// The PTP helper row (its own type — see ``PTPHelperRowView``).
     var test_ptpHelperRow: PTPHelperRowView { _ = view; return ptpHelperRow }
+
+    /// Whether this presentation rendered the `.permissionLost` banner.
+    public var test_showsPermissionLostBanner: Bool { _ = view; return permissionBannerView != nil }
+
+    /// The banner's copy, if shown (nil for `.firstRun`).
+    public var test_permissionLostBannerText: String? { _ = view; return permissionBannerLabel?.stringValue }
 }

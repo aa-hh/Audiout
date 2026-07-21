@@ -174,16 +174,22 @@ let package = Package(
                 // Portable brew prefix resolved at the top of this file.
                 .unsafeFlags(["-I\(brewPrefix)/opt/libevent/include"]),
             ],
-            linkerSettings: [
-                .unsafeFlags(["-L\(brewPrefix)/opt/libevent/lib"]),
-                .linkedLibrary("event"),
-                // libevent's pthreads support lives in a separate library.
-                // evthread_use_pthreads() (EngineThread) needs it so that
-                // cross-thread event_base_once() wakes a kevent-blocked loop —
-                // without it the engine's first live start() deadlocked
-                // (gated first-light, 2026-07-16).
-                .linkedLibrary("event_pthreads"),
-            ]
+            // NO libevent linkerSettings here on purpose. Clibairptp is a
+            // static-library target — it does not resolve its own external
+            // symbols; each final executable that links it does. Keeping the
+            // libevent link OUT of this shared target is what lets its two
+            // consumers link libevent DIFFERENTLY: CAirPlayEngine (the app
+            // path) links the Homebrew libevent *dylib* (its own linkerSettings
+            // below), while ptp-helper *statically* links libevent_core.a +
+            // libevent_pthreads.a. The helper must static-link because it is a
+            // hardened-runtime Developer-ID root daemon with Library Validation
+            // ON (no disable-library-validation entitlement, unlike the app):
+            // dyld refuses to load the ad-hoc-signed Homebrew libevent *dylib*
+            // into it ("different Team IDs"), which crashed the launchd daemon
+            // at load time (OS_REASON_DYLD) — found in the first Developer-ID
+            // live test, 2026-07-21. Static-linking removes the runtime dylib
+            // dependency entirely, so there is nothing external to validate.
+            linkerSettings: []
         ),
 
         // The vendored + shimmed C cluster — see header comment above for
@@ -345,7 +351,22 @@ let package = Package(
         .executableTarget(
             name: "ptp-helper",
             dependencies: ["Clibairptp"],
-            path: "Sources/ptp-helper"
+            path: "Sources/ptp-helper",
+            linkerSettings: [
+                // STATIC-link libevent into the root daemon (see the long note
+                // on Clibairptp's empty linkerSettings above). Passing the .a
+                // archive paths directly to the linker links them statically,
+                // so the shipped helper has NO libevent dylib dependency —
+                // `otool -L` shows only libSystem — and Library Validation on
+                // the hardened Developer-ID daemon has nothing external to
+                // reject. libevent_core.a = the event loop; libevent_pthreads.a
+                // = evthread_use_pthreads() (needed so cross-thread
+                // event_base_once() wakes the kevent-blocked master loop).
+                .unsafeFlags([
+                    "\(brewPrefix)/opt/libevent/lib/libevent_core.a",
+                    "\(brewPrefix)/opt/libevent/lib/libevent_pthreads.a",
+                ]),
+            ]
         ),
 
         // TEST-ONLY shim (T7, ptp-helper-design.md §6.2): re-exposes

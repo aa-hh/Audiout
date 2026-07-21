@@ -59,6 +59,15 @@ to a backend directly.
   `Chrome` enum, no `showPanel`, and no `onClose` on this type anymore — the
   land-home-on-close behavior belongs to the shell. When touching hosting,
   edit the shell, not this controller.
+- **`NSWindow.setFrameAutosaveName`'s Bool return does NOT mean "a saved frame
+  was restored"** — verified empirically, it returns `true` even for a
+  brand-new autosave name with nothing ever saved. `makeContainer()` calls
+  `setFrameUsingName` first (the trustworthy restore-and-report API), then
+  `setFrameAutosaveName` only to arm future autosave-on-move. `init()` gates
+  its default-size/`center()` fallback on that Bool — trusting the wrong one
+  silently re-centers over every restored frame on every launch, a regression
+  invisible to a same-session move/close/reopen smoke test because
+  `AppDelegate` builds this controller once and reuses it.
 - **The create sheet gates on the split VC's OWN host window, not
   `self.window`.** `presentCreateSheet` presents on `splitViewController` and
   guards `splitViewController.view.window?.isVisible`, so the sheet re-parents

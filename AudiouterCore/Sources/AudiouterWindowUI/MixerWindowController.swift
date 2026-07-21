@@ -121,10 +121,29 @@ public final class MixerWindowController: NSWindowController {
         // left with the mixer pane — live-test feedback 2026-07-18). The split
         // view IS the window's content controller now — the sidebar item runs
         // the full window height; only the content item hosts the footer.
-        let window = Self.makeContainer()
+        let (window, hasSavedFrame) = Self.makeContainer()
+        // `setFrameAutosaveName` (inside `makeContainer()`) already restored the
+        // user's last frame into `window.frame` SYNCHRONOUSLY if one was saved —
+        // capture it now, before `contentViewController` is assigned, because
+        // assigning a content view controller whose view hasn't been laid out
+        // yet collapses the window to that view's near-zero intrinsic size.
+        // Re-apply the restored frame explicitly afterward so a real user's
+        // saved position/size survive a relaunch; only a truly first-ever
+        // window (no saved frame yet) falls back to the default size +
+        // `center()`. Skipping this check and unconditionally calling
+        // `setContentSize`/`center()` here silently discarded every restored
+        // frame on every launch — the window LOOKED like it remembered its
+        // position only because `AppDelegate` builds this controller once and
+        // reuses it for the rest of the process's life, so closing/reopening
+        // the window within one run never re-ran this code at all.
+        let restoredFrame = window.frame
         window.contentViewController = splitViewController
-        window.setContentSize(NSSize(width: 720, height: 460))
-        window.center()
+        if hasSavedFrame {
+            window.setFrame(restoredFrame, display: false)
+        } else {
+            window.setContentSize(NSSize(width: 720, height: 460))
+            window.center()
+        }
         // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
 
         super.init(window: window)
@@ -174,7 +193,23 @@ public final class MixerWindowController: NSWindowController {
     /// shell (`ControlPanelWindowController` in `AudiouterSharedUI`) is a separate
     /// type that hosts `contentViewController`; this controller only ever builds
     /// the window.
-    private static func makeContainer() -> NSWindow {
+    ///
+    /// Returns whether a previously-saved frame under the "MixerWindow" autosave
+    /// name was found and synchronously applied, so the caller knows whether
+    /// it's safe to fall back to the default size + `center()` — a caller that
+    /// unconditionally re-sizes/re-centers afterward silently throws the
+    /// restore away.
+    ///
+    /// Deliberately calls `setFrameUsingName` FIRST, not `setFrameAutosaveName`
+    /// alone: `setFrameAutosaveName`'s own Bool return is NOT a trustworthy
+    /// signal for "was a frame actually restored" — verified empirically, it
+    /// returns `true` even for a brand-new name with nothing ever saved (its
+    /// return value means something else undocumented, not "restored").
+    /// `setFrameUsingName` is the API that both restores a saved frame AND
+    /// reliably reports whether it found one. `setFrameAutosaveName` is called
+    /// afterward purely to ARM ongoing autosave-on-move/resize for this window
+    /// going forward; re-applying an already-restored frame is a harmless no-op.
+    private static func makeContainer() -> (window: NSWindow, hasSavedFrame: Bool) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -182,8 +217,9 @@ public final class MixerWindowController: NSWindowController {
             defer: false
         )
         window.title = "Groups"
+        let hasSavedFrame = window.setFrameUsingName("MixerWindow")
         window.setFrameAutosaveName("MixerWindow")
-        return window
+        return (window, hasSavedFrame)
     }
 
     // MARK: App integration

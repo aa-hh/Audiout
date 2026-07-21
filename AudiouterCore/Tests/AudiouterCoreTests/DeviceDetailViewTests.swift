@@ -156,7 +156,10 @@ final class DeviceDetailViewTests: XCTestCase {
 
     func testGroupMembershipTextUpdatesOnRefreshAfterAMembershipChange() throws {
         let controller = makeController()
-        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: [], memberVolumes: [:]))
+        // Seed with a DIFFERENT member so "office" starts as a non-member while
+        // the group stays non-empty (an empty group is now rejected).
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["living-room"],
+                                       memberVolumes: ["living-room": 50]))
         let detail = DeviceDetailViewController(groupController: controller)
         detail.show(device: makeDevice(id: "office"))
         XCTAssertEqual(detail.test_groupMembershipText, "None")

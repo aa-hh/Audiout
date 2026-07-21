@@ -7,10 +7,48 @@ import AirPlayEngine
 /// double (feeds `DiscoveryEvent`s synchronously). No engine thread, no C cluster,
 /// no `NWBrowser`, no network, no TCC.
 ///
-/// Covers: `deviceAdded` on discovery, AP1 surfaced-unavailable-and-never-added,
+/// Covers: `deviceAdded` on discovery, AP1 surfaced-available-and-engine-driven,
 /// `deviceUpdated` on an out-of-band engine state transition, best-effort
 /// convergence (D4), and the mute stash/restore shim.
 final class NativeBackendTests: XCTestCase {
+
+    // MARK: AirPlay-1 perceptual volume curve (the "cliff at ~50%" fix, 2026-07-22)
+
+    /// The AP1 curve must keep the WHOLE slider audible: it compresses UI 0–100
+    /// onto the top of the AirPlay range so the C map (`-30 + 0.3·pct`) never
+    /// lands below `airPlay1MinVolumeDB`. Endpoints, monotonicity, and the "never
+    /// below the floor" invariant are the contract; the exact floor is tuned by ear.
+    func testEngineVolumeAP1KeepsWholeSliderAudible() {
+        // Helper: normalized 0…1 → the AirPlay dB the C layer will send.
+        func dB(_ normalized: Double) -> Double { -30.0 + 0.3 * (normalized * 100.0) }
+
+        // 100% → 0 dB (full), 0% → the floor (not −30 dB).
+        XCTAssertEqual(NativeBackend.engineVolumeAP1(100), 1.0, accuracy: 0.001)
+        XCTAssertEqual(dB(NativeBackend.engineVolumeAP1(0)),
+                       NativeBackend.airPlay1MinVolumeDB, accuracy: 0.2)
+
+        // Every position, including the bottom, stays at or above the floor —
+        // this is exactly what the linear map failed to do (0% → −30 dB → silent).
+        for pct in 0...100 {
+            XCTAssertGreaterThanOrEqual(
+                dB(NativeBackend.engineVolumeAP1(pct)),
+                NativeBackend.airPlay1MinVolumeDB - 0.001,
+                "AP1 volume at \(pct)% dropped below the perceptual floor")
+        }
+
+        // Monotonically non-decreasing across the slider.
+        for pct in 1...100 {
+            XCTAssertGreaterThanOrEqual(
+                NativeBackend.engineVolumeAP1(pct),
+                NativeBackend.engineVolumeAP1(pct - 1),
+                "AP1 volume curve is not monotonic at \(pct)%")
+        }
+
+        // AP2 path is untouched: linear 0…1 (0% → −30 dB is fine on AP2 receivers).
+        XCTAssertEqual(NativeBackend.engineVolume(0), 0.0, accuracy: 0.001)
+        XCTAssertEqual(NativeBackend.engineVolume(50), 0.5, accuracy: 0.001)
+        XCTAssertEqual(NativeBackend.engineVolume(100), 1.0, accuracy: 0.001)
+    }
 
     // MARK: Doubles
 
@@ -20,6 +58,10 @@ final class NativeBackendTests: XCTestCase {
         private(set) var started = false
         private(set) var stopped = false
         private(set) var discoveryFed: [OutputID] = []
+        /// The full descriptors handed to `updateDiscovery`, in order — lets an
+        /// integration test assert the ENGINE-facing `kind`/`name`/`parsedID` that
+        /// route a device to `output_raop` vs `output_airplay`, not just its id.
+        private(set) var fedDescriptors: [DeviceDescriptor] = []
         private(set) var discoveryRemoved: [String] = []   // descriptor names
         private(set) var added: [OutputID] = []
         private(set) var removed: [OutputID] = []
@@ -65,6 +107,7 @@ final class NativeBackendTests: XCTestCase {
             let id = descriptor.parsedID ?? OutputID(rawValue: 0)
             lock.withLock {
                 discoveryFed.append(id)
+                fedDescriptors.append(descriptor)
                 feedCounts[id.rawValue, default: 0] += 1
             }
             return id
@@ -149,6 +192,7 @@ final class NativeBackendTests: XCTestCase {
         var addedIDs: [OutputID] { lock.withLock { added } }
         var removedIDs: [OutputID] { lock.withLock { removed } }
         var fedIDs: [OutputID] { lock.withLock { discoveryFed } }
+        var fedDescriptorList: [DeviceDescriptor] { lock.withLock { fedDescriptors } }
         var discoveryRemovedNames: [String] { lock.withLock { discoveryRemoved } }
         var volumeCalls: [(OutputID, Double)] { lock.withLock { volumes } }
         var bufferSetCalls: [Int] { lock.withLock { bufferSets } }
@@ -168,6 +212,28 @@ final class NativeBackendTests: XCTestCase {
         func start() { startCount += 1 }
         func stop() { stopCount += 1 }
         func fire(_ event: DiscoveryEvent) { onEvent?(event) }
+    }
+
+    /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
+    /// through the REAL ``NativeDiscovery`` production pipeline (identity →
+    /// `descriptor(from:)` → `buildDevice`), so the end-to-end AP1 test exercises
+    /// the actual descriptor construction rather than a hand-built fixture.
+    private final class ScriptedBrowser: ServiceBrowsing, @unchecked Sendable {
+        var onResolve: (@Sendable (ResolvedService) -> Void)?
+        var onRemove: (@Sendable (RemovedService) -> Void)?
+        var onStateChange: (@Sendable (BrowserState) -> Void)?
+        func start() {}
+        func stop() {}
+        func resolve(_ service: ResolvedService) { onResolve?(service) }
+    }
+
+    /// A tiny thread-safe holder for the `DiscoveredDevice` that
+    /// `NativeDiscovery.onEvent` (called on its own serial queue) produces.
+    private final class DiscoveredBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: DiscoveredDevice?
+        func set(_ d: DiscoveredDevice) { lock.withLock { value = d } }
+        func get() -> DiscoveredDevice? { lock.withLock { value } }
     }
 
     /// Fakes the Mac's own default-output volume/mute (``SystemVolumeControlling``)
@@ -495,10 +561,11 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(engine.fedIDs.contains(device.outputID), "AP2 device should be fed to the engine")
     }
 
-    /// An AP1-only device is surfaced `deviceAdded` with supportsAirPlay2=false AND
-    /// isAvailable=false, is NEVER fed to the engine, and is NEVER addOutput-ed even
-    /// when included in a `setOutputSet`.
-    func testAirPlay1SurfacedUnavailableNeverAdded() async {
+    /// An AP1-only device is surfaced `deviceAdded` AVAILABLE (it drives through the
+    /// shared engine now, T7) but with `supportsAirPlay2 == false` — the flag stays
+    /// false because it means "no perfect multi-room sync", not "unsupported". Its
+    /// descriptor is fed to the engine exactly like an AP2 device's.
+    func testAirPlay1SurfacedAvailableAndFed() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -509,16 +576,142 @@ final class NativeBackendTests: XCTestCase {
         } after: { discovery.fire(.appeared(ap1)) }
 
         let d = events.compactMap { if case .deviceAdded(let x) = $0 { return x } else { return nil } }.first { $0.id == ap1.id }
-        XCTAssertEqual(d?.supportsAirPlay2, false)
-        XCTAssertEqual(d?.isAvailable, false, "AP1-only device must be surfaced unavailable (D6)")
+        XCTAssertEqual(d?.supportsAirPlay2, false, "AP1 keeps supportsAirPlay2==false — it means 'no perfect sync', still true")
+        XCTAssertEqual(d?.isAvailable, true, "an AP1 receiver is reachable and engine-driveable now (T7)")
 
-        // Never fed to the engine.
-        XCTAssertTrue(engine.fedIDs.isEmpty, "AP1 device must NOT be fed to the AP2 engine")
+        // Fed to the engine so it becomes addOutput-able, same as an AP2 device.
+        await pollUntil { engine.fedIDs.contains(ap1.outputID) }
+        XCTAssertTrue(engine.fedIDs.contains(ap1.outputID), "AP1 device must be fed to the shared engine (T7)")
+    }
 
-        // Even if the app tries to select it, it is never addOutput-ed.
+    /// Selecting an AP1 device converges it through the SAME engine surface as AP2:
+    /// it is `addOutput`-ed, marked selected/available/connected, and accepts
+    /// volume + mute control (which reach `engine.setVolume`). `supportsAirPlay2`
+    /// stays false throughout — the flag is not a gate any more (T7).
+    func testAirPlay1ConvergesAndDrives() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap1 = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
+        } after: { discovery.fire(.appeared(ap1)) }
+
+        // Select it → converge → addOutput.
         backend.setOutputSet([ap1.id])
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertTrue(engine.addedIDs.isEmpty, "AP1 device must NEVER be addOutput-ed (D6)")
+        await pollUntil {
+            let d = backend.devices.first { $0.id == ap1.id }
+            return d?.isSelected == true && engine.addedIDs.contains(ap1.outputID)
+        }
+        let selected = backend.devices.first { $0.id == ap1.id }
+        XCTAssertEqual(selected?.isSelected, true, "a selected AP1 device converges on (T7)")
+        XCTAssertEqual(selected?.isAvailable, true)
+        XCTAssertEqual(selected?.supportsAirPlay2, false, "converging must NOT flip the AP1 sync flag")
+        XCTAssertEqual(selected?.connectionState, .connected, "a driven AP1 device reaches .connected")
+        XCTAssertTrue(engine.addedIDs.contains(ap1.outputID), "AP1 device must be addOutput-ed (T7)")
+
+        // Volume + mute reach the engine through the ordinary surface.
+        backend.setVolume(42, for: ap1.id)
+        await pollUntil { engine.volumeCalls.contains { $0.0 == ap1.outputID } }
+        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == ap1.outputID },
+                      "setVolume on an AP1 device must reach engine.setVolume (T7)")
+
+        backend.setMuted(true, for: ap1.id)
+        await pollUntil { backend.devices.first { $0.id == ap1.id }?.isMuted == true }
+        XCTAssertEqual(backend.devices.first { $0.id == ap1.id }?.isMuted, true,
+                       "mute works on an AP1 device (stashed-volume shim, shared path)")
+    }
+
+    /// END-TO-END AP1 (classic RAOP) LIVE-PATH INTEGRATION TEST — the test that
+    /// would have caught the two live-feed gaps (kind never `.raop`; `parsedID`
+    /// nil for name-derived gear). It drives a REALISTIC classic-RAOP service —
+    /// `"<12-hex>@<display>"` instance name, `_raop._tcp`, NO `deviceid` TXT, NO
+    /// `features` TXT (exactly what shairport-sync / AirPort Express advertise) —
+    /// through the ACTUAL `NativeDiscovery` → `descriptor(from:)` production, then
+    /// as far through `NativeBackend`'s converge/feed toward the engine as the
+    /// harness allows, and asserts the ENGINE-facing descriptor routes to
+    /// `output_raop`. Fully deterministic: no live network, no real engine.
+    func testClassicRaopDiscoversAndFeedsEngineAsRaopEndToEnd() async {
+        // A realistic classic-RAOP advert: MAC-prefixed instance name, _raop._tcp,
+        // and an EMPTY TXT record — no `deviceid`, no `features`.
+        let instanceName = "6B2E52B73717@Kitchen Speaker"
+        let service = ResolvedService(
+            serviceType: .raop,
+            name: instanceName,
+            hostname: "kitchen.local",
+            address: "192.168.1.77",
+            family: .ipv4,
+            port: 5000,
+            txtRecord: [:]
+        )
+
+        // (1) Drive the REAL NativeDiscovery → descriptor(from:) production.
+        let browser = ScriptedBrowser()
+        let discovery = NativeDiscovery(browser: browser)
+        let box = DiscoveredBox()
+        discovery.onEvent = { if case .appeared(let d) = $0 { box.set(d) } }
+        discovery.start()
+        browser.resolve(service)                    // re-dispatched onto discovery's serial queue
+        await pollUntil { box.get() != nil }
+        discovery.stop()
+        guard let discovered = box.get() else {
+            return XCTFail("a classic-RAOP service must surface as .appeared (not be dropped)")
+        }
+
+        // The produced engine-facing DeviceDescriptor:
+        let descriptor = discovered.descriptor
+        //  - routes to output_raop, not the AP2 gate (Gap A).
+        XCTAssertEqual(descriptor.kind, .raop,
+                       "a _raop._tcp service must produce kind == .raop so feedDescriptor targets output_raop")
+        //  - keeps the raw "<12-hex>@…" prefix so raop_device_cb can parse the id.
+        XCTAssertEqual(descriptor.name, instanceName,
+                       "the raw 12-hex '@' prefix must survive to the engine for raop_device_cb's safe_hextou64")
+        //  - has a non-nil parsedID (Gap B: updateDiscovery throws invalidDescriptor otherwise).
+        XCTAssertNotNil(descriptor.parsedID,
+                        "parsedID must be non-nil (deviceid injected from the name) or updateDiscovery rejects it")
+        //  - three-way sync: parsedID == the name-derived OutputID == the raw hex.
+        XCTAssertEqual(descriptor.parsedID, discovered.outputID,
+                       "parsedID (from injected deviceid) must equal the name-derived OutputID")
+        XCTAssertEqual(discovered.outputID.rawValue, 0x6B2E52B73717,
+                       "OutputID is the 12-hex prefix the C side parses from the name")
+        XCTAssertEqual(descriptor.txtRecord["deviceid"], "6B:2E:52:B7:37:17",
+                       "the injected deviceid is the canonical colon-hex form parsedID/raop_device_cb agree on")
+        //  - classified AP1-only and available.
+        XCTAssertFalse(discovered.isAirPlay2Supported, "a raop-only device classifies AP1-only")
+        XCTAssertTrue(discovered.isAvailable, "a live AP1 receiver is available")
+
+        // (2) Drive that DiscoveredDevice through NativeBackend toward the engine
+        // and assert the descriptor the ENGINE actually receives still routes to
+        // output_raop (kind == .raop) with the raw name intact.
+        let (backend, engine, fakeDiscovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == discovered.id } else { return false } }
+        } after: { fakeDiscovery.fire(.appeared(discovered)) }
+
+        // The mapped, user-facing device is AP1-only and available.
+        let mapped = backend.devices.first { $0.id == discovered.id }
+        XCTAssertEqual(mapped?.supportsAirPlay2, false, "AP1 stays AP1-only through the backend")
+        XCTAssertEqual(mapped?.isAvailable, true)
+        XCTAssertEqual(mapped?.name, "Kitchen Speaker", "the user-facing name is the stripped display name")
+
+        // Select it → converge → updateDiscovery + addOutput on the shared engine.
+        backend.setOutputSet([discovered.id])
+        await pollUntil {
+            engine.fedIDs.contains(discovered.outputID) && engine.addedIDs.contains(discovered.outputID)
+        }
+
+        let fed = engine.fedDescriptorList.first { $0.parsedID == discovered.outputID }
+        XCTAssertNotNil(fed, "the AP1 device must be fed to engine.updateDiscovery")
+        XCTAssertEqual(fed?.kind, .raop,
+                       "the engine feed routes AP1 to airplayengine_feed_raop_device (output_raop), NOT output_airplay")
+        XCTAssertEqual(fed?.name, instanceName,
+                       "the raw hex-prefixed name reaches the engine so raop_device_cb parses the id from it")
+        XCTAssertTrue(engine.addedIDs.contains(discovered.outputID),
+                      "the AP1 device is addOutput-ed on the shared engine")
     }
 
     // MARK: Current (local) device (BUG B)
@@ -1478,12 +1671,14 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(engine.discoveryRemovedNames.contains(device.descriptor.name))
     }
 
-    /// Finding 6: an AP2 device that downgrades to AP1 (loses `_airplay._tcp` but
-    /// stays on `_raop._tcp`) arrives as `.updated` with isAirPlay2Supported=false.
-    /// The backend must tear down the live engine session (removeOutput) AND
-    /// deregister the engine descriptor — otherwise it leaks a live RTSP/PTP
-    /// session while the UI flips the device to unavailable.
-    func testAP2ToAP1DowngradeTearsDownEngineSession() async {
+    /// Teardown-on-leave keys on REACHABILITY, not the AP2 flag (T7). The
+    /// "AP2→AP1 downgrade" scenario the sticky rule now prevents at the discovery
+    /// layer is no longer a teardown trigger: a same-id `.updated` that is still
+    /// AVAILABLE keeps its live engine session (AP1 is a valid engine target now),
+    /// even if it were to report `isAirPlay2Supported == false`. Only an
+    /// unavailable update tears the session down — see
+    /// `testAP2GoingOfflineStaysAP2Unavailable`.
+    func testAvailableUpdateKeepsEngineSession() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -1497,31 +1692,35 @@ final class NativeBackendTests: XCTestCase {
         backend.setOutputSet([ap2.id])
         await pollUntil { engine.addedIDs.contains(ap2.outputID) }
 
-        // Now it downgrades to AP1-only (same id, isAirPlay2Supported=false).
-        let downgraded = DiscoveredDevice(
+        // A still-available `.updated` for the same id (whatever the AP2 flag) must
+        // NOT tear the session down.
+        let stillAvailable = DiscoveredDevice(
             id: ap2.id,
             descriptor: ap2.descriptor,
             outputID: ap2.outputID,
-            isAirPlay2Supported: false)
-        discovery.fire(.updated(downgraded))
+            isAirPlay2Supported: false,
+            isAvailable: true)
+        discovery.fire(.updated(stillAvailable))
 
-        // The engine session is torn down and the descriptor deregistered.
-        await pollUntil { engine.removedIDs.contains(ap2.outputID) }
-        XCTAssertTrue(engine.removedIDs.contains(ap2.outputID),
-                      "an AP2→AP1 downgrade must removeOutput the live engine session (finding 6)")
-        await pollUntil { engine.discoveryRemovedNames.contains(ap2.descriptor.name) }
-        XCTAssertTrue(engine.discoveryRemovedNames.contains(ap2.descriptor.name),
-                      "an AP2→AP1 downgrade must deregister the engine descriptor (finding 6)")
+        // Give any (erroneous) teardown a window to happen, then assert it did not.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(engine.removedIDs.contains(ap2.outputID),
+                       "an available `.updated` must NOT removeOutput the live session (T7)")
+        XCTAssertFalse(engine.discoveryRemovedNames.contains(ap2.descriptor.name),
+                       "an available `.updated` must NOT deregister the engine descriptor (T7)")
+        XCTAssertEqual(backend.devices.first { $0.id == ap2.id }?.isAvailable, true,
+                       "the device stays available and driven")
     }
 
     /// THE BUG (live-gated 2026-07-17): a real AP2 device (Sonos Move) powered OFF
     /// loses its `_airplay._tcp` advert while `_raop._tcp` lingers. Discovery now
     /// reports this as an `.updated` with `isAirPlay2Supported == true` (STICKY)
     /// and `isAvailable == false`. The backend must: keep `supportsAirPlay2 == true`
-    /// (so the UI never shows the AP1 "coming soon" row — `isUnsupported` keys off
-    /// `supportsAirPlay2`), mark the device `isAvailable == false` and deselected,
-    /// tear down any live engine session/descriptor, and surface a `.failed`
-    /// (retry-on-click) dot — NOT the AP1 `.off` "coming soon" state.
+    /// (so the device isn't misreported as AP1-only — `supportsAirPlay2` is now
+    /// purely informational, since AP1 rows render live/enabled the same as AP2,
+    /// T10), mark the device `isAvailable == false` and deselected, tear down any
+    /// live engine session/descriptor, and surface a `.failed` (retry-on-click)
+    /// dot — NOT the AP1 `.off` state.
     func testAP2GoingOfflineStaysAP2Unavailable() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -2047,10 +2246,10 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertEqual(d?.isSelected, false)
     }
 
-    /// AP1-only devices are never routed (D6: never fed to the engine, never
-    /// addOutput-ed even if included in `setOutputSet`) and must stay `.off`
-    /// permanently — no connecting/failed dot for a device that can't be enabled.
-    func testConnectionStateAP1StaysOffPermanently() async {
+    /// An AP1 device rides the SAME connection-state hooks as AP2 now (T7): it rests
+    /// `.off` until selected, goes `.connecting` immediately on select, and settles
+    /// `.connected` once the engine confirms the add.
+    func testConnectionStateAP1DrivesLikeAP2() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -2059,14 +2258,17 @@ final class NativeBackendTests: XCTestCase {
         _ = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
         } after: { discovery.fire(.appeared(ap1)) }
-        XCTAssertEqual(backend.devices.first { $0.id == ap1.id }?.connectionState, .off)
+        XCTAssertEqual(backend.devices.first { $0.id == ap1.id }?.connectionState, .off,
+                       "an unselected AP1 device rests .off")
 
-        // Attempting to select it must not move the dot — it's never addOutput-ed.
         backend.setOutputSet([ap1.id])
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        await pollUntil {
+            let d = backend.devices.first { $0.id == ap1.id }
+            return d?.connectionState == .connected && engine.addedIDs.contains(ap1.outputID)
+        }
         let d = backend.devices.first { $0.id == ap1.id }
-        XCTAssertEqual(d?.connectionState, .off, "an AP1-only device must never show connecting/failed")
-        XCTAssertTrue(engine.addedIDs.isEmpty)
+        XCTAssertEqual(d?.connectionState, .connected, "a selected AP1 device converges to .connected (T7)")
+        XCTAssertTrue(engine.addedIDs.contains(ap1.outputID))
     }
 
     // MARK: Capture gate
@@ -2075,7 +2277,7 @@ final class NativeBackendTests: XCTestCase {
     // SILENT. `start()` used to run it unconditionally, so the default
     // out-of-the-box state (passthrough: no AirPlay outputs selected) muted system
     // audio and sent the capture nowhere: total silence. Capture must run IF AND
-    // ONLY IF at least one real AP2 output is selected.
+    // ONLY IF at least one real receiver output (AP1 or AP2) is selected.
 
     /// THE BUG: passthrough (the default launch state — `start()` with no
     /// selection, and the empty `setOutputSet` GroupController.applyRouting sends
@@ -2122,11 +2324,27 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertEqual(capture.ops, ["start", "stop"], "no redundant ops — the gate dedups against its own last decision")
     }
 
-    /// The gate keys on ids that could actually be streamed to. Neither the local
-    /// Mac device (`supportsAirPlay2 == false`) nor an AP1-only receiver (D6, never
-    /// addOutput-ed) may start the tap — selecting either would mute the Mac with
-    /// the audio going nowhere, which is the original bug wearing a different hat.
+    /// The gate keys on ids that could actually be streamed to. The local Mac device
+    /// (`isLocalDevice`, no engine handle) and an id we've never discovered may NOT
+    /// start the tap — selecting either would mute the Mac with the audio going
+    /// nowhere, which is the original bug wearing a different hat. (An AP1 receiver
+    /// IS streamable now and DOES start the tap — see `testCaptureStartsOnAP1Selection`.)
     func testNonStreamableSelectionNeverStartsCapture() async {
+        let (backend, engine, _) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // The local device + an id we've never discovered — neither is a real output.
+        backend.setOutputSet([NativeBackend.localDeviceID, "AA:BB:CC:DD:EE:FF"])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(capture.ops, [], "only a real, discovered receiver may start capture")
+    }
+
+    /// Selecting an AP1 receiver starts capture (mutes the Mac) just like an AP2
+    /// one — it is a real engine output now (T7).
+    func testCaptureStartsOnAP1Selection() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         backend.captureCoordinator = capture
@@ -2137,11 +2355,15 @@ final class NativeBackendTests: XCTestCase {
         _ = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
         } after: { discovery.fire(.appeared(ap1)) }
+        XCTAssertFalse(capture.isCapturing, "discovery alone must not start capture")
 
-        // The local device + an AP1-only receiver + an id we've never discovered.
-        backend.setOutputSet([NativeBackend.localDeviceID, ap1.id, "AA:BB:CC:DD:EE:FF"])
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(capture.ops, [], "only a real, discovered AP2 output may start capture")
+        backend.setOutputSet([ap1.id])
+        await pollUntil { capture.isCapturing }
+        XCTAssertTrue(capture.isCapturing, "a selected AP1 output must start capture (T7)")
+
+        backend.setOutputSet([])
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(capture.isCapturing, "deselecting the last AP1 output stops capture (unmuting the Mac)")
     }
 
     /// Toggle spam: the gate's start/stop calls must replay in the order
@@ -2579,6 +2801,34 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertEqual(binds.count, 1, "device should be bound exactly once")
         XCTAssertGreaterThanOrEqual(binds.first?.1 ?? 0, 1,
                                     "per-app stream id must be >= 1 (0 is the legacy whole-system path)")
+    }
+
+    /// T4b defensive guard: a per-app route that targets an AirPlay-1-only
+    /// (RAOP) device must never reach the engine's `addOutput`/`removeOutput`
+    /// — the UI already refuses to offer one as a destination
+    /// (`PopoverController.availableAirPlayDestinations`), but if a stale/racing
+    /// route table hands one down anyway, `NativeBackend` must refuse it rather
+    /// than proceed into the `.bind`/`.rebind` path (a rebind re-anchors an AP1
+    /// device's clock — no shared timing protocol with AP2 — drifting it out of
+    /// sync with the rest of a group, and some classic receivers briefly reject
+    /// the RTSP reconnect).
+    func testAppRouteToAirPlay1OnlyDeviceIsRefused() async {
+        let pids = PIDRecorder()
+        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        defer { backend.stop() }
+        let device = ap1Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        // Give the async bind-tail a moment to run, then assert it never touched
+        // the engine for this device — no bind, no rebind, no removeOutput.
+        await pollUntil(timeout: 1) { pids.asked.contains("com.foo.player") }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
+                     "an AirPlay-1-only device must never be bound to a per-app stream")
+        XCTAssertFalse(engine.removedIDs.contains(device.outputID),
+                       "an AirPlay-1-only device that was never bound should not be torn down either")
     }
 
     /// A route reverting to `.currentDevice` tears the capture bookkeeping down and

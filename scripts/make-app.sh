@@ -15,9 +15,13 @@
 set -euo pipefail
 
 # --- Config ---------------------------------------------------------------
-APP_NAME="Audiouter"
+# APP_NAME / BUNDLE_ID honor env overrides so a side-by-side dev build can carry
+# a distinct identity (its own menu-bar app + LaunchServices registration) and
+# coexist with an installed copy that shares the default bundle id. Defaults are
+# unchanged, so a normal `./scripts/make-app.sh` produces the usual Audiouter.app.
+APP_NAME="${APP_NAME:-Audiouter}"
 EXECUTABLE="AudiouterApp"
-BUNDLE_ID="com.audiouter.Audiouter"
+BUNDLE_ID="${BUNDLE_ID:-com.audiouter.Audiouter}"
 MIN_MACOS="13.0"
 # Human-readable marketing version and monotonic build number.
 APP_VERSION="0.1.0"

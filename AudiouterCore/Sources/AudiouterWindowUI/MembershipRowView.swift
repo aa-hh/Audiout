@@ -161,6 +161,18 @@ public final class MembershipRowView: NSView {
             checked ? "Remove \(device.name) from group" : "Add \(device.name) to group")
     }
 
+    /// Enable or disable the membership checkbox, with an optional tooltip
+    /// explaining why. Hosts use this to pin the sole remaining member of a
+    /// group (a group must keep at least one device). Call AFTER ``apply``,
+    /// which re-enables the checkbox as part of a host-driven refresh.
+    public func setCheckboxEnabled(_ enabled: Bool, tooltip: String? = nil) {
+        checkbox.isEnabled = enabled
+        checkbox.toolTip = tooltip
+    }
+
+    /// Whether the checkbox is currently interactive (for structural assertions).
+    public var test_isCheckboxEnabled: Bool { checkbox.isEnabled }
+
     // MARK: Actions
 
     @objc private func checkboxToggled(_ sender: NSButton) {

@@ -11,6 +11,22 @@ document's "otherwise byte-identical" extraction. See
 line numbers and shim inventory below are otherwise still the tag-29.2
 baseline they describe.
 
+**RAOP addendum (2026-07-19):** Appendix A's "CUT" verdict on `raop.c` below
+(kept only for its ~50-LOC uncompressed-ALAC encoder) is superseded — `raop.c`
+was itself vendored as a second sender backend (`struct output_definition
+output_raop`, alongside `airplay.c`'s `output_airplay`), with a two-backend
+`backend_for(device->type)` dispatch added to the shim registry
+(`shims/outputs.c`) and a second captured discovery callback in
+`shims/mdns.c`/`engine_bridge.{h,c}`. That extraction has its own
+purpose-built blueprint, `docs/raop-seam-brief.md` (the RAOP analogue of this
+document — full external-symbol classification, the RSA-AES handshake, the
+NTP/RTP timing model, and the two-backend dispatch design in its §6); the
+resulting vendored diff is ledgered in `docs/VENDORED-DIFFS.md` Entry 3. AP1
+receivers now drive through the shared engine exactly like AP2 (see
+`NativeBackend`'s "AirPlay 1" doc comment) — this document's own body below
+still describes only the original AP2-only extraction and is not rewritten to
+match.
+
 **Source:** `dev/owntone-src` — OwnTone pinned at tag **29.2**.
 **Goal:** extract the AirPlay 2 *sender* cluster into the SwiftPM package
 `AirPlayEngine/` (target `CAirPlayEngine`), replacing all OwnTone plumbing with
@@ -649,5 +665,6 @@ registration (→ `addOutput`/`removeOutput` C entries).
 `player_get_status`/`player_playback_*` (remote-control path); `commands_base_*`.
 
 **CUT:** `mdns_init/register/cname`, all non-AIRPLAY `outputs/*`, all OwnTone
-`.c` plumbing (§7.5), raop.c (except the ~50-LOC uncompressed ALAC encoder lifted
-into airplay.c).
+`.c` plumbing (§7.5). `raop.c` was originally CUT here (kept only for the
+~50-LOC uncompressed ALAC encoder lifted into airplay.c) — since superseded;
+see the RAOP addendum at the top of this document and `docs/raop-seam-brief.md`.

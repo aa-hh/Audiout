@@ -101,6 +101,34 @@ final class PopoverControllerTests: XCTestCase {
                       "groups are under an Output Groups header")
     }
 
+    func testEmptyGroupIsNotOfferedAsAMainOutOption() async throws {
+        // A group left empty by an older build (persisted directly, bypassing the
+        // current non-empty invariant) must not appear as a routing target.
+        let store = GroupStore(directory: tempDirectory())
+        try store.save([
+            Group(id: "ghost", name: "Ghost", memberIDs: [], memberVolumes: [:]),
+            Group(id: "real", name: "Kitchen", memberIDs: ["office"], memberVolumes: ["office": 50]),
+        ])
+
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        let controller = GroupController(backend: backend, store: store,
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: true)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        controller.ensureDefaultSelection()
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+
+        let targets = popover.test_mainOutRow.test_selectableTargets
+        XCTAssertTrue(targets.contains(.group(id: "real")), "the non-empty group is offered")
+        XCTAssertFalse(targets.contains(.group(id: "ghost")), "the empty group must not be offered")
+        XCTAssertFalse(popover.test_mainOutRow.test_optionTitles.contains("Ghost"),
+                       "the empty group's name must not appear in the menu")
+    }
+
     func testToggleComposesSelectedDevicesWithoutRoutingWhenTargetIsGroup() async throws {
         let (popover, controller, backend) = try await makePopover()
         // Build a group, point Main Out at it.
@@ -990,6 +1018,30 @@ final class PopoverControllerTests: XCTestCase {
                        "an explicit Current Device pick selects its own sentinel entry")
         XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), false,
                        "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
+    }
+
+    /// T4b (a deliberate product call, not a bug): an AirPlay-1-only (RAOP)
+    /// device must never appear as a per-app routing target — a per-app rebind
+    /// (`NativeBackend.performBindOp`'s `.rebind`, fired on a route change)
+    /// re-anchors an AP1 device's clock (no shared timing protocol with AP2),
+    /// drifting it out of sync with the rest of a group, and some classic
+    /// receivers briefly reject the RTSP reconnect. `demoFleet`'s "Mixer"
+    /// (`airport-mixer`) is `supportsAirPlay2 == false` — it must be excluded
+    /// from the destination menu even though it's a perfectly normal, selectable
+    /// Selected-Devices row (AP1 devices are still fine for whole-fleet output,
+    /// just not per-app redirect targets).
+    func testAppRowDestinationMenuExcludesAirPlay1OnlyDevices() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertFalse(titles.contains("Mixer"),
+                       "an AirPlay-1-only device (supportsAirPlay2 == false) must never be offered "
+                       + "as a per-app routing target")
+        XCTAssertTrue(titles.contains("Office"),
+                     "an AirPlay-2 device is still offered normally")
     }
 
     /// Selecting an AirPlay destination on a row calls through to

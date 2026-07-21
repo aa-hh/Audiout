@@ -9,6 +9,31 @@ import XCTest
 /// `NativeCaptureCoordinatorTests`' pure-function style for `rmsOfS16LE`.
 final class LevelMeterViewTests: XCTestCase {
 
+    // MARK: Perceptual dB height mapping (the "levels look extremely low" fix)
+
+    func testDisplayHeightIsPerceptualNotLinear() {
+        // Endpoints + floor.
+        XCTAssertEqual(LevelMeterView.displayHeight(forLevel: 0.0), 0.0, accuracy: 0.001)
+        XCTAssertEqual(LevelMeterView.displayHeight(forLevel: 1.0), 1.0, accuracy: 0.001)
+        // Silence-ish and sub-floor levels show no fill.
+        XCTAssertEqual(LevelMeterView.displayHeight(forLevel: 0.0005), 0.0, accuracy: 0.001) // ≈ −66 dBFS
+
+        // The whole point: typical program RMS (~0.05 ≈ −26 dBFS) must fill a
+        // HEALTHY chunk of the meter, not the ~5% a linear map gave it.
+        let normal = LevelMeterView.displayHeight(forLevel: 0.05)
+        XCTAssertGreaterThan(normal, 0.4, "normal audio should fill a visible portion, not a sliver")
+        XCTAssertLessThan(normal, 0.9)
+        XCTAssertGreaterThan(normal, 0.05 * 5, "must be well above the old linear fill (0.05)")
+
+        // Monotonic across the audible range.
+        var prev = LevelMeterView.displayHeight(forLevel: 0.001)
+        for milli in stride(from: 2, through: 1000, by: 20) {
+            let h = LevelMeterView.displayHeight(forLevel: CGFloat(milli) / 1000.0)
+            XCTAssertGreaterThanOrEqual(h, prev)
+            prev = h
+        }
+    }
+
     // MARK: Attack is faster than decay
 
     func testAttackStepIsLargerThanDecayStep() {

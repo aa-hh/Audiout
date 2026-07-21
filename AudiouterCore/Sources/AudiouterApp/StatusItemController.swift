@@ -87,5 +87,13 @@ final class StatusItemController {
         )
         image?.isTemplate = true   // correct rendering in dark/light menu bar
         button.image = image
+        // Opt-in dev disambiguator: when `AUDIOUTER_STATUS_LABEL` is set, show it
+        // as a text tag beside the icon so a side-by-side test build is visually
+        // distinct from an installed copy (identical bundle glyphs otherwise look
+        // the same). Inert in normal builds — no env var, no title.
+        if let label = ProcessInfo.processInfo.environment["AUDIOUTER_STATUS_LABEL"], !label.isEmpty {
+            button.title = " \(label)"
+            button.imagePosition = .imageLeading
+        }
     }
 }

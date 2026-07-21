@@ -569,10 +569,11 @@ public extension Array where Element == Device {
     }
 
     /// `demoFleet` PLUS one extra, explicitly-named AP1-only fixture
-    /// (T-UI-AP1-1, PLAN-PHASE-2B D6): discovered but `NativeBackend` never
-    /// `addOutput`s it — the popover renders it dimmed/disabled with a
-    /// "coming soon" explanation on click. A SEPARATE array (not appended to
-    /// `demoFleet` itself) so the many existing hardcoded `count == 7`
+    /// (T-UI-AP1-1, PLAN-PHASE-2B D6, superseded T10): AP1 devices are now LIVE —
+    /// `NativeBackend` `addOutput`s them same as AP2, and the popover renders the
+    /// row enabled/full-alpha with a normal, drivable checkbox/slider/mute (the
+    /// earlier "coming soon"/dimmed gate was retired). A SEPARATE array (not
+    /// appended to `demoFleet` itself) so the many existing hardcoded `count == 7`
     /// assertions elsewhere stay untouched; tests that want the AP1-only row
     /// opt in with this fleet instead.
     static var demoFleetWithAP1Only: [Device] {

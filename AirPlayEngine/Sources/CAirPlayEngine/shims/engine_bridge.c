@@ -14,6 +14,10 @@
  * airplay_init calls mdns_browse). NULL until init has run. */
 extern mdns_browse_cb airplayengine_device_cb;
 
+/* Defined in shims/mdns.c: the captured raop_device_cb (set when raop_init
+ * calls mdns_browse("_raop._tcp", ...)). NULL until raop_init has run. */
+extern mdns_browse_cb airplayengine_raop_device_cb;
+
 void
 engine_mask_sigpipe(void)
 {
@@ -74,5 +78,29 @@ airplayengine_feed_device(const char *name, const char *hostname, int family,
   // airplay_device_cb reads name/family/address/port/txt (seam-map §4).
   airplayengine_device_cb(name, "_airplay._tcp", "local", hostname,
                           family, address, port, txt);
+  return 0;
+}
+
+/* [AirPlayEngine vendored change 2026-07-19] RAOP analogue of
+ * airplayengine_feed_device above (raop-seam-brief §6.6) — mirrors its shape
+ * exactly, targeting the captured raop_device_cb instead. */
+bool
+airplayengine_raop_discovery_ready(void)
+{
+  return airplayengine_raop_device_cb != NULL;
+}
+
+int
+airplayengine_feed_raop_device(const char *name, const char *hostname, int family,
+                               const char *address, int port, struct keyval *txt)
+{
+  if (!airplayengine_raop_device_cb)
+    return -1;
+
+  // Same shape raop_init registered with mdns_browse. domain "local" and type
+  // "_raop._tcp" match what a real DNS-SD browse would deliver; raop_device_cb
+  // reads name/family/address/port/txt the same way airplay_device_cb does.
+  airplayengine_raop_device_cb(name, "_raop._tcp", "local", hostname,
+                               family, address, port, txt);
   return 0;
 }

@@ -10,7 +10,7 @@
 
 This inventory covers the actual license headers found in the OwnTone source extraction cluster (`dev/owntone-src/`). The project adopts **GPL-2.0-or-later** as the overall license for the Audiouter engine and application. Within this:
 
-- **GPL-2.0+ cluster** (airplay.c, airplay_events.c, rtp_common.c) forms the core sender engine.
+- **GPL-2.0+ cluster** (airplay.c, airplay_events.c, raop.c, rtp_common.c) forms the core sender engine.
 - **MIT components** (pair_ap, libairptp) retain their original headers and are compatible with GPL-2.0+.
 - **BSD components** (evrtsp, rtsp.c) retain their original headers and are compatible with GPL-2.0+.
 - The tiny **SMAppService PTP helper** will ship as MIT (libairptp-based, separate binary).
@@ -28,6 +28,7 @@ This inventory covers the actual license headers found in the OwnTone source ext
 | Path | License | Copyright Holders | Notes |
 |------|---------|-------------------|-------|
 | `src/outputs/airplay.c` | GPL-2.0+ | (Not explicitly listed in header) | 4413 lines; core sender implementation. SPDX: "GNU General Public License v2 or later" |
+| `src/outputs/raop.c` | GPL-2.0+ | Espen Jürgensen (2012-2020), Julien BLACHE (2010-2011); crypto adapted from VideoLAN (Michael Hanselmann 2008, GPLv2+); ALAC from raop_play (Shiro Ninomiya 2005, GPLv2+); ALAC end-tags (Mike Brady 2023, GPLv2+) | 4792 lines (T3, 2026-07-19); the classic AirPlay-1 / RAOP (AirTunes v2) sender. Full multi-holder GPL-2.0+ header retained verbatim. Vendored near-byte-identical (one guarded ffmpeg-shed diff — VENDORED-DIFFS Entry 3). |
 | `src/outputs/airplay_events.c` | GPL-2.0+ | (Not explicitly listed in header) | 12545 bytes; RTSP event handling for sender. Same GPL-2.0+ notice |
 | `src/outputs/rtp_common.c` | GPL-2.0+ | Copyright (C) 2019- Espen Jürgensen | RTP/RTCP packet framing. GPL-2.0+ notice present |
 | `src/outputs/rtp_common.h` | **NO LICENSE HEADER** | (None declared) | Support header for RTP. Assume GPL-2.0+ by inheritance (paired with .c). |
@@ -111,7 +112,7 @@ This inventory covers the actual license headers found in the OwnTone source ext
 When the AirPlayEngine (and the full Audiouter app) is distributed under GPL-2.0-or-later, the following apply:
 
 ### 1. Header Preservation
-- Every .c and .h file from the GPL cluster (airplay.c, airplay_events.c, rtp_common.c) **must retain its GPL-2.0+ header** in the distributed source.
+- Every .c and .h file from the GPL cluster (airplay.c, airplay_events.c, raop.c, rtp_common.c) **must retain its GPL-2.0+ header** in the distributed source.
 - Every BSD file (evrtsp/rtsp.c, evrtsp/*.h) **must retain its BSD header** with full copyright/disclaimer.
 - Every MIT file (pair_ap/*, libairptp/*) **must retain its MIT header** with full copyright notice.
 - Files without explicit headers (rtp_common.h, libairptp internal files, pair_ap internal files) **must have headers added or clarified** in the distribution. Recommended: add explicit SPDX header matching the cluster (e.g., `// SPDX-License-Identifier: GPL-2.0-or-later` for OwnTone plumbing; `// SPDX-License-Identifier: MIT` for pair_ap/libairptp).
@@ -125,10 +126,11 @@ A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
 - **GPL-2.0-or-later** — AirPlayEngine + Audiouter Core
   - Copyright: The Audiouter authors (or the named project holder)
   - Source: Audiouter repository
-  - Includes OwnTone-derived code (airplay.c, rtp_common.c) — see individual files for original copyright.
+  - Includes OwnTone-derived code (airplay.c, raop.c, rtp_common.c) — see individual files for original copyright.
 - **OwnTone GPL-2.0-or-later Components** (for historical record)
   - airplay.c — OwnTone Project
   - airplay_events.c — OwnTone Project
+  - raop.c — Copyright (C) 2012-2020 Espen Jürgensen, (C) 2010-2011 Julien BLACHE; embeds GPLv2+ crypto (VideoLAN) + ALAC (raop_play / Mike Brady)
   - rtp_common.c — Copyright (C) 2019- Espen Jürgensen; OwnTone Project
   - (Note: distribution does not name OwnTone product; headers retain "OwnTone Project" copyright.)
 - **evrtsp (BSD-2-Clause)** — Based on libevent
@@ -190,7 +192,7 @@ See the top-level LICENSE or COPYING file for the full GPL v2 text.
 #### GNU General Public License (GPL-2.0+) Components
 
 - **AirPlayEngine C Core** (sender implementation)
-  - Files: `src/outputs/airplay.c`, `src/outputs/airplay_events.c`, `src/outputs/rtp_common.c`, `src/outputs/rtp_common.h`
+  - Files: `src/outputs/airplay.c`, `src/outputs/airplay_events.c`, `src/outputs/raop.c`, `src/outputs/rtp_common.c`, `src/outputs/rtp_common.h`
   - Derived from OwnTone Server (https://github.com/owntone/owntone-server)
   - GPL-2.0-or-later license
   - Copyright notice retained in each file

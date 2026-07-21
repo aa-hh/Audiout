@@ -399,6 +399,55 @@ outputs_device_remove(struct output_device *remove);
 void
 outputs_device_free(struct output_device *device);
 
+/* --- Two-backend per-device dispatch (raop-seam-brief §6.2).
+ *
+ * The shared registry hosts AP1 (output_raop) and AP2 (output_airplay) devices;
+ * each entry point forwards to the definition that owns `device` (selected by
+ * device->type) and PRESERVES the backend's return value N — the count the async
+ * waiter keys on (§5). N ∈ {0,1}: N > 0 promises exactly one deferred outputs_cb
+ * completion for callback_id, N <= 0 promises none. An unhandled device->type is
+ * logged and treated as "no callback promised" (the int ops return -1, the void
+ * ops no-op). These replace the previously hardcoded output_airplay.<op> calls
+ * at the engine/Swift seam. Engine thread only. --- */
+
+int
+outputs_device_start(struct output_device *device, int callback_id);
+
+int
+outputs_device_stop(struct output_device *device, int callback_id);
+
+int
+outputs_device_flush(struct output_device *device, int callback_id);
+
+int
+outputs_device_probe(struct output_device *device, int callback_id);
+
+int
+outputs_device_volume_set(struct output_device *device, int callback_id);
+
+int
+outputs_device_authorize(struct output_device *device, const char *pin, int callback_id);
+
+void
+outputs_device_cb_set(struct output_device *device, int callback_id);
+
+/* Free the backend's per-device extra (guarded on extra_device_info, like
+ * outputs_device_free's own inline dispatch). */
+void
+outputs_device_free_extra(struct output_device *device);
+
+/* Broadcast a PCM buffer to BOTH backends (§6.3). Each self-filters by
+ * quality/stream_id against its own session list; a backend owning no matching
+ * session no-ops. Engine thread only (hot path). */
+void
+outputs_write(struct output_buffer *buffer);
+
+/* Test/diagnostic seam (NOT shipping API): the backend a device routes to, so a
+ * headless test can pin type-based dispatch (output_raop vs output_airplay)
+ * without a live session. Returns NULL for an unhandled type. */
+const struct output_definition *
+outputs_backend_definition_for(struct output_device *device);
+
 #ifdef __cplusplus
 }
 #endif

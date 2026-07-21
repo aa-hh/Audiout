@@ -50,6 +50,12 @@ public struct ProbeDevice: Equatable {
     public var model: String = "AudioAccessory5,1"
     public var ipv6: Bool = false
     public var password: String?
+    /// Target this device over AirPlay 1 / RAOP (`output_raop`) instead of
+    /// AirPlay 2 (`output_airplay`). Per-device, like `ipv6` — mirrors the
+    /// AGENTS.md "two sender backends share one registry" rule. See
+    /// main.swift's device loop for how this changes descriptor/TXT shape
+    /// (no `features`/`model` — a real `_raop._tcp` TXT record has neither).
+    public var raop: Bool = false
 
     public init() {}
 
@@ -87,6 +93,14 @@ public func usage() -> String {
                    --name "Living Room" --address <ip2> --device-id <hex2> \\
                    --i-have-a-receiver-and-owntone-is-stopped
 
+    USAGE (AirPlay 1 / RAOP device — classic AirPort Express / AirTunes v2):
+      engine-probe --raop --address <ip> --port 5000 --device-id <AA:BB:..> \\
+                   --pcm <file.raw> --i-have-a-receiver-and-owntone-is-stopped
+      (--raop routes this device to output_raop instead of output_airplay;
+      it feeds a genuinely RAOP-shaped descriptor — no features/model TXT,
+      no AP2 gate — see --raop below. Classic RAOP receivers usually listen
+      on port 5000, not AirPlay 2's 7000.)
+
     HOW FLAGS GROUP INTO DEVICES: a device is complete once it has BOTH
     --address and --device-id. Per-device flags amend the device being
     described — in any order — until it is complete; the next per-device
@@ -113,6 +127,14 @@ public func usage() -> String {
       --model <str>           TXT model                   (default HomePod-like)
       --ipv6                  Treat this device's --address as IPv6
       --password <str>        RTSP password, if required
+      --raop                  Target this device over AirPlay 1 / RAOP
+                               (output_raop) instead of AirPlay 2
+                               (output_airplay). Ignores --features/--model
+                               (a real _raop._tcp TXT record has neither);
+                               --device-id is still required (used for the
+                               engine's own OutputID bookkeeping, and encoded
+                               into the mDNS-style instance name raop_device_cb
+                               parses its id back out of — see main.swift).
 
     GATE (required to actually open a session):
       --i-have-a-receiver-and-owntone-is-stopped
@@ -224,6 +246,8 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
             }
         case "--ipv6":
             applyPerDeviceOption("--ipv6") { $0.ipv6 = true }
+        case "--raop":
+            applyPerDeviceOption("--raop") { $0.raop = true }
         case "--password":
             if let v = value(for: "--password") {
                 applyPerDeviceOption("--password") { $0.password = v }

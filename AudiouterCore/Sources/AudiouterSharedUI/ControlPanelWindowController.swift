@@ -120,6 +120,10 @@ public final class ControlPanelWindowController: NSWindowController {
         // decorative backing window (which follows this one's frame deltas,
         // not a live layout pass) never drifts out of sync.
         panel.isMovable = false
+        // Summon onto the CURRENT Space (and over a fullscreen app) rather than
+        // switching Spaces — matches the "summon → act → dismiss" model
+        // (window-panel.md M1).
+        panel.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         return panel
     }
 
@@ -137,6 +141,8 @@ public final class ControlPanelWindowController: NSWindowController {
             defer: false
         )
         window.level = .floating
+        // Match the panel's Space behavior so the decorative backing follows it.
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true

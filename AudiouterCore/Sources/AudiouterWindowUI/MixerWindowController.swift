@@ -219,6 +219,10 @@ public final class MixerWindowController: NSWindowController {
         window.title = "Groups"
         let hasSavedFrame = window.setFrameUsingName("MixerWindow")
         window.setFrameAutosaveName("MixerWindow")
+        // Summon onto the CURRENT Space (and over a fullscreen app) instead of
+        // switching Spaces to the window's home — reopening a config window must
+        // not yank the user out of what they're doing (window-panel.md M1).
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         return (window, hasSavedFrame)
     }
 

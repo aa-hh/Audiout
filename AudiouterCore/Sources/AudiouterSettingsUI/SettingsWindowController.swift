@@ -96,6 +96,9 @@ public final class SettingsWindowController: NSWindowController {
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.title = "Settings"
         window.setFrameAutosaveName("SettingsWindow")
+        // Appear on the active Space (over a fullscreen app) rather than
+        // Space-switching to the window's home (window-panel.md M1).
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         // No forced `NSAppearance` — the app applies the theme override on
         // `NSApp`, and this window inherits it like everything else.
 

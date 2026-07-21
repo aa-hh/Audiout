@@ -478,6 +478,56 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertNil(popover.test_deviceRow(for: "office"), "row gone with the device")
     }
 
+    /// C1 regression: the auto-expanded panel must actually be attached in the
+    /// live view tree, directly under its failed device's row — not merely
+    /// recorded in `diagnosisPanelsByID`. `test_diagnosisPanel(for:)` alone can't
+    /// catch this: the dictionary is populated in `mountDiagnosisPanel` BEFORE
+    /// `panel.insertRow(_:after:animated:)` runs, so it stayed non-nil even while
+    /// `insertRow` silently no-op'd (it searched `CardView.contentStack` for the
+    /// sibling device row, but device rows live one level deeper in `bodyStack` —
+    /// the lookup could never match, so the panel was never actually mounted).
+    /// This test walks the real `NSStackView` hierarchy instead.
+    func testDiagnosisPanelViewIsActuallyMountedInViewTree() async throws {
+        let failure = ConnectionFailure(cause: .notResponding, detail: "raw engine log line")
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, failure),
+                .connect(after: 0.05),
+            ]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
+        let panel = try XCTUnwrap(popover.test_diagnosisPanel(for: "office"))
+
+        let stack = try XCTUnwrap(row.superview as? NSStackView,
+                                  "the device row itself must be mounted in a stack")
+        XCTAssertTrue(stack.arrangedSubviews.contains(panel),
+                      "the diagnosis panel's VIEW must actually be attached in the row's own " +
+                      "stack, not just recorded in diagnosisPanelsByID")
+        XCTAssertTrue(panel.superview === stack,
+                      "the panel mounts in the SAME stack as its device row")
+        let rowIndex = try XCTUnwrap(stack.arrangedSubviews.firstIndex(of: row))
+        let panelIndex = try XCTUnwrap(stack.arrangedSubviews.firstIndex(of: panel))
+        XCTAssertEqual(panelIndex, rowIndex + 1, "the panel sits directly UNDER its failed device row")
+
+        // Reconnecting must detach the VIEW from the tree too, not just clear the
+        // dictionary entry. `removeRow` runs its detach inside an
+        // `NSAnimationContext` completion handler (unless Reduce Motion is on),
+        // so give the ~0.22s slide-out animation a chance to actually finish
+        // before asserting the terminal, detached state.
+        popover.test_tapRetry(for: "office")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        popover.update(devices: backend.devices)
+        XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(panel.superview,
+                     "the panel view is detached from the tree on removal, not just forgotten")
+    }
+
     /// A retry while a SECOND device is still connecting: the retry must not
     /// disturb the in-flight device, and both resolve independently.
     func testRetryWhileSecondDeviceConnecting() async throws {

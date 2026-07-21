@@ -542,14 +542,34 @@ final class PopoverPanelViewController: NSViewController {
     /// NSPopover motivation): animate the row's `isHidden` inside an
     /// `NSAnimationContext` group with implicit animation on, laying out the
     /// stack so siblings slide apart, then pin the final state in the completion
-    /// handler. No-op if `sibling` isn't currently mounted in a card.
+    /// handler. No-op if `sibling` isn't currently mounted (i.e. its own
+    /// superview isn't a stack).
+    ///
+    /// **Trap (found live, 2026-07-19 — C1):** this used to search
+    /// `card.contentStack.arrangedSubviews` for `sibling`, but a device row (or
+    /// any other *body* row) never lives directly in `contentStack` — `addRow`
+    /// routes it through `CardView.addBodyRow` into `bodyStack`, itself nested
+    /// inside `bodyClip`, which is the only thing `contentStack` actually holds
+    /// (`CardView.swift`). That lookup could never match a device row, so the
+    /// diagnosis panel silently never attached — the dead-feature bug. Insert
+    /// into `sibling.superview` itself (whichever stack that really is —
+    /// `contentStack` for a header row, `bodyStack` for a body row) instead of
+    /// assuming a fixed stack, so the row always lands where its sibling
+    /// actually lives.
     func insertRow(_ view: NSView, after sibling: NSView, animated: Bool) {
-        guard let card = stackView.arrangedSubviews.compactMap({ $0 as? CardView })
-                .first(where: { $0.contentStack.arrangedSubviews.contains(sibling) }),
-              let index = card.contentStack.arrangedSubviews.firstIndex(of: sibling)
+        guard let stack = sibling.superview as? NSStackView,
+              let index = stack.arrangedSubviews.firstIndex(of: sibling)
         else { return }
-        card.insertRow(view, at: index + 1)
-        guard animated else { return }
+        stack.insertArrangedSubview(view, at: index + 1)
+        view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+        view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+
+        // Same Reduce Motion gate `setCardCollapsed` already applies (PLAN §E
+        // risk 1 / house rule — "Respect system settings: Reduce Motion"):
+        // re-derive `wantsAnimation` here rather than trusting the caller's
+        // `animated` alone, since both call sites always pass `animated: true`.
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animated && !reduceMotion else { return }
         view.isHidden = true
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.22
@@ -574,7 +594,9 @@ final class PopoverPanelViewController: NSViewController {
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        guard animated else { detach(); return }
+        // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animated && !reduceMotion else { detach(); return }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.22
             context.allowsImplicitAnimation = true

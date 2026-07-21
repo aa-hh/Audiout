@@ -38,6 +38,15 @@ LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network 
 HELPER_EXECUTABLE="ptp-helper"
 HELPER_LABEL="com.audiouter.Audiouter.ptphelper"
 
+# Codesigning identity. Default "-" = ad-hoc (fine for local launch + the
+# unprivileged test paths). Set CODESIGN_IDENTITY to a Developer ID Application
+# identity (e.g. "Developer ID Application: Name (TEAMID)") to produce a build
+# whose bundled SMAppService LaunchDaemon can actually register() — ad-hoc
+# signatures have no Team ID, so the OS won't associate the daemon with the app
+# or let it bind privileged ports under launchd. Both the app and the nested
+# ptp-helper are signed with THIS identity so their Team IDs match.
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +60,10 @@ MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 LAUNCH_DAEMONS_DIR="$CONTENTS/Library/LaunchDaemons"
 HELPER_PLIST_SOURCE="$SCRIPT_DIR/ptp-helper.plist"
+# Info.plist embedded into the ptp-helper Mach-O as a __TEXT,__info_plist
+# section at link time (SMAppService requires a standalone-executable daemon to
+# carry an embedded CFBundleIdentifier — see the file's header comment).
+HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
@@ -67,7 +80,15 @@ test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINAR
 # HELPER_EXECUTABLE comment above for why this binary is built and signed
 # apart from the app executable.
 echo "==> Building $HELPER_EXECUTABLE (release)"
-swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE"
+# -sectcreate __TEXT __info_plist bakes the daemon's Info.plist (CFBundleIdentifier
+# etc.) into the Mach-O — mandatory for a standalone-executable SMAppService
+# LaunchDaemon (§ HELPER_INFO_PLIST above). Absolute path so it resolves
+# regardless of the linker's working directory. Only this bundled/signed build
+# carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
+# it, which is fine — the section only matters to SMAppService registration.
+test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
+swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
 HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
@@ -287,14 +308,14 @@ find "$APP_BUNDLE" \( -name '._*' -o -name '.DS_Store' \) -delete
 # and `--verify --strict` fails (or, worse, silently ignores unsigned nested
 # code depending on codesign version) — sign inside-out and it can't.
 if [ -d "$CONTENTS/Frameworks" ] && [ -n "$(ls -A "$CONTENTS/Frameworks" 2>/dev/null)" ]; then
-  echo "==> Ad-hoc codesigning bundled dylibs in Contents/Frameworks (inside-out, before the app)"
+  echo "==> Codesigning bundled dylibs in Contents/Frameworks (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
   # --options runtime for consistency with the hardened-runtime posture below;
   # these are library code, not the entitled executable, so no --entitlements
   # here — only the main executable needs the audio-capture / local-network /
   # disable-library-validation entitlements.
   find "$CONTENTS/Frameworks" -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
     echo "    signing $(basename "$dylib")"
-    codesign --force --options runtime --sign - "$dylib"
+    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$dylib"
   done
 fi
 # ptp-helper is a second Mach-O living directly in Contents/MacOS (not nested
@@ -313,14 +334,14 @@ fi
 # by reading AirPlayEngine/Sources/ptp-helper/main.c: it only calls
 # airptp_daemon_bind/airptp_daemon_start/airptp_end plus libc signal/socket
 # calls. Do not add entitlements to this binary speculatively.
-echo "==> Ad-hoc codesigning ptp-helper (inside-out, before the app)"
-codesign --force --options runtime --sign - "$MACOS_DIR/$HELPER_EXECUTABLE"
+echo "==> Codesigning ptp-helper (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
+codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
 codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE"
 
-echo "==> Ad-hoc codesigning (hardened runtime)"
+echo "==> Codesigning app (identity: $CODESIGN_IDENTITY, hardened runtime)"
 ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
-codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE"
+codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --strict --verbose "$APP_BUNDLE"
 # Assert the hardened runtime actually got applied — a signature silently missing
 # the runtime flag would reopen the injection surface above. Capture first, then

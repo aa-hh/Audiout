@@ -389,8 +389,9 @@ standalone daemon would be re-homed verbatim; instead:
   engine's shim can depend on it without duplicating compilation;
 - the helper itself is a **freshly-written** `bind→start(shared)→wait-for-signal→end`
   driver, `AirPlayEngine/Sources/ptp-helper/main.c` — not a port of any
-  `airptpd.c` — that depends only on `Clibairptp` (+ libevent transitively),
-  so it stays small enough to read line-by-line (SPEC §4.1);
+  `airptpd.c` — that depends only on `Clibairptp` (+ a **statically-linked**
+  libevent — see §6.1.1), so it stays small enough to read line-by-line
+  (SPEC §4.1);
 - it is packaged as a Developer-ID-signed Mach-O launchd daemon under
   SMAppService (plist §2.2, signing, firewall allowlist);
 - it has no `daemonize()` call — launchd owns backgrounding; it runs foreground;
@@ -405,6 +406,35 @@ standalone daemon would be re-homed verbatim; instead:
 A `AUDIOUTER_PTP_PORTS` env var (parsed in `main.c`, applied via
 `airptp_ports_override()` before binding) lets the helper itself run on high,
 unprivileged ports for the same CI/dev path described in §6.2.
+
+### 6.1.1 The helper statically links libevent (Library Validation)
+
+**The helper links `libevent_core.a` + `libevent_pthreads.a` statically, not the
+Homebrew libevent dylib the app links.** This is not a size optimization — it is
+required for the hardened-runtime Developer-ID launchd daemon to run at all.
+
+The first Developer-ID live test (2026-07-21) crashed the daemon at load time
+(`launchctl print` → `last exit reason = OS_REASON_DYLD`, KeepAlive respawning in
+a throttle loop). `dyld` refused to map the Homebrew
+`libevent-2.1.7.dylib` into the process: *"code signature ... not valid for use in
+process: mapping process and mapped file (non-platform) have different Team IDs."*
+That is **Library Validation** (part of the hardened runtime): a Developer-ID
+binary may only load libraries signed by the same Team ID or by Apple, and
+Homebrew's libevent is ad-hoc-signed. The **app** dodges this with the
+`com.apple.security.cs.disable-library-validation` entitlement
+(`scripts/Audiouter.entitlements`); the **helper deliberately carries no
+entitlements** (§1.1 — smallest privileged surface), so it enforces validation.
+
+Rather than weaken the root daemon with that entitlement, the helper
+**static-links** libevent, so at runtime it has **no external dylib dependency at
+all** (`otool -L Contents/MacOS/ptp-helper` → only `libSystem`) and there is
+nothing for Library Validation to reject. Mechanically (`AirPlayEngine/Package.swift`):
+the shared `Clibairptp` target carries **no** libevent linker settings (a
+static-library target does not resolve its own external symbols — its consumers
+do), so its two consumers link libevent *differently* — `CAirPlayEngine` (the app
+path) links the dylib as before, while the `ptp-helper` executable passes the
+`.a` archive paths to the linker. Verified live: after the fix the daemon runs as
+**root**, stable, having bound 319/320 and started the PTP master.
 
 ### 6.2 Which side runs what in the two-host harness (clarified)
 

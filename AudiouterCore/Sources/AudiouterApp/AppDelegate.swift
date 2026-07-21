@@ -227,13 +227,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onboarding.present()
                 return
             }
-            // Control-panel rollout: while a control-panel session is live (the
-            // shell may be tucked away after an app-switch), a click restores the
-            // shared shell in place — whatever surface it's hosting — rather than
-            // toggling the popover. Otherwise: normal popover.
+            // Control-panel rollout: while a control-panel session is live, the
+            // menu-bar click TOGGLES the shared shell (whatever surface it's
+            // hosting) rather than the popover. If the shell is showing, close it
+            // (a real close → lands home on the popover, exactly like the ✕/Esc);
+            // if it's tucked away after an app-switch, restore it in place. A bare
+            // re-show here (the old behavior) could never dismiss the panel, so a
+            // click on an already-open panel did nothing.
             if self.useControlPanel, self.controlPanelSessionActive,
                let shell = self.controlPanel {
-                shell.show(anchorRect: self.statusAnchorRect())
+                if shell.isPanelVisible {
+                    shell.performClose()
+                } else {
+                    shell.show(anchorRect: self.statusAnchorRect())
+                }
                 return
             }
             self.popoverController.toggle(relativeTo: button)

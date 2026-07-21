@@ -92,4 +92,56 @@ final class ControlPanelWindowControllerTests: XCTestCase {
         controller.setTitle("Settings")
         XCTAssertEqual(controller.window?.title, "Settings")
     }
+
+    // MARK: - Close affordances (control-panel-ship)
+
+    /// The panel is a real work surface that does NOT dismiss on click-out, so
+    /// it must expose an obvious close control — the standard close button, kept
+    /// visible. Miniaturize/zoom are hidden (meaningless on an anchored, fixed
+    /// panel). This is the fix for the "no visible way to close the panel" bug.
+    func testCloseButtonIsVisibleAndOtherTrafficLightsHidden() {
+        let controller = makeController()
+        guard let panel = controller.test_panel else {
+            return XCTFail("window should be an NSPanel")
+        }
+        XCTAssertEqual(panel.standardWindowButton(.closeButton)?.isHidden, false,
+                       "the close button must stay visible so the panel can be closed")
+        XCTAssertEqual(panel.standardWindowButton(.miniaturizeButton)?.isHidden, true)
+        XCTAssertEqual(panel.standardWindowButton(.zoomButton)?.isHidden, true)
+    }
+
+    /// Escape closes the panel through the SAME real-close/land-home path as the
+    /// ✕ button — wired explicitly via `cancelOperation(_:)` → `performClose(_:)`
+    /// on the panel subclass, not left to incidental default behavior.
+    func testEscapeViaCancelOperationClosesAndFiresOnClose() {
+        let controller = makeController()
+        controller.show(anchorRect: nil)
+        var fired = false
+        controller.onClose = { fired = true }
+        controller.test_panel?.cancelOperation(nil)
+        XCTAssertTrue(fired, "Escape/cancelOperation should close the panel and fire onClose")
+    }
+
+    /// The status-item toggle-close calls this shell method when the panel is
+    /// already open; it must route through the real close so the app lands home
+    /// on the popover (i.e. `onClose` fires), not silently order the panel out.
+    func testPerformCloseFiresOnClose() {
+        let controller = makeController()
+        controller.show(anchorRect: nil)
+        var fired = false
+        controller.onClose = { fired = true }
+        controller.performClose()
+        XCTAssertTrue(fired, "performClose() should fire onClose (land home)")
+    }
+
+    /// `isPanelVisible` is the signal the status-item click reads to tell an open
+    /// panel (→ toggle closed) from one tucked away by `hidesOnDeactivate` (→
+    /// restore in place). It tracks `window.isVisible`; headless runs never order
+    /// the window on screen (`HeadlessRuntime`), so it reads false until a real
+    /// show — which is exactly the wiring this locks down.
+    func testIsPanelVisibleReflectsWindowVisibility() {
+        let controller = makeController()
+        XCTAssertFalse(controller.isPanelVisible,
+                       "an unshown panel is not visible (never ordered on screen)")
+    }
 }

@@ -654,6 +654,34 @@ final class MixerWindowControllerTests: XCTestCase {
                        "sofa.fill",
                        "the shared controller resolves the override the row renders")
     }
+
+    // MARK: Keyboard focus (A11Y-GROUPS)
+    //
+    // Live-test finding: pressing Tab did nothing anywhere in the Groups
+    // window, because nothing in its lifecycle ever calls
+    // `NSWindow.makeFirstResponder(_:)` — so a freshly-shown window has no
+    // real first responder to advance Tab FROM. `SidebarViewController`'s
+    // `viewDidAppear()` override seeds the outline view as first responder
+    // (see its doc comment for the full root-cause writeup); this asserts
+    // that seed fires exactly the way a real window appearing would trigger
+    // it, without needing an actual on-screen window (never available under
+    // `swift test`).
+
+    func testWindowHasNoFirstResponderBeforeItEverAppears() async throws {
+        let (window, _, _) = try await makeWindow()
+        // Before `viewDidAppear()` has ever run, the window's first responder
+        // is itself — nothing has claimed it. This is the exact state a live
+        // Tab press found: nothing to advance from.
+        XCTAssertTrue(window.test_sidebar.view.window === window.window)
+        XCTAssertFalse(window.test_sidebar.test_isOutlineViewFirstResponder)
+    }
+
+    func testSidebarViewDidAppearSeedsTheOutlineViewAsFirstResponder() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_sidebar.test_simulateViewDidAppear()
+        XCTAssertTrue(window.test_sidebar.test_isOutlineViewFirstResponder,
+                      "the sidebar's outline view must become first responder once the window appears, or Tab has nothing to advance from")
+    }
 }
 
 private actor WindowTestCountBox {

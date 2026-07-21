@@ -86,6 +86,52 @@ public final class SidebarViewController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    // MARK: Keyboard focus (A11Y-GROUPS)
+    //
+    // Live-test finding: pressing Tab did NOTHING anywhere in the Groups
+    // window. Root cause, confirmed by inspection: nothing in this window's
+    // whole lifecycle — not `MixerWindowController.showWindow()`, not the
+    // auto-select on launch, not any child controller — EVER calls
+    // `NSWindow.makeFirstResponder(_:)` or sets `initialFirstResponder`
+    // (verified: zero hits for either, or for `recalculateKeyViewLoop`,
+    // anywhere in `AudiouterWindowUI`/`AudiouterApp`). A freshly-ordered-front
+    // `NSWindow`'s first responder is the WINDOW ITSELF until something
+    // explicitly claims it, and even programmatic selection
+    // (`outlineView.selectRowIndexes(...)`, used by the auto-select and by
+    // `select(_:notify:)`) does NOT promote the outline view to first
+    // responder the way a real click does — only `NSTableView`'s own
+    // `mouseDown:` does that. So Tab never had a real key view to advance
+    // FROM. `viewDidAppear()` only fires once the window is genuinely on
+    // screen (never under `swift test`/harness runs — those never order the
+    // window front at all, see `HeadlessRuntime` / `../../AGENTS.md`), so
+    // seeding here is safe unconditionally and costs nothing headless.
+    //
+    // The sidebar is the one control ALWAYS present regardless of which
+    // content pane is showing (editor/detail/empty), so it's the natural
+    // anchor: force AppKit to (re)compute the window's automatic key-view
+    // loop (`autorecalculatesKeyViewLoop`, on by default for a window built
+    // entirely in code, as this one is — but recalculation is reactive and
+    // nothing here ever explicitly nudged it either) and claim first
+    // responder for the outline view, the top-leading control.
+    //
+    // FOLLOW-UP for the next person here: this fixes "nothing is ever
+    // tabbable from launch," which is the mechanism a live test would hit
+    // immediately on opening the window. It does NOT touch
+    // `MixerWindowController.swift` (out of this task's scope — see
+    // PROGRESS.md's A11Y-GROUPS entry) or `ContentPaneHostViewController`'s
+    // `setContent(_:)` (same file), which swaps the content pane's view
+    // hierarchy on every sidebar selection; if a live retest finds Tab still
+    // breaks specifically AFTER switching panes, the next place to look is
+    // whether that swap needs its own `window.recalculateKeyViewLoop()` call.
+    public override func viewDidAppear() {
+        super.viewDidAppear()
+        guard let window = view.window else { return }
+        window.recalculateKeyViewLoop()
+        if window.firstResponder === window {
+            window.makeFirstResponder(outlineView)
+        }
+    }
+
     public override func loadView() {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
         column.resizingMask = .autoresizingMask
@@ -350,6 +396,19 @@ public final class SidebarViewController: NSViewController {
 
     /// True when the outline view allows multi-selection (SPEC.md §9).
     public var test_allowsMultipleSelection: Bool { outlineView.allowsMultipleSelection }
+
+    /// Drive the real `viewDidAppear()` lifecycle override directly (A11Y-GROUPS)
+    /// — a headless run never orders the window on screen, so AppKit never calls
+    /// this itself; this hook exercises the exact same method a live window
+    /// appearing would call.
+    public func test_simulateViewDidAppear() { viewDidAppear() }
+
+    /// True when the outline view is the hosting window's current first
+    /// responder (A11Y-GROUPS: asserts the Tab-traversal seed in
+    /// `viewDidAppear()` actually claimed it).
+    public var test_isOutlineViewFirstResponder: Bool {
+        view.window?.firstResponder === outlineView
+    }
 }
 
 // MARK: - NSOutlineViewDataSource

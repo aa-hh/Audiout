@@ -337,6 +337,50 @@ final class SetupModelTests: XCTestCase {
         XCTAssertEqual(net.probeCount, 0, "network not browsed while unknown")
     }
 
+    func testRefreshStatusesReadsAudioSilentlyNeverTheAudibleTone() async {
+        // ONBOARD-TONE regression: `refreshStatuses()` is what
+        // `OnboardingWindowController.appDidBecomeActive` calls on EVERY plain
+        // app reactivation while onboarding is still open (e.g. Cmd+Tab away
+        // and back) — not just the explicit "Allow…" tap. Once the row has
+        // been engaged (`.denied`), a refresh must adopt the SILENT read and
+        // must NEVER call the audible `probe()` — that stays reserved for
+        // `requestAudioCapture()`.
+        let audio = SilentAudioProbe(probeResult: .denied, silentResult: .granted)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // the one legitimate audible call
+        XCTAssertEqual(model.audioStatus, .denied)
+        XCTAssertEqual(audio.probeCallCount, 1)
+
+        await model.refreshStatuses()       // simulated plain app reactivation
+        XCTAssertEqual(model.audioStatus, .granted, "picks up a grant made in Settings via the silent read")
+        XCTAssertEqual(audio.silentCallCount, 1)
+        XCTAssertEqual(audio.probeCallCount, 1, "reactivation must not replay the audible tone probe")
+    }
+
+    func testRefreshStatusesLeavesAudioUnchangedWhenSilentReadIsNil() async {
+        // A fake that hasn't implemented the silent seam (default `nil`, e.g.
+        // `CannedAudioProbe`) must not fall back to the audible probe on an
+        // engaged (`.denied`) row — it just leaves the cached status
+        // untouched, same posture as `auditRequiredPermissions()`.
+        let audio = SilentAudioProbe(probeResult: .denied, silentResult: nil)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // → .denied, engages the row
+        XCTAssertEqual(model.audioStatus, .denied)
+        XCTAssertEqual(audio.probeCallCount, 1)
+
+        await model.refreshStatuses()
+        XCTAssertEqual(model.audioStatus, .denied, "unchanged — nil silent read must not clobber the cached status")
+        XCTAssertEqual(audio.probeCallCount, 1, "still never falls back to the audible probe")
+    }
+
     func testRefreshReprobesAlreadyAskedNetwork() async {
         // Once the network row has been engaged, a refresh re-checks it — catching
         // the case where the browse first got nowhere (requested) but the network
@@ -427,20 +471,27 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Required permissions (revocation audit)
 
-    /// Records `currentStatusSilently()` calls and returns a canned result —
-    /// exercises the OPT-IN silent seam (default is `nil` via the protocol
-    /// extension, so every other fake in this file needs no change).
+    /// Records `probe()` (audible) and `currentStatusSilently()` (silent) calls
+    /// separately and returns canned results for each — exercises the OPT-IN
+    /// silent seam (default is `nil` via the protocol extension, so every other
+    /// fake in this file needs no change) while also proving the audible path
+    /// was or wasn't touched.
     private final class SilentAudioProbe: AudioCapturePermissionProbing, @unchecked Sendable {
         let probeResult: PermissionStatus
         let silentResult: PermissionStatus?
         private let lock = NSLock()
         private var _silentCallCount = 0
+        private var _probeCallCount = 0
         var silentCallCount: Int { lock.withLock { _silentCallCount } }
+        var probeCallCount: Int { lock.withLock { _probeCallCount } }
         init(probeResult: PermissionStatus = .granted, silentResult: PermissionStatus?) {
             self.probeResult = probeResult
             self.silentResult = silentResult
         }
-        func probe() async -> PermissionStatus { probeResult }
+        func probe() async -> PermissionStatus {
+            lock.withLock { _probeCallCount += 1 }
+            return probeResult
+        }
         func currentStatusSilently() -> PermissionStatus? {
             lock.withLock { _silentCallCount += 1 }
             return silentResult

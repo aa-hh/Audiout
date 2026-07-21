@@ -489,11 +489,87 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    @objc private func doneTapped() { onDone() }
+    /// Finish onboarding — unless a REQUIRED permission
+    /// (``SetupModel/requiredPermissionsNotGranted()``) hasn't actually been
+    /// granted, in which case ask first rather than silently completing setup
+    /// with a gap the user won't discover until something fails later with no
+    /// path back. Setup stays "guidance, not a gate"
+    /// (``SetupModel/complete()``) — Continue Anyway still finishes; this only
+    /// stops the SILENT case.
+    @objc private func doneTapped() {
+        let notGranted = model.requiredPermissionsNotGranted()
+        guard !notGranted.isEmpty else { onDone(); return }
+        confirmFinishDespiteUngrantedPermissions(notGranted) { [weak self] continueAnyway in
+            if continueAnyway { self?.onDone() }
+        }
+    }
+
+    /// Ask "continue anyway?" as a sheet on the window when one exists (the
+    /// real app always has one here — the Done button is only visible inside
+    /// an on-screen window). A headless test has no window to host a sheet
+    /// (its completion handler needs the app's run loop, which XCTest doesn't
+    /// pump), so it stashes the pending confirmation for
+    /// ``test_resolvePendingConfirmation(continueAnyway:)`` to resolve instead
+    /// of calling `completion` synchronously.
+    private func confirmFinishDespiteUngrantedPermissions(
+        _ notGranted: [RequiredPermission],
+        completion: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Continue without every permission?"
+        alert.informativeText = Self.confirmationText(for: notGranted)
+        // "Go Back" first (and thus default/Return-bound) so an accidental
+        // Return doesn't skip the very permissions this dialog is warning
+        // about — same reasoning as Done itself not being Return-default.
+        alert.addButton(withTitle: "Go Back")
+        alert.addButton(withTitle: "Continue Anyway")
+        if let window = view.window {
+            alert.beginSheetModal(for: window) { response in
+                completion(response == .alertSecondButtonReturn)
+            }
+        } else {
+            test_pendingConfirmation = (notGranted, completion)
+        }
+    }
+
+    /// The confirmation body, naming the specific ungranted permission(s) —
+    /// same "name it plainly" approach as ``bannerText(for:)``.
+    private static func confirmationText(for notGranted: [RequiredPermission]) -> String {
+        let names = notGranted.map(displayName(for:))
+        let joined: String
+        switch names.count {
+        case 0: joined = "a permission"   // shouldn't happen — only called with a non-empty set
+        case 1: joined = names[0]
+        case 2: joined = "\(names[0]) and \(names[1])"
+        default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
+        }
+        let plural = names.count > 1 ? "permissions" : "permission"
+        return "You haven't granted the \(joined) \(plural). Audiouter may not work "
+            + "correctly until it's turned on in System Settings."
+    }
 
     // MARK: Test-support hooks
 
     private var doneButton: NSButton?
+
+    /// Set (headless only) while `doneTapped()` is waiting on a "continue
+    /// anyway?" confirmation that has no real window to host a sheet on.
+    /// `nil` once resolved, or whenever Done didn't need to ask at all.
+    public private(set) var test_pendingConfirmationPermissions: [RequiredPermission]?
+    private var test_pendingConfirmation: (permissions: [RequiredPermission], completion: (Bool) -> Void)? {
+        didSet { test_pendingConfirmationPermissions = test_pendingConfirmation?.permissions }
+    }
+
+    /// Resolve a pending headless "continue anyway?" confirmation — `true`
+    /// simulates clicking Continue Anyway (finishes), `false` simulates Go
+    /// Back (does nothing further; Done can be tapped again later). A no-op
+    /// if nothing is pending.
+    public func test_resolvePendingConfirmation(continueAnyway: Bool) {
+        guard let pending = test_pendingConfirmation else { return }
+        test_pendingConfirmation = nil
+        pending.completion(continueAnyway)
+    }
 
     public var test_audioRowButtonTitles: [String] { _ = view; return audioRow.test_buttonTitles }
     public var test_networkRowButtonTitles: [String] { _ = view; return networkRow.test_buttonTitles }
@@ -529,7 +605,9 @@ public final class OnboardingViewController: NSViewController {
         ptpHelperRow.update(status: ptpHelper)
     }
 
-    /// Invoke Done.
+    /// Invoke Done. Finishes immediately if every required permission is
+    /// granted; otherwise leaves a pending confirmation
+    /// (``test_pendingConfirmationPermissions``) rather than finishing.
     public func test_tapDone() { _ = view; doneTapped() }
 
     /// The laid-out root view (for offscreen snapshot rendering).

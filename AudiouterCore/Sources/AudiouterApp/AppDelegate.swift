@@ -99,6 +99,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (first launch, or "Run Setup Again…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
 
+    /// The `SetupModel` behind the last-presented onboarding window, kept alive
+    /// after the window closes and REUSED by every subsequent automatic
+    /// revocation audit (see `auditRequiredPermissionsIfNeeded`) rather than
+    /// rebuilding a blank one each time. `SetupModel` never re-probes Local
+    /// Network from `.unknown` (that would spring an untouched prompt — see
+    /// `SetupModel.auditRequiredPermissions()`'s doc comment), so throwing the
+    /// model away between audits would permanently disable Local Network
+    /// revocation detection for the rest of the run; reusing it means the
+    /// first audit after Local Network was actually engaged (during onboarding,
+    /// or a previous audit) can see it change.
+    private var permissionAuditModel: SetupModel?
+
+    /// True while an automatic revocation audit's async probes are in flight —
+    /// guards against a second `didBecomeActive`/wake firing before the first
+    /// audit's Local Network browse resolves.
+    private var isAuditingRequiredPermissions = false
+
+    /// Set right after a `.permissionLost` onboarding window is dismissed;
+    /// automatic audits are skipped until this elapses. Local Network's status
+    /// can read a false "not reachable right now" for reasons that have nothing
+    /// to do with the permission (speakers off, Wi-Fi hiccup — see
+    /// `PermissionStatus`'s doc comment on why it never reports a hard
+    /// `.denied`), so without this a transient blip could reopen the window
+    /// again on the very next reactivate/wake and nag the user in a loop. A
+    /// real, sustained revocation is still caught on the next audit once the
+    /// cooldown elapses.
+    private var permissionAuditCooldownUntil: Date?
+    private let permissionAuditCooldown: TimeInterval = 30
+
     /// Whether `backend.start()` has run. On first-run native the backend start
     /// (and its Bonjour discovery, which triggers the Local Network prompt) is
     /// DEFERRED until onboarding is dismissed, so the prompt is primed by the
@@ -327,6 +356,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             startBackendIfNeeded()
             log("Audiouter launched (backend: \(type(of: backend)))")
+            // Existing users who completed onboarding before the PTP helper
+            // daemon existed never got `register()` called — it previously only
+            // ran from `OnboardingViewController.viewDidLoad`, which this launch
+            // path skips entirely. Give every native-backend launch one silent
+            // registration attempt so their Login Items entry appears too.
+            registerPTPHelperIfNeeded()
+        }
+
+        // Revocation watch: if a REQUIRED permission (audio capture, local
+        // network, PTP helper — NOT Remote Control, an enhancement) gets turned
+        // off after setup already completed, force onboarding back open with a
+        // banner rather than silently degrading. Reactivate and wake are the two
+        // moments a permission flip made elsewhere (System Settings, or the PTP
+        // helper's Login Items toggle) is most likely to have just happened.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            // `queue: .main` guarantees this runs on the main thread; `MainActor
+            // .assumeIsolated` tells the compiler what the queue already
+            // guarantees (same idiom `OnboardingViewController`'s Timer closures
+            // use for the identical shape of problem).
+            MainActor.assumeIsolated { self?.auditRequiredPermissionsIfNeeded() }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.auditRequiredPermissionsIfNeeded() }
+        }
+    }
+
+    /// Register the PTP helper daemon once at launch, outside onboarding
+    /// (T6 follow-up). Registering shows no system prompt of its own (see
+    /// `PTPHelperManaging.register()`'s doc comment) — it just adds a disabled
+    /// Login Items entry — so it's safe to fire unconditionally. Gated to
+    /// `.notRegistered` (skip the no-op call once already registered) and to
+    /// the native backend, same posture as `SetupModel.shouldPresentOnLaunch`:
+    /// the mock/OwnTone paths don't use the helper at all.
+    @MainActor
+    private func registerPTPHelperIfNeeded() {
+        guard case .native = backendKind else { return }
+        let ptpHelper = SMAppServicePTPHelper()
+        guard ptpHelper.status == .notRegistered else { return }
+        do {
+            try ptpHelper.register()
+            log("PTP helper registered at launch (existing-user path)")
+        } catch {
+            log("PTP helper registration failed at launch: \(error)")
+        }
+    }
+
+    /// The automatic post-onboarding revocation check, run from reactivate/wake.
+    /// Builds/reuses `permissionAuditModel`, audits the three required
+    /// permissions with SILENT/functional reads only (`SetupModel.auditRequiredPermissions()`
+    /// — never an audible probe, never an untouched prompt), and force-reopens
+    /// onboarding with the `.permissionLost` banner if anything's unmet.
+    @MainActor
+    private func auditRequiredPermissionsIfNeeded() {
+        guard !HeadlessRuntime.isActive else { return }
+        guard settings.hasCompletedSetup else { return }
+        guard onboardingWindowController == nil else { return }
+        guard case .native = backendKind else { return }
+        guard !isAuditingRequiredPermissions else { return }
+        if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return }
+
+        let model = permissionAuditModel ?? SetupModel(
+            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
+            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
+            remoteControl: RemoteControlPrimerFactory.makeDefault(),
+            ptpHelper: SMAppServicePTPHelper(),
+            settings: settings)
+        permissionAuditModel = model
+
+        isAuditingRequiredPermissions = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let unmet = await model.auditRequiredPermissions()
+            self.isAuditingRequiredPermissions = false
+            // Re-check onboarding isn't already open — the audit's awaits give a
+            // window for another trigger (or the user) to have opened it since.
+            guard !unmet.isEmpty, self.onboardingWindowController == nil else { return }
+            self.log("Required permission(s) turned off since setup completed: \(unmet) — reopening setup")
+            self.presentSetup(reason: .permissionLost(unmet), model: model)
         }
     }
 
@@ -341,21 +452,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backend.start()
     }
 
-    /// Build a fresh ``SetupModel`` (production probes) + onboarding window and
-    /// present it. Used for both first-run and "Run Setup Again…". `onFinished`
-    /// starts the backend if it hasn't already (first run) and is a guarded no-op
-    /// on a re-run (backend already streaming).
+    /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
+    /// and present it. Used for first-run, "Run Setup Again…", AND the
+    /// automatic permission-revocation reopen (`auditRequiredPermissionsIfNeeded`).
+    /// `onFinished` starts the backend if it hasn't already (first run) and is a
+    /// guarded no-op on a re-run (backend already streaming).
+    ///
+    /// - Parameters:
+    ///   - reason: `.firstRun` (default) for the ordinary flows, unchanged from
+    ///     before; `.permissionLost` for the automatic reopen, which also shows
+    ///     the "turned off" banner.
+    ///   - model: pass the SAME model the triggering audit already refreshed
+    ///     (so the rows reflect the just-observed unmet statuses instead of
+    ///     resetting to blank); `nil` builds a fresh one, as every pre-existing
+    ///     call site did. Either way the result is stashed in
+    ///     `permissionAuditModel` so later automatic audits keep reusing it.
     @MainActor
-    private func presentSetup() {
-        let model = SetupModel(
+    private func presentSetup(reason: OnboardingReason = .firstRun, model providedModel: SetupModel? = nil) {
+        let model = providedModel ?? SetupModel(
             audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
             localNetwork: LocalNetworkPrimerFactory.makeDefault(),
             remoteControl: RemoteControlPrimerFactory.makeDefault(),
             ptpHelper: SMAppServicePTPHelper(),
             settings: settings)
-        let controller = OnboardingWindowController(model: model) { [weak self] in
-            self?.onboardingWindowController = nil
-            self?.startBackendIfNeeded()
+        permissionAuditModel = model
+        let controller = OnboardingWindowController(model: model, reason: reason) { [weak self] in
+            guard let self else { return }
+            self.onboardingWindowController = nil
+            self.startBackendIfNeeded()
+            if case .permissionLost = reason {
+                self.permissionAuditCooldownUntil = Date().addingTimeInterval(self.permissionAuditCooldown)
+            }
         }
         onboardingWindowController = controller
         controller.present()

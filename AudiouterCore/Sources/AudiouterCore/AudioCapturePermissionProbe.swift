@@ -5,6 +5,7 @@ import Foundation
 #if canImport(AudioToolbox)
 import AudioToolbox
 import AVFoundation
+import CoreGraphics
 #endif
 
 /// Constructs the production ``AudioCapturePermissionProbing`` for this OS.
@@ -137,6 +138,21 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
 
         let peak = tap.peak()
         return peak > grantedPeakThreshold ? .granted : .denied
+    }
+
+    /// Silent revocation-detection path (`SetupModel.auditRequiredPermissions()`):
+    /// no tone, no tap, no prompt — just a read of the live TCC decision. `probe()`
+    /// above deliberately triggers the audible self-test tone because it's the
+    /// only way to distinguish "granted" from "denied" for the explicit
+    /// "Allow…" gesture; firing that tone on every reactivate/wake to catch a
+    /// revocation would be user-hostile. `CGPreflightScreenCaptureAccess()` is
+    /// the public, silent, non-prompting status read for the exact TCC bucket
+    /// the process-tap grant lives under — "Screen & System Audio Recording"
+    /// (see `SystemSettingsPane.screenAndSystemAudioRecording`) — so it can
+    /// stand in for a real status API here even though process taps have none
+    /// of their own.
+    public func currentStatusSilently() -> PermissionStatus? {
+        CGPreflightScreenCaptureAccess() ? .granted : .denied
     }
 
     // MARK: pid → Core Audio process object (mirrors dev/audiocap CAHelpers)

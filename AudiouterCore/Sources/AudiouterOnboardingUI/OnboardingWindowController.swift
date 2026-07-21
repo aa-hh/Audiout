@@ -30,11 +30,15 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
     /// - Parameters:
     ///   - model: the Core flow model, pre-wired with the production probes.
+    ///   - reason: why this presentation is happening — `.firstRun` (default,
+    ///     every existing call site) renders exactly as before; `.permissionLost`
+    ///     shows the "turned off" banner (see ``OnboardingReason``).
     ///   - openSettings: how to open a System Settings pane; defaults to the real
     ///     `NSWorkspace`-backed opener, injected as a spy in tests.
     ///   - onFinished: called once when the window is dismissed (Done or close) —
     ///     the app starts the (deferred) backend here.
     public init(model: SetupModel,
+                reason: OnboardingReason = .firstRun,
                 openSettings: @escaping (SystemSettingsPane) -> Void = SystemSettingsOpener.open,
                 onFinished: @escaping () -> Void) {
         self.model = model
@@ -47,6 +51,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         let trampoline = Trampoline()
         contentVC = OnboardingViewController(
             model: model,
+            reason: reason,
             onOpenSettings: openSettings,
             onDone: { trampoline.fire() })
 

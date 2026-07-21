@@ -194,6 +194,51 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertEqual(ptpHelper.registerCount, 1)
     }
 
+    // MARK: Presentation reason (`.permissionLost` banner)
+
+    func testFirstRunRendersNoBanner() {
+        let vc = OnboardingViewController(model: makeModel(audio: .granted),
+                                          reason: .firstRun,
+                                          onOpenSettings: { _ in }, onDone: {})
+        XCTAssertFalse(vc.test_showsPermissionLostBanner)
+        XCTAssertNil(vc.test_permissionLostBannerText)
+    }
+
+    func testPermissionLostRendersBannerNamingTheUnmetPermission() {
+        let vc = OnboardingViewController(model: makeModel(audio: .denied),
+                                          reason: .permissionLost([.audioCapture]),
+                                          onOpenSettings: { _ in }, onDone: {})
+        XCTAssertTrue(vc.test_showsPermissionLostBanner)
+        let text = vc.test_permissionLostBannerText
+        XCTAssertNotNil(text)
+        XCTAssertTrue(text?.contains("System Audio") ?? false,
+                      "banner names the specific unmet permission: \(text ?? "nil")")
+    }
+
+    func testPermissionLostBannerNamesMultipleUnmetPermissions() {
+        let vc = OnboardingViewController(model: makeModel(audio: .denied),
+                                          reason: .permissionLost([.audioCapture, .ptpHelper]),
+                                          onOpenSettings: { _ in }, onDone: {})
+        let text = vc.test_permissionLostBannerText ?? ""
+        XCTAssertTrue(text.contains("System Audio"), text)
+        XCTAssertTrue(text.contains("PTP helper"), text)
+    }
+
+    func testWindowControllerThreadsReasonThroughToTheContentViewController() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .denied),
+                                            reason: .permissionLost([.localNetwork]),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        XCTAssertTrue(wc.test_contentViewController.test_showsPermissionLostBanner)
+    }
+
+    func testWindowControllerDefaultsToFirstRun() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        XCTAssertFalse(wc.test_contentViewController.test_showsPermissionLostBanner)
+    }
+
     // MARK: Window controller dismissal contract
 
     func testDoneFinishesOnceAndPersistsCompletion() {

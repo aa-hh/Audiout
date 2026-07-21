@@ -63,6 +63,19 @@ public enum SetupPermission: CaseIterable, Sendable {
     case remoteControl
 }
 
+/// A permission the app REQUIRES to operate — as opposed to Remote Control
+/// (Accessibility), which is an *enhancement* (speaker-side transport control,
+/// see ``RemoteControlPriming``) and is deliberately excluded here. Losing
+/// Remote Control never stops the app from playing audio, so it must never
+/// force-reopen onboarding; losing one of these three does (see
+/// ``SetupModel/unmetRequiredPermissions()``). Locked product decision,
+/// 2026-07-21.
+public enum RequiredPermission: CaseIterable, Sendable {
+    case audioCapture
+    case localNetwork
+    case ptpHelper
+}
+
 /// A System Settings privacy pane the setup flow deep-links to when a permission
 /// is denied or unverifiable. The `x-apple.systempreferences:` scheme is the
 /// documented way to open a specific pane; the anchors below are the ones macOS
@@ -147,6 +160,19 @@ public enum SetupPresentation {
 public protocol AudioCapturePermissionProbing: Sendable {
     /// Fire the prompt (if not yet decided) and report the real outcome.
     func probe() async -> PermissionStatus
+
+    /// A SILENT, side-effect-free read of the current status — no tone, no
+    /// prompt, no tap. `nil` when the concrete probe has no such read (the
+    /// default, via the protocol extension below — existing test fakes need
+    /// no change). This is the only way to catch a granted→revoked flip
+    /// without re-firing the audible tone probe, so it's what the automatic
+    /// post-onboarding revocation audit uses (``SetupModel/auditRequiredPermissions()``);
+    /// the production impl is ``CoreAudioTonePermissionProbe``.
+    func currentStatusSilently() -> PermissionStatus?
+}
+
+public extension AudioCapturePermissionProbing {
+    func currentStatusSilently() -> PermissionStatus? { nil }
 }
 
 /// Triggers AND functionally checks the Local Network permission. macOS exposes
@@ -380,6 +406,82 @@ public final class SetupModel {
         guard next != remoteControlStatus else { return }
         remoteControlStatus = next
         onChange?()
+    }
+
+    /// Which of the three REQUIRED permissions (``RequiredPermission`` — Remote
+    /// Control is deliberately excluded) are currently unmet, read from the
+    /// model's CURRENT cached statuses only — no probing, no side effects, safe
+    /// to call anytime. Used both to decide whether to force-reopen onboarding
+    /// after setup already completed, and (indirectly) by
+    /// ``auditRequiredPermissions()`` after it refreshes the cached statuses.
+    ///
+    /// - Audio capture is unmet only on a confirmed `.denied` — `.unsupported`
+    ///   (pre-14.2 OS) isn't fixable, and `.granted`/`.unknown` are fine.
+    /// - Local Network is unmet only on `.requested` (asked but unproven —
+    ///   the honest "not currently working" state); `.unknown` means never
+    ///   engaged, not lost, so it never counts.
+    /// - The PTP helper is unmet when it's registered but not usable
+    ///   (`.requiresApproval`/`.notFound`) — a REGISTERED-but-not-approved
+    ///   helper is the actionable "turned off in Login Items" case.
+    ///   `.notRegistered` is the pre-registration state (handled by the app's
+    ///   launch-time registration attempt, not a nag here) and `.enabled` is fine.
+    public func unmetRequiredPermissions() -> [RequiredPermission] {
+        var unmet: [RequiredPermission] = []
+        if audioStatus == .denied {
+            unmet.append(.audioCapture)
+        }
+        if localNetworkStatus == .requested {
+            unmet.append(.localNetwork)
+        }
+        if ptpHelperStatus != .enabled, ptpHelperStatus != .notRegistered {
+            unmet.append(.ptpHelper)
+        }
+        return unmet
+    }
+
+    /// Refresh ONLY the three required permissions' statuses using SILENT/
+    /// functional reads (never the audible tone, never an unengaged prompt),
+    /// then report ``unmetRequiredPermissions()``. This is the "did something
+    /// I need get turned off since setup finished?" check — driven by the app
+    /// on reactivate/wake, never by the onboarding UI itself.
+    ///
+    /// - Audio: uses ``AudioCapturePermissionProbing/currentStatusSilently()``
+    ///   — the ONLY reliable way to catch a granted→revoked flip without
+    ///   firing the 250 ms tone probe. A `nil` result (a test fake that hasn't
+    ///   implemented it) leaves `audioStatus` untouched.
+    /// - Local Network: re-probes ONLY if already engaged
+    ///   (`localNetworkStatus != .unknown`) — same "never spring an untouched
+    ///   prompt" rule ``refreshStatuses()`` follows. A model that has never
+    ///   observed Local Network leave `.unknown` (e.g. the user skipped that
+    ///   row during onboarding) can't detect a revocation for it — there's
+    ///   nothing to revoke from a status we never confirmed in the first place.
+    /// - PTP helper: a plain silent `.status` re-read, never re-``register()``.
+    /// - Remote Control is NEVER touched here — it's excluded from "required"
+    ///   entirely (see ``RequiredPermission``).
+    public func auditRequiredPermissions() async -> [RequiredPermission] {
+        var changed = false
+
+        if let silentAudio = audioProbe.currentStatusSilently(), silentAudio != audioStatus {
+            audioStatus = silentAudio
+            changed = true
+        }
+
+        if localNetworkStatus != .unknown {
+            let next: PermissionStatus = await localNetwork.probe() ? .granted : .requested
+            if next != localNetworkStatus {
+                localNetworkStatus = next
+                changed = true
+            }
+        }
+
+        let nextPTPHelperStatus = ptpHelper.status
+        if nextPTPHelperStatus != ptpHelperStatus {
+            ptpHelperStatus = nextPTPHelperStatus
+            changed = true
+        }
+
+        if changed { onChange?() }
+        return unmetRequiredPermissions()
     }
 
     /// Mark the flow finished so it doesn't present again on launch. Does NOT

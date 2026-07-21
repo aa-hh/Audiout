@@ -108,7 +108,8 @@ public final class OnboardingViewController: NSViewController {
                 symbolName: "wifi",
                 tileColor: .systemIndigo,
                 title: "Local Network",
-                detail: "Find AirPlay speakers on your Wi-Fi.",
+                // U+2011 non-breaking hyphen keeps "Wi‑Fi" from wrapping to an orphan "Fi."
+                detail: "Find AirPlay speakers on your Wi\u{2011}Fi.",
                 allowButtonTitle: "Allow…"),
             onAllow: { [weak self] in
                 Task { @MainActor in

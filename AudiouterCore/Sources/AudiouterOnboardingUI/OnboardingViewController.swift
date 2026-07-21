@@ -29,6 +29,7 @@ public final class OnboardingViewController: NSViewController {
     private var audioRow: PermissionRowView!
     private var networkRow: PermissionRowView!
     private var remoteControlRow: PermissionRowView!
+    private var ptpHelperRow: PTPHelperRowView!
 
     /// Polls the silent Accessibility trust read while the window is open, so a
     /// grant made in System Settings shows up even if `AXIsProcessTrusted()` only
@@ -37,6 +38,13 @@ public final class OnboardingViewController: NSViewController {
     /// "relaunch to apply" Accessibility behavior), polling can't help — that's what
     /// the AIRPLAY_DEBUG_SETUP log disambiguates.
     private var remoteControlPoll: Timer?
+
+    /// Polls the PTP helper's `SMAppService.status` while the window is open, so
+    /// approving it in Login Items (System Settings, not this window) is picked
+    /// up without needing a re-focus. Stops once `.enabled`. Same rationale as
+    /// `remoteControlPoll` — see T6/PROGRESS.md for the Developer-ID gating that
+    /// keeps this from ever reaching `.enabled` on an ad-hoc-signed build.
+    private var ptpHelperPoll: Timer?
 
     public init(model: SetupModel,
                 onOpenSettings: @escaping (SystemSettingsPane) -> Void,
@@ -47,7 +55,7 @@ public final class OnboardingViewController: NSViewController {
         super.init(nibName: nil, bundle: nil)
     }
 
-    deinit { remoteControlPoll?.invalidate() }
+    deinit { remoteControlPoll?.invalidate(); ptpHelperPoll?.invalidate() }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -108,6 +116,12 @@ public final class OnboardingViewController: NSViewController {
             // can't. (macOS gives no way to highlight an app row via URL.)
             onOpenSettings: { [weak self] in self?.model.primeRemoteControl() })
 
+        // T6: the privileged PTP helper daemon (SMAppService, not a TCC
+        // permission) — its own row type/status (see PTPHelperRowView's doc
+        // comment) rather than a fourth PermissionStatus case.
+        ptpHelperRow = PTPHelperRowView(
+            onOpenLoginItems: { [weak self] in self?.model.openPTPHelperLoginItems() })
+
         let header = makeHeader()
         content.addArrangedSubview(header)
         content.addArrangedSubview(makeReassurance())
@@ -146,12 +160,15 @@ public final class OnboardingViewController: NSViewController {
         }
         let separator1 = textInsetSeparator()
         let separator2 = textInsetSeparator()
+        let separator3 = textInsetSeparator()
 
         card.addSubview(audioRow)
         card.addSubview(separator1)
         card.addSubview(networkRow)
         card.addSubview(separator2)
         card.addSubview(remoteControlRow)
+        card.addSubview(separator3)
+        card.addSubview(ptpHelperRow)
 
         // Separators start after the icon tile, aligned with the row text —
         // exactly how System Settings insets its grouped-row dividers.
@@ -176,7 +193,15 @@ public final class OnboardingViewController: NSViewController {
             remoteControlRow.topAnchor.constraint(equalTo: separator2.bottomAnchor),
             remoteControlRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             remoteControlRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            remoteControlRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+
+            separator3.topAnchor.constraint(equalTo: remoteControlRow.bottomAnchor),
+            separator3.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: textInset),
+            separator3.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+
+            ptpHelperRow.topAnchor.constraint(equalTo: separator3.bottomAnchor),
+            ptpHelperRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            ptpHelperRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            ptpHelperRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
 
             card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
         ])
@@ -193,7 +218,13 @@ public final class OnboardingViewController: NSViewController {
         // Reflect real current state up front — surfaces an Accessibility grant the
         // user already had (silent check), without prompting anything untouched.
         refreshStatuses()
+        // Register the PTP helper daemon once, at load (T6): unlike the three
+        // probes above, registering shows no system prompt of its own, so it's
+        // safe to run unconditionally rather than waiting for a tap — see
+        // `SetupModel.registerPTPHelper()`'s doc comment.
+        model.registerPTPHelper()
         startRemoteControlPoll()
+        startPTPHelperPoll()
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
     }
@@ -207,6 +238,20 @@ public final class OnboardingViewController: NSViewController {
                 guard let self else { timer.invalidate(); return }
                 self.model.refreshRemoteControlStatus()
                 if self.model.remoteControlStatus == .granted { timer.invalidate(); self.remoteControlPoll = nil }
+            }
+        }
+    }
+
+    /// Poll the PTP helper's `SMAppService.status` every ~1.5 s until it's
+    /// `.enabled`, so approving it in Login Items lands on the row without a
+    /// re-focus. Same shape as `startRemoteControlPoll()`.
+    private func startPTPHelperPoll() {
+        guard ptpHelperPoll == nil else { return }
+        ptpHelperPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                self.model.refreshPTPHelperStatus()
+                if self.model.ptpHelperStatus == .enabled { timer.invalidate(); self.ptpHelperPoll = nil }
             }
         }
     }
@@ -330,6 +375,7 @@ public final class OnboardingViewController: NSViewController {
         audioRow.update(status: model.audioStatus, isProbing: model.isProbingAudio)
         networkRow.update(status: model.localNetworkStatus, isProbing: false)
         remoteControlRow.update(status: model.remoteControlStatus, isProbing: false)
+        ptpHelperRow.update(status: model.ptpHelperStatus)
     }
 
     private func allowAudio() {
@@ -354,6 +400,7 @@ public final class OnboardingViewController: NSViewController {
     public var test_audioRowButtonTitles: [String] { _ = view; return audioRow.test_buttonTitles }
     public var test_networkRowButtonTitles: [String] { _ = view; return networkRow.test_buttonTitles }
     public var test_remoteControlRowButtonTitles: [String] { _ = view; return remoteControlRow.test_buttonTitles }
+    public var test_ptpHelperRowButtonTitles: [String] { _ = view; return ptpHelperRow.test_buttonTitles }
 
     /// Drive the model as the audio "Allow…" button would, then await the probe.
     public func test_allowAudio() async { _ = view; await model.requestAudioCapture() }
@@ -364,6 +411,9 @@ public final class OnboardingViewController: NSViewController {
     /// Drive the model as the remote-control "Allow…" button would.
     public func test_allowRemoteControl() { _ = view; model.primeRemoteControl() }
 
+    /// Drive the model as the load-time PTP helper registration would.
+    public func test_registerPTPHelper() { _ = view; model.registerPTPHelper() }
+
     /// Re-read model status into the rows (the `viewWillAppear` bind, headless).
     public func test_refresh() { _ = view; refresh() }
 
@@ -372,11 +422,13 @@ public final class OnboardingViewController: NSViewController {
     public func test_applyStatuses(audio: PermissionStatus,
                                    isProbingAudio: Bool,
                                    network: PermissionStatus,
-                                   remoteControl: PermissionStatus) {
+                                   remoteControl: PermissionStatus,
+                                   ptpHelper: PTPHelperStatus = .enabled) {
         _ = view
         audioRow.update(status: audio, isProbing: isProbingAudio)
         networkRow.update(status: network, isProbing: false)
         remoteControlRow.update(status: remoteControl, isProbing: false)
+        ptpHelperRow.update(status: ptpHelper)
     }
 
     /// Invoke Done.
@@ -389,8 +441,10 @@ public final class OnboardingViewController: NSViewController {
         return view
     }
 
-    /// The three rows, for asserting status rendering directly.
+    /// The three permission rows, for asserting status rendering directly.
     var test_audioRow: PermissionRowView { _ = view; return audioRow }
     var test_networkRow: PermissionRowView { _ = view; return networkRow }
     var test_remoteControlRow: PermissionRowView { _ = view; return remoteControlRow }
+    /// The PTP helper row (its own type — see ``PTPHelperRowView``).
+    var test_ptpHelperRow: PTPHelperRowView { _ = view; return ptpHelperRow }
 }

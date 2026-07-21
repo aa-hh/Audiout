@@ -208,6 +208,11 @@ public final class SetupModel {
     /// ``RemoteControlPriming``.
     public private(set) var remoteControlStatus: PermissionStatus = .unknown
 
+    /// PTP helper daemon status (T6). Starts `.notRegistered`; becomes
+    /// `.requiresApproval` once ``registerPTPHelper()`` runs, then `.enabled`
+    /// once the user approves it in Login Items. See ``PTPHelperStatus``.
+    public private(set) var ptpHelperStatus: PTPHelperStatus = .notRegistered
+
     /// True while an audio probe is running, so the UI can show progress and
     /// ignore repeat taps. The probe blocks ~250 ms capturing the test tone.
     public private(set) var isProbingAudio = false
@@ -218,15 +223,18 @@ public final class SetupModel {
     private let audioProbe: AudioCapturePermissionProbing
     private let localNetwork: LocalNetworkPriming
     private let remoteControl: RemoteControlPriming
+    private let ptpHelper: PTPHelperManaging
     private let settings: AppSettings
 
     public init(audioProbe: AudioCapturePermissionProbing,
                 localNetwork: LocalNetworkPriming,
                 remoteControl: RemoteControlPriming,
+                ptpHelper: PTPHelperManaging,
                 settings: AppSettings = AppSettings()) {
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
+        self.ptpHelper = ptpHelper
         self.settings = settings
     }
 
@@ -283,6 +291,8 @@ public final class SetupModel {
     ///   answered the prompt.
     /// - **Local Network** re-probes ONLY if already asked (browsing fires the
     ///   prompt), upgrading `.requested` → `.granted` once discovery works.
+    /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
+    ///   see ``refreshPTPHelperStatus()``), the same posture as Remote Control.
     public func refreshStatuses() async {
         // Remote Control — silent, always safe.
         if remoteControl.isTrusted() {
@@ -304,6 +314,52 @@ public final class SetupModel {
             localNetworkStatus = await localNetwork.probe() ? .granted : .requested
         }
 
+        // PTP helper — silent status read only, never re-registers here.
+        ptpHelperStatus = ptpHelper.status
+
+        onChange?()
+    }
+
+    /// Register the PTP helper daemon and read the resulting status.
+    ///
+    /// Unlike the three probes above, this needs no explicit user gesture to be
+    /// safe to call: registering an `SMAppService` daemon shows NO system
+    /// prompt of its own (see ``PTPHelperManaging/register()``'s doc comment) —
+    /// it just adds a disabled entry to Login Items. The user-facing step is
+    /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
+    /// once, at onboarding load (mirrors the design doc's "at first launch").
+    /// Idempotent — safe to call again (e.g. "Run Setup Again…").
+    ///
+    /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
+    /// `register()` cannot validate and this will not progress past
+    /// `.notRegistered`/reach `.enabled` — see ``PTPHelperManaging``'s doc
+    /// comment and PROGRESS.md T5/T6. Real end-to-end verification is blocked
+    /// until Developer ID signing ships.
+    public func registerPTPHelper() {
+        do {
+            try ptpHelper.register()
+        } catch {
+            FileHandle.standardError.write(
+                Data("[Audiouter] PTP helper registration failed: \(error)\n".utf8))
+        }
+        ptpHelperStatus = ptpHelper.status
+        onChange?()
+    }
+
+    /// Deep-link to System Settings › General › Login Items & Extensions,
+    /// where the user approves (or later revokes) the PTP helper.
+    public func openPTPHelperLoginItems() {
+        ptpHelper.openSystemSettingsLoginItems()
+    }
+
+    /// Re-read the PTP helper's live status WITHOUT re-registering — cheap
+    /// enough to poll on a timer while `.requiresApproval` waits for the user
+    /// to flip the Login Items toggle (mirrors ``refreshRemoteControlStatus()``
+    /// below). Fires `onChange` only on an actual transition.
+    public func refreshPTPHelperStatus() {
+        let next = ptpHelper.status
+        guard next != ptpHelperStatus else { return }
+        ptpHelperStatus = next
         onChange?()
     }
 

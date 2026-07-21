@@ -16,6 +16,50 @@ struct PermissionRowContent {
     let allowButtonTitle: String
 }
 
+/// Shared trailing-accessory push button for onboarding rows (``PermissionRowView``,
+/// ``PTPHelperRowView``). `prominent` tints the bezel with the accent color
+/// (the "please do this" CTA) WITHOUT making it the window's Return-default —
+/// a screen can have several such buttons, and a window has only one keyboard
+/// default (Done). Non-prominent is a plain gray button for a secondary
+/// "Open Settings"/"Open Login Items…" fallback.
+func onboardingRowActionButton(title: String, prominent: Bool,
+                               target: AnyObject, action: Selector) -> NSButton {
+    if prominent {
+        // ProminentButton self-manages its accent fill + a key-state-aware
+        // title colour (see its doc comment for the white-on-white bug it fixes).
+        return ProminentButton(title: title, target: target, action: action)
+    }
+    let button = NSButton(title: title, target: target, action: action)
+    button.bezelStyle = .rounded
+    // Secondary buttons share the column with a status word, so `.small` keeps
+    // the pair inside the fixed column width. A plain bordered button, so
+    // AppKit's own inactive-window handling applies unchanged.
+    button.controlSize = .small
+    button.setContentHuggingPriority(.required, for: .horizontal)
+    return button
+}
+
+/// Shared trailing-accessory status chip (symbol + text) for onboarding rows.
+func onboardingRowStatusLabel(_ text: String, symbol: String, tint: NSColor) -> NSView {
+    let image = NSImageView()
+    image.image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
+    image.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+    image.contentTintColor = tint
+    image.translatesAutoresizingMaskIntoConstraints = false
+
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+    label.textColor = tint == .systemGreen || tint == .systemOrange ? .labelColor : .secondaryLabelColor
+    label.translatesAutoresizingMaskIntoConstraints = false
+
+    let stack = NSStackView(views: [image, label])
+    stack.orientation = .horizontal
+    stack.alignment = .centerY
+    stack.spacing = 4
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    return stack
+}
+
 /// One permission row in the onboarding window: a leading colour icon tile, a
 /// title + wrapping "why" subtitle, and a trailing accessory that swaps with the
 /// live ``PermissionStatus`` — an Allow button, a spinner while probing, a
@@ -182,74 +226,34 @@ final class PermissionRowView: NSView {
 
         switch status {
         case .unknown:
-            accessory.addArrangedSubview(makeButton(title: content.allowButtonTitle,
-                                                    prominent: true, action: #selector(allowTapped)))
+            accessory.addArrangedSubview(onboardingRowActionButton(
+                title: content.allowButtonTitle, prominent: true,
+                target: self, action: #selector(allowTapped)))
         case .granted:
-            accessory.addArrangedSubview(statusLabel("Allowed",
+            accessory.addArrangedSubview(onboardingRowStatusLabel("Allowed",
                                                      symbol: "checkmark.circle.fill",
                                                      tint: .systemGreen))
         case .requested:
             // Asked, but macOS won't confirm it (Local Network). Say so, and offer
             // System Settings as the way to check/fix if speakers don't appear.
-            accessory.addArrangedSubview(statusLabel("Requested",
+            accessory.addArrangedSubview(onboardingRowStatusLabel("Requested",
                                                      symbol: "checkmark.circle",
                                                      tint: .secondaryLabelColor))
-            accessory.addArrangedSubview(makeButton(title: "Open Settings",
-                                                    prominent: false, action: #selector(openSettingsTapped)))
+            accessory.addArrangedSubview(onboardingRowActionButton(
+                title: "Open Settings", prominent: false,
+                target: self, action: #selector(openSettingsTapped)))
         case .denied:
-            accessory.addArrangedSubview(statusLabel("Denied",
+            accessory.addArrangedSubview(onboardingRowStatusLabel("Denied",
                                                      symbol: "exclamationmark.triangle.fill",
                                                      tint: .systemOrange))
-            accessory.addArrangedSubview(makeButton(title: "Open Settings",
-                                                    prominent: false, action: #selector(openSettingsTapped)))
+            accessory.addArrangedSubview(onboardingRowActionButton(
+                title: "Open Settings", prominent: false,
+                target: self, action: #selector(openSettingsTapped)))
         case .unsupported:
-            accessory.addArrangedSubview(statusLabel("Requires macOS 14.2 or later",
+            accessory.addArrangedSubview(onboardingRowStatusLabel("Requires macOS 14.2 or later",
                                                      symbol: "xmark.circle",
                                                      tint: .secondaryLabelColor))
         }
-    }
-
-    // MARK: Accessory builders
-
-    /// A trailing-accessory push button. `prominent` tints the bezel with the
-    /// accent color (the "please do this" CTA) WITHOUT making it the window's
-    /// Return-default — there are multiple Allow buttons, and a window may have
-    /// only one keyboard default (that's Done). Non-prominent is a plain gray
-    /// button for the secondary "Open Settings" fallback.
-    private func makeButton(title: String, prominent: Bool, action: Selector) -> NSButton {
-        if prominent {
-            // ProminentButton self-manages its accent fill + a key-state-aware
-            // title colour (see its doc comment for the white-on-white bug it fixes).
-            return ProminentButton(title: title, target: self, action: action)
-        }
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
-        // Secondary "Open Settings" shares the column with a status word, so
-        // `.small` keeps the pair inside the fixed column width. A plain bordered
-        // button, so AppKit's own inactive-window handling applies unchanged.
-        button.controlSize = .small
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        return button
-    }
-
-    private func statusLabel(_ text: String, symbol: String, tint: NSColor) -> NSView {
-        let image = NSImageView()
-        image.image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
-        image.symbolConfiguration = .init(pointSize: 13, weight: .regular)
-        image.contentTintColor = tint
-        image.translatesAutoresizingMaskIntoConstraints = false
-
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        label.textColor = tint == .systemGreen || tint == .systemOrange ? .labelColor : .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView(views: [image, label])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 4
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        return stack
     }
 
     // MARK: Actions

@@ -50,6 +50,12 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
   stays silent.
 - **Not fully wired into the app.** Check `NativeBackend` and
   `../dev/notes/p2b-nativebackend-seam-brief.md` before assuming closed.
+- **The engine is a PTP client, never a PTP binder.** `shims/ptpd.c` only calls
+  `airptp_daemon_find()` — the shipped default never binds UDP 319/320 itself;
+  that privileged bind belongs solely to the separate `ptp-helper` root daemon
+  (see `docs/ptp-helper-design.md`). `AUDIOUTER_PTP_INPROC_BIND=1` restores the
+  old in-process bind as a **dev/CI-only** fallback — never rely on it in the
+  shipped path.
 
 ## Map
 
@@ -61,6 +67,9 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 | `CompletionRegistry` | Bridges C callback-id dispatcher to `async`/`await`. |
 | `Sources/CAirPlayEngine/` | Vendored+shimmed C cluster. |
 | `Sources/engine-probe/` | Gated one-device live-session CLI. |
+| `Sources/ptp-helper/` (`ptp-helper` target) | Privileged root PTP daemon: binds 319/320, finds nothing. |
+| `Clibairptp` target | `libairptp/` (MIT PTP clock lib) as its own SwiftPM target, shared by the helper and the engine's shim. |
+| `docs/ptp-helper-design.md` | The helper's privilege-boundary design and packaging. |
 | `docs/seam-map.md` | Extraction blueprint, authoritative. |
 | `docs/first-light-report.md` | Live-hardware-test ledger, diagnostic method. |
 | `docs/VENDORED-DIFFS.md` | Exceptions to byte-identical vendored C. |

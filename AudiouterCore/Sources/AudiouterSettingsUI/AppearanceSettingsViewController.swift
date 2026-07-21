@@ -83,6 +83,11 @@ public final class AppearanceSettingsViewController: NSViewController {
         tile.isBordered = false
         tile.target = self
         tile.action = #selector(tileTapped(_:))
+        // `.radioButton` role + a 0/1 accessibility value is the standard AX
+        // contract VoiceOver reads aloud as "selected"/"not selected" — without
+        // it, all three tiles announce identically and the current theme is
+        // never conveyed non-visually.
+        tile.setAccessibilityRole(.radioButton)
         tile.setAccessibilityLabel(theme.displayName)
         return tile
     }
@@ -94,7 +99,9 @@ public final class AppearanceSettingsViewController: NSViewController {
 
     private func applySelectionHighlight() {
         for (index, tile) in tiles.enumerated() {
-            tile.isSelectedTile = index == selectedIndex
+            let isSelected = index == selectedIndex
+            tile.isSelectedTile = isSelected
+            tile.setAccessibilityValue(isSelected)
         }
     }
 
@@ -121,6 +128,16 @@ public final class AppearanceSettingsViewController: NSViewController {
         _ = view
         guard let index = order.firstIndex(of: theme), let tile = tiles[safe: index] else { return }
         tileTapped(tile)
+    }
+
+    /// Whether `theme`'s tile currently reports itself as VoiceOver-selected
+    /// (`.radioButton` role + a 1/0 accessibility value, set in
+    /// `applySelectionHighlight()`) — verifies the fix for all three tiles
+    /// previously sounding identical to VoiceOver.
+    public func test_isTileAccessibilitySelected(_ theme: AppearanceTheme) -> Bool {
+        _ = view
+        guard let index = order.firstIndex(of: theme), let tile = tiles[safe: index] else { return false }
+        return (tile.accessibilityValue() as? NSNumber)?.boolValue ?? false
     }
 }
 

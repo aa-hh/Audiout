@@ -24,6 +24,19 @@ import AppKit
 /// a plain, instant alpha change with Reduce Motion on, a brief fade otherwise.
 /// This is the one place hover state changes, so it doubles as the headless
 /// test/snapshot hook.
+///
+/// KEYBOARD/VOICEOVER OPERABLE (A11Y-GROUPS): this is a bare `NSView`, not an
+/// `NSButton`, because it needs the badge-over-glyph composition above — so it
+/// earns its own first-responder/keyDown/accessibility-press plumbing rather
+/// than getting it for free the way a real `NSButton` would. `acceptsFirstResponder`
+/// opts it into the window's Tab key-view loop; `keyDown(with:)` maps Space/Return
+/// (and the numeric-keypad Enter) onto the same `onClick` a mouse click fires;
+/// `accessibilityPerformPress()` is the seam VoiceOver's "press" gesture and Full
+/// Keyboard Access both call instead of a real click. Focus is drawn via the
+/// standard system focus ring (`drawFocusRingMask()`) AND, like a real hover, a
+/// step-up of the corner badge's alpha through the same `setOverlayVisible(_:)`
+/// path — so a sighted keyboard user gets the same "this is interactive" cue a
+/// mouse user gets on hover, not just the ring.
 final class DeviceIconWellView: NSView {
 
     /// Square side length (approved: "~64pt"), one constant so the detail
@@ -114,14 +127,76 @@ final class DeviceIconWellView: NSView {
 
     override func mouseEntered(with event: NSEvent) { setOverlayVisible(true) }
     override func mouseExited(with event: NSEvent) { setOverlayVisible(false) }
-    override func mouseDown(with event: NSEvent) { onClick?() }
+
+    override func mouseDown(with event: NSEvent) {
+        // A real click also claims first responder, exactly like a genuine
+        // `NSButton` would — otherwise a mouse click leaves whatever was
+        // focused before still focused, and the very next Tab jumps from
+        // there instead of from the well the user just interacted with.
+        window?.makeFirstResponder(self)
+        onClick?()
+    }
+
+    // MARK: Keyboard / VoiceOver operability (A11Y-GROUPS)
+    //
+    // This view has no `NSButton` underneath it (see the class doc comment),
+    // so none of the following is inherited for free — each override mirrors
+    // exactly what `NSButton` would already give it.
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { setOverlayVisible(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { setOverlayVisible(false) }
+        return resigned
+    }
+
+    /// Space, Return, and the numeric-keypad Enter all activate the well —
+    /// the same set `NSButton` treats as "press" from the keyboard. Any other
+    /// key falls through to `super` so this doesn't swallow e.g. Tab (which
+    /// AppKit resolves to key-view-loop traversal before `keyDown` even sees
+    /// it, but falling through keeps this view from becoming an unintended
+    /// sink for keys it has no opinion on).
+    override func keyDown(with event: NSEvent) {
+        switch event.charactersIgnoringModifiers {
+        case " ", "\r", "\u{3}":   // space, Return, keypad Enter
+            onClick?()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    /// The VoiceOver / Full Keyboard Access "press" entry point — fired
+    /// instead of a real click when the user activates this element via
+    /// assistive technology rather than a pointer.
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
+
+    /// Draws the standard system focus ring around the well's full bounds
+    /// while this view is the first responder in a key window — the same
+    /// automatic ring an `NSButton` gets, computed manually here since a
+    /// plain `NSView` has no default focus-ring mask.
+    override func drawFocusRingMask() {
+        NSBezierPath(rect: bounds).fill()
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
 
     /// Step the badge between its rest and hover alpha. Respects Reduce Motion
     /// (`../AGENTS.md`'s system-settings rule): an instant change with Reduce
-    /// Motion on, a brief fade otherwise. This is the one place hover state
-    /// changes, so it doubles as the headless test/snapshot hook. (Name kept
-    /// as `setOverlayVisible` for the existing test/snapshot call sites; there
-    /// is no longer a full-coverage overlay — only the badge.)
+    /// Motion on, a brief fade otherwise. This is the one place hover OR
+    /// keyboard-focus state changes, so it doubles as the headless test/
+    /// snapshot hook. (Name kept as `setOverlayVisible` for the existing
+    /// test/snapshot call sites; there is no longer a full-coverage overlay —
+    /// only the badge.)
     func setOverlayVisible(_ visible: Bool) {
         let badgeAlpha = visible ? Self.badgeHoverAlpha : Self.badgeRestAlpha
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -132,5 +207,36 @@ final class DeviceIconWellView: NSView {
             context.duration = Self.fadeDuration
             badgeView.animator().alphaValue = badgeAlpha
         }
+    }
+
+    // MARK: Test-support hooks
+
+    /// The corner badge's current alpha — asserts the hover-OR-focus step-up
+    /// (`setOverlayVisible(_:)`), including the keyboard-focus case a headless
+    /// run can't observe visually.
+    var test_badgeAlpha: CGFloat { badgeView.alphaValue }
+
+    /// Simulate a real Space/Return key press on this view via the actual
+    /// `keyDown(with:)` override (not a direct `onClick?()` call) — proves
+    /// the key maps to activation the same way a live keypress would.
+    /// Mirrors the "no synthesized clicks in headless runs" house rule
+    /// (`../AGENTS.md`) for the keyboard path: no real window is needed since
+    /// `keyDown(with:)` never touches `window`.
+    func test_pressKey(_ characters: String) {
+        keyDown(with: Self.keyEvent(charactersIgnoringModifiers: characters))
+    }
+
+    private static func keyEvent(charactersIgnoringModifiers: String) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: charactersIgnoringModifiers,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            isARepeat: false,
+            keyCode: 0)!
     }
 }

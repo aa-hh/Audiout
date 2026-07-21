@@ -165,9 +165,11 @@ public protocol AudioCapturePermissionProbing: Sendable {
     /// prompt, no tap. `nil` when the concrete probe has no such read (the
     /// default, via the protocol extension below — existing test fakes need
     /// no change). This is the only way to catch a granted→revoked flip
-    /// without re-firing the audible tone probe, so it's what the automatic
-    /// post-onboarding revocation audit uses (``SetupModel/auditRequiredPermissions()``);
-    /// the production impl is ``CoreAudioTonePermissionProbe``.
+    /// without re-firing the audible tone probe, so it's what BOTH the
+    /// automatic post-onboarding revocation audit
+    /// (``SetupModel/auditRequiredPermissions()``) AND the onboarding window's
+    /// own reactivation refresh (``SetupModel/refreshStatuses()``) use; the
+    /// production impl is ``CoreAudioTonePermissionProbe``.
     func currentStatusSilently() -> PermissionStatus?
 }
 
@@ -304,17 +306,24 @@ public final class SetupModel {
 
     /// Re-derive every permission's status from its CURRENT real state, so the
     /// screen reflects reality rather than a stale "requested." Safe to call on
-    /// every window focus — deliberately never SPRINGS a prompt on a permission
-    /// the user hasn't engaged yet:
+    /// every window focus/reactivate — deliberately never SPRINGS a prompt on a
+    /// permission the user hasn't engaged yet, and (ONBOARD-TONE) never replays
+    /// the audible System Audio tone outside the explicit "Allow…" gesture:
     ///
     /// - **Remote Control** always refreshes: `isTrusted()` is a silent read, so a
     ///   grant made in System Settings shows up the moment the window regains key
     ///   (and a revocation downgrades a prior `.granted` back to `.requested`).
-    /// - **System Audio** re-probes ONLY if already asked (`.denied`/`.requested`)
-    ///   — probing fires the tap/prompt, so we must not do it on an untouched row.
-    ///   This is also what catches a grant made in Settings, and quietly resolves
-    ///   the first-run race where the initial probe read zeros before the user
-    ///   answered the prompt.
+    /// - **System Audio** re-reads ONLY if already asked (`.denied`/`.requested`),
+    ///   and does so via the SILENT ``AudioCapturePermissionProbing/currentStatusSilently()``
+    ///   — never the audible tone/tap ``AudioCapturePermissionProbing/probe()``,
+    ///   which is reserved for the explicit "Allow…" tap (``requestAudioCapture()``).
+    ///   This method runs on every plain app reactivation while onboarding is open
+    ///   (`OnboardingWindowController.appDidBecomeActive`), not just an explicit
+    ///   gesture, so firing the audible probe here would replay the tone on a bare
+    ///   Cmd+Tab away and back — the original ONBOARD-TONE bug. The silent read
+    ///   still catches a grant made in Settings; a `nil` result (a test fake that
+    ///   hasn't implemented the silent seam) leaves `audioStatus` untouched, same
+    ///   posture as ``auditRequiredPermissions()``.
     /// - **Local Network** re-probes ONLY if already asked (browsing fires the
     ///   prompt), upgrading `.requested` → `.granted` once discovery works.
     /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
@@ -327,12 +336,13 @@ public final class SetupModel {
             remoteControlStatus = .requested   // revoked in Settings since
         }
 
-        // System Audio — re-probe only a row the user has already engaged, and do
-        // it SILENTLY (no `isProbingAudio` spinner): a background re-check on every
-        // window focus shouldn't flash a spinner each time. The explicit "Allow…"
-        // tap still shows one (see `requestAudioCapture`).
-        if audioStatus == .denied || audioStatus == .requested {
-            audioStatus = await audioProbe.probe()
+        // System Audio — re-read only a row the user has already engaged, and do
+        // it SILENTLY: this runs on every plain app reactivation (not just an
+        // explicit gesture), so it must never replay the audible tone/tap probe
+        // — that stays reserved for `requestAudioCapture()`.
+        if audioStatus == .denied || audioStatus == .requested,
+           let silentAudio = audioProbe.currentStatusSilently() {
+            audioStatus = silentAudio
         }
 
         // Local Network — re-probe only if already asked (else browsing prompts).
@@ -354,7 +364,7 @@ public final class SetupModel {
     /// it just adds a disabled entry to Login Items. The user-facing step is
     /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
     /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Run Setup Again…").
+    /// Idempotent — safe to call again (e.g. "Check Permissions…").
     ///
     /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
     /// `register()` cannot validate and this will not progress past
@@ -437,6 +447,40 @@ public final class SetupModel {
             unmet.append(.ptpHelper)
         }
         return unmet
+    }
+
+    /// Which of the three REQUIRED permissions are NOT currently confirmed
+    /// granted/enabled, right now — the check behind onboarding's Done-tap
+    /// confirmation (`OnboardingViewController`), not to be confused with
+    /// ``unmetRequiredPermissions()`` above.
+    ///
+    /// The two methods answer different questions and deliberately disagree on
+    /// `.unknown`: ``unmetRequiredPermissions()`` exists to catch a
+    /// *regression* (something that WAS working and got turned off), so an
+    /// untouched `.unknown` row correctly never counts — "never engaged" isn't
+    /// "lost". This method exists to catch the opposite gap — a user who never
+    /// engaged a row at all and taps Done anyway — so `.unknown` (and every
+    /// other non-success state) DOES count here. Using
+    /// ``unmetRequiredPermissions()`` for the Done gate would silently let a
+    /// first-time user finish setup with zero permissions granted, since every
+    /// untouched row starts life as `.unknown`/`.notRegistered`.
+    ///
+    /// - Audio capture: granted only on `.granted` — `.unsupported` is excluded
+    ///   (pre-14.2 OS; no grant can fix it, so nagging about it would mislead).
+    /// - Local Network: granted only on `.granted`.
+    /// - PTP helper: granted only on `.enabled`.
+    public func requiredPermissionsNotGranted() -> [RequiredPermission] {
+        var notGranted: [RequiredPermission] = []
+        if audioStatus != .granted, audioStatus != .unsupported {
+            notGranted.append(.audioCapture)
+        }
+        if localNetworkStatus != .granted {
+            notGranted.append(.localNetwork)
+        }
+        if ptpHelperStatus != .enabled {
+            notGranted.append(.ptpHelper)
+        }
+        return notGranted
     }
 
     /// Refresh ONLY the three required permissions' statuses using SILENT/

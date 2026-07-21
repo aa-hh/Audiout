@@ -76,12 +76,18 @@ public final class ControlPanelWindowController: NSWindowController {
     /// on a window whose style mask lacks `.titled` — verified empirically.
     /// Removing it would have desynchronized `onClose` from ✕/Esc/performClose,
     /// which the whole "land home" contract (and this file's own tests) depend
-    /// on. Instead the native title bar is made fully invisible
-    /// (`titlebarAppearsTransparent` + hidden title + hidden close button) and
-    /// the window itself painted transparent so the ONLY visible chrome is
-    /// `ControlPanelBackingView`'s custom drawing in the window behind it.
+    /// on. The native title bar is made visually invisible
+    /// (`titlebarAppearsTransparent` + hidden title) while the standard CLOSE
+    /// button is deliberately KEPT VISIBLE as the panel's close affordance: an
+    /// anchored work surface that does NOT dismiss on click-out (it only tucks
+    /// away on app-switch) has to give the user a real, obvious way out. The
+    /// miniaturize/zoom buttons are hidden — neither makes sense on a fixed,
+    /// anchored, non-movable panel. The window is painted transparent so the
+    /// only large chrome is `ControlPanelBackingView`'s bubble in the window
+    /// behind it, with the lone close button sitting in the top-left safe area
+    /// over it. Escape is wired to close too — see `ControlPanelPanel`.
     private static func makePanel() -> NSPanel {
-        let panel = NSPanel(
+        let panel = ControlPanelPanel(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -99,7 +105,13 @@ public final class ControlPanelWindowController: NSWindowController {
         // fully transparent everywhere the hosted content doesn't paint.
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
+        // The close button is the panel's one visible close affordance — kept
+        // shown (this is the fix for "no way to close the panel"). Miniaturize
+        // and zoom are hidden: an anchored, non-movable panel has no use for
+        // them, and a lone close button reads cleanly against the bubble.
+        panel.standardWindowButton(.closeButton)?.isHidden = false
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -108,6 +120,10 @@ public final class ControlPanelWindowController: NSWindowController {
         // decorative backing window (which follows this one's frame deltas,
         // not a live layout pass) never drifts out of sync.
         panel.isMovable = false
+        // Summon onto the CURRENT Space (and over a fullscreen app) rather than
+        // switching Spaces — matches the "summon → act → dismiss" model
+        // (window-panel.md M1).
+        panel.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         return panel
     }
 
@@ -125,6 +141,8 @@ public final class ControlPanelWindowController: NSWindowController {
             defer: false
         )
         window.level = .floating
+        // Match the panel's Space behavior so the decorative backing follows it.
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -149,23 +167,28 @@ public final class ControlPanelWindowController: NSWindowController {
     }
 
     /// T11: round the hosted content's corners to match the backing bubble's
-    /// `cornerRadius` (so the two windows read as one continuous shape) and
-    /// give it an opaque backdrop fill, since the panel itself is now fully
-    /// transparent (see `makePanel`) and can no longer be relied on to paint
-    /// anything behind content that doesn't already paint its own background.
-    /// The known limitation: the resolved fill color is a snapshot taken now,
-    /// not a live-tracking dynamic color — a mid-session `NSApp.appearance`
-    /// flip while this exact panel instance stays open without reopening
-    /// would leave it stale until the next `setContent`/`show`. Every real
-    /// caller (Groups' split view, Settings' `NSVisualEffectView` root) also
-    /// paints its own opaque background already, so this is a defensive
-    /// fallback, not the primary source of the visible fill.
+    /// `cornerRadius` so the two windows read as one continuous shape.
+    ///
+    /// The hosted view is left TRANSPARENT on purpose — it must NOT paint an
+    /// opaque background of its own. The panel is fully transparent (see
+    /// `makePanel`), and the decorative backing window behind it already draws
+    /// an opaque, LIVE-adaptive `windowBackgroundColor` bubble
+    /// (`ControlPanelBackingView.draw`). An earlier version filled this layer
+    /// with a resolved `windowBackgroundColor.cgColor` "defensive fallback",
+    /// but a CGColor is frozen at the instant's appearance and cannot follow a
+    /// light/dark change — which is exactly what left Groups' transparent
+    /// split-view content pane rendering a stale LIGHT fill in dark mode while
+    /// its vibrancy sidebar adapted correctly (visual C3b, the "half-render").
+    /// Clearing the fill lets the backing bubble's live color show through the
+    /// content pane — identical to how the rounded corners already reveal it —
+    /// so the whole panel tracks the appearance as one, and Groups in the shell
+    /// matches Groups in its standalone window (source-list sidebar + a
+    /// `windowBackgroundColor` content pane). Content that paints its OWN
+    /// opaque, appearance-adaptive background (Settings' `NSVisualEffectView`
+    /// root) simply covers the bubble, unaffected.
     private func configureContentAppearance(_ view: NSView) {
         view.wantsLayer = true
-        let appearance = window?.effectiveAppearance ?? NSApp.effectiveAppearance
-        appearance.performAsCurrentDrawingAppearance {
-            view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        }
+        view.layer?.backgroundColor = NSColor.clear.cgColor
         view.layer?.cornerRadius = ControlPanelBackingView.cornerRadius
         view.layer?.masksToBounds = true
     }
@@ -175,6 +198,20 @@ public final class ControlPanelWindowController: NSWindowController {
     /// accessibility/VoiceOver title and the Mission Control / ⌘` window name.
     public func setTitle(_ title: String) {
         window?.title = title
+    }
+
+    /// Whether the panel is currently on screen, as opposed to tucked away by
+    /// `hidesOnDeactivate` after an app-switch. The status-item click handler
+    /// reads this to decide between toggling a live panel CLOSED and restoring
+    /// a tucked-away one — see `AppDelegate`'s `onButtonClicked`.
+    public var isPanelVisible: Bool { window?.isVisible ?? false }
+
+    /// Close the panel exactly as the ✕ button or Escape would: routed through
+    /// `performClose(_:)` so `windowWillClose` → `onClose` fires and the app
+    /// lands home on the popover. The status-item toggle-close uses this rather
+    /// than a bare `close()`/`orderOut`, which would skip the land-home contract.
+    public func performClose() {
+        window?.performClose(nil)
     }
 
     /// Show the panel anchored just under `anchorRect` (the menu-bar status
@@ -331,5 +368,22 @@ extension ControlPanelWindowController: NSWindowDelegate {
     public func windowWillClose(_ notification: Notification) {
         animateDisappearance()
         onClose?()
+    }
+}
+
+// MARK: - ControlPanelPanel
+
+/// The shell's `NSPanel`, subclassed for ONE reason: to make Escape a
+/// deterministic close. Pressing Escape (or ⌘.) sends `cancelOperation(_:)` up
+/// the responder chain; routing it to `performClose(_:)` guarantees Esc closes
+/// the panel through the SAME path as the ✕ button — `windowWillClose` →
+/// `onClose` (land home) — instead of relying on incidental default panel
+/// behavior. `performClose(_:)` only fires when the style mask contains
+/// `.titled`/`.closable` (it does — see `ControlPanelWindowController.makePanel`),
+/// so this closes cleanly with no system beep. A field editor still gets first
+/// crack at Escape (to cancel in-progress text editing) before it reaches here.
+final class ControlPanelPanel: NSPanel {
+    override func cancelOperation(_ sender: Any?) {
+        performClose(sender)
     }
 }

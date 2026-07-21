@@ -59,6 +59,9 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         window.styleMask = [.titled, .closable]
         window.title = "Welcome"
         window.isRestorable = false   // fixed-size, centered; never restored
+        // Appear on whatever Space the user is on (incl. over a fullscreen app)
+        // when summoned/re-fronted, rather than Space-switching (window-panel.md M1).
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         // NOTE: deliberately a NORMAL window level. An earlier version made this
         // `.floating` to keep it recoverable after a permission prompt stole focus,
         // but floating means always-on-top over EVERY other app — it hovered over

@@ -3,8 +3,14 @@
 import AppKit
 
 /// Settings › **General** pane. Step 1: a single "Launch at login" switch wired
-/// to the `LoginItemManaging` seam. More lands here later (menu-bar icon level,
-/// reset), which is why it's a form, not a lone control.
+/// to the `LoginItemManaging` seam. Also the entry point to **About Audiouter…**
+/// (app identity/version, GPL license + source link, third-party credits,
+/// support contact) — the app's only in-app About/Credits surface, required
+/// for GPL attribution before charging money for the app. The About content
+/// lives in its own small `AboutWindowController` rather than inline here —
+/// its full required content roughly doubles a pane's height, which would
+/// break the single-screen Settings window's fixed/scrolling-free design (see
+/// `AboutView.swift`'s doc comment).
 ///
 /// The switch always reflects the *live* system state (`loginItem.isEnabled`),
 /// re-read on every appear — the user can flip the login item in System Settings
@@ -15,14 +21,27 @@ public final class GeneralSettingsViewController: NSViewController {
     private let loginItem: LoginItemManaging
     private let launchSwitch = NSSwitch()
     private let setupButton = NSButton()
+    private let aboutButton = NSButton()
+    private let aboutWindowController: AboutWindowController
 
-    /// Fired when "Run Setup Again…" is clicked, so the app can re-present the
+    /// Fired when "Check Permissions…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
 
-    public init(loginItem: LoginItemManaging) {
+    /// - Parameters:
+    ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
+    ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
+    ///     value in tests so the rendered version string never depends on how
+    ///     the test binary was built.
+    ///   - openURL: opens the About window's "View Source Code" link; defaults
+    ///     to `NSWorkspace`, injected as a recording closure in tests so a
+    ///     test run never actually launches a browser.
+    public init(loginItem: LoginItemManaging,
+                aboutInfo: AboutInfo = .current(),
+                openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.loginItem = loginItem
+        self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
         super.init(nibName: nil, bundle: nil)
         title = "General"
     }
@@ -39,19 +58,31 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
 
-        // "Run Setup Again…" re-opens the first-run permission-priming window —
+        // "Check Permissions…" re-opens the first-run permission-priming window —
         // the way a user re-checks the System Audio / Local Network grants after
         // changing them in System Settings (the flow itself deep-links there).
-        setupButton.title = "Run Setup Again…"
+        setupButton.title = "Check Permissions…"
         setupButton.bezelStyle = .rounded
         setupButton.target = self
         setupButton.action = #selector(runSetupAgainTapped)
         let setupRow = SettingsForm.row(
             title: "Setup",
-            subtitle: "Review what Audiouter needs and re-check permissions.",
+            subtitle: "Verify that required permissions are granted.",
             control: setupButton)
 
-        view = SettingsForm.paneView(rows: [launchRow, setupRow])
+        // "About Audiouter…" opens the standalone About/Credits window (app
+        // identity, GPL license + source link, third-party credits, support) —
+        // see the type doc comment for why that content isn't inline here.
+        aboutButton.title = "About Audiouter…"
+        aboutButton.bezelStyle = .rounded
+        aboutButton.target = self
+        aboutButton.action = #selector(aboutTapped)
+        let aboutRow = SettingsForm.row(
+            title: "About",
+            subtitle: "Version, license, and third-party credits.",
+            control: aboutButton)
+
+        view = SettingsForm.paneView(rows: [launchRow, setupRow, aboutRow])
     }
 
     public override func viewDidLoad() {
@@ -70,6 +101,8 @@ public final class GeneralSettingsViewController: NSViewController {
     }
 
     @objc private func runSetupAgainTapped() { onRunSetupAgain?() }
+
+    @objc private func aboutTapped() { aboutWindowController.show() }
 
     // STABILITY(D4): SMAppService register/status round-trips launchd XPC synchronously on the main thread; see dev/notes/stability-audit-2026-07-18.md
     @objc private func launchToggled() {
@@ -105,9 +138,23 @@ public final class GeneralSettingsViewController: NSViewController {
         launchToggled()
     }
 
-    /// Invoke "Run Setup Again…" as a click would.
+    /// Invoke "Check Permissions…" as a click would.
     public func test_tapRunSetupAgain() {
         _ = view
         runSetupAgainTapped()
+    }
+
+    // MARK: Test-support hooks (About)
+
+    /// The About window controller, so a test can drill into
+    /// `AboutViewController`'s own `test_*` hooks without this pane
+    /// re-exposing every one of them a second time (mirrors
+    /// `SettingsWindowController.test_general` etc.).
+    public var test_about: AboutWindowController { aboutWindowController }
+
+    /// Invoke "About Audiouter…" as a click would.
+    public func test_tapAbout() {
+        _ = view
+        aboutTapped()
     }
 }

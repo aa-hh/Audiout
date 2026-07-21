@@ -246,6 +246,17 @@ public final class GroupRowView: NSView {
         delegate?.groupRowToggleExpansion(self, groupID: group.id)
     }
 
+    // Wires VoiceOver's activate gesture (VO+Space / double-tap) to the same
+    // "click anywhere on the row toggles expansion" behavior `mouseDown` gives
+    // a pointer user (SPEC §9 revised). Claiming `.button` role in
+    // `configureAccessibility()` isn't enough on its own — only `NSButton`
+    // wires AXPress to a target/action automatically; a plain `NSView` must
+    // implement this itself or VoiceOver's press silently does nothing.
+    public override func accessibilityPerformPress() -> Bool {
+        delegate?.groupRowToggleExpansion(self, groupID: group.id)
+        return true
+    }
+
     // Let the name/readout labels pass clicks through to the row (they are not
     // interactive controls), so clicking the name also toggles expansion.
     public override func hitTest(_ point: NSPoint) -> NSView? {
@@ -404,4 +415,11 @@ public final class GroupRowView: NSView {
     /// row, WITHOUT a `mouseExited:` — the last-row dead-zone case. Hover must
     /// clear. General to any row.
     func test_reconcileHover(pointerInside: Bool) { setHovered(pointerInside) }
+
+    /// Simulate VoiceOver's activate gesture (VO+Space / double-tap) via the
+    /// real `accessibilityPerformPress()` override — not a direct delegate
+    /// call — proving the row's claimed `.button` role actually does
+    /// something when pressed non-visually.
+    @discardableResult
+    func test_accessibilityPerformPress() -> Bool { accessibilityPerformPress() }
 }

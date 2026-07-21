@@ -264,8 +264,21 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         stateLock.withLock { engineRunning = false }
 
         // Re-establish each player→mixer connection (the config change reset them).
+        // Each `connect` is wrapped: a raised NSException (uncatchable by plain
+        // Swift `try`/`catch`) would otherwise abort the whole process. Bail on
+        // the FIRST failure rather than connecting the rest — `engineRunning` is
+        // already `false` (set above) and we never reach `engine.start()`/`play()`
+        // below, so the partially-reconnected graph is simply never driven; no
+        // buffer is scheduled against it (see `receive`'s `engineRunning` gate).
         for (_, node) in snapshot {
-            engine.connect(node.player, to: engine.mainMixerNode, format: node.connectionFormat)
+            do {
+                try catchingObjCException {
+                    engine.connect(node.player, to: engine.mainMixerNode, format: node.connectionFormat)
+                }
+            } catch {
+                AudioDiag.log("LPE.configChange reconnect FAILED: \(error)")
+                return
+            }
         }
         _ = engine.mainMixerNode
         engine.prepare()
@@ -281,8 +294,24 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             AudioDiag.log("LPE.configChange restart: engine still not running")
             return
         }
-        // Re-play each player (a stopped engine stops its player nodes).
-        for (_, node) in snapshot { node.player.play() }
+        // Re-play each player (a stopped engine stops its player nodes). Wrapped
+        // for the same reason as the reconnect loop above: `play()` raises an
+        // NSException (not a Swift error) if the engine turns out not to be
+        // running despite `isRunning` having just reported `true` — the same
+        // start/stop race the doc comment on `startEngineOnGraphQueue` describes.
+        // On a raised exception, flip `engineRunning` back to `false` (the same
+        // "leave it false, don't trust an optimistic true" idiom used everywhere
+        // else in this class) and bail before playing the rest, rather than leave
+        // a mix of playing/non-playing nodes against a since-invalidated graph.
+        for (_, node) in snapshot {
+            do {
+                try catchingObjCException { node.player.play() }
+            } catch {
+                AudioDiag.log("LPE.configChange replay FAILED: \(error)")
+                stateLock.withLock { engineRunning = false }
+                return
+            }
+        }
         AudioDiag.log("LPE.configChange recovered — engine running, \(snapshot.count) player(s) replaying")
     }
 
@@ -364,7 +393,21 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             // start-empty-then-hot-attach path.
             let player = AVAudioPlayerNode()
             engine.attach(player)
-            engine.connect(player, to: engine.mainMixerNode, format: connectionFormat)
+            // `connect` raises an NSException (not a Swift error) on a rejected
+            // format pairing — the interleaved-connection-format crash this class's
+            // header doc already guards against by construction, plus any other
+            // format edge case. Roll back exactly like the `engineNotRunning` guard
+            // below does for the same freshly-attached player: detach it and fail
+            // soft via the same error case, rather than let the exception abort.
+            do {
+                try catchingObjCException {
+                    engine.connect(player, to: engine.mainMixerNode, format: connectionFormat)
+                }
+            } catch {
+                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: connect raised \(error)")
+                engine.detach(player)
+                throw LocalPlaybackError.engineNotRunning
+            }
             player.volume = Self.clamp(volume)
 
             try startEngineOnGraphQueue()
@@ -386,7 +429,22 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                     player: player, sourceFormat: sourceFormat,
                     connectionFormat: connectionFormat, converter: converter)
             }
-            player.play()
+            // `play()` asserts the engine is running and raises an NSException
+            // (not a Swift error) if the `isRunning` check above raced a
+            // just-landed config change — the exact uncatchable-abort the class
+            // doc above warns about. On a raised exception, roll back BOTH
+            // mutations this call site made: the just-registered `nodes` entry
+            // (undoing the `stateLock.withLock` immediately above, since nothing
+            // else has claimed it yet) and the attach/connect from above, then
+            // fail soft via the same `engineNotRunning` case/detach used there.
+            do {
+                try catchingObjCException { player.play() }
+            } catch {
+                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: play() raised \(error)")
+                _ = stateLock.withLock { nodes.removeValue(forKey: bundleID) }
+                engine.detach(player)
+                throw LocalPlaybackError.engineNotRunning
+            }
         }
     }
 
@@ -456,7 +514,29 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         } else {
             pcm = src
         }
-        node.player.scheduleBuffer(pcm, completionHandler: nil)
+        // `scheduleBuffer` raises an NSException (not a Swift error) if the
+        // player has been detached out from under this call — a real race, since
+        // `receive` runs on the RT tap-delivery thread while `removeApp`/`stop`
+        // detach on `graphQueue` under a DIFFERENT lock (see the class's
+        // threading note: `stateLock`'s non-blocking `try()` above only
+        // guarantees `node` was valid at snapshot time, not still valid now).
+        // Rather than attempt any graph mutation from the RT thread — which
+        // would risk leaving the graph half-connected against a mutation already
+        // in flight on `graphQueue` — mirror the `converter.convert` soft-fail
+        // just above: drop this one buffer and return untouched. `nodes`/
+        // `engineRunning` are left alone; whichever concurrent `graphQueue` call
+        // caused this already owns that cleanup.
+        do {
+            try catchingObjCException {
+                node.player.scheduleBuffer(pcm, completionHandler: nil)
+            }
+        } catch {
+            if AudioDiag.isEnabled {
+                AudioDiag.log("LPE.receive bundle=\(bundleID) scheduleBuffer raised \(error)")
+                Self.tickDrop(bundleID)
+            }
+            return
+        }
         if AudioDiag.isEnabled { Self.tickScheduled(bundleID) }
     }
 

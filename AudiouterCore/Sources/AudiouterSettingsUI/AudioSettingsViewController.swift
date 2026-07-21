@@ -134,7 +134,7 @@ public final class AudioSettingsViewController: NSViewController {
         heading.font = .systemFont(ofSize: NSFont.systemFontSize)
 
         let subtitle = SettingsForm.label(
-            "Audio from these apps always stays on this Mac — never captured or redirected.")
+            "Audio from these apps always plays on your Mac — never sent to speakers.")
         subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byWordWrapping
@@ -223,10 +223,10 @@ public final class AudioSettingsViewController: NSViewController {
         }
         wakeRestorePopup.target = self
         wakeRestorePopup.action = #selector(wakeRestoreChanged)
-        wakeRestorePopup.setAccessibilityLabel("Restore Mac audio after wake")
+        wakeRestorePopup.setAccessibilityLabel("Restore Mac audio if speakers don't reconnect")
 
         views.append(SettingsForm.row(
-            title: "Restore Mac audio after wake if speakers don't return",
+            title: "Restore Mac audio if speakers don't reconnect",
             subtitle: "After the Mac wakes from sleep, if a selected speaker hasn't "
                 + "reconnected within this time, play audio on this Mac instead.",
             control: wakeRestorePopup))
@@ -356,7 +356,7 @@ public final class AudioSettingsViewController: NSViewController {
         guard let latency, latency.envOverrideMs == nil else { return }
         let armed = pendingMs != appliedMs && !isApplying
         applyButton.isEnabled = armed
-        applyButton.title = (armed && latency.isStreaming()) ? "Apply & Reconnect" : "Apply"
+        applyButton.title = (armed && latency.isStreaming()) ? "Apply & Reconnect" : "Apply Settings"
         applyButton.keyEquivalent = armed ? "\r" : ""
         bufferPopup.isEnabled = !isApplying
     }
@@ -493,7 +493,7 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-        button.title = "Add application…"
+        button.title = "Add app…"
         button.contentTintColor = .secondaryLabelColor
         button.target = self
         button.action = #selector(addTapped(_:))

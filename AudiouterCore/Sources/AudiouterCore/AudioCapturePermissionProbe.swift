@@ -140,17 +140,20 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
         return peak > grantedPeakThreshold ? .granted : .denied
     }
 
-    /// Silent revocation-detection path (`SetupModel.auditRequiredPermissions()`):
-    /// no tone, no tap, no prompt — just a read of the live TCC decision. `probe()`
-    /// above deliberately triggers the audible self-test tone because it's the
-    /// only way to distinguish "granted" from "denied" for the explicit
-    /// "Allow…" gesture; firing that tone on every reactivate/wake to catch a
-    /// revocation would be user-hostile. `CGPreflightScreenCaptureAccess()` is
-    /// the public, silent, non-prompting status read for the exact TCC bucket
-    /// the process-tap grant lives under — "Screen & System Audio Recording"
-    /// (see `SystemSettingsPane.screenAndSystemAudioRecording`) — so it can
-    /// stand in for a real status API here even though process taps have none
-    /// of their own.
+    /// Silent revocation-detection path, used by BOTH
+    /// `SetupModel.auditRequiredPermissions()` (post-onboarding reactivate/wake
+    /// watch) AND `SetupModel.refreshStatuses()` (the onboarding window's own
+    /// reactivation refresh — see the ONBOARD-TONE fix): no tone, no tap, no
+    /// prompt — just a read of the live TCC decision. `probe()` above
+    /// deliberately triggers the audible self-test tone because it's the only
+    /// way to distinguish "granted" from "denied" for the explicit "Allow…"
+    /// gesture; firing that tone on every reactivate — including a bare Cmd+Tab
+    /// away and back while onboarding is still open — would be user-hostile.
+    /// `CGPreflightScreenCaptureAccess()` is the public, silent, non-prompting
+    /// status read for the exact TCC bucket the process-tap grant lives under —
+    /// "Screen & System Audio Recording" (see
+    /// `SystemSettingsPane.screenAndSystemAudioRecording`) — so it can stand in
+    /// for a real status API here even though process taps have none of their own.
     public func currentStatusSilently() -> PermissionStatus? {
         CGPreflightScreenCaptureAccess() ? .granted : .denied
     }

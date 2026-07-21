@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backendKind = BackendKind.resolved()
 
     /// The first-run onboarding/permission-priming window, retained while open
-    /// (first launch, or "Run Setup Again…" from Settings ▸ General).
+    /// (first launch, or "Check Permissions…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
@@ -227,17 +227,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onboarding.present()
                 return
             }
-            // Control-panel rollout: while a control-panel session is live (the
-            // shell may be tucked away after an app-switch), a click restores the
-            // shared shell in place — whatever surface it's hosting — rather than
-            // toggling the popover. Otherwise: normal popover.
+            // Control-panel rollout: while a control-panel session is live, the
+            // menu-bar click TOGGLES the shared shell (whatever surface it's
+            // hosting) rather than the popover. If the shell is showing, close it
+            // (a real close → lands home on the popover, exactly like the ✕/Esc);
+            // if it's tucked away after an app-switch, restore it in place. A bare
+            // re-show here (the old behavior) could never dismiss the panel, so a
+            // click on an already-open panel did nothing.
             if self.useControlPanel, self.controlPanelSessionActive,
                let shell = self.controlPanel {
-                shell.show(anchorRect: self.statusAnchorRect())
+                if shell.isPanelVisible {
+                    shell.performClose()
+                } else {
+                    shell.show(anchorRect: self.statusAnchorRect())
+                }
                 return
             }
             self.popoverController.toggle(relativeTo: button)
         }
+
+        // Secondary (right/control) click on the menu-bar icon raises a small menu
+        // — the discoverable way to reach Settings, Groups, and Quit in a Dock-less
+        // app. A minimal main menu supplies ⌘Q / ⌘, while the app is active.
+        statusItemController.secondaryClickMenu = { [weak self] in self?.makeStatusMenu() }
+        installMainMenu()
 
         // The mixer model binds to the resolved backend, then the popover binds
         // to the model. From here the popover drives all group/master/mute/
@@ -453,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
-    /// and present it. Used for first-run, "Run Setup Again…", AND the
+    /// and present it. Used for first-run, "Check Permissions…", AND the
     /// automatic permission-revocation reopen (`auditRequiredPermissionsIfNeeded`).
     /// `onFinished` starts the backend if it hasn't already (first run) and is a
     /// guarded no-op on a re-run (backend already streaming).
@@ -487,6 +500,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindowController = controller
         controller.present()
     }
+
+    // MARK: Menu-bar secondary menu + app main menu (Quit / Settings discoverability)
+
+    /// The menu shown on a right/control-click of the status item — the
+    /// discoverable path to Settings, Groups, and Quit for a Dock-less app whose
+    /// only other quit affordance is the small power glyph in the popover header.
+    @MainActor
+    private func makeStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+        let settings = menu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settings.target = self
+        let groups = menu.addItem(withTitle: "Groups…", action: #selector(menuOpenGroups), keyEquivalent: "")
+        groups.target = self
+        menu.addItem(.separator())
+        let quit = menu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        return menu
+    }
+
+    /// A minimal application main menu. A menu-bar-only (`.accessory`) app shows
+    /// no menu bar, but a main menu still supplies working key equivalents while
+    /// the app is active — this is what makes ⌘Q (and ⌘,) work, which the app
+    /// otherwise lacked entirely.
+    @MainActor
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(.separator())
+        let quit = appMenu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        appItem.submenu = appMenu
+        NSApp.mainMenu = mainMenu
+    }
+
+    @MainActor @objc private func menuOpenSettings() { openSettings() }
+    @MainActor @objc private func menuOpenGroups() { openMixer() }
 
     /// "Open Mixer…" target — open/focus the full mixer window (SPEC §9, T-U4).
     /// Lazily built on first use, then reused; seeded with the current device
@@ -599,7 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   wakeRestore: makeWakeRestoreSettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
-            // "Run Setup Again…" (General pane) re-opens the first-run priming
+            // "Check Permissions…" (General pane) re-opens the first-run priming
             // window; the backend is already running, so its onFinished is a
             // guarded no-op.
             controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }

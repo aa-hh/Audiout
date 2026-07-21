@@ -530,4 +530,49 @@ final class AppRowViewTests: XCTestCase {
         row.resetLevel()
         XCTAssertEqual(row.test_meterLevel(), 0)
     }
+
+    // MARK: Composed VoiceOver label (A11Y-LABELS)
+    //
+    // Before this fix the row's accessibility label carried only name +
+    // volume — a VoiceOver user could never hear WHERE an app was routed or
+    // WHETHER it was actually running, even though both are visible to a
+    // sighted user (the destination popup's title, the offline badge).
+
+    func testAccessibilityLabelIncludesRoutedDestinationWhenRedirected() {
+        let (row, _) = makeRow(selected: "device-1")
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.contains("Living Room"), "label (\"\(label)\") must name the routed destination")
+    }
+
+    func testAccessibilityLabelIncludesCurrentDeviceWhenNotRedirected() {
+        let (row, _) = makeRow(selected: "local")
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.contains("Current Device"), "label (\"\(label)\") must name the Current Device destination")
+    }
+
+    func testAccessibilityLabelOmitsNotRunningWhenRunning() {
+        let row = AppRowView()
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: "local", destinations: makeDestinations(), isRunning: true))
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertFalse(label.localizedCaseInsensitiveContains("not running"))
+    }
+
+    func testAccessibilityLabelIncludesNotRunningWhenNotRunning() {
+        let row = AppRowView()
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: "local", destinations: makeDestinations(), isRunning: false))
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.localizedCaseInsensitiveContains("not running"),
+                      "label (\"\(label)\") must say the app isn't running")
+    }
+
+    func testAccessibilityLabelStillIncludesNameAndVolume() {
+        let (row, _) = makeRow(selected: "local")
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.contains("Example App"))
+        XCTAssertTrue(label.contains("42"))
+    }
 }

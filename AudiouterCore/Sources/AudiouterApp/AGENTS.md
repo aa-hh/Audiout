@@ -63,9 +63,11 @@ package layout, backends, and core types, see
   records what's showing — opening the other surface REPLACES the current
   content in the same shell via `setContent`, never a second panel. A
   status-item click during a live session (`controlPanelSessionActive`)
-  re-summons `controlPanel` in place regardless of surface; a real close lands
-  home on the popover. The flag defaults off, so the shipping window paths
-  (`openMixer`, `openSettings`'s `showWindow()`) are untouched.
+  TOGGLES `controlPanel`: it CLOSES a showing panel (a real close, so it lands
+  home on the popover, like ✕/Esc) and RESTORES one tucked away on an
+  app-switch — it never merely re-fronts an already-open panel. The flag
+  defaults off, so the shipping window paths (`openMixer`, `openSettings`'s
+  `showWindow()`) are untouched.
 
 ## Map
 

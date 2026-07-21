@@ -59,6 +59,15 @@ to a backend directly.
   `Chrome` enum, no `showPanel`, and no `onClose` on this type anymore — the
   land-home-on-close behavior belongs to the shell. When touching hosting,
   edit the shell, not this controller.
+- **`NSWindow.setFrameAutosaveName`'s Bool return does NOT mean "a saved frame
+  was restored"** — verified empirically, it returns `true` even for a
+  brand-new autosave name with nothing ever saved. `makeContainer()` calls
+  `setFrameUsingName` first (the trustworthy restore-and-report API), then
+  `setFrameAutosaveName` only to arm future autosave-on-move. `init()` gates
+  its default-size/`center()` fallback on that Bool — trusting the wrong one
+  silently re-centers over every restored frame on every launch, a regression
+  invisible to a same-session move/close/reopen smoke test because
+  `AppDelegate` builds this controller once and reuses it.
 - **The create sheet gates on the split VC's OWN host window, not
   `self.window`.** `presentCreateSheet` presents on `splitViewController` and
   guards `splitViewController.view.window?.isVisible`, so the sheet re-parents
@@ -74,6 +83,19 @@ to a backend directly.
   is groups-configuration only). When empty it displays "No groups yet"
   (a non-selectable placeholder), plus a labeled "New Group" button at the
   bottom. The Devices section appears whenever there is at least one device.
+- **`SidebarViewController.viewDidAppear()` seeds Tab-key traversal for the
+  WHOLE window (A11Y-GROUPS), not just the sidebar.** A live test found Tab
+  did nothing anywhere in this window; root cause was that nothing in the
+  window's lifecycle ever calls `NSWindow.makeFirstResponder(_:)` (not even
+  the sidebar's own programmatic auto-select — only a real click promotes
+  first responder), so a freshly-shown window has no key view for Tab to
+  advance from. Don't remove this override as apparently-dead code — it only
+  fires on a genuine on-screen appearance (never under `swift test`/harness
+  runs, so it's invisible to headless coverage) and is the one thing that
+  makes Tab work at all. Known gap: it doesn't re-seed after the content pane
+  swaps (`MixerWindowController.swift`'s `ContentPaneHostViewController` —
+  out of scope where this was fixed) — if a future live retest finds Tab
+  breaks specifically after switching panes, look there first.
 - **Both sidebar sections are FLAT — no expand/collapse, no nested rows**
   (design review 2026-07-18). A group row is a single leaf row: icon (in the
   SAME icon column as a device row) + name, no disclosure chevron, no
@@ -135,6 +157,10 @@ to a backend directly.
   presents `IconPickerViewController` as an anchored popover, and picking a
   symbol (or "use default") writes through `DeviceIconController` (devices)
   or `saveGroup` (groups). Do not copy this custom-drawn pattern anywhere else.
+  Being a bare `NSView` (A11Y-GROUPS), it gets none of `NSButton`'s free
+  keyboard/VoiceOver support — `acceptsFirstResponder`, Space/Return in
+  `keyDown(with:)`, and `accessibilityPerformPress()` are hand-rolled;
+  preserve all three in any future change here.
 - **`IconPickerViewController` has no opinion on presentation.** It only
   builds a curated grid (`DeviceIcon.curated`, filtered through
   `DeviceIcon.isValid` so a stale curated name never renders a blank glyph)

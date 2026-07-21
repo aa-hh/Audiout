@@ -64,14 +64,14 @@ final class AudioSettingsLatencyTests: XCTestCase {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
 
-        // Unchanged selection: disarmed plain "Apply".
+        // Unchanged selection: disarmed "Apply Settings".
         XCTAssertFalse(pane.test_applyButtonEnabled)
-        XCTAssertEqual(pane.test_applyButtonTitle, "Apply")
+        XCTAssertEqual(pane.test_applyButtonTitle, "Apply Settings")
 
-        // Changed while idle: armed, still plain "Apply" (instant, no gap).
+        // Changed while idle: armed, still "Apply Settings" (instant, no gap).
         pane.test_selectLatencyOption(ms: 1500)
         XCTAssertTrue(pane.test_applyButtonEnabled)
-        XCTAssertEqual(pane.test_applyButtonTitle, "Apply")
+        XCTAssertEqual(pane.test_applyButtonTitle, "Apply Settings")
 
         // Changed while streaming: armed and warns about the reconnect.
         recorder.streaming = true

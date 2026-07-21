@@ -278,4 +278,117 @@ final class OnboardingUITests: XCTestCase {
         wc.test_finishWithDone()     // and again
         XCTAssertEqual(counter.count, 1, "onFinished fires exactly once")
     }
+
+    // MARK: Done-tap confirmation gate (ONBOARD-GATE)
+    //
+    // The original bug: a first-time user could click Done with ZERO
+    // permissions granted and the flow would silently complete, with no
+    // warning and no path back once something failed later. These pin that
+    // Done now asks first whenever a REQUIRED permission
+    // (`SetupModel.requiredPermissionsNotGranted()`) isn't actually granted,
+    // and that "Continue Anyway" still finishes (setup stays guidance, not a
+    // hard gate — `SetupModel.complete()`).
+
+    /// A local-network fake that reports the browse as reachable — needed here
+    /// (unlike `NoopLocalNetwork`) to drive `localNetworkStatus` all the way to
+    /// `.granted` for the "everything granted" case.
+    private struct ReachableLocalNetwork: LocalNetworkPriming {
+        func probe() async -> Bool { true }
+    }
+
+    func testDoneAsksForConfirmationWhenNothingWasEverGranted() {
+        // A fresh model: every required permission is still at its untouched
+        // initial state (.unknown / .notRegistered) — exactly the scenario
+        // that used to complete silently.
+        var doneFired = false
+        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
+                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
+        vc.test_tapDone()
+        XCTAssertFalse(doneFired, "must not finish silently with nothing granted")
+        XCTAssertEqual(Set(vc.test_pendingConfirmationPermissions ?? []),
+                       Set([.audioCapture, .localNetwork, .ptpHelper]))
+    }
+
+    func testDoneAsksOnlyAboutPermissionsStillMissing() async {
+        let ptpHelper = FakePTPHelper(status: .enabled)
+        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
+                                          onOpenSettings: { _ in }, onDone: {})
+        // Actually grant audio (unlike test_applyStatuses, which only fakes the
+        // row display and never touches the model the gate reads from). PTP
+        // helper is already `.enabled` from `viewDidLoad()`'s automatic
+        // registration; Local Network is left untouched.
+        await vc.test_allowAudio()
+
+        vc.test_tapDone()
+
+        XCTAssertEqual(vc.test_pendingConfirmationPermissions, [.localNetwork],
+                       "audio + PTP helper are already granted; only Local Network is still missing")
+    }
+
+    func testDoneFinishesImmediatelyWhenEveryRequiredPermissionIsGranted() async {
+        let ptpHelper = FakePTPHelper(status: .enabled)
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: ReachableLocalNetwork(),
+                               remoteControl: NoopRemoteControl(),
+                               ptpHelper: ptpHelper,
+                               settings: AppSettings(defaults: defaults))
+        var doneFired = false
+        let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
+        await vc.test_allowAudio()
+        await vc.test_allowNetwork()
+        XCTAssertEqual(model.requiredPermissionsNotGranted(), [])
+
+        vc.test_tapDone()
+
+        XCTAssertTrue(doneFired, "Done finishes immediately once every required permission is granted")
+        XCTAssertNil(vc.test_pendingConfirmationPermissions)
+    }
+
+    func testContinueAnywayStillFinishesDespiteUngrantedPermissions() {
+        var doneFired = false
+        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
+                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
+        vc.test_tapDone()
+        XCTAssertFalse(doneFired)
+
+        vc.test_resolvePendingConfirmation(continueAnyway: true)
+
+        XCTAssertTrue(doneFired, "Continue Anyway still finishes — setup is guidance, not a hard gate")
+        XCTAssertNil(vc.test_pendingConfirmationPermissions)
+    }
+
+    func testGoBackLeavesOnboardingOpenWithoutFinishing() {
+        var doneFired = false
+        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
+                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
+        vc.test_tapDone()
+
+        vc.test_resolvePendingConfirmation(continueAnyway: false)
+
+        XCTAssertFalse(doneFired, "Go Back must not finish setup")
+        XCTAssertNil(vc.test_pendingConfirmationPermissions, "the pending confirmation clears either way")
+    }
+
+    func testDoneCanBeRetriedAfterGoingBackAndThenGranting() async {
+        // Go Back, grant the missing permissions, tap Done again — the second
+        // tap must re-evaluate rather than being stuck.
+        let ptpHelper = FakePTPHelper(status: .enabled)
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: ReachableLocalNetwork(),
+                               remoteControl: NoopRemoteControl(),
+                               ptpHelper: ptpHelper,
+                               settings: AppSettings(defaults: defaults))
+        var doneFired = false
+        let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
+
+        vc.test_tapDone()   // nothing granted yet → asks
+        XCTAssertFalse(doneFired)
+        vc.test_resolvePendingConfirmation(continueAnyway: false)   // Go Back
+
+        await vc.test_allowAudio()
+        await vc.test_allowNetwork()
+        vc.test_tapDone()   // now everything is granted → finishes immediately
+
+        XCTAssertTrue(doneFired)
+    }
 }

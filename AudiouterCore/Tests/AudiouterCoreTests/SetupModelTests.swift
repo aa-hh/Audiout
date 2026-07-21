@@ -337,6 +337,50 @@ final class SetupModelTests: XCTestCase {
         XCTAssertEqual(net.probeCount, 0, "network not browsed while unknown")
     }
 
+    func testRefreshStatusesReadsAudioSilentlyNeverTheAudibleTone() async {
+        // ONBOARD-TONE regression: `refreshStatuses()` is what
+        // `OnboardingWindowController.appDidBecomeActive` calls on EVERY plain
+        // app reactivation while onboarding is still open (e.g. Cmd+Tab away
+        // and back) — not just the explicit "Allow…" tap. Once the row has
+        // been engaged (`.denied`), a refresh must adopt the SILENT read and
+        // must NEVER call the audible `probe()` — that stays reserved for
+        // `requestAudioCapture()`.
+        let audio = SilentAudioProbe(probeResult: .denied, silentResult: .granted)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // the one legitimate audible call
+        XCTAssertEqual(model.audioStatus, .denied)
+        XCTAssertEqual(audio.probeCallCount, 1)
+
+        await model.refreshStatuses()       // simulated plain app reactivation
+        XCTAssertEqual(model.audioStatus, .granted, "picks up a grant made in Settings via the silent read")
+        XCTAssertEqual(audio.silentCallCount, 1)
+        XCTAssertEqual(audio.probeCallCount, 1, "reactivation must not replay the audible tone probe")
+    }
+
+    func testRefreshStatusesLeavesAudioUnchangedWhenSilentReadIsNil() async {
+        // A fake that hasn't implemented the silent seam (default `nil`, e.g.
+        // `CannedAudioProbe`) must not fall back to the audible probe on an
+        // engaged (`.denied`) row — it just leaves the cached status
+        // untouched, same posture as `auditRequiredPermissions()`.
+        let audio = SilentAudioProbe(probeResult: .denied, silentResult: nil)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // → .denied, engages the row
+        XCTAssertEqual(model.audioStatus, .denied)
+        XCTAssertEqual(audio.probeCallCount, 1)
+
+        await model.refreshStatuses()
+        XCTAssertEqual(model.audioStatus, .denied, "unchanged — nil silent read must not clobber the cached status")
+        XCTAssertEqual(audio.probeCallCount, 1, "still never falls back to the audible probe")
+    }
+
     func testRefreshReprobesAlreadyAskedNetwork() async {
         // Once the network row has been engaged, a refresh re-checks it — catching
         // the case where the browse first got nowhere (requested) but the network
@@ -427,20 +471,27 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Required permissions (revocation audit)
 
-    /// Records `currentStatusSilently()` calls and returns a canned result —
-    /// exercises the OPT-IN silent seam (default is `nil` via the protocol
-    /// extension, so every other fake in this file needs no change).
+    /// Records `probe()` (audible) and `currentStatusSilently()` (silent) calls
+    /// separately and returns canned results for each — exercises the OPT-IN
+    /// silent seam (default is `nil` via the protocol extension, so every other
+    /// fake in this file needs no change) while also proving the audible path
+    /// was or wasn't touched.
     private final class SilentAudioProbe: AudioCapturePermissionProbing, @unchecked Sendable {
         let probeResult: PermissionStatus
         let silentResult: PermissionStatus?
         private let lock = NSLock()
         private var _silentCallCount = 0
+        private var _probeCallCount = 0
         var silentCallCount: Int { lock.withLock { _silentCallCount } }
+        var probeCallCount: Int { lock.withLock { _probeCallCount } }
         init(probeResult: PermissionStatus = .granted, silentResult: PermissionStatus?) {
             self.probeResult = probeResult
             self.silentResult = silentResult
         }
-        func probe() async -> PermissionStatus { probeResult }
+        func probe() async -> PermissionStatus {
+            lock.withLock { _probeCallCount += 1 }
+            return probeResult
+        }
         func currentStatusSilently() -> PermissionStatus? {
             lock.withLock { _silentCallCount += 1 }
             return silentResult
@@ -517,6 +568,67 @@ final class SetupModelTests: XCTestCase {
         model.registerPTPHelper()                     // → .notFound
         XCTAssertEqual(Set(model.unmetRequiredPermissions()),
                        Set([.audioCapture, .localNetwork, .ptpHelper]))
+    }
+
+    // MARK: Required permissions NOT granted (onboarding Done-tap gate)
+
+    /// The original ONBOARD-GATE bug: a first-time user who never touched a
+    /// single row and taps Done straight away. Every required permission is
+    /// still at its untouched initial state — unlike
+    /// ``SetupModel/unmetRequiredPermissions()`` (which exists to catch a
+    /// *regression* and deliberately never flags `.unknown`/`.notRegistered`),
+    /// `requiredPermissionsNotGranted()` must flag all three here, since
+    /// nothing was ever actually granted.
+    func testRequiredPermissionsNotGrantedFlagsAllThreeOnAFreshModel() {
+        let (model, _, _, _) = makeModel(audio: .granted)   // audioProbe would say granted, but never asked
+        XCTAssertEqual(model.audioStatus, .unknown)
+        XCTAssertEqual(model.localNetworkStatus, .unknown)
+        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
+        XCTAssertEqual(Set(model.requiredPermissionsNotGranted()),
+                       Set([.audioCapture, .localNetwork, .ptpHelper]))
+    }
+
+    func testRequiredPermissionsNotGrantedEmptyWhenAllThreeAreActuallyGranted() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .enabled
+        let (model, net, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        await model.requestAudioCapture()   // → .granted
+        net.reachable = true
+        await model.primeLocalNetwork()     // → .granted
+        model.registerPTPHelper()           // → .enabled (mirrors viewDidLoad's real call)
+        XCTAssertEqual(model.requiredPermissionsNotGranted(), [])
+    }
+
+    func testRequiredPermissionsNotGrantedExcludesUnsupportedAudio() async {
+        // `.unsupported` (pre-14.2 OS) can't be fixed by granting anything, so
+        // it must not be nagged about — unlike `.unknown`/`.denied`.
+        let (model, _, _, _) = makeModel(audio: .unsupported)
+        await model.requestAudioCapture()   // → .unsupported
+        XCTAssertFalse(model.requiredPermissionsNotGranted().contains(.audioCapture))
+    }
+
+    func testRequiredPermissionsNotGrantedIncludesNotRegisteredPTPHelper() {
+        // Contrast with `unmetRequiredPermissions()`, which deliberately
+        // excludes `.notRegistered` (see
+        // `testUnmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper`) —
+        // that method only cares about a REGRESSION after setup completed.
+        // This one cares whether Done is about to finish with the helper
+        // never actually enabled, so `.notRegistered` counts.
+        let (model, _, _, _) = makeModel(audio: .granted)
+        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
+        XCTAssertTrue(model.requiredPermissionsNotGranted().contains(.ptpHelper))
+    }
+
+    func testRequiredPermissionsNotGrantedIgnoresRemoteControl() {
+        // Remote Control isn't in `RequiredPermission` at all (enhancement,
+        // not a requirement), so it can never appear here regardless of state.
+        let (model, _, remote, _) = makeModel(audio: .granted)
+        remote.trusted = false
+        model.primeRemoteControl()
+        XCTAssertEqual(model.remoteControlStatus, .requested)
+        XCTAssertEqual(Set(model.requiredPermissionsNotGranted()),
+                       Set([.audioCapture, .localNetwork, .ptpHelper]),
+                       "Remote Control status never influences this list")
     }
 
     func testAuditRequiredPermissionsUsesSilentAudioReadAndFlagsRevocation() async {

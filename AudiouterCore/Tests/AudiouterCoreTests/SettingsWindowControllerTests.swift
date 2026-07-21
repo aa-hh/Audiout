@@ -58,7 +58,7 @@ final class SettingsWindowControllerTests: XCTestCase {
         var fired = 0
         controller.onRunSetupAgain = { fired += 1 }
         controller.test_general.test_tapRunSetupAgain()
-        XCTAssertEqual(fired, 1, "Run Setup Again… routes from the General pane out to the app")
+        XCTAssertEqual(fired, 1, "Check Permissions… routes from the General pane out to the app")
     }
 
     /// The sizing-bug regression test: the assembled single-screen content must
@@ -151,5 +151,36 @@ final class SettingsWindowControllerTests: XCTestCase {
         let controller = SettingsWindowController(settings: settings, loginItem: FakeLoginItem(enabled: false))
         // Force the pane to load its view, then read the selection.
         XCTAssertEqual(controller.test_appearance.test_selectedTheme, .light)
+    }
+
+    // MARK: Theme tile VoiceOver selected-state (A11Y-LABELS)
+
+    /// Before this fix all three tiles sounded identical to VoiceOver — only
+    /// the currently-selected theme's tile should report itself as AX-selected.
+    func testOnlyTheSelectedThemeTileReportsAccessibilitySelected() {
+        let settings = makeSettings()
+        settings.theme = .dark
+        let controller = SettingsWindowController(settings: settings, loginItem: FakeLoginItem(enabled: false))
+        let appearance = controller.test_appearance
+
+        XCTAssertTrue(appearance.test_isTileAccessibilitySelected(.dark))
+        XCTAssertFalse(appearance.test_isTileAccessibilitySelected(.light))
+        XCTAssertFalse(appearance.test_isTileAccessibilitySelected(.system))
+    }
+
+    /// Picking a different tile flips the AX-selected state live, so a
+    /// VoiceOver user re-querying the picker hears the new selection.
+    func testTappingATileMovesAccessibilitySelectedStateToIt() {
+        let settings = makeSettings()
+        let controller = SettingsWindowController(settings: settings, loginItem: FakeLoginItem(enabled: false))
+        let appearance = controller.test_appearance
+
+        appearance.test_selectTheme(.light)
+        XCTAssertTrue(appearance.test_isTileAccessibilitySelected(.light))
+        XCTAssertFalse(appearance.test_isTileAccessibilitySelected(.dark))
+
+        appearance.test_selectTheme(.dark)
+        XCTAssertTrue(appearance.test_isTileAccessibilitySelected(.dark))
+        XCTAssertFalse(appearance.test_isTileAccessibilitySelected(.light))
     }
 }

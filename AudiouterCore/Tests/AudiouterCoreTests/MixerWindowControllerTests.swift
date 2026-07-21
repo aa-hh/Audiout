@@ -91,6 +91,83 @@ final class MixerWindowControllerTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 150_000_000)
     }
 
+    // MARK: Window frame persistence (R2: reconciling the audit vs. the live test)
+    //
+    // `MixerWindowController` restores its frame via
+    // `NSWindow.setFrameAutosaveName("MixerWindow")`, which — per AppKit — finds
+    // and SYNCHRONOUSLY applies any previously-saved frame the instant it's
+    // called, before `init()` does anything else. A prior version of this
+    // controller unconditionally called `setContentSize`/`center()` right after
+    // that, silently discarding the restore on every construction. That bug was
+    // invisible to a live "move it, close it, reopen it" smoke test because
+    // `AppDelegate` builds this controller once per process and reuses it — a
+    // same-session close/reopen never re-runs `init()` at all. It only shows up
+    // across a genuine app relaunch, which is exactly when frame autosave is
+    // supposed to matter. These tests construct a fresh `MixerWindowController`
+    // under the REAL "MixerWindow" autosave name, standing in for "a fresh
+    // launch after a previous session saved a frame" — the case the live smoke
+    // test never actually exercised.
+
+    private static let mixerWindowAutosaveName = NSWindow.FrameAutosaveName("MixerWindow")
+    private static let mixerWindowFrameDefaultsKey = "NSWindow Frame MixerWindow"
+
+    /// Simulate "a previous session left the window here": build a throwaway
+    /// window under the SAME "MixerWindow" autosave name `MixerWindowController`
+    /// itself uses, move it, and force-persist that frame — exactly what AppKit
+    /// does automatically as the user drags a real, autosave-named window.
+    private func seedSavedMixerWindowFrame(_ frame: NSRect) {
+        let seed = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
+                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                            backing: .buffered, defer: false)
+        seed.setFrameAutosaveName(Self.mixerWindowAutosaveName)
+        seed.setFrame(frame, display: false)
+        seed.saveFrame(usingName: Self.mixerWindowAutosaveName)
+    }
+
+    /// Clear any saved "MixerWindow" frame so this test's seed can never leak
+    /// into another test in the same process (all `swift test` cases share one
+    /// `UserDefaults.standard` domain) and a stale seed from an earlier failed
+    /// run can never leak into this one.
+    private func clearSavedMixerWindowFrame() {
+        UserDefaults.standard.removeObject(forKey: Self.mixerWindowFrameDefaultsKey)
+    }
+
+    func testWindowRestoresPreviouslySavedFrameInsteadOfRecentering() async throws {
+        clearSavedMixerWindowFrame()
+        defer { clearSavedMixerWindowFrame() }
+        let saved = NSRect(x: 133, y: 222, width: 900, height: 600)
+        seedSavedMixerWindowFrame(saved)
+
+        let (window, _, _) = try await makeWindow()
+
+        XCTAssertEqual(window.window?.frame, saved,
+                       "a frame saved by a previous session must be restored as-is on the next " +
+                       "construction, not overwritten by the default-size/center() fallback — " +
+                       "regression coverage for the R2 audit/live-test contradiction")
+    }
+
+    func testFreshWindowWithNoSavedFrameFallsBackToDefaultSizeCentered() async throws {
+        clearSavedMixerWindowFrame()
+        defer { clearSavedMixerWindowFrame() }
+
+        let (window, _, _) = try await makeWindow()
+        let frame = try XCTUnwrap(window.window?.frame)
+        XCTAssertEqual(frame.width, 720, accuracy: 0.5)
+        XCTAssertEqual(frame.height, 460, accuracy: 0.5,
+                       "460 = the exact content size — .fullSizeContentView means content fills the " +
+                       "whole frame, no separate title-bar addition")
+
+        // AppKit's `center()` isn't the screen's exact geometric midpoint (it's
+        // nudged for visual balance), so compare against a same-size probe that
+        // also just calls `center()`, rather than hard-coding that offset.
+        let probe = NSWindow(contentRect: NSRect(origin: .zero, size: frame.size),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                             backing: .buffered, defer: false)
+        probe.center()
+        XCTAssertEqual(frame.origin, probe.frame.origin,
+                       "with nothing saved yet, the window must still fall back to center() as before")
+    }
+
     // MARK: Window chrome (SPEC §9 "Full window")
 
     func testWindowChromeHasFullSizeContentAndNoToolbar() async throws {
@@ -601,6 +678,34 @@ final class MixerWindowControllerTests: XCTestCase {
         XCTAssertEqual(icons.symbolName(for: backend.devices.first { $0.id == "office" }!),
                        "sofa.fill",
                        "the shared controller resolves the override the row renders")
+    }
+
+    // MARK: Keyboard focus (A11Y-GROUPS)
+    //
+    // Live-test finding: pressing Tab did nothing anywhere in the Groups
+    // window, because nothing in its lifecycle ever calls
+    // `NSWindow.makeFirstResponder(_:)` — so a freshly-shown window has no
+    // real first responder to advance Tab FROM. `SidebarViewController`'s
+    // `viewDidAppear()` override seeds the outline view as first responder
+    // (see its doc comment for the full root-cause writeup); this asserts
+    // that seed fires exactly the way a real window appearing would trigger
+    // it, without needing an actual on-screen window (never available under
+    // `swift test`).
+
+    func testWindowHasNoFirstResponderBeforeItEverAppears() async throws {
+        let (window, _, _) = try await makeWindow()
+        // Before `viewDidAppear()` has ever run, the window's first responder
+        // is itself — nothing has claimed it. This is the exact state a live
+        // Tab press found: nothing to advance from.
+        XCTAssertTrue(window.test_sidebar.view.window === window.window)
+        XCTAssertFalse(window.test_sidebar.test_isOutlineViewFirstResponder)
+    }
+
+    func testSidebarViewDidAppearSeedsTheOutlineViewAsFirstResponder() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_sidebar.test_simulateViewDidAppear()
+        XCTAssertTrue(window.test_sidebar.test_isOutlineViewFirstResponder,
+                      "the sidebar's outline view must become first responder once the window appears, or Tab has nothing to advance from")
     }
 }
 

@@ -74,6 +74,18 @@ public final class ControlPanelBackingView: NSView {
         bubblePath().fill()
     }
 
+    /// Repaint on a light/dark flip. This bubble's `windowBackgroundColor` fill
+    /// is now the LIVE source of the shell's content-pane background too — the
+    /// hosted content is left transparent so this shows through it (see
+    /// `ControlPanelWindowController.configureContentAppearance`). A custom
+    /// `draw(_:)` isn't re-invoked automatically on an appearance change, so
+    /// without this a mid-session theme flip would leave a stale fill behind
+    /// both the bubble and the content pane.
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
     /// This view (and the window it lives in) is purely decorative — see
     /// `ControlPanelWindowController.makeBackingWindow`, which also sets
     /// `ignoresMouseEvents = true` on the whole window so hosted content in

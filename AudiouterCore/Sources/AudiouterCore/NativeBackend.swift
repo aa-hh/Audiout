@@ -3160,6 +3160,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         applyMeteringTapDiff(diff)
     }
 
+    // MARK: Synced local sink (T-FANOUT / "play everywhere")
+
+    /// Attach (or detach, with `nil`) the delayed local sink used in "play
+    /// everywhere" mode (T-FANOUT). The whole-system tap fans the SAME captured
+    /// audio it sends the AirPlay engine to this sink, which plays a PTP-delayed
+    /// copy on the Mac's own speakers phase-aligned with the receivers.
+    ///
+    /// CRITICAL (R2 / brief §8): the sink renders through THIS app's own
+    /// `AVAudioEngine`, so the whole-system tap attributes its output to our
+    /// process. We hand the coordinator our own pid (`getpid()`) as the
+    /// render-process identity to EXCLUDE from the tap — otherwise the tap
+    /// re-captures the delayed output and "play everywhere" becomes "play
+    /// everywhere, with a delayed echo of itself." Because the tap is
+    /// `.mutedWhenTapped`, excluding our process also leaves the delayed output
+    /// audible while the raw system mix stays muted — exactly the intent.
+    ///
+    /// T-BACKEND drives WHEN this is called (the selection includes the Mac plus
+    /// ≥1 AirPlay device); this method just wires the sink + self-exclude through
+    /// the capture seam. No-op when no real capture coordinator is wired
+    /// (tests / UI-only smoke).
+    public func attachSyncedLocalSink(_ sink: SyncedLocalPCMSink?) {
+        let renderProcessPID: pid_t? = (sink == nil) ? nil : getpid()
+        captureCoordinator?.setSyncedLocalSink(sink, renderProcessPID: renderProcessPID)
+    }
+
     // MARK: Metering-only tap reconcile (T3, `.noRedirect` source)
 
     /// Compute the metering-only tap start/stop diff and COMMIT the new target set
@@ -3468,6 +3493,14 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// that only exercises the capture gate compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real implementation.
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)
+
+    /// Attach/detach the delayed local sink fan-out (T-FANOUT) and the pid of the
+    /// process that renders its output. A non-nil sink turns the fan-out on and
+    /// adds `renderProcessPID` to the whole-system tap's exclusion set so the
+    /// sink's own output isn't re-captured as an echo (R2); `nil` turns both off.
+    /// Default no-op so a capture-gate-only fake compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
 }
 
 extension CaptureControlling {
@@ -3475,6 +3508,9 @@ extension CaptureControlling {
     /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setMeteringActive(_ active: Bool) {}
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {}
+    /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
+    /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
+    func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}

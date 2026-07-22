@@ -120,6 +120,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// that's already running without going through a recreate.
     private var currentExcludedBundleIDs: Set<String> = []
 
+    /// T-FANOUT: the delayed local sink to ALSO feed (the "play everywhere" second
+    /// consumer), and the pid of the process that RENDERS its output — our own
+    /// process, since the sink is an in-process `AVAudioEngine`. Both queue-confined
+    /// and set together via ``setSyncedLocalSink(_:renderProcessPID:)``.
+    ///
+    /// `syncedLocalRenderPID` is unioned into every tap's `excludedPIDs`
+    /// (``resolveExcludedPIDs()``) so the whole-system tap never re-captures the
+    /// sink's own delayed output as an echo (plan risk R2 / brief §8). Because the
+    /// tap is `.mutedWhenTapped`, excluding our process ALSO keeps that delayed
+    /// output audible while the raw system mix stays muted — exactly the intent.
+    /// Both `nil` = play-everywhere off: no fan-out and no self-exclude, i.e.
+    /// today's behavior.
+    private var syncedLocalSink: SyncedLocalPCMSink?
+    private var syncedLocalRenderPID: pid_t?
+
     /// Fired on every state transition so a UI (or a test) can observe the
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
@@ -328,6 +343,33 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap()
     }
 
+    /// Attach (or detach, with `nil`) the delayed local sink fan-out (T-FANOUT),
+    /// and the pid of the process that renders its output. Both move together: a
+    /// non-nil `sink` turns the fan-out ON and adds `renderProcessPID` to the
+    /// whole-system tap's exclusion set so the sink's own delayed audio is never
+    /// re-captured as an echo (R2 / brief §8); `nil` turns both off.
+    ///
+    /// If a tap is currently `.capturing` AND the exclusion pid actually changes,
+    /// the tap is recreated immediately so the new exclusion takes effect without
+    /// waiting for a device change — mirroring
+    /// ``updateRouting(appRoutes:excludedBundleIDs:)``. Otherwise the new pid is
+    /// simply applied at the next tap creation. ``NativeBackend`` calls this when
+    /// the selection enters/leaves "play everywhere" mode; it supplies the
+    /// render-process identity (its own `getpid()`, since the sink renders
+    /// in-process).
+    public func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
+        let needsRecreate: Bool = queue.sync {
+            self.syncedLocalSink = sink
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != syncedLocalRenderPID else { return false }
+            syncedLocalRenderPID = newPID
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard needsRecreate else { return }
+        recreateTap()
+    }
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it
@@ -352,7 +394,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// pid-resolvable yet. MUST be called while holding `queue`
     /// (`currentExcludedBundleIDs` is queue-confined).
     private func resolveExcludedPIDs() -> Set<pid_t> {   // must hold `queue`
-        Set(currentExcludedBundleIDs.compactMap(resolvePID))
+        var pids = Set(currentExcludedBundleIDs.compactMap(resolvePID))
+        // T-FANOUT self-exclude (R2): keep the delayed local sink's own render
+        // process out of the whole-system tap so its output isn't re-captured as
+        // an echo — and (since the tap is `.mutedWhenTapped`) stays audible.
+        if let renderPID = syncedLocalRenderPID { pids.insert(renderPID) }
+        return pids
     }
 
     // MARK: Buffer delivery (tap IOProc thread → convert → engine)
@@ -366,7 +413,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the actual conversion OUTSIDE it so a slow convert can't stall stop().
         // `meteringActive` rides along on the same read (T-GATE) — no separate
         // lock acquisition per buffer.
-        let (converter, metering) = queue.sync { (self.converter, self.meteringActive) }
+        let (converter, metering, syncedSink) = queue.sync {
+            (self.converter, self.meteringActive, self.syncedLocalSink)
+        }
         guard let converter else { return }
 
         guard let pcm = converter.convertToAirPlayPCM(buffer) else { return }
@@ -374,6 +423,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)
+
+        // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
+        // sink, widened to interleaved Float32 — ONE capture, two consumers. Gated
+        // exactly like metering below: a nil sink (play-everywhere off) means no
+        // fan-out. The sink's own scheduling holds it phase-aligned with AirPlay;
+        // its render process is self-excluded from this tap (``resolveExcludedPIDs``)
+        // so this fanned-out audio can't loop back as an echo.
+        if let syncedSink {
+            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink)
+        }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
         // the meter feature (identical for every fanned-out device) — but only
@@ -478,6 +537,38 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self.converter = nil
                 self.transition(to: .failed(mapped))
             }
+        }
+    }
+
+    // MARK: Synced-local fan-out (T-FANOUT)
+
+    /// Widen one interleaved S16LE airplay-format buffer (``PCMFormat/airplay`` —
+    /// 44100 / 2ch, the exact bytes handed to the engine) to interleaved Float32 in
+    /// −1.0…1.0 and hand it to the delayed local sink with the capture `pts`.
+    ///
+    /// Reuses the engine's already-resampled/channel-matched PCM rather than a
+    /// SECOND `AVAudioConverter` pass off the raw tap buffer: one capture drives
+    /// both consumers with a single heavy conversion plus this cheap integer→float
+    /// widen, and the local copy is bit-for-bit the same program the AirPlay
+    /// receivers get (the whole point of "play everywhere"). Runs on the tap
+    /// delivery thread; the only allocation is the one Float scratch array.
+    static func fanOutToSyncedLocal(_ s16le: Data, pts: timespec, into sink: SyncedLocalPCMSink) {
+        let channelCount = PCMFormat.airplay.channels
+        let sampleCount = s16le.count / MemoryLayout<Int16>.size
+        guard channelCount > 0, sampleCount >= channelCount else { return }
+        let frameCount = sampleCount / channelCount
+        let usableSamples = frameCount * channelCount
+        var floats = [Float](repeating: 0, count: usableSamples)
+        let scale: Float = 1.0 / 32768.0
+        s16le.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<usableSamples {
+                floats[i] = Float(Int16(littleEndian: p[i])) * scale
+            }
+        }
+        floats.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            sink.enqueue(interleavedFrames: base, frameCount: frameCount, pts: pts)
         }
     }
 
@@ -650,6 +741,22 @@ public protocol PCMSink: Sendable {
 public protocol PCMConverting: Sendable {
     func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data?
 }
+
+/// The delayed-local-sink fan-out target (T-FANOUT). The whole-system tap feeds
+/// the SAME captured audio it hands the engine (``PCMSink/write(pcm:pts:)``) to a
+/// second consumer conforming to this, so the Mac's own speakers can play a
+/// PTP-delayed copy phase-aligned with the AirPlay receivers ("play everywhere").
+/// The concrete ``SyncedLocalSink`` conforms; tests inject a spy. Fed interleaved
+/// Float32 at the airplay rate/channel-count (44100 / 2ch) — the coordinator
+/// widens the already-converted S16LE airplay PCM, keeping the sink about
+/// scheduling, not format bridging (see ``SyncedLocalSink/enqueue(interleavedFrames:frameCount:pts:)``).
+public protocol SyncedLocalPCMSink: AnyObject, Sendable {
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec)
+}
+
+/// ``SyncedLocalSink`` already exposes exactly this shape — both the AVFoundation
+/// and the inert fallback variant — so conformance is declaration-only.
+extension SyncedLocalSink: SyncedLocalPCMSink {}
 
 /// Every way native capture can fail, shaped so a UI can render an actionable
 /// message and the state machine can surface it.

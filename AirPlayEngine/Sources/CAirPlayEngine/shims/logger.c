@@ -59,6 +59,26 @@ mirror_to_stderr(int severity)
   return forced || severity <= E_WARN;
 }
 
+/* Optional append-to-file sink, opened once from AIRPLAYENGINE_LOG_FILE. Unlike
+ * stderr (swallowed when the app is launched via `open`/LaunchServices) and
+ * os_log (a custom subsystem from an ad-hoc-signed bundle isn't reliably
+ * persisted), a plain file is readable from a bundled, TCC-correct live session —
+ * the only way to observe a real receiver session's logs. NULL when unset. */
+static FILE *
+log_file(void)
+{
+  static FILE *f = NULL;
+  static int tried = 0;
+  if (!tried)
+    {
+      const char *path = getenv("AIRPLAYENGINE_LOG_FILE");
+      tried = 1;
+      if (path && path[0])
+        f = fopen(path, "a");
+    }
+  return f;
+}
+
 static const char *
 domain_label(int domain)
 {
@@ -114,6 +134,16 @@ emit(int severity, int domain, const char *msg)
       size_t n = strlen(msg);
       if (n == 0 || msg[n - 1] != '\n')
         fputc('\n', stderr);
+    }
+
+  FILE *lf = log_file();
+  if (lf)
+    {
+      size_t n = strlen(msg);
+      fprintf(lf, "[%s] %s", domain_label(domain), msg);
+      if (n == 0 || msg[n - 1] != '\n')
+        fputc('\n', lf);
+      fflush(lf); // flush every line: a live capture must not lose the tail
     }
 }
 

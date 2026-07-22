@@ -98,6 +98,9 @@ final class NativeBackendTests: XCTestCase {
         private(set) var maxConcurrentPerDevice = 0
 
         private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
+        private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
+
+        var dacpID: UInt64 { 0x1122334455667788 }
 
         func start() async throws { lock.withLock { started = true } }
         func stop() async { lock.withLock { stopped = true } }
@@ -182,10 +185,21 @@ final class NativeBackendTests: XCTestCase {
                 lock.withLock { self.continuation = continuation }
             }
         }
+        func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
+            AsyncStream { continuation in
+                lock.withLock { self.remoteContinuation = continuation }
+            }
+        }
         /// Push a synthetic out-of-band transition through the state stream.
         func pushState(_ id: OutputID, _ state: OutputState) {
             let c = lock.withLock { continuation }
             c?.yield((id, state))
+        }
+        /// Push a synthetic remote-control event (a speaker transport key or a
+        /// change to the speaker's own volume) through the remote-event stream.
+        func pushRemoteEvent(_ event: RemoteEvent) {
+            let c = lock.withLock { remoteContinuation }
+            c?.yield(event)
         }
 
         // Thread-safe snapshots for assertions.
@@ -4086,6 +4100,225 @@ final class NativeBackendTests: XCTestCase {
             if condition() { return }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+    }
+
+    // MARK: Remote-control stream (speaker transport keys + the speaker's own volume)
+
+    /// The speaker changing its OWN volume moves that one device's slider: a
+    /// `RemoteEvent.volume(level: 0.5)` becomes a `deviceUpdated` with volume 50
+    /// for that id (0.0…1.0 → 0…100).
+    func testSpeakerVolumeMovesThatDeviceSlider() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Discover the device first so the id↔OutputID mapping exists.
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // 0.8 → 80, deliberately different from a discovered device's default 50
+        // (mapDiscovered) so the change actually emits rather than being de-duped.
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
+        } after: { engine.pushRemoteEvent(.volume(device.outputID, level: 0.8)) }
+
+        let updated = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
+        }
+        XCTAssertEqual(updated.last?.volume, 80, "the speaker's knob should move its slider to 80")
+    }
+
+    /// A volume report for an OutputID the backend never mapped is dropped — it
+    /// must not fabricate a device or crash. We prove it by confirming a LATER
+    /// event for a real device still flows (the stream wasn't wedged) and no
+    /// deviceUpdated arrived for the bogus id.
+    func testSpeakerVolumeForUnknownOutputIsIgnored() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        let bogus = OutputID(rawValue: 0xDEADBEEF)
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            engine.pushRemoteEvent(.volume(bogus, level: 0.9)) // dropped
+            discovery.fire(.appeared(device))                  // still flows
+        }
+
+        XCTAssertFalse(
+            events.contains { if case .deviceUpdated = $0 { return true } else { return false } },
+            "an unknown-output volume must not produce any deviceUpdated"
+        )
+    }
+
+    /// Each transport key pressed on the speaker surfaces the matching
+    /// device-agnostic `remoteTransport` backend event (play/pause/next/previous).
+    func testSpeakerTransportKeysEmitRemoteTransport() async {
+        let (backend, engine, _) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        @Sendable func sawTransport(_ events: [BackendEvent], _ command: RemoteTransportCommand) -> Bool {
+            events.contains { if case .remoteTransport(let c) = $0 { return c == command } else { return false } }
+        }
+
+        let events = await collect(from: backend) { events in
+            sawTransport(events, .playPause) && sawTransport(events, .next) && sawTransport(events, .previous)
+        } after: {
+            engine.pushRemoteEvent(.transport(.playPause))
+            engine.pushRemoteEvent(.transport(.next))
+            engine.pushRemoteEvent(.transport(.previous))
+        }
+
+        XCTAssertTrue(sawTransport(events, .playPause))
+        XCTAssertTrue(sawTransport(events, .next))
+        XCTAssertTrue(sawTransport(events, .previous))
+    }
+
+    // MARK: DACP volume routing (a volume change made ON THE SPEAKER)
+
+    /// A DACP volume report whose Active-Remote token matches a device's id (low
+    /// 32 bits) moves that device's slider.
+    func testDacpVolumeMovesMatchingDeviceSlider() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Active-Remote is the low 32 bits of the device id (airplay.c). 0.8 → 80,
+        // deliberately != the discovered default of 50 so the change actually emits.
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
+        } after: { backend.applyDacpVolume(activeRemote: token, level: 0.8) }
+
+        let updated = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
+        }
+        XCTAssertEqual(updated.last?.volume, 80, "a DACP volume for this speaker's token moves its slider")
+    }
+
+    /// A DACP volume for a token that matches no known device is dropped (no
+    /// deviceUpdated), while a real device still flows — the stream isn't wedged.
+    func testDacpVolumeForUnknownTokenIsIgnored() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            backend.applyDacpVolume(activeRemote: 0xDEADBEEF, level: 0.9) // no such token
+            discovery.fire(.appeared(device))
+        }
+        XCTAssertFalse(
+            events.contains { if case .deviceUpdated = $0 { return true } else { return false } },
+            "an unknown DACP token must not move any slider"
+        )
+    }
+
+    /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
+    /// fire-and-forget through a Task, so it's not synchronous with the apply).
+    private func waitForVolumePush(
+        _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 3
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if engine.volumeCalls.contains(where: { $0.0 == outputID && abs($0.1 - value) < 0.001 }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
+    }
+
+    /// Closing the loop: a speaker-requested volume must be written BACK out to
+    /// the engine (→ SET_PARAMETER to the receiver), not just move our slider.
+    /// The sender owns AirPlay volume — without the write-back the speaker's own
+    /// baseline never advances, which is exactly the first-live-test bug (a full
+    /// swipe moved a few points and every new swipe re-based on the stale level).
+    func testDacpVolumeIsPushedBackToTheEngine() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+
+        let pushed = await waitForVolumePush(engine, device.outputID, 0.8)
+        XCTAssertTrue(pushed, "a speaker-requested volume must be pushed back to the engine so the speaker actually changes level")
+    }
+
+    /// A receiver reflecting our own write back (a value equal to what the slider
+    /// already holds) must NOT trigger another push — that would ping-pong
+    /// forever. The same-value guard in `setSpeakerVolume` breaks the cycle.
+    func testDacpVolumeEchoOfCurrentValueDoesNotRePush() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        _ = await waitForVolumePush(engine, device.outputID, 0.8)
+        let countAfterFirst = engine.volumeCalls.count
+
+        // The "echo": same level again. Give any (wrong) push time to land.
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(engine.volumeCalls.count, countAfterFirst,
+                       "an echo of the current value must not push again (feedback loop)")
+    }
+
+    /// Relative `volumeup`/`volumedown` verbs step from the level the app
+    /// CURRENTLY holds, so consecutive presses accumulate instead of re-basing:
+    /// 50 → 52 → 54 → 52 with the ±2-point step.
+    func testDacpVolumeStepsAccumulate() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let step = NativeBackend.speakerVolumeStep
+        let deviceID = device.id
+        let volumesOf: @Sendable ([BackendEvent]) -> [Int] = { events in
+            events.compactMap { event -> Int? in
+                if case .deviceUpdated(let d) = event, d.id == deviceID { return d.volume } else { return nil }
+            }
+        }
+        let events = await collect(from: backend) { events in
+            volumesOf(events).count >= 3
+        } after: {
+            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(activeRemote: token, direction: -1)
+        }
+
+        let volumes = volumesOf(events)
+        XCTAssertEqual(volumes, [50 + step, 50 + 2 * step, 50 + step],
+                       "steps must accumulate from the current level, up then back down")
     }
 }
 

@@ -106,4 +106,42 @@ if [ -n "$iso_hits" ]; then
     echo "" >&2
 fi
 
+# ---------------------------------------------------------------------------
+# GUARD 4 (BLOCKING): the full test suite must pass before Swift code is
+# committed. THE coverage guarantee — nothing broken gets committed, and since
+# everything that reaches main was committed here first, main stays green.
+#
+# Agents may run `swift test --filter <Suite>` while iterating (fast); a
+# too-narrow filter can miss a suite the change broke, but that risk is absorbed
+# HERE — no commit touching AudiouterCore Swift sources/tests lands until the
+# WHOLE suite (parallelised) passes. So filtering can only ever cost one extra
+# fix cycle at commit time.
+#
+# Scope: only runs when staged files include AudiouterCore Swift source/test
+# files. Docs/config/other commits skip it (no code changed → nothing to gate).
+#
+# Pathspec note: a bare directory pathspec + `grep '\.swift$'` — NOT
+# `Sources/**/*.swift`, whose `**` must span ≥1 directory and so silently
+# misses a file sitting directly in Sources/ or Tests/ (verified empirically).
+#
+# Escape hatch: `git commit --no-verify` for a deliberate emergency, same as
+# the other guards. Missing `swift` toolchain => skip (don't wedge a machine
+# that can't build).
+staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
+    'AudiouterCore/Sources/' 'AudiouterCore/Tests/' 2>/dev/null | grep '\.swift$')
+if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    echo "" >&2
+    echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
+    echo "  (swift test --parallel) before commit. ~70s warm; --no-verify to skip." >&2
+    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel >&2 ); then
+        echo "" >&2
+        echo "  REFUSED: full test suite failed. Fix the failures" >&2
+        echo "  (or 'git commit --no-verify' for a real emergency)." >&2
+        echo "" >&2
+        exit 1
+    fi
+    echo "  Guard 4: full suite passed." >&2
+fi
+
 exit 0

@@ -123,6 +123,7 @@ public actor AirPlayEngine {
     private nonisolated let engineThreadHolder = EngineThreadHolder()
     private let completions = CompletionRegistry()
     private let stateHub = StateStreamHub()
+    private let remoteHub = RemoteEventHub()
 
     private var started = false
     // C2: set BEFORE the first suspension point in `start()`, so two concurrent
@@ -348,6 +349,9 @@ public actor AirPlayEngine {
             }
             completions.install()
             stateHub.install() // device-state stream hook (T-ENG-STATESTREAM-1)
+            // Remote-control hook (speaker-input task): MUST install before
+            // airplay_init below spawns the "airplay events" thread that fires it.
+            remoteHub.install()
 
             // 3. Apply config via conffile setters (strings NOT copied — retained
             //    on `self` for the engine lifetime).
@@ -400,6 +404,7 @@ public actor AirPlayEngine {
             try? await engineThread.run { [self] in
                 completions.uninstall()
                 stateHub.uninstall()
+                remoteHub.uninstall()
                 outputs_dispatcher_deinit()
                 outputs_registry_clear()
             }
@@ -460,6 +465,7 @@ public actor AirPlayEngine {
             stateReconcileTask = nil
             completions.uninstall()   // resumes (cancels) every in-flight op continuation
             stateHub.uninstall()
+            remoteHub.uninstall()
             knownOutputs.removeAll()
             return
         }
@@ -485,6 +491,9 @@ public actor AirPlayEngine {
                 ptpd_deinit()
                 completions.uninstall()
                 stateHub.uninstall()
+                // Safe here: deinitFn() above ran airplay_deinit, which joins the
+                // "airplay events" thread, so no fire can race this teardown.
+                remoteHub.uninstall()
                 outputs_dispatcher_deinit()
                 // C2: airplay_deinit frees the sessions but leaves device->session
                 // dangling and never empties device_list — clear the registry so a
@@ -551,6 +560,18 @@ public actor AirPlayEngine {
         }
         // Keep it non-zero (the C side asserts a non-zero seed).
         return hash == 0 ? 0x1 : hash
+    }
+
+    /// The `DACP-ID` this engine advertises to receivers on its RTSP requests
+    /// (`airplay.c` sets `DACP-ID: <libhash>`). A receiver that wants to control
+    /// the sender — e.g. report that the user changed the volume ON THE SPEAKER —
+    /// browses mDNS for `iTunes_Ctrl_<DACP-ID>` and calls that DACP server. The
+    /// app must advertise a `_dacp._tcp` service under exactly this id for those
+    /// calls to land, so this exposes the same `libhash` the engine derives from
+    /// the client name + install seed. Nonisolated: reads only the immutable
+    /// `config`, and the value is a pure function of it.
+    public nonisolated var dacpID: UInt64 {
+        Self.hashClientName(config.clientName, seed: config.installSeed)
     }
 
     // MARK: - Discovery IN (app-owned NWBrowser -> engine)
@@ -636,6 +657,25 @@ public actor AirPlayEngine {
     /// its own synchronized type.
     public nonisolated func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
         stateHub.makeStream()
+    }
+
+    // MARK: - Remote-control stream (speaker-input task)
+
+    /// An async stream of things the user did ON A SPEAKER — its transport keys
+    /// and its own volume — reported back over the AirPlay reverse event channel.
+    /// Each call returns an independent stream (same contract as
+    /// ``makeStateStream()``). No polling: each event is pushed the moment the
+    /// vendored event channel decodes it.
+    ///
+    /// `NativeBackend` subscribes once and turns each ``RemoteEvent`` into an app
+    /// action: a ``RemoteEvent/transport(_:)`` becomes a Mac media key, a
+    /// ``RemoteEvent/volume(_:level:)`` moves that speaker's slider.
+    ///
+    /// THREADING: unlike ``makeStateStream()`` (engine thread), the underlying C
+    /// hook fires on the vendored "airplay events" thread. The hub is
+    /// `AsyncStream`-backed and thread-safe, so a subscriber need not care.
+    public nonisolated func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
+        remoteHub.makeStream()
     }
 
     // MARK: - Session lifecycle
@@ -1266,6 +1306,7 @@ public actor AirPlayEngine {
         headlessFlag.store(true)
         completions.install() // wire the C completion hook (start() isn't called)
         stateHub.install()    // wire the C device-state hook (T-ENG-STATESTREAM-1)
+        remoteHub.install()   // wire the C remote-control hook (speaker-input task)
         // So the hot `write(pcm:pts:)` path's started-guard passes in headless
         // tests (T-ENG-CADENCE-1) without running the real engine thread/init.
         startedFlag.store(true)
@@ -1375,6 +1416,92 @@ final class StateStreamHub: @unchecked Sendable {
         let id = OutputID(rawValue: deviceId)
         lock.lock(); let targets = Array(continuations.values); lock.unlock()
         for c in targets { c.yield((id, mapped)) }
+    }
+}
+
+/// Fans the C remote-control hook (`airplayengine_remote_event_set`,
+/// shims/engine_bridge.c) out to any number of `AsyncStream<RemoteEvent>`
+/// subscribers — the receiver→sender counterpart of ``StateStreamHub`` (speaker-
+/// input task).
+///
+/// Same shape as ``StateStreamHub`` (one process-wide `shared` the
+/// `@convention(c)` hook targets; a lock-guarded subscriber table; `.unbounded`
+/// buffers because deliveries are advisory and a slow consumer must never wedge
+/// the producer). The ONE difference is the producer thread: this hook fires on
+/// the vendored "airplay events" thread, not the engine thread — which is fine,
+/// as every touch point here (`AsyncStream` yield/finish, the `NSLock`) is
+/// thread-safe. `install()`/`uninstall()` are still called on the engine thread,
+/// bracketing airplay_init/airplay_deinit so the C pointer is set before the
+/// events thread exists and cleared after it is joined (no set/read race).
+final class RemoteEventHub: @unchecked Sendable {
+
+    /// The single active hub the C hook reads. Set by `install()`.
+    static private(set) var shared: RemoteEventHub?
+
+    private var continuations: [UUID: AsyncStream<RemoteEvent>.Continuation] = [:]
+    private let lock = NSLock()
+
+    /// Install this hub as the process-wide target and wire the C hook. MUST run
+    /// before airplay_init spawns the events thread (see the type doc).
+    func install() {
+        RemoteEventHub.shared = self
+        airplayengine_remote_event_set({ deviceId, event, volume, _ in
+            RemoteEventHub.shared?.deliver(deviceId: deviceId, event: event, volume: volume)
+        }, nil)
+    }
+
+    /// Tear down the hook and finish every live stream (on stop). MUST run after
+    /// airplay_deinit joins the events thread.
+    func uninstall() {
+        airplayengine_remote_event_set(nil, nil)
+        lock.lock()
+        let live = continuations
+        continuations.removeAll()
+        lock.unlock()
+        for (_, c) in live { c.finish() }
+        if RemoteEventHub.shared === self { RemoteEventHub.shared = nil }
+    }
+
+    /// A fresh independent stream of ``RemoteEvent``s.
+    func makeStream() -> AsyncStream<RemoteEvent> {
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            let key = UUID()
+            lock.lock(); continuations[key] = continuation; lock.unlock()
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.continuations[key] = nil; self.lock.unlock()
+            }
+        }
+    }
+
+    /// Called by the C hook on the events thread for every decoded remote event.
+    /// Maps the C enum + payload to a ``RemoteEvent`` and yields to each live
+    /// subscriber. An `AIRPLAYENGINE_REMOTE_UNKNOWN` (or any unmapped value) is
+    /// dropped rather than surfaced.
+    private func deliver(deviceId: UInt64, event: airplayengine_remote_event, volume: Double) {
+        let mapped: RemoteEvent
+        if event == AIRPLAYENGINE_REMOTE_VOLUME {
+            mapped = .volume(OutputID(rawValue: deviceId), level: max(0.0, min(1.0, volume)))
+        } else if let command = TransportCommand(event) {
+            mapped = .transport(command)
+        } else {
+            return
+        }
+        lock.lock(); let targets = Array(continuations.values); lock.unlock()
+        for c in targets { c.yield(mapped) }
+    }
+}
+
+extension TransportCommand {
+    /// Map the vendored remote-event enum to a transport command, or nil for the
+    /// non-transport values (volume / unknown).
+    init?(_ c: airplayengine_remote_event) {
+        switch c {
+        case AIRPLAYENGINE_REMOTE_PLAYPAUSE: self = .playPause
+        case AIRPLAYENGINE_REMOTE_NEXT:      self = .next
+        case AIRPLAYENGINE_REMOTE_PREVIOUS:  self = .previous
+        default:                             return nil
+        }
     }
 }
 

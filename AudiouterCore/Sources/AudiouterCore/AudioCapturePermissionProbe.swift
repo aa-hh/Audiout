@@ -6,6 +6,7 @@ import Foundation
 import AudioToolbox
 import AVFoundation
 import CoreGraphics
+import Darwin   // dlopen/dlsym for the private TCC audio-capture status read
 #endif
 
 /// Constructs the production ``AudioCapturePermissionProbing`` for this OS.
@@ -149,13 +150,43 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// way to distinguish "granted" from "denied" for the explicit "Allow…"
     /// gesture; firing that tone on every reactivate — including a bare Cmd+Tab
     /// away and back while onboarding is still open — would be user-hostile.
-    /// `CGPreflightScreenCaptureAccess()` is the public, silent, non-prompting
-    /// status read for the exact TCC bucket the process-tap grant lives under —
-    /// "Screen & System Audio Recording" (see
-    /// `SystemSettingsPane.screenAndSystemAudioRecording`) — so it can stand in
-    /// for a real status API here even though process taps have none of their own.
+    /// The silent read queries the **System Audio Recording Only** bucket
+    /// (`kTCCServiceAudioCapture`) directly — NOT `CGPreflightScreenCaptureAccess()`,
+    /// which reports the wrong permission on macOS 14.4+ (see the detailed note on
+    /// `currentStatusSilently()` below).
     public func currentStatusSilently() -> PermissionStatus? {
-        CGPreflightScreenCaptureAccess() ? .granted : .denied
+        switch Self.systemAudioCaptureAuthorization() {
+        case .granted: return .granted
+        case .denied:  return .denied
+        case .undetermined, .none:
+            // Not yet decided, or the private symbol/service is unavailable
+            // (pre-14.4, where the tap grant still lived under Screen Recording).
+            return CGPreflightScreenCaptureAccess() ? .granted : .denied
+        }
+    }
+
+    /// tccd's authorization values for `TCCAccessPreflight` (private TCC API).
+    private enum TCCPreflightResult { case granted, denied, undetermined }
+
+    /// Live authorization for the "System Audio Recording Only" bucket
+    /// (`kTCCServiceAudioCapture`), read through the private `TCCAccessPreflight`
+    /// symbol. Returns `nil` when the TCC framework or symbol can't be resolved.
+    /// See `currentStatusSilently()` for why this private read is necessary.
+    private static func systemAudioCaptureAuthorization() -> TCCPreflightResult? {
+        typealias PreflightFn = @convention(c) (CFString, CFDictionary?) -> Int32
+        // dyld resolves this from the shared cache even though the file isn't on
+        // disk. Intentionally NOT dlclose'd: the framework stays resident (AppKit
+        // uses it too) and the handle lives for the process's lifetime.
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW),
+              let symbol = dlsym(handle, "TCCAccessPreflight") else {
+            return nil
+        }
+        let preflight = unsafeBitCast(symbol, to: PreflightFn.self)
+        switch preflight("kTCCServiceAudioCapture" as CFString, nil) {
+        case 0:  return .granted        // kTCCAccessPreflightGranted
+        case 1:  return .denied         // kTCCAccessPreflightDenied
+        default: return .undetermined   // kTCCAccessPreflightUnknown (2)
+        }
     }
 
     // MARK: pid → Core Audio process object (mirrors dev/audiocap CAHelpers)

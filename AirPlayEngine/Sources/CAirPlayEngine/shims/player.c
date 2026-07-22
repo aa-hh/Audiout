@@ -23,6 +23,7 @@
 #include "player.h"
 #include "outputs.h" /* outputs_device_add/get/remove/free + struct output_device */
 #include "logger.h"
+#include "engine_bridge.h" /* airplayengine_remote_fire — receiver->sender path */
 
 #include <stdlib.h>
 #include <string.h>
@@ -106,14 +107,25 @@ player_device_remove(void *device)
   return 0;
 }
 
+// The receiver->sender remote-control path (airplay_events.c handle_event) used
+// to dead-end here in no-ops. It now forwards to the app via the engine bridge:
+// the user pressed a transport key ON THE SPEAKER, which we turn into a Mac
+// media key upstream so the actual media app (Spotify/Music/…) responds.
+//
+// handle_event() collapses the device's play AND pause into player_playback_start
+// (player_get_status is always PLAY_STOPPED for an audio-only sender, so the
+// "if PLAYING -> pause else -> start" branch always starts), and macOS exposes a
+// single Play/Pause TOGGLE media key anyway — so start and pause both map to
+// AIRPLAYENGINE_REMOTE_PLAYPAUSE. device_id is 0 (transport is global: one Mac
+// media session) and volume is -1 (unused for transport).
 int
-player_playback_start(void) { return 0; }
+player_playback_start(void) { airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PLAYPAUSE, -1.0); return 0; }
 
 int
-player_playback_pause(void) { return 0; }
+player_playback_pause(void) { airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PLAYPAUSE, -1.0); return 0; }
 
 int
-player_playback_next(void) { return 0; }
+player_playback_next(void) { airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_NEXT, -1.0); return 0; }
 
 int
-player_playback_prev(void) { return 0; }
+player_playback_prev(void) { airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PREVIOUS, -1.0); return 0; }

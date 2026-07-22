@@ -183,6 +183,60 @@ raop_test_master_sessions_reset(void);
 void
 raop_test_write_one(uint32_t stream_id, struct media_quality *quality, const void *pcm, size_t bufsize, uint32_t samples, uint32_t pts_sec);
 
+/* ------------------ Receiver -> sender remote control --------------------
+ *
+ * The AirPlay reverse "event" channel (sender/airplay_events.c) is how a
+ * receiver tells US, the sender, that the user pressed a control ON THE SPEAKER
+ * itself: the transport keys (play/pause/next/previous) and, on receivers that
+ * report it, a change to the speaker's own volume. OwnTone drove these into its
+ * player; an audio-only sender has no player, so the vendored path used to
+ * dead-end in the no-op player_playback_* shims (shims/player.c) and volume was
+ * never parsed at all — pressing a button on the speaker did nothing here.
+ *
+ * This hook re-opens that path to the app. The events thread calls
+ * airplayengine_remote_fire(), which forwards to the installed Swift callback;
+ * the Swift RemoteEventHub turns each one into an app action (a Mac media key
+ * for transport, a slider move for volume). See the speaker-input task.
+ *
+ * THREADING (differs from the discovery/state hooks, which fire on the engine
+ * thread): this fires on the "airplay events" thread — airplay_events.c owns its
+ * own event_base. The Swift target is AsyncStream-backed and thread-safe. The
+ * setter is only safe to call on the engine thread BEFORE airplay_init spawns
+ * the events thread and to clear AFTER airplay_deinit joins it; AirPlayEngine
+ * .start()/.stop() bracket exactly there, so the pointer is never read and
+ * written concurrently. */
+enum airplayengine_remote_event
+{
+  AIRPLAYENGINE_REMOTE_UNKNOWN = 0,
+  AIRPLAYENGINE_REMOTE_PLAYPAUSE, /* transport: toggle play/pause */
+  AIRPLAYENGINE_REMOTE_NEXT,      /* transport: next track */
+  AIRPLAYENGINE_REMOTE_PREVIOUS,  /* transport: previous track */
+  AIRPLAYENGINE_REMOTE_VOLUME,    /* the speaker's own volume changed */
+};
+
+/* cb(device_id, event, volume, context):
+ *   device_id : the receiver that sent it (its output_device id). 0 if unknown.
+ *               Meaningful for VOLUME (route to that one speaker's slider);
+ *               transport is global (one Mac media session) so it is 0 there.
+ *   event     : one of enum airplayengine_remote_event.
+ *   volume    : 0.0..1.0 for AIRPLAYENGINE_REMOTE_VOLUME; -1.0 otherwise.
+ *   context   : the pointer passed to airplayengine_remote_event_set. */
+typedef void (*airplayengine_remote_event_cb)(uint64_t device_id,
+                                              enum airplayengine_remote_event event,
+                                              double volume,
+                                              void *context);
+
+/* Install/replace the remote-control callback (NULL clears it). See THREADING. */
+void
+airplayengine_remote_event_set(airplayengine_remote_event_cb cb, void *context);
+
+/* Fire the installed callback (no-op if none installed). Called by the vendored
+ * event path: shims/player.c (transport) and sender/airplay_events.c (volume). */
+void
+airplayengine_remote_fire(uint64_t device_id,
+                          enum airplayengine_remote_event event,
+                          double volume);
+
 #ifdef __cplusplus
 }
 #endif

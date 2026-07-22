@@ -52,6 +52,9 @@ func describe(_ event: BackendEvent) -> String? {
         // Only `NativeBackend` emits this (T4 relaunch fix); under `mock` it
         // never fires. Handled so the switch stays exhaustive.
         return "♪ app running  \(bundleID) isRunning:\(isRunning)"
+    case .remoteTransport(let command):
+        // Also native-only (a key pressed on the speaker itself); never under mock.
+        return "▶ remote key  \(command) (from a speaker)"
     }
 }
 

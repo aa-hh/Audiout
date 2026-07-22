@@ -128,6 +128,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   bare serial `swift test`). It parallelizes at the test-CLASS level: each
   suite runs in its own process, so tests must not race on cross-process shared
   state.
+- **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
+  Guard 4 runs the full `swift test --parallel` whenever a commit's staged
+  files touch AudiouterCore Swift sources/tests, and blocks the commit if it
+  fails. So a too-narrow filter in the loop can never ship a regression — it
+  only costs one extra fix cycle at commit. Everything that reaches `main` was
+  committed through this gate, so `main` stays green. Filtering in the loop is
+  a convention (this doc), not machine-enforced; `--no-verify` skips the gate
+  for a deliberate emergency.
 - **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
   each suite its own process, two suites that both write `UserDefaults.standard`
   or the same `FileManager.default.temporaryDirectory` path race and flake.

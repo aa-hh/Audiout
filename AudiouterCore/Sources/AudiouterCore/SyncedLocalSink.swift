@@ -28,22 +28,33 @@ enum SyncTiming {
 
     /// How long after a captured sample's `pts` the local speaker must emit it to
     /// land level with the AirPlay receivers:
-    /// `presentationDelay − localOutputLatency − safetyMargin`, clamped ≥ 0.
+    /// `presentationDelay − localOutputLatency − safetyMargin + userOffset`, clamped
+    /// ≥ 0.
     ///
     /// `presentationDelayMs` MUST come from the live engine value
     /// (``AirPlayEngine/AirPlayEngine/currentPresentationDelayMs()`` /
     /// ``EngineConfig/presentationDelayMs``) — never a hardcoded copy of the
     /// 250 ms `AIRPLAY_AUDIO_LATENCY_MS` constant (plan risk R4): a later
     /// buffer-size tune must move both the AirPlay schedule and this one together.
+    ///
+    /// `userOffsetMs` is the T-OFFSET-UI manual bias (Settings › Audio › Advanced,
+    /// ``AppSettings/syncOffsetMs``) — a static, user-set nudge added ON TOP of the
+    /// computed+corrected delay target (day-one escape hatch for devices that
+    /// misreport their own latency, plan risk R1). Signed: positive delays the
+    /// local speaker further, negative pulls it earlier. Applied INSIDE the same
+    /// zero-floor clamp as the computed terms, so a large negative offset can never
+    /// produce a negative delay — it only ever drives the total down to 0.
     static func totalDelayNanos(
         presentationDelayMs: Int,
         localOutputLatencySeconds: Double,
-        safetyMarginMs: Double
+        safetyMarginMs: Double,
+        userOffsetMs: Int = 0
     ) -> Int64 {
         let presentationNanos = Int64(presentationDelayMs) &* 1_000_000
         let latencyNanos = Int64((localOutputLatencySeconds * 1_000_000_000).rounded())
         let marginNanos = Int64((safetyMarginMs * 1_000_000).rounded())
-        return max(0, presentationNanos &- latencyNanos &- marginNanos)
+        let offsetNanos = Int64(userOffsetMs) &* 1_000_000
+        return max(0, presentationNanos &- latencyNanos &- marginNanos &+ offsetNanos)
     }
 
     static func targetReleaseMonotonicNanos(anchorPtsNanos: Int64, totalDelayNanos: Int64) -> Int64 {
@@ -136,6 +147,12 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-LATENCY). Sampled off the render path (same points as the delay). Optional
     /// so a measurement failure just yields a slightly longer delay, never a crash.
     private let localOutputLatency: @Sendable () -> LocalOutputLatencyMeasurement?
+    /// Reads the LIVE user sync-offset bias (T-OFFSET-UI, ms — signed,
+    /// ``AppSettings/syncOffsetMs``). Sampled at the same points as
+    /// `presentationDelayMs`/`localOutputLatency` (session anchor + lifecycle
+    /// rebuild), never on the render path, so a Settings change takes effect on the
+    /// next connect or rebuild rather than needing a render-thread-safe live poke.
+    private let userOffsetMs: @Sendable () -> Int
 
     private let engine = AVAudioEngine()
     private let sourceNode: AVAudioSourceNode
@@ -194,7 +211,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
         maxRenderFrames: Int = 8192,
         safetyMarginMs: Double = SyncedLocalSink.defaultSafetyMarginMs,
         presentationDelayMs: @escaping @Sendable () -> Int,
-        localOutputLatency: @escaping @Sendable () -> LocalOutputLatencyMeasurement? = { try? LocalOutputLatency.measure() }
+        localOutputLatency: @escaping @Sendable () -> LocalOutputLatencyMeasurement? = { try? LocalOutputLatency.measure() },
+        userOffsetMs: @escaping @Sendable () -> Int = { AppSettings().syncOffsetMs }
     ) {
         let channels = max(1, channelCount)
         self.renderSampleRate = renderSampleRate
@@ -203,6 +221,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
         self.maxRenderFrames = max(1, maxRenderFrames)
         self.presentationDelayMs = presentationDelayMs
         self.localOutputLatency = localOutputLatency
+        self.userOffsetMs = userOffsetMs
 
         // The ring is the delay line: during the ~presentationDelay pre-roll the
         // producer fills while the consumer drains nothing, so capacity must exceed
@@ -289,7 +308,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
         SyncTiming.totalDelayNanos(
             presentationDelayMs: presentationDelayMs(),
             localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
-            safetyMarginMs: safetyMarginMs)
+            safetyMarginMs: safetyMarginMs,
+            userOffsetMs: userOffsetMs())
     }
 
     /// Just the engine-level teardown half of `stop()` — no session-state reset.
@@ -464,7 +484,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 let delay = cachedTotalDelayNanos ?? SyncTiming.totalDelayNanos(
                     presentationDelayMs: presentationDelayMs(),
                     localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
-                    safetyMarginMs: safetyMarginMs)
+                    safetyMarginMs: safetyMarginMs,
+                    userOffsetMs: userOffsetMs())
                 cachedTotalDelayNanos = delay
                 anchored = true
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
@@ -722,7 +743,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
         maxRenderFrames: Int = 8192,
         safetyMarginMs: Double = SyncedLocalSink.defaultSafetyMarginMs,
         presentationDelayMs: @escaping @Sendable () -> Int,
-        localOutputLatency: @escaping @Sendable () -> LocalOutputLatencyMeasurement? = { nil }
+        localOutputLatency: @escaping @Sendable () -> LocalOutputLatencyMeasurement? = { nil },
+        userOffsetMs: @escaping @Sendable () -> Int = { AppSettings().syncOffsetMs }
     ) {}
     public var latestPhaseErrorNanos: Int64 { 0 }
     public func start() throws {}

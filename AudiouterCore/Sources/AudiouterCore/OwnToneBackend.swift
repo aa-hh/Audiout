@@ -898,11 +898,16 @@ public func makeBackend(
         // OWN live `startBufferMs` (T-ENGINE-DELAY / R4) so a later buffer-size
         // change moves local playback with it, rather than a stale copy of the
         // value at launch.
+        // userOffsetMs: T-OFFSET-UI's manual ms bias (Settings › Audio ›
+        // Advanced), read LIVE from `AppSettings` on every (re)anchor/rebuild —
+        // never a stale copy captured at launch — so a change takes effect on
+        // the next connect or lifecycle rebuild.
         nativeBackend.syncedLocalSinkFactory = {
             SyncedLocalSink(
                 renderSampleRate: 44_100,
                 channelCount: 2,
-                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs })
+                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs },
+                userOffsetMs: { AppSettings().syncOffsetMs })
         }
         return nativeBackend
     }

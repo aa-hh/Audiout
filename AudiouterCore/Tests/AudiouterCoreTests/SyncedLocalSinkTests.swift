@@ -25,6 +25,117 @@ final class SyncedLocalSinkTests: IsolatedTestCase {
         XCTAssertEqual(delay, 0)
     }
 
+    // MARK: T-OFFSET-UI — manual ms sync-offset bias
+
+    func test_totalDelayNanos_defaultsToNoUserOffset() {
+        // Omitting `userOffsetMs` must be identical to passing 0 — existing
+        // callers (T-SINK/T-LIFECYCLE) that predate T-OFFSET-UI stay unaffected.
+        let withDefault = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3)
+        let withExplicitZero = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: 0)
+        XCTAssertEqual(withDefault, withExplicitZero)
+        XCTAssertEqual(withDefault, 87_000_000)
+    }
+
+    func test_totalDelayNanos_positiveUserOffset_shiftsTargetLater() {
+        // 100 ms presentation − 10 ms latency − 3 ms safety = 87 ms base, +50 ms
+        // user bias → 137 ms. The offset is a straightforward additive shift.
+        let delay = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: 50)
+        XCTAssertEqual(delay, 137_000_000)
+    }
+
+    func test_totalDelayNanos_negativeUserOffset_shiftsTargetEarlier() {
+        // Same 87 ms base, −20 ms user bias → 67 ms.
+        let delay = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: -20)
+        XCTAssertEqual(delay, 67_000_000)
+    }
+
+    func test_totalDelayNanos_negativeUserOffset_stillClampsAtZero() {
+        // A negative offset large enough to push the total below zero must still
+        // floor at 0 — a delay can never be negative, whatever the user dials in.
+        let delay = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: -1_000)
+        XCTAssertEqual(delay, 0)
+    }
+
+    func test_totalDelayNanos_userOffsetShiftIsExactlyTheOffsetMagnitude() {
+        // The general contract the plan's Verify step calls for: changing the
+        // offset by N ms shifts the resulting delay by exactly N ms, regardless of
+        // the base terms — as long as the result doesn't hit the zero floor.
+        let base = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 300, localOutputLatencySeconds: 0.005, safetyMarginMs: 3)
+        for offsetMs in [-200, -1, 1, 42, 400] {
+            let shifted = SyncTiming.totalDelayNanos(
+                presentationDelayMs: 300, localOutputLatencySeconds: 0.005, safetyMarginMs: 3,
+                userOffsetMs: offsetMs)
+            XCTAssertEqual(shifted, base + Int64(offsetMs) * 1_000_000)
+        }
+    }
+
+    /// A trivial `@unchecked Sendable` mutable box — lets the test mutate the
+    /// user-offset value the sink's injected closure reads, across two calls,
+    /// without a captured `var` tripping Swift 6 strict-concurrency capture
+    /// checking on the `@Sendable () -> Int` closure parameter.
+    private final class MutableIntBox: @unchecked Sendable {
+        var value = 0
+    }
+
+    func test_syncedLocalSink_measuresDelayUsingLiveUserOffset() throws {
+        // End-to-end (still offline/no real device): the sink's own delay
+        // measurement — not just the free `SyncTiming` function — must fold in
+        // the injected `userOffsetMs` closure, and must re-read it live rather
+        // than caching the value from `init`.
+        let offset = MutableIntBox()
+        let latency = LocalOutputLatencyMeasurement(
+            safetyOffsetFrames: 0, deviceLatencyFrames: 0, streamLatencyFrames: 0,
+            bufferFrameSizeFrames: 0, nominalSampleRate: 48_000)
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1,
+            safetyMarginMs: 0,
+            presentationDelayMs: { 100 },
+            localOutputLatency: { latency },
+            userOffsetMs: { offset.value })
+
+        let delay = sink.lifecycleHooks.remeasureLatency()
+        XCTAssertEqual(delay, 100_000_000, "no offset yet: plain 100 ms presentation delay")
+
+        offset.value = 25
+        let shiftedDelay = sink.lifecycleHooks.remeasureLatency()
+        XCTAssertEqual(shiftedDelay, 125_000_000, "the live closure must be re-read, not cached")
+    }
+
+    /// A zero presentation delay (edge case: an engine buffer config that reports
+    /// no AirPlay-side latency at all) must never go negative — it clamps to 0, the
+    /// same floor as any other combination that would otherwise underflow.
+    func test_totalDelayNanos_zeroPresentationDelay_clampsAtZero() {
+        let delay = SyncTiming.totalDelayNanos(
+            presentationDelayMs: 0, localOutputLatencySeconds: 0.001, safetyMarginMs: 3)
+        XCTAssertEqual(delay, 0)
+    }
+
+    /// A negative presentation delay should never reach this function in practice
+    /// (the engine's ms value is always ≥ 0), but the clamp must hold defensively
+    /// anyway — a negative input must never produce a negative (or, worse, huge
+    /// unsigned-wraparound) delay.
+    func test_totalDelayNanos_negativePresentationDelay_clampsAtZero() {
+        let delay = SyncTiming.totalDelayNanos(
+            presentationDelayMs: -50, localOutputLatencySeconds: 0.010, safetyMarginMs: 3)
+        XCTAssertEqual(delay, 0)
+    }
+
+    /// A zero presentation delay with zero latency/margin is the exact `delta == 0`
+    /// boundary once fed through `plan(...)`: releases at frame 0 of the cycle that
+    /// starts exactly at the target, not "silent forever" or an off-by-one frame.
+    func test_plan_exactlyAtTarget_releasesAtFrameZero() {
+        let plan = SyncTiming.plan(
+            cycleStartMonotonicNanos: 5_000_000_000, frameCount: 512,
+            sampleRate: 48_000, targetReleaseMonotonicNanos: 5_000_000_000)
+        XCTAssertEqual(plan, SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true))
+    }
+
     func test_plan_silentBeforeTarget_thenReleasesAtFrameOffset() {
         let sampleRate = 48_000.0
         let target: Int64 = 1_000_000_000 + 87_000_000
@@ -215,6 +326,168 @@ final class SyncedLocalSinkTests: IsolatedTestCase {
         }
         XCTAssertFalse(produced, "the anchor must be gone after the live reset hook runs")
         XCTAssertTrue(out.allSatisfy { $0 == 0 })
+    }
+
+    // MARK: Ring overflow (sustained overrun)
+
+    /// A single enqueue far larger than the ring's capacity must be dropped
+    /// wholesale (the ring's producer never partially writes a chunk) rather than
+    /// crash or corrupt the buffer. Anchoring still happens (the anchor set is
+    /// independent of whether the ring write below it succeeds), so the sink is
+    /// silent — never garbage — once the target is reached.
+    func test_enqueue_singleChunkLargerThanRingCapacity_isSilentlyDroppedNotCrash() {
+        // maxBufferedSeconds tiny ⇒ a ring of only a few dozen samples' capacity.
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            presentationDelayMs: { 5 }, localOutputLatency: { nil })
+
+        // Far more frames than the ring could ever hold.
+        var huge = [Float](repeating: 0, count: 50_000)
+        for i in 0..<huge.count { huge[i] = Float(i + 1) }
+        huge.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                         pts: timespec(tv_sec: 10, tv_nsec: 0))
+        }
+
+        // Past the (tiny) target: the whole chunk was dropped, so this must drain
+        // as silence, never a crash and never stray/garbage samples.
+        var out = [Float](repeating: 1, count: 256)
+        let produced = out.withUnsafeMutableBufferPointer { ob in
+            sink.renderInterleaved(into: ob, frameCount: 256, cycleStartMonotonicNanos: 20_000_000_000)
+        }
+        XCTAssertFalse(produced, "an oversized chunk must be dropped, not partially admitted")
+        XCTAssertTrue(out.allSatisfy { $0 == 0 })
+    }
+
+    /// Sustained overrun: many small chunks enqueued back-to-back, far exceeding
+    /// what the small ring can hold, all BEFORE any draining happens (mirrors a
+    /// consumer stalled behind a burst of captured audio). The ring must never
+    /// corrupt already-accepted data by overwriting it out of order — whatever
+    /// prefix survives must drain out strictly in the original ascending order,
+    /// with no repeats and no reordering, even though later chunks were silently
+    /// dropped for lack of space.
+    func test_enqueue_sustainedOverflow_drainsAcceptedPrefixInOrderWithoutCorruption() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            presentationDelayMs: { 1 }, localOutputLatency: { nil })
+
+        let anchorSec = 100
+        // Flood far more chunks than the ring can ever hold — some prefix is
+        // accepted, the rest silently dropped (never partially written).
+        let chunkSize = 16
+        let chunkCount = 500
+        var nextValue: Float = 1
+        for c in 0..<chunkCount {
+            var chunk = [Float](repeating: 0, count: chunkSize)
+            for i in 0..<chunkSize { chunk[i] = nextValue; nextValue += 1 }
+            chunk.withUnsafeMutableBufferPointer { buf in
+                sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: chunkSize,
+                             pts: timespec(tv_sec: anchorSec, tv_nsec: 0))
+            }
+            _ = c
+        }
+
+        // Drain well past the tiny target delay; collect every non-zero sample.
+        var drained: [Float] = []
+        var out = [Float](repeating: .nan, count: 64)
+        for cycle in 0..<20 {
+            let cycleStart = Int64(anchorSec) * 1_000_000_000 + Int64(cycle) * 64 * 1_000_000_000 / 48_000
+            out.withUnsafeMutableBufferPointer { ob in
+                _ = sink.renderInterleaved(into: ob, frameCount: 64, cycleStartMonotonicNanos: cycleStart)
+            }
+            drained.append(contentsOf: out.filter { $0 != 0 })
+        }
+
+        XCTAssertFalse(drained.isEmpty, "some accepted prefix must have survived the overrun")
+        // Strictly ascending, no repeats, no reordering — proof the ring never
+        // silently overwrote already-accepted data with a later, dropped chunk.
+        for i in 1..<drained.count {
+            XCTAssertGreaterThan(drained[i], drained[i - 1],
+                                 "drained samples must stay in original ascending order at index \(i)")
+        }
+        // What did survive is a genuine PREFIX of the flood (starts at the very
+        // first enqueued value), not some arbitrary later slice.
+        XCTAssertEqual(drained.first, 1, "the surviving data must start at the first enqueued sample")
+        // And it is far short of everything enqueued — the overrun genuinely
+        // dropped data rather than the ring having (surprisingly) fit it all.
+        XCTAssertLessThan(drained.count, chunkSize * chunkCount,
+                          "the tiny ring must not have accepted the entire flood")
+    }
+
+    // MARK: Lifecycle reset mid-flight (sleep/wake while a correction is running)
+
+    /// A lifecycle rebuild (device change / sleep / wake) that fires WHILE the
+    /// T-CORRECTION phase-lock loop has already accumulated a non-trivial
+    /// correction (simulating: session has been running under clock skew, then the
+    /// Mac sleeps) must leave NO residual state behind — `latestPhaseErrorNanos`
+    /// resets to 0 and a fresh session starts exactly like a brand-new sink, never
+    /// fighting the old session's stale integrator/resampler phase (plan risk R3:
+    /// sleep/wake is a silent-failure mode, not a crash, so this must be checked
+    /// explicitly rather than trusted to "probably reset").
+    func test_liveLifecycleReset_midFlightCorrection_clearsResidualPhaseState() {
+        let sr = 48_000.0
+        let cc = 1
+        let N = 512
+        let nsPerFrame = 1_000_000_000.0 / sr
+
+        let latency = LocalOutputLatencyMeasurement(
+            safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+            bufferFrameSizeFrames: 0, nominalSampleRate: sr)
+        let sink = SyncedLocalSink(
+            renderSampleRate: sr, channelCount: cc, safetyMarginMs: 3,
+            presentationDelayMs: { 100 }, localOutputLatency: { latency })
+
+        let anchorSec = 2_000
+        let anchorNanos = Int64(anchorSec) * 1_000_000_000
+
+        var contentFrame = 0
+        func enqueueChunk(_ frames: Int) {
+            var buf = [Float](repeating: 0.1, count: frames * cc)
+            let ptsNanos = anchorNanos + Int64((Double(contentFrame) * nsPerFrame).rounded())
+            let sec = Int(ptsNanos / 1_000_000_000)
+            let nsec = Int(ptsNanos % 1_000_000_000)
+            buf.withUnsafeBufferPointer {
+                sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: frames,
+                             pts: timespec(tv_sec: sec, tv_nsec: nsec))
+            }
+            contentFrame += frames
+        }
+
+        // Pre-roll, then run many cycles under a sustained device-clock skew so the
+        // PI loop's integrator accumulates a real, non-zero correction — "mid-flight".
+        enqueueChunk(N * 40)
+        let skewPpm = 80.0
+        let deviceStep = Double(N) * nsPerFrame * (1.0 + skewPpm * 1e-6)
+        var cycleStart = Double(anchorNanos)
+        var out = [Float](repeating: 0, count: N * cc)
+        for cycle in 0..<400 {
+            if cycle < 200 { enqueueChunk(N) }
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(into: $0, frameCount: N, cycleStartMonotonicNanos: Int64(cycleStart.rounded()))
+            }
+            cycleStart += deviceStep
+        }
+        XCTAssertNotEqual(sink.latestPhaseErrorNanos, 0,
+                          "precondition: a real in-flight residual/correction must exist before the reset")
+
+        // Fire the SAME live (production-default) hooks a real sleep/wake would —
+        // remeasure then reset — exactly as ``handleSystemWillSleep()`` does, without
+        // touching the real AVAudioEngine (house rule: no real engine start in tests).
+        let delay = sink.lifecycleHooks.remeasureLatency()
+        sink.lifecycleHooks.resetSessionState(delay)
+
+        XCTAssertEqual(sink.latestPhaseErrorNanos, 0,
+                       "the reset must zero the phase-error readout — no stale mid-flight residual survives")
+
+        // And the sink behaves like a brand-new session: silent until a fresh
+        // anchor, first sample of the NEW content lands at the newly-computed
+        // target, unperturbed by the old session's skew/correction history.
+        var out2 = [Float](repeating: .nan, count: 128)
+        let producedBeforeReanchor = out2.withUnsafeMutableBufferPointer { ob in
+            sink.renderInterleaved(into: ob, frameCount: 128, cycleStartMonotonicNanos: Int64(cycleStart.rounded()))
+        }
+        XCTAssertFalse(producedBeforeReanchor, "silent until a fresh session is anchored")
+        XCTAssertTrue(out2.allSatisfy { $0 == 0 })
     }
     #endif
 }

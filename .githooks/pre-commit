@@ -23,15 +23,11 @@ hook_dir=$(dirname "$0")
 # So: don't work in the main checkout. Work in a worktree, where docs and code
 # have to travel together as one merge.
 #
-# Merges are deliberately exempt FROM THIS FILE, and this is verified
-# behaviour, not a guess:
+# Merges are deliberately exempt, and this is verified behaviour, not a guess:
 #   - a clean `git merge` never invokes pre-commit at all
 #   - a conflict-resolution merge commit DOES invoke it, but has MERGE_HEAD
-# So this guard only refuses a bare `git commit` while standing on main; a
-# merge lands untouched by IT. (The full-suite check below, Guard 4, DOES also
-# gate merges — via a separate hook, pre-merge-commit, which git invokes even
-# for a clean --no-ff merge. See that file for why the two gates need to be
-# separate hooks: pre-commit and pre-merge-commit fire at different moments.)
+# So merging a branch into main — the correct way to land anything — is
+# untouched. Only typing `git commit` while standing on main is refused.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 if [ "$branch" = "main" ] && [ ! -f "$git_dir/MERGE_HEAD" ]; then
     echo "" >&2
@@ -111,26 +107,41 @@ if [ -n "$iso_hits" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 4 (BLOCKING): the full test suite must pass before Swift code lands.
+# GUARD 4 (BLOCKING): the full test suite must pass before Swift code is
+# committed. THE coverage guarantee — nothing broken gets committed, and since
+# everything that reaches main was committed here first, main stays green.
 #
-# This is the coverage GUARANTEE that makes inner-loop filtering safe. Agents
-# are steered toward `swift test --filter <Suite>` while iterating (see
-# .claude/hooks/swift-test-nudge.sh) — fast, but a too-narrow filter can miss a
-# suite the change actually broke. That risk is absorbed HERE: no commit that
-# touches AudiouterCore Swift sources/tests lands until the WHOLE suite passes.
-# So filtering can only ever cost one extra fix cycle at commit time; it can
-# never ship a regression on THIS branch — Guard 5 (pre-merge-commit) is the
-# matching gate for the moment this branch actually lands on another one.
+# Agents may run `swift test --filter <Suite>` while iterating (fast); a
+# too-narrow filter can miss a suite the change broke, but that risk is absorbed
+# HERE — no commit touching AudiouterCore Swift sources/tests lands until the
+# WHOLE suite (parallelised) passes. So filtering can only ever cost one extra
+# fix cycle at commit time.
 #
 # Scope: only runs when staged files include AudiouterCore Swift source/test
 # files. Docs/config/other commits skip it (no code changed → nothing to gate).
 #
-# Escape hatch: `git commit --no-verify` for a deliberate emergency, same as the
-# other guards. Shared implementation with Guard 5: lib/run-full-suite-if-
-# swift-changed.sh — one script, so the two gates can't silently drift apart.
-lib="$hook_dir/lib/run-full-suite-if-swift-changed.sh"
-if [ -f "$lib" ]; then
-    sh "$lib" "Guard 4" --cached || exit 1
+# Pathspec note: a bare directory pathspec + `grep '\.swift$'` — NOT
+# `Sources/**/*.swift`, whose `**` must span ≥1 directory and so silently
+# misses a file sitting directly in Sources/ or Tests/ (verified empirically).
+#
+# Escape hatch: `git commit --no-verify` for a deliberate emergency, same as
+# the other guards. Missing `swift` toolchain => skip (don't wedge a machine
+# that can't build).
+staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
+    'AudiouterCore/Sources/' 'AudiouterCore/Tests/' 2>/dev/null | grep '\.swift$')
+if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    echo "" >&2
+    echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
+    echo "  (swift test --parallel) before commit. ~70s warm; --no-verify to skip." >&2
+    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel >&2 ); then
+        echo "" >&2
+        echo "  REFUSED: full test suite failed. Fix the failures" >&2
+        echo "  (or 'git commit --no-verify' for a real emergency)." >&2
+        echo "" >&2
+        exit 1
+    fi
+    echo "  Guard 4: full suite passed." >&2
 fi
 
 exit 0

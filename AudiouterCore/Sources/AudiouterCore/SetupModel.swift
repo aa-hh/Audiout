@@ -226,8 +226,13 @@ public final class SetupModel {
     /// Verifiable audio-capture status. Starts `.unknown`.
     public private(set) var audioStatus: PermissionStatus = .unknown
 
-    /// Local-network status. Starts `.unknown`, becomes `.requested` once the
-    /// prompt is triggered (never `.granted` on its own — see ``PermissionStatus``).
+    /// Local-network status. When the OS gates local network (`localNetworkGated`,
+    /// macOS 15+), starts `.unknown` and becomes `.requested` once the prompt is
+    /// triggered (never `.granted` on its own — see ``PermissionStatus``). On
+    /// macOS < 15 there is NO local-network privacy gate — that permission arrived
+    /// in Sequoia — so access is unconditionally allowed: it starts, and stays,
+    /// `.granted`, and the row never routes the user to a Settings pane that
+    /// doesn't exist there. See `localNetworkGated`.
     public private(set) var localNetworkStatus: PermissionStatus = .unknown
 
     /// Remote-control (Accessibility) status. Starts `.unknown`, becomes
@@ -254,16 +259,39 @@ public final class SetupModel {
     private let ptpHelper: PTPHelperManaging
     private let settings: AppSettings
 
+    /// Whether this OS gates local-network access behind a privacy permission.
+    /// True on macOS 15+ (Sequoia introduced Local Network privacy); false below,
+    /// where access is ungated and the onboarding row must NOT present a grant or
+    /// a Settings link that doesn't exist. Injected so tests stay OS-independent;
+    /// the app passes ``osGatesLocalNetwork``.
+    private let localNetworkGated: Bool
+
+    /// The real per-OS value for `localNetworkGated`: macOS 15+ gates local
+    /// network, earlier versions don't. The app injects this. The init default
+    /// stays `true` so existing tests keep their gated expectations regardless of
+    /// the test runner's OS version.
+    public static var osGatesLocalNetwork: Bool {
+        if #available(macOS 15, *) { return true } else { return false }
+    }
+
     public init(audioProbe: AudioCapturePermissionProbing,
                 localNetwork: LocalNetworkPriming,
                 remoteControl: RemoteControlPriming,
                 ptpHelper: PTPHelperManaging,
-                settings: AppSettings = AppSettings()) {
+                settings: AppSettings = AppSettings(),
+                localNetworkGated: Bool = true) {
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
         self.ptpHelper = ptpHelper
         self.settings = settings
+        self.localNetworkGated = localNetworkGated
+        // macOS < 15 has no local-network privacy gate → access is already
+        // allowed. Reflect that up front so the row shows satisfied, never nags,
+        // and never opens the Settings pane that doesn't exist on that OS.
+        if !localNetworkGated {
+            self.localNetworkStatus = .granted
+        }
     }
 
     /// Trigger + verify the audio-capture permission. On first run this surfaces
@@ -288,6 +316,14 @@ public final class SetupModel {
     /// it was already allowed and "Requested" was a lie); not reachable ⇒
     /// `.requested` (asked, but we can't prove it — no speakers, or denied).
     public func primeLocalNetwork() async {
+        // No gate on this OS (macOS < 15): access is already allowed, so there's
+        // nothing to prompt for and no Settings pane to open — report granted and
+        // skip the browse entirely.
+        guard localNetworkGated else {
+            localNetworkStatus = .granted
+            onChange?()
+            return
+        }
         let reachable = await localNetwork.probe()
         localNetworkStatus = reachable ? .granted : .requested
         onChange?()
@@ -345,8 +381,10 @@ public final class SetupModel {
             audioStatus = silentAudio
         }
 
-        // Local Network — re-probe only if already asked (else browsing prompts).
-        if localNetworkStatus != .unknown {
+        // Local Network — re-probe only if already asked (else browsing prompts),
+        // and only where the OS gates it. On macOS < 15 it's unconditionally
+        // granted, so there's nothing to re-read and no prompt to risk.
+        if localNetworkGated, localNetworkStatus != .unknown {
             localNetworkStatus = await localNetwork.probe() ? .granted : .requested
         }
 
@@ -510,7 +548,7 @@ public final class SetupModel {
             changed = true
         }
 
-        if localNetworkStatus != .unknown {
+        if localNetworkGated, localNetworkStatus != .unknown {
             let next: PermissionStatus = await localNetwork.probe() ? .granted : .requested
             if next != localNetworkStatus {
                 localNetworkStatus = next

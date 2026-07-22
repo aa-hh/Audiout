@@ -71,10 +71,10 @@ HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
-ICON_SOURCE="$SCRIPT_DIR/AudioOuter-MacOS-Default-1024x1024@1x.png"
+ICON_SOURCE="$SCRIPT_DIR/Audiouter-MacOS-Default-1024x1024@1x.png"
 # Flattened 1024 "Dark" render from Icon Composer, paired with ICON_SOURCE to
 # build a light/dark appearance-aware icon (see the app-icon step below).
-ICON_SOURCE_DARK="$SCRIPT_DIR/AudioOuter-MacOS-Dark-1024x1024@1x.png"
+ICON_SOURCE_DARK="$SCRIPT_DIR/Audiouter-MacOS-Dark-1024x1024@1x.png"
 
 # --- Build (release) ------------------------------------------------------
 echo "==> Building $EXECUTABLE (release)"
@@ -157,21 +157,28 @@ else
 fi
 
 # --- App icon --------------------------------------------------------------
-# The official icon is authored in Icon Composer (scripts/AudioOuter.icon) as a
-# Liquid Glass icon. Compiling that bundle standalone (outside an .xcodeproj)
-# requires Xcode 26's actool, and Liquid Glass only renders on macOS 26 anyway.
-# actool's CLI contract for a bare .icon bundle isn't Apple-documented yet (this
-# is a brand-new Xcode 26 feature), so we ATTEMPT it opportunistically and fall
-# back automatically to a classic .icns baked from Icon Composer's flattened
-# 1024 "Default" render — this keeps the script working unmodified on an
-# Xcode-15 machine (falls back every time) and an Xcode-26 machine (uses the
-# real Liquid Glass icon whenever the actool invocation below is accepted).
+# The official icon is authored in Icon Composer (scripts/Audiouter.icon) as a
+# Liquid Glass icon. Compiling that bundle into the real Liquid Glass asset
+# (Assets.car) requires Xcode 26's actool, and Liquid Glass only renders on
+# macOS 26 anyway. IMPORTANT: the .icon must be authored in an Icon Composer
+# whose format GENERATION matches the actool doing the compile — a mismatch
+# makes actool crash with an unhelpful "insert nil object" backtrace (it's
+# really "wrong format", surfaced as a crash rather than a clean error). This
+# bundle is authored in Icon Composer 1.4 (the generation that ships inside
+# Xcode 26.4.x), so Xcode 26.4.x's actool compiles it cleanly. (An earlier
+# revision authored in the newer standalone Icon Composer 2.0 crashed 26.4.x's
+# 1.4-generation actool for exactly this reason — see also the separate
+# post-26.4.1 actool regression FB20183399 / github.com/expo/expo/issues/46121.)
+# We ATTEMPT the compile opportunistically and fall back automatically to a
+# classic .icns baked from Icon Composer's flattened 1024 "Default" render,
+# which keeps the script working unmodified on an Xcode-15 machine (falls back
+# every time) while an Xcode-26 machine gets the real Liquid Glass icon.
 # NOTE: this is a menu-bar app (LSUIElement) so it has no Dock icon; this icon
 # is what Finder, Get Info, the About box, notifications, and any
 # Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
 ICON_MODE="icns"
-ICON_BUNDLE_SRC="$SCRIPT_DIR/AudioOuter.icon"
+ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiouter.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
 if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"

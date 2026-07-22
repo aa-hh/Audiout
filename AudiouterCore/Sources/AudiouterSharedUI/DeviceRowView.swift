@@ -844,10 +844,14 @@ public final class DeviceRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
-            // Connection halo ring: a box matching the icon box, centered on the
-            // icon, so its inscribed `haloRingDiameter` circle rings the glyph.
-            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
-            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            // Connection halo ring: a box GROWN past the icon box (Warm Signal
+            // v4.1 item 2 — `haloRingHostBoxDiameter`, not `iconWidth`) so its
+            // inscribed `haloRingDiameter` circle floats a breathing-room gap
+            // off the glyph rather than hugging it. Still centered on the
+            // icon — only the halo's own overlay box grows; the icon/name/
+            // fader column alignment is untouched.
+            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
+            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
             haloRingView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 

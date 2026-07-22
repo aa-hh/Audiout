@@ -88,6 +88,21 @@ public enum PopoverColumnGrid {
     /// Height of the under-name live-level meter bar (spec ~3 pt).
     public static let meterUnderNameHeight: CGFloat = 3
 
+    // MARK: Master strip — the Main Audio meter (Warm Signal v4.1 item 1)
+    //
+    // The Main Audio row's meter is the terminus the left rail plugs into: same
+    // LENGTH as the device meters (`meterUnderNameWidth`, unchanged) but a
+    // heavier THICKNESS — thickness alone signifies "master bus," so it still
+    // reads as a gauge-sibling of the device meters, not a different species.
+    // UNUSED until the master-strip task wires it.
+
+    /// Thickness of the Main Audio master meter bar (spec ~6 pt, vs the device
+    /// meters' `meterUnderNameHeight` 3 pt). Length stays `meterUnderNameWidth`.
+    public static let masterMeterThickness: CGFloat = 6
+    /// Diameter of the small filled dot marking where the left rail's spine
+    /// turns and plugs into the master meter's leading end (spec item 1).
+    public static let masterMeterJunctionDotDiameter: CGFloat = 5
+
     // MARK: Fixed column widths
 
     /// The device/Main-Out icon column. Bumped 22→26 (2026-07-17) when the
@@ -155,16 +170,32 @@ public enum PopoverColumnGrid {
     // (`Device.connectionState`), replacing the retired corner connection dot.
     // Geometry lives here (promoted per spec §3.2 "geometry off
     // PopoverColumnGrid") so a future density setting swaps ring + icon sizing
-    // in one place. The visible ring circle is `haloRingDiameter` (21 pt) inside
-    // the 26 pt `iconWidth` box — the size the ≥3:1 `ringConnected` contrast
-    // floor is tested at (spec §3.2). The breathing pulse REUSES the
-    // `statusDotBreath*` timing constants above (spec §6: "breathing pulse
-    // (`statusDotBreathDuration` timing)").
+    // in one place. The visible ring circle is `haloRingDiameter` (26 pt, Warm
+    // Signal v4.1 item 2), drawn centered in the grown `haloRingHostBoxDiameter`
+    // (34 pt) host box rather than the 26 pt `iconWidth` icon box — the host
+    // box only gives the ring (and its dashes/glow) drawing headroom past the
+    // icon's own frame, it does not itself create the gap (a `CGPath` circle's
+    // position/size comes from `haloRingDiameter` alone, independent of the
+    // view's own bounds). The gap a viewer sees is against the rendered SF
+    // Symbol glyph (which sits inset within the 26 pt icon box, not filling
+    // it), and was tuned by rendering + eyeballing per the spec's ~3–4 pt
+    // target, landing this constant at 26 pt (up from the original 21 pt,
+    // which hugged the glyph at ~1.5–2.5 pt). `haloRingDiameter` is also the
+    // size the ≥3:1 `ringConnected` contrast floor is tested at (spec §3.2).
+    // The breathing pulse REUSES the `statusDotBreath*` timing constants above
+    // (spec §6: "breathing pulse (`statusDotBreathDuration` timing)").
 
-    /// Diameter of the visible connection-ring circle (the stroke centerline),
-    /// inside the `iconWidth` (26 pt) icon box. The contrast floor is tested at
-    /// this size (spec §3.2).
-    public static let haloRingDiameter: CGFloat = 21
+    /// Diameter of the visible connection-ring circle (the stroke centerline).
+    /// Warm Signal v4.1 item 2 grew this from the original 21 pt (which hugged
+    /// the rendered icon glyph at ~1.5–2.5 pt) to 26 pt, tuned by rendering the
+    /// popover-snapshot connection-states fixture and measuring the gap: ~3–4 pt
+    /// top/bottom, a little more at the glyph's narrower left/right extent
+    /// (icon art varies by device kind, so the gap isn't perfectly uniform by
+    /// angle — the ring itself is a uniform circle centered on the icon).
+    /// Paired with `haloRingHostBoxDiameter` as the ring's own host box (see
+    /// below) so the enlarged ring isn't cramped against the row's other
+    /// controls. The contrast floor is tested at this size (spec §3.2).
+    public static let haloRingDiameter: CGFloat = 26
     /// Stroke width of the **connected** solid ring (spec §3.2 ≈1.6 pt).
     public static let haloRingConnectedStroke: CGFloat = 1.6
     /// Stroke width of the **connecting/reconnecting** dashed ring — same weight
@@ -178,6 +209,21 @@ public enum PopoverColumnGrid {
     public static let haloRingDashLength: CGFloat = 2.6
     /// Gap length between connecting-ring dashes.
     public static let haloRingDashGap: CGFloat = 2.6
+
+    /// Extra headroom (Warm Signal v4.1 item 2) added to the halo ring's own
+    /// host box past `iconWidth`, on each side, so the enlarged
+    /// `haloRingDiameter` (26 pt) ring has drawing room without being cramped
+    /// against the row's other controls. Wiring `haloRingHostBoxDiameter` as
+    /// the ring's own host box (in place of `iconWidth`) in `DeviceRowView`
+    /// and `MainOutRowView`, still centered on the icon, keeps the icon
+    /// glyph's own size/position untouched — the halo is purely an overlay,
+    /// so only its own box grows.
+    public static let haloBreathingRoomGap: CGFloat = 4
+    /// The ring's host square diameter once breathing room is applied —
+    /// `iconWidth` grown by `haloBreathingRoomGap` on each side. The ring
+    /// itself (`haloRingDiameter`) is sized/centered within this larger box
+    /// by the consuming task, not by widening `haloRingDiameter` itself.
+    public static var haloRingHostBoxDiameter: CGFloat { iconWidth + haloBreathingRoomGap * 2 }
 
     // MARK: Route-armed corner dot (Warm Signal v3 §3.3, S2)
     //
@@ -227,6 +273,16 @@ public enum PopoverColumnGrid {
     public static let railGutterCenterX: CGFloat = 20
     /// Diameter of a bus node (spec §4.1 "~13 pt, matching the `.switch` box").
     public static let busNodeDiameter: CGFloat = 13
+    /// Diameter of a SELECTED (filled member) bus node once size joins fill as
+    /// a selection signal (Warm Signal v4.1 item 4) — same value as
+    /// `busNodeDiameter` today; named separately so the unselected diameter
+    /// below can shrink independently. UNUSED until the larger-node task wires
+    /// selected vs. unselected sizing into `MembershipBusView`.
+    public static let busNodeDiameterSelected: CGFloat = 13
+    /// Diameter of an UNSELECTED (hollow non-member) bus node — visibly
+    /// smaller than `busNodeDiameterSelected` (spec item 4 "~9–10 pt") so
+    /// selection reads via size AND fill, not fill alone.
+    public static let busNodeDiameterUnselected: CGFloat = 9.5
     /// Stroke width of the bus line (spec §4.1 "~2 pt").
     public static let busLineWidth: CGFloat = 2
     /// Stroke width of the rim ringing a filled node / edging a hollow one.

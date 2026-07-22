@@ -20,7 +20,8 @@ import AudiouterCore
 ///   animation) — "incomplete", legible frozen. Same `ringConnected` hue as
 ///   connected: form, not color, carries pending (spec §3.2 "zero new colors").
 /// - `.connected` → **solid quiet ring**, `ringConnected` token (hue-neutral
-///   warm-grey), stroke ~1.6 pt. Tested ≥3:1 vs the panel at 21 px, both themes.
+///   warm-grey), stroke ~1.6 pt. Tested ≥3:1 vs the panel at `haloRingDiameter`
+///   (26 px, Warm Signal v4.1 item 2), both themes.
 /// - `.failed` → **red solid ring**, `failure` token, stroke ~1.8 pt (heavier so
 ///   the failed row wins the scan beside flickering meters).
 ///

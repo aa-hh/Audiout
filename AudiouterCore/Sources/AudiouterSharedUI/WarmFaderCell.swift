@@ -141,6 +141,19 @@ public final class WarmFaderCell: NSSliderCell {
         rimPath.stroke()
     }
 
+    /// Stock `NSSliderCell` computes the knob's vertical position from its own
+    /// (much taller) default knob geometry, which sits it visibly LOW against
+    /// our thin (`faderTrackHeight` ≈ 5 pt) recessed trough — a real drawing
+    /// bug (v4.1 polish item 5). Re-centering only the Y here, on the same
+    /// `trackRect` midline `drawBar` fills against, keeps X (the value
+    /// position along the track) and width entirely stock.
+    public override func knobRect(flipped: Bool) -> NSRect {
+        var rect = super.knobRect(flipped: flipped)
+        let track = trackRect(inside: barRect(flipped: flipped))
+        rect.origin.y = (track.midY - rect.height / 2).rounded()
+        return rect
+    }
+
     public override func drawKnob(_ knobRect: NSRect) {
         let size = NSSize(width: PopoverColumnGrid.faderThumbWidth,
                           height: PopoverColumnGrid.faderThumbHeight)

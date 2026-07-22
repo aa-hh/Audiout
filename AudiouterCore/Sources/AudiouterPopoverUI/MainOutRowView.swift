@@ -411,9 +411,12 @@ public final class MainOutRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
-            // Connection halo ring: a box matching the icon box, centered on it.
-            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
-            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            // Connection halo ring: a box GROWN past the icon box (Warm Signal
+            // v4.1 item 2 — `haloRingHostBoxDiameter`, not `iconWidth`), still
+            // centered on it, so the ring floats a breathing-room gap off the
+            // glyph without shifting the icon/name/fader column alignment.
+            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
+            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
             haloRingView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 

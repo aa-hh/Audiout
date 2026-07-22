@@ -397,6 +397,13 @@ public enum PopoverColumnGrid {
     /// without clipping. Spans the full row height so stacked rows' rail segments
     /// read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
+    /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
+    /// collapsed (or mid-collapse clipping) section — the terminus marker that
+    /// says "the rail stops HERE, at this section's header, nothing below it is
+    /// currently visible" (collapse-reactive rail, 2026-07-22). Matches the old
+    /// `busOriginDotDiameter` weight so the collapsed terminus reads as the same
+    /// family of gutter dot the rail used before the ring-hook terminus landed.
+    public static let railCollapsedTerminusDotDiameter: CGFloat = 5
 
     // MARK: Unified row styling — body rows, hover, selection (2026-07-18)
     //

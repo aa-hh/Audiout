@@ -204,11 +204,19 @@ final class PopoverPanelViewController: NSViewController {
     }
 
     /// Point the continuous rail overlay at the current Main Audio row + device
-    /// rows (top-to-bottom display order), then repaint it. The controller calls
-    /// this at the end of every rebuild / in-place device repaint.
-    func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding]) {
+    /// rows (top-to-bottom display order) AND the two collapsible cards the rail
+    /// spans (the origin card holding Main Audio, the device card holding the
+    /// rows), then repaint it. The controller calls this at the end of every
+    /// rebuild / in-place device repaint. Passing the cards by title lets the
+    /// overlay react to a collapse: terminate the rail at the collapsed section's
+    /// header, move the origin up when the origin card collapses, and squeeze in
+    /// sync with the clip animation (collapse-reactive rail, 2026-07-22).
+    func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
+                     originCardTitle: String, deviceCardTitle: String) {
         railOverlay.mainOutRow = mainOut
         railOverlay.deviceRows = deviceRows
+        railOverlay.originSection = cardsByHeader[originCardTitle]
+        railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
         railOverlay.needsDisplay = true
     }
 
@@ -757,6 +765,14 @@ final class PopoverPanelViewController: NSViewController {
     /// Number of section cards currently mounted (footer card removed).
     var test_cardCount: Int {
         stackView.arrangedSubviews.compactMap { $0 as? CardView }.count
+    }
+
+    /// The collapse-reactive rail geometry the overlay would draw from the CURRENT
+    /// (settled) layout — settles layout first so the plan reflects final frames.
+    /// `nil` if the origin anchor can't resolve. Used by the rail collapse tests.
+    func test_railPlan() -> RailPlan? {
+        view.layoutSubtreeIfNeeded()
+        return railOverlay.test_resolvePlan()
     }
 
     // MARK: Collapsible-card test hooks (T-4)

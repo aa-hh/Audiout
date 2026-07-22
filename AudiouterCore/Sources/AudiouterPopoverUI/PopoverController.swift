@@ -1193,7 +1193,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
         // Feed the continuous rail overlay the Main Audio row + device rows in
         // display order so it can draw the spine as one line through the gutter.
-        panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows)
+        panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows,
+                          originCardTitle: Self.mainAudioCardTitle,
+                          deviceCardTitle: Self.outputDevicesCardTitle)
     }
 
     /// Sync the Devices card's "Save Selected Devices as group" accessory enabled
@@ -1939,6 +1941,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Drive the resize primitive directly (offscreen; no live popover) so tests can
     /// assert the published size equals the content's fitting height.
     public func test_applyExactFitSize() { panel.panelContentDidChangeHeight(animated: false) }
+
+    /// The collapse-reactive rail geometry the overlay resolves from the current
+    /// laid-out frames (origin at ring vs collapsed header, the terminus dot, the
+    /// visible device stops). Lets the rail-collapse tests assert the drawn shape.
+    public func test_railPlan() -> RailPlan? { panel.test_railPlan() }
 
     /// Select the Main Out destination directly (drives the routing).
     public func test_selectMainOut(_ target: MainOutTarget) {

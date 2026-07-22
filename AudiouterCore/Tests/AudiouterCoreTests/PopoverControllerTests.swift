@@ -4,6 +4,7 @@ import XCTest
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
+@testable import AudiouterSharedUI
 
 /// Structural + integration coverage for the popover (SPEC §9 2026-07-14b —
 /// SoundSource-inspired Main Out model). The popover isn't visible to CI, so
@@ -924,6 +925,93 @@ final class PopoverControllerTests: XCTestCase {
         popover.test_toggleCard(title: title, animated: true)
         XCTAssertEqual(popover.test_isCardCollapsed(title: title), false,
                        "the extra toggle ends expanded")
+    }
+
+    // MARK: Collapse-reactive rail (2026-07-22)
+
+    /// Behavior 1 + 2 (far end): collapsing the DEVICE card ("Output Devices")
+    /// cuts the rail with a terminus dot and stops drawing its now-hidden device
+    /// nodes, while the origin stays on the Main Audio ring (only the far end
+    /// resolved to the collapsed header).
+    func testCollapsingDeviceCardCutsRailAtHeaderDot() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_applyExactFitSize()
+
+        let expanded = try XCTUnwrap(popover.test_railPlan())
+        XCTAssertFalse(expanded.stops.isEmpty, "expanded: the rail draws its device nodes")
+        XCTAssertNil(expanded.terminusDotY, "expanded: no collapsed-terminus dot")
+        guard case .ring = expanded.origin else {
+            return XCTFail("expanded origin should curve into the Main Audio ring")
+        }
+
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_applyExactFitSize()
+
+        let collapsed = try XCTUnwrap(popover.test_railPlan())
+        XCTAssertTrue(collapsed.stops.isEmpty,
+                      "collapsed device card: none of its hidden nodes are drawn")
+        XCTAssertNotNil(collapsed.terminusDotY,
+                        "collapsed device card: the rail terminates with a dot at its header")
+        guard case .ring = collapsed.origin else {
+            return XCTFail("collapsing the DEVICE card must not move the origin off the ring")
+        }
+    }
+
+    /// Behavior 2 (origin end): collapsing the ORIGIN card ("System Audio") hides
+    /// the Main Audio ring, so the rail's origin moves UP to that card's header
+    /// dot — a different resolution than collapsing the device card.
+    func testCollapsingOriginCardMovesOriginToHeaderDot() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_applyExactFitSize()
+
+        guard case .ring = try XCTUnwrap(popover.test_railPlan()).origin else {
+            return XCTFail("expanded origin should be the ring")
+        }
+
+        popover.test_toggleCard(title: "System Audio", animated: false)
+        popover.test_applyExactFitSize()
+
+        let collapsed = try XCTUnwrap(popover.test_railPlan())
+        guard case .headerDot = collapsed.origin else {
+            return XCTFail("collapsing the origin card moves the origin to its header dot")
+        }
+    }
+
+    /// Behavior 4: re-expanding a collapsed section restores the EXACT rail
+    /// geometry it had before — the overlay carries no transient state across a
+    /// collapse→expand cycle. Uses a specific device selection so the restored
+    /// plan is a non-trivial shape (real member nodes), not an empty default.
+    func testReExpandRestoresExactRailGeometry() async throws {
+        let (popover, _, _) = try await makePopover()
+        // A specific selection so the rail has real member nodes to restore.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_applyExactFitSize()
+
+        let before = try XCTUnwrap(popover.test_railPlan())
+        XCTAssertFalse(before.stops.isEmpty, "the pre-collapse rail has device nodes")
+
+        // Collapse then expand the device card (non-animated == the settled path).
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_applyExactFitSize()
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_applyExactFitSize()
+
+        let after = try XCTUnwrap(popover.test_railPlan())
+        XCTAssertEqual(after, before,
+                       "re-expanding restores the identical rail (same origin, stops, terminus)")
+    }
+
+    /// Behavior 3 + Reduce Motion: the non-animated (Reduce Motion) collapse path
+    /// resolves the collapsed rail SYNCHRONOUSLY — after `animated: false`, the
+    /// plan is already the fully-collapsed shape, no pending animation to settle.
+    func testReduceMotionCollapseResolvesRailInstantly() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_applyExactFitSize()
+
+        let plan = try XCTUnwrap(popover.test_railPlan())
+        XCTAssertTrue(plan.stops.isEmpty, "Reduce Motion path lands the collapsed rail at once")
+        XCTAssertNotNil(plan.terminusDotY, "…terminus dot already resolved, no animation tail")
     }
 
     func testMuteDrivesVolumeToZeroAndRestores() async throws {

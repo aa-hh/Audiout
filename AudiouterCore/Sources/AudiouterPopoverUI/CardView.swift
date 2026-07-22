@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// A popover **section container** — header row + collapsible body rows.
 ///
@@ -171,6 +172,16 @@ final class CardView: NSView {
         bodyClip.superview != nil ? bodyClip.frame.height : 0
     }
 
+    // MARK: Rail terminus geometry (collapse-reactive rail, 2026-07-22)
+
+    /// The always-visible header row (the first content row `beginCard` adds) —
+    /// the rail's origin/terminus anchor when this card's body collapses. `nil`
+    /// before any row is added.
+    var railHeaderRow: NSView? { contentStack.arrangedSubviews.first }
+    /// The body clip once its first body row has mounted it (`nil` for a
+    /// header-only card) — its LIVE frame drives the rail's in-sync squeeze.
+    var mountedBodyClip: NSView? { bodyClip.superview != nil ? bodyClip : nil }
+
     /// Set the collapsed state.
     ///
     /// Choreography (PLAN §E risk 1):
@@ -264,4 +275,18 @@ final class CardView: NSView {
             onComplete?()
         })
     }
+}
+
+/// A card is a rail SECTION (collapse-reactive rail, 2026-07-22): the overlay
+/// reads its collapse state, its always-visible header row (the collapsed
+/// origin/terminus anchor), and its body clip's LIVE frame (the in-sync squeeze
+/// source). `railSectionCollapsed` reports the TARGET state (set at the start of
+/// an animated toggle) — but the overlay leans on the live clip frame, not this
+/// flag, to place the rail mid-animation, so the flag flipping early is harmless.
+extension CardView: RailSectionProviding {
+    var railSectionCollapsed: Bool { isBodyCollapsed }
+    var railSectionHeaderView: NSView? { railHeaderRow }
+    var railSectionHeaderBounds: NSRect { railHeaderRow?.bounds ?? .zero }
+    var railSectionClipView: NSView? { mountedBodyClip }
+    var railSectionClipBounds: NSRect { mountedBodyClip?.bounds ?? .zero }
 }

@@ -352,10 +352,48 @@ func run() -> Int32 {
     checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
                        "the card collapses again once no app is redirected")
 
-    // --- 21. Connection-status flow (brief §7.3), on a scripted MockBackend:
+    // --- 21. Membership bus (Warm Signal v3 §4, S-BUS): the origin stub on the
+    // Audio Out row, node fill ↦ membership, the distinct blocked node, one
+    // fixed node column with zero layout shift across toggles (R7), the single
+    // terminating node, and the dormant de-emphasis under a group target.
+    print("\n[21] Membership bus — origin + nodes + fixed column + terminator")
+    // Section 13 left Main Out on the saved group while section 6 had toggled
+    // sonos-move-2 into the checked set — checked ≠ group members, so the card
+    // is GENUINELY DIVERGED (spec §4.7 FINAL, S5) and the bus renders dormant.
+    checks.expect(popover.test_mainOutRow.test_busOriginDimmed,
+                  "the bus origin stub dims while the checked set diverges from the group target")
+    popover.test_selectMainOut(.selectedDevices); drain()
+    checks.expectEqual(popover.test_mainOutRow.test_busOriginNode, .origin,
+                       "the Audio Out row launches the bus out of its dropdown column")
+    checks.expect(!popover.test_mainOutRow.test_busOriginDimmed,
+                  "the origin recovers full ink under Selected Devices")
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_busNode, .member,
+                       "a tapped-in device's node is FILLED on the line")
+    checks.expectEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNode, .nonMember,
+                       "an untapped device's node is HOLLOW — the line detours it")
+    checks.expectEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .blocked,
+                       "the local-mix-blocked Mac renders the distinct greyed node")
+    let officeX = popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -1
+    let mixerX = popover.test_deviceRow(for: "airport-mixer")?.test_busNodeCenterX() ?? -2
+    checks.expect(abs(officeX - mixerX) < 0.5, "every node sits at one fixed column x")
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false); drain()
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_busNode, .nonMember,
+                       "toggling out hollows the node")
+    let officeXAfter = popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -3
+    checks.expect(abs(officeXAfter - officeX) < 0.001,
+                  "…with zero layout shift — only fill and line path changed (R7)")
+    let railBelows = backend.devices.compactMap {
+        popover.test_deviceRow(for: $0.id)?.test_busRailBelow
+    }
+    checks.expectEqual(railBelows.count, backend.devices.count,
+                       "every device row carries a bus segment")
+    checks.expectEqual(railBelows.filter { $0 == false }.count, 1,
+                       "exactly one terminating node ends the line (spec §4.1)")
+
+    // --- 22. Connection-status flow (brief §7.3), on a scripted MockBackend:
     // fail → toggle bounced + warning + auto-expanded panel; sticky warning
     // survives the cleanup setOutputSet; "Try again" → connected + panel gone.
-    print("\n[21] Connection-status flow (scripted MockBackend)")
+    print("\n[22] Connection-status flow (scripted MockBackend)")
     runConnectionStatusChecks(checks)
 
     print("\n----------------------------------------")
@@ -429,7 +467,7 @@ func runConnectionStatusChecks(_ checks: Checks) {
     checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == false,
                   "row switch rests OFF after the bounce")
     checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .failed,
-                  "on-icon status dot shows the failed (amber) state")
+                  "the failed halo ring is shown")
     let panel = popover.test_diagnosisPanel(for: "office")
     checks.expect(panel != nil, "diagnosis panel auto-expanded on failure")
     checks.expectEqual(panel?.test_headlineText ?? "", "Didn't respond",
@@ -444,7 +482,7 @@ func runConnectionStatusChecks(_ checks: Checks) {
     checks.expect(officeIsFailed(backend.devices.first { $0.id == "office" }?.connectionState ?? .off),
                   "backend kept .failed sticky through the cleanup setOutputSet")
     checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .failed,
-                  "failed dot survived the cleanup setOutputSet")
+                  "the failed ring survived the cleanup setOutputSet")
     checks.expect(popover.test_diagnosisPanel(for: "office") != nil,
                   "panel survived the cleanup setOutputSet")
 
@@ -455,7 +493,7 @@ func runConnectionStatusChecks(_ checks: Checks) {
     popover.update(devices: backend.devices)
 
     checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connected,
-                  "retry succeeded: green connected dot")
+                  "retry succeeded: the connected ring is shown")
     checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == true,
                   "the honest toggle now rests ON")
     checks.expect(popover.test_diagnosisPanel(for: "office") == nil,

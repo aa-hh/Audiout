@@ -26,8 +26,9 @@ public enum OnboardingReason: Equatable, Sendable {
 /// just binds the model's status to the rows and forwards button taps back to it.
 ///
 /// Sibling in spirit to `SettingsRootViewController`: fixed content width, an
-/// opaque appearance-adaptive `NSVisualEffectView` background, and `test_` hooks
-/// so a headless harness/test can assert structure without a visible window.
+/// opaque appearance-adaptive background (the Warm Signal canvas —
+/// `WarmCanvasView`, spec §5.8), and `test_` hooks so a headless harness/test
+/// can assert structure without a visible window.
 @MainActor
 public final class OnboardingViewController: NSViewController {
 
@@ -96,10 +97,15 @@ public final class OnboardingViewController: NSViewController {
         audioRow = PermissionRowView(
             content: PermissionRowContent(
                 symbolName: "waveform",
-                tileColor: .systemBlue,
                 title: "System Audio",
-                detail: "Send your Mac's sound to your speakers. Allowing plays "
-                    + "a brief tone to confirm it's working.",
+                // Outcome-framed reassurance FIRST (spec §5.8 house voice: the
+                // OS prompt will say "screen recording", so defuse it here),
+                // then the honest heads-up about the confirmation tone the
+                // probe really does play (AudioCapturePermissionProbe —
+                // "the UI warns first" is part of that contract).
+                detail: "macOS calls this screen recording. Your audio flows "
+                    + "straight to your speakers — nothing is stored or sent. "
+                    + "Allowing plays a brief tone to confirm it's working.",
                 allowButtonTitle: "Allow…"),
             onAllow: { [weak self] in self?.allowAudio() },
             onOpenSettings: { [weak self] in self?.onOpenSettings(.screenAndSystemAudioRecording) })
@@ -107,10 +113,12 @@ public final class OnboardingViewController: NSViewController {
         networkRow = PermissionRowView(
             content: PermissionRowContent(
                 symbolName: "wifi",
-                tileColor: .systemIndigo,
                 title: "Local Network",
-                // U+2011 non-breaking hyphen keeps "Wi‑Fi" from wrapping to an orphan "Fi."
-                detail: "Find AirPlay speakers on your Wi\u{2011}Fi.",
+                // Plain "speakers", never "AirPlay", in onboarding copy (spec
+                // §5.8, decision m). U+2011 non-breaking hyphen keeps "Wi‑Fi"
+                // from wrapping to an orphan "Fi."
+                detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
+                    + "in your list.",
                 allowButtonTitle: "Allow…"),
             onAllow: { [weak self] in
                 Task { @MainActor in
@@ -130,9 +138,11 @@ public final class OnboardingViewController: NSViewController {
         remoteControlRow = PermissionRowView(
             content: PermissionRowContent(
                 symbolName: "accessibility",
-                tileColor: .systemPurple,
                 title: "Remote Control",
-                detail: "Let the speaker's buttons control playback.",
+                // Outcome first, then name the OS's own label for the
+                // permission so the System Settings pane is recognisable.
+                detail: "Press play or pause on a speaker and your Mac follows. "
+                    + "macOS calls this Accessibility.",
                 allowButtonTitle: "Allow…"),
             onAllow: { [weak self] in self?.model.primeRemoteControl() },
             // Re-fire the macOS Accessibility PROMPT rather than deep-linking to the
@@ -164,10 +174,12 @@ public final class OnboardingViewController: NSViewController {
         // A touch more air below the hero than the uniform rhythm.
         content.setCustomSpacing(22, after: header)
 
-        let background = NSVisualEffectView()
-        background.material = Tokens.Material.windowBackground
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
+        // The Warm Signal canvas (spec §5.8: "warm canvas + permission
+        // tiles"), replacing the old opaque `NSVisualEffectView`
+        // window-background material. `WarmCanvasView` is always fully
+        // opaque and self-handles Reduce Transparency / Increase Contrast
+        // (flat `canvas` fill, no gradient/grain) — see its doc comment.
+        let background = WarmCanvasView()
         background.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(content)
         NSLayoutConstraint.activate([
@@ -326,7 +338,8 @@ public final class OnboardingViewController: NSViewController {
         title.font = .systemFont(ofSize: 22, weight: .bold)
         title.alignment = .center
 
-        let subtitle = NSTextField(labelWithString: "Play your Mac's sound on any AirPlay speaker.")
+        // Plain "speakers", never "AirPlay" (spec §5.8, decision m).
+        let subtitle = NSTextField(labelWithString: "Play your Mac's sound on the speakers around your home.")
         subtitle.font = Tokens.Font.body
         subtitle.textColor = Tokens.Color.secondaryLabel
         subtitle.alignment = .center
@@ -369,8 +382,8 @@ public final class OnboardingViewController: NSViewController {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let card = RoundedContainerView(fill: NSColor.systemOrange.withAlphaComponent(0.14),
-                                        border: NSColor.systemOrange.withAlphaComponent(0.4))
+        let card = RoundedContainerView(fill: Tokens.Color.warning.withAlphaComponent(0.14),
+                                        border: Tokens.Color.warning.withAlphaComponent(0.4))
         card.addSubview(row)
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
@@ -402,16 +415,19 @@ public final class OnboardingViewController: NSViewController {
         switch permission {
         case .audioCapture: return "System Audio"
         case .localNetwork: return "Local Network"
-        case .ptpHelper:    return "PTP helper"
+        // Matches the row's on-screen title (was "PTP helper" — jargon the
+        // user never sees anywhere else; spec §5.8's plain-speakers voice).
+        case .ptpHelper:    return "Speaker Sync"
         }
     }
 
     private func makeReassurance() -> NSView {
-        // The one message this screen exists to land: reframe the OS's "recording"
-        // label before the prompt does. Kept to two calm sentences.
+        // Outcome-framed and calm (spec §5.8 house voice): what saying yes
+        // gets you, and how little it asks. The "recording" reframe now lives
+        // on the System Audio row itself, right where that prompt fires.
         let text = NSTextField(wrappingLabelWithString:
-            "Routing audio requires permission to access your Mac's audio stream. "
-            + "Nothing is ever saved or recorded; it all streams right through.")
+            "A few one-time permissions let your sound reach every speaker "
+            + "in the house. Each one below is a single click.")
         text.font = Tokens.Font.body
         text.textColor = Tokens.Color.label
         text.alignment = .center

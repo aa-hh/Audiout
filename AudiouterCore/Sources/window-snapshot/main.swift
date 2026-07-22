@@ -486,6 +486,40 @@ func run() -> Int32 {
             drain()
             snapshotWindow(window, label: "4-device-detail", appearanceName: appearanceName, outDir: outDir)
 
+            // 6. Icon picker (Warm Signal W3): the anchored popover content,
+            // rendered standalone like the create sheet (`presentIconPicker`
+            // never actually draws headless). Built off the detail pane's
+            // real click path so it carries the shown device's CURRENT
+            // override — the curated cell with the gold "current icon"
+            // selection ring — and a valid exact-name search so the preview
+            // glyph renders on its mini warm-canvas tile.
+            let picker = windowController.test_detail.test_clickEditIcon()
+            // "homepod" is BOTH a valid exact symbol (preview tile renders)
+            // and a substring that keeps the ringed current cell
+            // ("homepod.2.fill") in the narrowed grid.
+            picker.test_setSearchText("homepod")
+            drain()
+            snapshotStandaloneView(picker.view, label: "6-icon-picker",
+                                   appearanceName: appearanceName, outDir: outDir)
+
+            // 7. Edit pane for the ACTIVE group (Warm Signal W3, spec §5.3):
+            // the icon well carries the thin gold ring while the shown group
+            // is the Main Out target. Activation happens through the MODEL
+            // (`GroupController.activateGroup`), exactly as the popover would
+            // — the window itself stays config-only; this render just shows
+            // how the editor looks while its group is playing.
+            controller.activateGroup(id: saved.id)
+            windowController.update(devices: backend.devices)
+            windowController.test_select(.group(id: saved.id))
+            drain()
+            snapshotWindow(window, label: "7-edit-active-group",
+                           appearanceName: appearanceName, outDir: outDir)
+            // Back to the detail selection so the panel-chrome state below
+            // renders the same content it always did.
+            windowController.test_select(.device(id: "sonos-move"))
+            windowController.test_detail.test_setOverlayVisible(true)
+            drain()
+
             // 5. Panel chrome (T11): the control-panel shell with Groups content
             // anchored to a mock menu-bar status item (top-right). The sticky
             // floating NSPanel + decorative backing window with the beak,

@@ -21,11 +21,13 @@ import AppKit
 /// values — the warm surface ladder + hairline (`canvas`, `canvasHi`,
 /// `panel`, `raised`, `well`, `hairline`; see the "Warm Signal custom
 /// palette" section below). `Tokens.Font`/`Tokens.Layout`/`Tokens.Material`
-/// remain pure forwarding aliases; only `Tokens.Color` gains custom cases,
-/// and only ones a real call site consumes this same wave. Gold/ember/glow/
-/// `ring-connected`/caution/failure/link are deliberately NOT added yet —
-/// those are the later S-chain (signal-color) tasks' job, once their call
-/// sites exist.
+/// remain pure forwarding aliases (plus `Font.microLabel`, the spec-named
+/// §2 micro-label voice added by S3's MUTED sublabel token); only
+/// `Tokens.Color` gains custom cases, and only ones a real call site
+/// consumes in the same wave: the S-chain has since added `ringConnected`/
+/// `failure` (S1), `gold`/`ember` (S-BUS), and `caution`/`glow`/`dotSocket`
+/// (S2+S3, the meter gradient + route-armed dot). `link` remains unadded
+/// (its call site — the reference page — doesn't exist yet).
 ///
 /// Do not add a case here for a color/font/material combination that isn't
 /// already used (or, for the warm palette, consumed by the very same commit)
@@ -60,9 +62,12 @@ public enum Tokens {
         /// Opaque window chrome background (onboarding, Settings, control-panel
         /// backing bubble). Alias of `NSColor.windowBackgroundColor`.
         public static var windowBackground: NSColor { .windowBackgroundColor }
-        /// The color a decorative punch-out border is drawn in so a badge
-        /// reads as separate from what's behind it (`StatusDotView`). Alias of
-        /// `NSColor.underPageBackgroundColor`.
+        /// The color a decorative punch-out border is drawn in so a corner badge
+        /// reads as separate from what's behind it. Alias of
+        /// `NSColor.underPageBackgroundColor`. (Its former consumer, the corner
+        /// connection dot `StatusDotView`, was retired for the halo ring in S1;
+        /// the gold route-armed corner dot in a later task, spec §3.3, re-adopts
+        /// this punch-out border.)
         public static var underPageBackground: NSColor { .underPageBackgroundColor }
         /// Hover/selection wash background for list rows (`GroupRowView`,
         /// `AppRowView`, `DeviceRowView`). Alias of
@@ -71,8 +76,6 @@ public enum Tokens {
         /// Faint recessed track fill behind a meter/indicator (`LevelMeterView`'s
         /// track layer). Alias of `NSColor.tertiarySystemFill`.
         public static var tertiarySystemFill: NSColor { .tertiarySystemFill }
-        /// The VU-meter fill color. Alias of `NSColor.systemGreen`.
-        public static var meterFill: NSColor { .systemGreen }
         /// Destructive/error inline text (e.g. AppRowView's removed-app
         /// strikethrough label). Alias of `NSColor.systemRed`.
         public static var destructive: NSColor { .systemRed }
@@ -161,6 +164,145 @@ public enum Tokens {
             warmDynamic(name: "hairline", dark: 0x3A332B, darkHighContrast: 0x786B5A,
                        light: 0xE2DACC, lightHighContrast: 0x9B8768)
         }
+
+        // MARK: Connection-ring instruments (spec §3.2, S1)
+        //
+        // The two hues the halo connection ring (``HaloRingView``) needs. Teal
+        // is RETIRED everywhere (spec §0 decision c / §3.1) — the ring is driven
+        // by `Device.connectionState` ALONE, so there is no routing/teal ring
+        // token. `connecting` reuses `ringConnected` (dashed form, not a new
+        // color, per spec §3.2's "zero new colors" Reduce-Motion resolution).
+        // These are the FIRST signal-color instruments to populate `Tokens.Color`
+        // with real custom values; the gold/ember/glow accent instruments remain
+        // the later S-chain's job (their call sites don't exist yet).
+
+        /// The **connected** solid ring hue — a hue-neutral warm-grey (gold is
+        /// reserved for the route-armed dot/meter). Also the color of the
+        /// **connecting** dashed ring (form, not color, carries pending — §3.2).
+        /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor tested
+        /// at the 21 px ring circle, dark vs BOTH `panel` and `raised`, light vs
+        /// `panel`. Measured (WCAG relative luminance): dark `#8D7D5E` = 4.35:1
+        /// vs `panel` / 4.07:1 vs `raised`; light `#A08C66` = 3.08:1 vs `panel`
+        /// (passes, tight — spec §10 flagged the exact hex for the Wave-5 sweep).
+        /// Both clear the floor as-is, so the spec hexes stand (no escape-valve
+        /// brightening needed). Increase-Contrast variants push further from
+        /// `panel` for headroom (dark `#A99A78` = 6.31:1; light `#8A7550` =
+        /// 4.18:1), per house rule 3 (every case ships an IC variant).
+        public static var ringConnected: NSColor {
+            warmDynamic(name: "ringConnected", dark: 0x8D7D5E, darkHighContrast: 0xA99A78,
+                       light: 0xA08C66, lightHighContrast: 0x8A7550)
+        }
+
+        /// The **FAILURE-EXCLUSIVE** hue (house rule 8): the failed connection
+        /// ring, the failed row's sublabel, and the diagnosis panel — never a
+        /// meter (meters top out at `caution`, not here) and never remapped by
+        /// the accent dial (spec §1.3: red stays red in every mode). CONTRAST
+        /// RATIONALE: spec ≥3:1 floor vs `panel`. Measured: dark `#D9564A` =
+        /// 4.48:1 vs `panel` / 4.18:1 vs `raised`; light `#BB3A2F` = 5.27:1 vs
+        /// `panel` — both clear the floor as spec'd. IC variants raise contrast
+        /// further while keeping the hue red (dark `#F26B5C` = 5.85:1; light
+        /// `#A62A20` = 6.66:1).
+        public static var failure: NSColor {
+            warmDynamic(name: "failure", dark: 0xD9564A, darkHighContrast: 0xF26B5C,
+                       light: 0xBB3A2F, lightHighContrast: 0xA62A20)
+        }
+
+        // MARK: Gold accent instruments (spec §1, S-BUS)
+        //
+        // THE accent (spec §1.1/§1.2): `gold` is the bus-node fill / route-armed
+        // dot / meter hot end; `ember` is gold's dim companion (bus LINE ink /
+        // meter low end). S-BUS (the membership bus, spec §4) is their FIRST
+        // consumer — the filled node is a `gold` disc with an `ember` rim, and the
+        // bus line is drawn in `ember` (spec §4.1/§4.2). `glow` (the bloom/halo,
+        // §3.3) lives in the S2+S3 block below with its consumer, the
+        // route-armed dot. Per the accent dial (spec §1.3) these three are the
+        // ONLY tokens the Full-gold/Subtle/Follow-accent remap touches — that remap
+        // is a later task; today they are the Full-gold defaults.
+        //
+        // CONTRAST RATIONALE (spec §1 "instruments clear ≥3:1 vs every surface"):
+        // the bus draws on the warm `canvas`/`panel` surfaces. Measured (WCAG
+        // relative luminance): dark `gold` `#E8B84B` ≈ 8.9:1 vs `panel` `#1D1915`;
+        // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
+        // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
+        // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
+        // `panel`; light `#C2A05A` ≈ 2.0:1 vs `panel` — BELOW the 3:1 instrument
+        // floor as a hairline, but `ember` here is a 2 pt LINE paired with the
+        // high-contrast `gold` nodes it connects, and spec §1.2 lists `ember` at
+        // exactly this hex; per the spec's escape valve the Increase-Contrast
+        // variant is brightened/deepened to clear the floor (light IC `#9A7A2E`
+        // ≈ 3.4:1) while the base stays the spec hex (Wave-5 sweep owns any base
+        // re-tune). IC variants (my picks, flagged for the Wave-5 sweep like
+        // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
+        // `gold` `#8A6614`, light `ember` `#9A7A2E`.
+
+        /// THE gold accent — the bus-node fill (spec §4.2), route-armed dot, and
+        /// meter hot end (spec §1). Remapped only by the accent dial (§1.3); never
+        /// by anything else. Full-gold default values here.
+        public static var gold: NSColor {
+            warmDynamic(name: "gold", dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
+                       light: 0xA97F1E, lightHighContrast: 0x8A6614)
+        }
+
+        /// Gold's dim companion — the bus LINE ink (spec §4.1), the filled node's
+        /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design.
+        public static var ember: NSColor {
+            warmDynamic(name: "ember", dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
+                       light: 0xC2A05A, lightHighContrast: 0x9A7A2E)
+        }
+
+        // MARK: Signal-dot + meter instruments (spec §3.3 / §1, S2+S3)
+        //
+        // The remaining instrument hues the route-armed corner dot and the
+        // warm meter gradient need. `caution` is the meter's CEILING (house
+        // rule 8: FAILURE RED NEVER APPEARS IN A METER — a loud party can
+        // never impersonate a failure); `glow` is the armed dot's bloom/halo;
+        // `dotSocket` is the dot's dark "empty socket" resting state. Like
+        // gold/ember, `caution` is never remapped by anything except… nothing:
+        // spec §1.3 exempts it from the accent dial entirely (caution stays
+        // caution in every mode).
+
+        /// The meter caution/hot-zone CEILING (spec §1.1/§1.2 `caution`) — the
+        /// warm meter gradient tops out HERE, never at `failure` red (house
+        /// rule 8). CONTRAST RATIONALE: spec ≥3:1 floor vs `panel`. Measured
+        /// (WCAG relative luminance): dark `#E29A3D` = 7.42:1 vs `panel`
+        /// `#1D1915` (6.94:1 vs `raised`); light `#B3701C` = 3.77:1 vs `panel`
+        /// `#FBF8F2` — both clear the floor as spec'd, so the spec hexes
+        /// stand. IC variants push further from `panel` for headroom (my
+        /// picks, flagged for the Wave-5 sweep like `ringConnected`): dark
+        /// `#F2AC4F` = 8.98:1; light `#8F5A12` = 5.44:1.
+        public static var caution: NSColor {
+            warmDynamic(name: "caution", dark: 0xE29A3D, darkHighContrast: 0xF2AC4F,
+                       light: 0xB3701C, lightHighContrast: 0x8F5A12)
+        }
+
+        /// The gold bloom/halo hue (spec §1.1/§1.2 `glow`) — the route-armed
+        /// dot's static halo and its arm-transition bloom (§3.3). CONTRAST
+        /// RATIONALE: the spec's table states NO floor for `glow` ("—",
+        /// transient/halo only — it never carries meaning alone; the ≥3:1
+        /// `gold` disc under it does). Measured for the record: dark `#FFD97A`
+        /// = 12.86:1 vs `panel`; light `#E8B84B` = 1.74:1 vs `panel` (a soft
+        /// paper halo — acceptable because floor-exempt). House rule 3 still
+        /// requires IC variants: both reuse the base hexes (a halo needs no
+        /// extra IC contrast; the disc's IC variant carries that).
+        public static var glow: NSColor {
+            warmDynamic(name: "glow", dark: 0xFFD97A, darkHighContrast: 0xFFD97A,
+                       light: 0xE8B84B, lightHighContrast: 0xE8B84B)
+        }
+
+        /// The route-armed dot's **dark/empty socket** resting fill (spec §3.3
+        /// "dark/empty socket (`#34302A` dark) when not armed"). CONTRAST
+        /// RATIONALE: deliberately QUIET — the socket is the "nothing armed"
+        /// state, spec'd with no floor (it must not compete with the lit gold
+        /// dot; measured dark `#34302A` = 1.33:1 vs `panel`, a subtle recess).
+        /// The spec names only the dark hex; light `#E0D8C6` (= 1.34:1 vs
+        /// light `panel`, the symmetrical quiet recess) is my pick, flagged
+        /// for the Wave-5 sweep like `ringConnected`'s hexes. IC variants
+        /// deepen the recess for definition without making it a signal (dark
+        /// `#4A443B` = 1.81:1; light `#C4B89E` = 1.85:1).
+        public static var dotSocket: NSColor {
+            warmDynamic(name: "dotSocket", dark: 0x34302A, darkHighContrast: 0x4A443B,
+                       light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
+        }
     }
 
     // MARK: - Type
@@ -168,8 +310,9 @@ public enum Tokens {
     /// Typography aliases. Every case forwards to the exact
     /// `NSFont.systemFont`/`.boldSystemFont`/`.menuFont` call and size the
     /// codebase already uses (verified via `git grep -n "NSFont\."` across
-    /// the same five UI packages). No custom font family or arbitrary point
-    /// size lives here — only forwarding of patterns already in use.
+    /// the same five UI packages) — with ONE spec-named custom exception,
+    /// ``microLabel`` (the Warm Signal §2 micro-label voice, added with its
+    /// first consumer, S3's MUTED sublabel token).
     public enum Font {
         /// Standard body text at the system's default control size — the most
         /// common label font in the app (row names, headings, form labels).
@@ -219,6 +362,21 @@ public enum Tokens {
         /// match a real `NSMenuItem`'s rendering (`AppRowView`). Alias of
         /// `NSFont.menuFont(ofSize: 0)`.
         public static var menuItem: NSFont { .menuFont(ofSize: 0) }
+        /// The **micro-label voice** (Warm Signal v3 §2): SF Mono, ~8.5–11 pt,
+        /// weight 700, UPPERCASE, tracked +0.09–0.11 em — the small-caps state
+        /// vocabulary (`LIVE`/`MUTED`/`IDLE`) and section captions. 8.5 pt is
+        /// the bottom of the spec's band, sized to ride as a leading token
+        /// INSIDE the existing 10 pt sublabel line without changing its height
+        /// (§3.5 no-reflow rule). The +0.09 em tracking rides alongside as
+        /// ``microLabelKern`` (an `NSAttributedString.Key.kern` value, since
+        /// tracking isn't a font attribute in AppKit). The first spec-named
+        /// custom `Tokens.Font` case (system monospaced ≈ SF Mono).
+        public static var microLabel: NSFont {
+            .monospacedSystemFont(ofSize: 8.5, weight: .bold)
+        }
+        /// The `.kern` value (in points) realizing the micro-label voice's
+        /// +0.09 em tracking at ``microLabel``'s 8.5 pt size (0.09 × 8.5).
+        public static var microLabelKern: CGFloat { 0.765 }
     }
 
     // MARK: - Layout

@@ -4,14 +4,24 @@ import AppKit
 import AudiouterSharedUI
 import QuartzCore
 
-/// The **leading-column VU meter** (task T1): a thin vertical bar whose green
-/// fill height tracks the live per-device RMS the backend emits via
-/// `BackendEvent.level(id:rms:)`. v1 is deliberately minimal — SINGLE GREEN
-/// fill (`.systemGreen`), no yellow/red ramp, no peak-hold marker.
+/// The **leading-column VU meter** (task T1): a thin vertical bar whose fill
+/// height tracks the live per-device RMS the backend emits via
+/// `BackendEvent.level(id:rms:)`.
 ///
-/// Two layers on one custom `CALayer`-backed view: a faint rounded "track"
-/// (the recess the bar sits in) and a green "fill" layer that grows from the
-/// bottom. Only the fill layer's height changes per frame.
+/// **Warm meter gradient (Warm Signal v3 §1/§3.3, S2):** the fill is the
+/// position-fixed warm ramp `ember → gold` with the top zone at `caution` —
+/// the meter's CEILING hue. The old green/red vocabulary is retired, and
+/// FAILURE RED NEVER APPEARS IN A METER (house rule 8): a loud party can
+/// never impersonate a failure; `caution` is as hot as a meter gets. The
+/// gradient is anchored to the TRACK, not the bar — a full-height
+/// `CAGradientLayer` revealed through a bottom-anchored mask — so the hues
+/// live at fixed heights (bottom = ember, top = caution) and the bar
+/// "uncovers" them as it rises, like a hardware LED ladder.
+///
+/// Three layers on one custom `CALayer`-backed view: a faint rounded "track"
+/// (the recess the bar sits in), the full-height warm gradient, and the
+/// gradient's mask whose height is the displayed level. Only the mask's
+/// height changes per frame.
 ///
 /// **Ballistics, not a snap-to-target bar**: `setLevel` only records a target;
 /// a `CVDisplayLink`-driven loop eases the *displayed* level toward it every
@@ -27,7 +37,7 @@ import QuartzCore
 /// restarts it. Every popover row gets one of these, so an always-running
 /// per-row display link would be a real cost with several devices visible.
 ///
-/// Mirrors ``StatusDotView``'s layer + Reduce-Motion idioms: `updateLayer` /
+/// Mirrors `StatusDotView`'s layer + Reduce-Motion idioms: `updateLayer` /
 /// `viewDidChangeEffectiveAppearance` for colour re-resolution, and a Reduce
 /// Motion check that snaps instead of animating.
 public final class LevelMeterView: NSView {
@@ -47,8 +57,21 @@ public final class LevelMeterView: NSView {
     /// at rest and the display link is torn down.
     private static let restEpsilon: CGFloat = 0.001
 
+    /// Gradient stop for where `ember` has fully warmed to `gold` (fraction of
+    /// the track height). Below this the bar reads ember-dim; the healthy
+    /// listening band reads gold.
+    static let meterGoldStop: NSNumber = 0.7
+    /// The `caution` top-zone onset: gold blends toward the `caution` ceiling
+    /// across the final stretch of the track (spec: "meters top out HERE").
+    static let meterCautionStop: NSNumber = 1.0
+
     private let trackLayer = CALayer()
-    private let fillLayer = CALayer()
+    /// The full-height, position-fixed warm gradient (`ember → gold →
+    /// caution`), revealed through ``fillMaskLayer``.
+    private let fillLayer = CAGradientLayer()
+    /// Bottom-anchored mask over ``fillLayer`` — its height IS the displayed
+    /// level; the gradient itself never moves or rescales.
+    private let fillMaskLayer = CALayer()
 
     /// The most recently requested level (post-clamp), i.e. what the display
     /// link eases `displayed` toward.
@@ -62,7 +85,17 @@ public final class LevelMeterView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         trackLayer.cornerRadius = Self.columnWidth / 2
-        fillLayer.cornerRadius = Self.columnWidth / 2
+        // The visible fill's rounded cap comes from the MASK (the moving bar),
+        // not the fixed gradient sheet it reveals.
+        fillMaskLayer.cornerRadius = Self.columnWidth / 2
+        fillMaskLayer.backgroundColor = NSColor.black.cgColor   // opaque = revealed
+        // Bottom-to-top ramp: startPoint is the bar's base (ember), endPoint
+        // the track's ceiling (caution). CAGradientLayer y grows downward, so
+        // the base is y=1.
+        fillLayer.startPoint = CGPoint(x: 0.5, y: 1)
+        fillLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        fillLayer.locations = [0, Self.meterGoldStop, Self.meterCautionStop]
+        fillLayer.mask = fillMaskLayer
         layer?.addSublayer(trackLayer)
         layer?.addSublayer(fillLayer)
         updateLayerColors()
@@ -98,7 +131,14 @@ public final class LevelMeterView: NSView {
     private func updateLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             trackLayer.backgroundColor = Tokens.Color.tertiarySystemFill.cgColor
-            fillLayer.backgroundColor = Tokens.Color.meterFill.cgColor
+            // The warm ramp (S2): ember low end → gold body → caution ceiling.
+            // NEVER `failure` red (house rule 8). Re-stamped on every
+            // appearance/Increase-Contrast change since CGColors are static.
+            fillLayer.colors = [
+                Tokens.Color.ember.cgColor,
+                Tokens.Color.gold.cgColor,
+                Tokens.Color.caution.cgColor,
+            ]
         }
     }
 
@@ -107,6 +147,8 @@ public final class LevelMeterView: NSView {
     public override func layout() {
         super.layout()
         trackLayer.frame = bounds
+        // The gradient sheet always spans the FULL track; only the mask moves.
+        fillLayer.frame = bounds
         redrawFill()
     }
 
@@ -139,7 +181,10 @@ public final class LevelMeterView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let height = bounds.height * Self.displayHeight(forLevel: displayed)
-        fillLayer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
+        // Mask coordinates are the gradient layer's own space (same bounds):
+        // a bottom-anchored reveal window. The gradient never moves (S2 —
+        // hues live at fixed track heights).
+        fillMaskLayer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
         CATransaction.commit()
     }
 
@@ -158,6 +203,15 @@ public final class LevelMeterView: NSView {
             if clamped <= Self.restEpsilon {
                 stopDisplayLink()
             }
+            return
+        }
+        // Zero-target-while-already-at-rest: nothing to ease — don't spin up a
+        // display link just to discover it's at rest one frame later (energy
+        // rule; S3's mute drain re-applies target 0 on every model refresh).
+        if clamped <= Self.restEpsilon && displayed <= Self.restEpsilon {
+            displayed = 0
+            redrawFill()
+            stopDisplayLink()
             return
         }
         startDisplayLinkIfNeeded()
@@ -236,5 +290,21 @@ public final class LevelMeterView: NSView {
     public func test_setDisplayedLevel(_ level: CGFloat) {
         displayed = min(max(level, 0), 1)
         redrawFill()
+    }
+
+    /// The current ballistics target (post-clamp). Together with
+    /// ``test_displayedLevel`` it distinguishes a mute DRAIN (target 0 while
+    /// `displayed` is still easing down — S3's reuse of the decay path) from a
+    /// hard ``reset()`` (both snap to 0 instantly).
+    public var test_targetLevel: CGFloat { target }
+
+    /// The currently drawn level (what the mask height renders from).
+    public var test_displayedLevel: CGFloat { displayed }
+
+    /// The warm gradient's current fill colors, bottom → top (resolved against
+    /// the effective appearance) — asserts the `ember → gold → caution` ramp
+    /// and that failure red never appears in a meter (house rule 8).
+    public var test_gradientColors: [NSColor] {
+        (fillLayer.colors as? [CGColor])?.compactMap { NSColor(cgColor: $0) } ?? []
     }
 }

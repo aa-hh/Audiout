@@ -493,6 +493,42 @@ public final class MixerWindowController: NSWindowController {
     public var test_footerText: String { contentHostViewController.test_footerText }
 }
 
+// MARK: - WarmPanelView
+
+/// The Groups window's CONTENT-PANE canvas (Warm Signal spec §5.3, decision
+/// j: "content pane warm, chrome stock"): a flat, fully opaque fill of
+/// `Tokens.Color.panel` — the warm surface one rung LIGHTER than the
+/// popover's `canvas` gradient — with **no grain** (grain is the popover's
+/// density texture, §1.1; a configuration window doesn't carry it) and no
+/// gradient. The window CHROME around it (title bar, split view, sidebar
+/// material, sheets) stays fully native and untouched; because the window is
+/// `.fullSizeContentView`, the system title bar takes its tint from this
+/// warm surface beneath it, exactly the §5 "the shell samples us" mechanism.
+///
+/// A `draw(_:)` override — deliberately NOT a frozen layer color — so the
+/// token re-resolves live per appearance flip and Increase Contrast on every
+/// paint (`WarmCanvasView`'s pattern; always opaque, so Reduce Transparency
+/// needs no fallback branch).
+final class WarmPanelView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Tokens.Color.panel.setFill()
+        bounds.fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
 // MARK: - ContentPaneHostViewController
 
 /// Hosts the swapped content pane (editor / detail / empty) plus the
@@ -528,7 +564,10 @@ final class ContentPaneHostViewController: NSViewController {
 
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let root = NSView()
+        // Warm Signal §5.3: the CONTENT pane (swapped pane + footer strip)
+        // sits on the warm `panel` canvas; the split view / sidebar / title
+        // bar around it stay stock. The root of this host is that canvas.
+        let root = WarmPanelView()
         root.addSubview(contentContainer)
         root.addSubview(footerLabel)
         NSLayoutConstraint.activate([
@@ -572,47 +611,50 @@ final class ContentPaneHostViewController: NSViewController {
 // MARK: - GroupsEmptyStateViewController
 
 /// The "No groups yet" pane shown when there is nothing to select (stock
-/// AppKit): a centered primary message, a light secondary nudge, and a
-/// "New Group" button running the same creation sheet as the sidebar's
-/// bottom-bar button.
+/// AppKit): a centered primary message, a light secondary nudge in the
+/// Warm Signal house voice (§5.9's "warm, concrete, one idea per line"
+/// register), and a "New Group" button running the same creation sheet as
+/// the sidebar's bottom-bar button. The whole message block is one vertical
+/// stack centered on BOTH axes so it sits truly centered in the pane rather
+/// than hanging off a hand-tuned offset.
 public final class GroupsEmptyStateViewController: NSViewController {
 
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
-    private let messageLabel = NSTextField(labelWithString: "No groups yet")
-    private let subtitleLabel = NSTextField(labelWithString: "Play groups from the menu bar")
+    private let messageLabel = NSTextField(labelWithString: "No groups yet.")
+    private let subtitleLabel = NSTextField(labelWithString: "Music first — rooms can come later.")
     private let newGroupButton = NSButton()
 
     public override func loadView() {
-        messageLabel.translatesAutoresizingMaskIntoConstraints = false
         messageLabel.font = Tokens.Font.titleLarge
         messageLabel.textColor = Tokens.Color.secondaryLabel
         messageLabel.alignment = .center
 
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.font = Tokens.Font.subtitleLarge
         subtitleLabel.textColor = Tokens.Color.tertiaryLabel
         subtitleLabel.alignment = .center
 
-        newGroupButton.translatesAutoresizingMaskIntoConstraints = false
         newGroupButton.title = "New Group"
         newGroupButton.bezelStyle = .rounded
         newGroupButton.target = self
         newGroupButton.action = #selector(newGroupTapped(_:))
 
+        let stack = NSStackView(views: [messageLabel, subtitleLabel, newGroupButton])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 4
+        stack.setCustomSpacing(12, after: subtitleLabel)
+
         let container = NSView()
-        container.addSubview(messageLabel)
-        container.addSubview(subtitleLabel)
-        container.addSubview(newGroupButton)
+        container.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            messageLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            messageLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: -16),
-            subtitleLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            subtitleLabel.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 4),
-            newGroupButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            newGroupButton.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12),
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
         ])
 
         view = container

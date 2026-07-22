@@ -123,23 +123,25 @@ final class AppRowViewTests: XCTestCase {
 
     // MARK: Three-state menu structure (No Redirect / Current Device / AirPlay Devices)
 
-    /// The standalone "No Redirect" entry is first, with no header of its own,
-    /// followed by the "Current Device" section, then "AirPlay Devices" — in
-    /// that order.
+    /// The standalone entry is first, with no header of its own, followed by
+    /// the "Current Device" section, then "AirPlay Devices" — in that order.
+    /// It DISPLAYS as the bridge phrase "Follows main output" (Warm Signal
+    /// spec §5.1, decision 3 — S6) regardless of the host-supplied sentinel
+    /// title ("No Redirect").
     func testNoRedirectEntryLeadsMenuAheadOfBothSections() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
         let titles = row.test_menuTitles
-        XCTAssertEqual(titles.first, "No Redirect",
-                       "the standalone No Redirect entry must be the very first item")
-        let noRedirectIndex = titles.firstIndex(of: "No Redirect")
+        XCTAssertEqual(titles.first, "Follows main output",
+                       "the standalone entry must be first, displayed as the bridge phrase")
+        let standaloneIndex = titles.firstIndex(of: "Follows main output")
         let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
         let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
         XCTAssertNotNil(currentDeviceHeaderIndex)
         XCTAssertNotNil(airplayHeaderIndex)
-        XCTAssertLessThan(noRedirectIndex!, currentDeviceHeaderIndex!)
+        XCTAssertLessThan(standaloneIndex!, currentDeviceHeaderIndex!)
         XCTAssertLessThan(currentDeviceHeaderIndex!, airplayHeaderIndex!)
-        // No Redirect must not itself land inside either section.
-        XCTAssertFalse(titles[(currentDeviceHeaderIndex! + 1)...].contains("No Redirect"))
+        // The standalone entry must not itself land inside either section.
+        XCTAssertFalse(titles[(currentDeviceHeaderIndex! + 1)...].contains("Follows main output"))
     }
 
     func testNoRedirectEntrySelectionIsCheckmarked() {
@@ -574,5 +576,94 @@ final class AppRowViewTests: XCTestCase {
         let label = try! XCTUnwrap(row.test_accessibilityLabel)
         XCTAssertTrue(label.contains("Example App"))
         XCTAssertTrue(label.contains("42"))
+    }
+
+    // MARK: APP EXCEPTIONS treatment (Warm Signal S6, spec §5.1/§3.5/§2)
+
+    private func makeThreeStateRow(selected: String, isRunning: Bool) -> AppRowView {
+        let row = AppRowView()
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: selected, destinations: makeThreeStateDestinations(),
+            isRunning: isRunning))
+        return row
+    }
+
+    /// The collapsed dropdown always names the destination: the bridge phrase
+    /// when unrouted, the device name when routed (spec §5.1, decision 3).
+    func testCollapsedDropdownTitleIsBridgePhraseWhenUnrouted() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
+        XCTAssertEqual(row.test_collapsedDestinationTitle, "Follows main output")
+    }
+
+    func testCollapsedDropdownTitleIsDeviceNameWhenRouted() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: true)
+        XCTAssertEqual(row.test_collapsedDestinationTitle, "Living Room")
+    }
+
+    /// A live exception route (routed + running — the liveness proxy until the
+    /// confirmed-streaming flag is plumbed in) is the section's bright anchor:
+    /// name at FULL label colour (spec §2/§6.3).
+    func testRoutedRunningAppNameIsFullLabelColor() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: true)
+        XCTAssertEqual(row.test_nameTextColor, .labelColor,
+                       "a live exception route's name must be the full-contrast anchor")
+        XCTAssertNil(row.test_idleSuffixColor, "a running route never shows the idle suffix")
+    }
+
+    /// An unrouted (follows-main-output) app is not a live exception — its
+    /// name sits at secondary, with no idle suffix.
+    func testUnroutedAppNameIsSecondary() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
+        XCTAssertEqual(row.test_nameTextColor, .secondaryLabelColor)
+        XCTAssertNil(row.test_idleSuffixColor)
+        XCTAssertEqual(row.test_nameDisplayText, "Example App")
+    }
+
+    /// A routed-but-idle app (route saved, process not running) shows the
+    /// spec's " (idle)" tertiary suffix (§3.5 `AppName (idle)` pattern), the
+    /// name itself at secondary, and NO warning badge — idle is a calm state,
+    /// not an alert.
+    func testRoutedIdleAppShowsTertiaryIdleSuffixAndNoBadge() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: false)
+        XCTAssertEqual(row.test_nameDisplayText, "Example App (idle)")
+        XCTAssertEqual(row.test_nameTextColor, .secondaryLabelColor)
+        XCTAssertEqual(row.test_idleSuffixColor, .tertiaryLabelColor,
+                       "the (idle) suffix must render in the tertiary idle voice")
+        XCTAssertFalse(row.test_isOfflineBadgeVisible,
+                       "the routed-idle treatment replaces the warning badge")
+    }
+
+    /// The unrouted + not-running combination keeps the old warning badge
+    /// (there's no enabled-but-quiet slider to explain — it's already dimmed),
+    /// and shows no idle suffix.
+    func testUnroutedNotRunningAppKeepsBadgeAndPlainName() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: false)
+        XCTAssertTrue(row.test_isOfflineBadgeVisible)
+        XCTAssertEqual(row.test_nameDisplayText, "Example App")
+        XCTAssertNil(row.test_idleSuffixColor)
+    }
+
+    /// S6 item 6: the composed VoiceOver label reads "…, follows main output"
+    /// for an unrouted app — the spoken equivalent of the bridge phrase —
+    /// never "routed to No Redirect".
+    func testAccessibilityLabelReadsFollowsMainOutputWhenUnrouted() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.contains("follows main output"), "label was \"\(label)\"")
+        XCTAssertFalse(label.contains("routed to"),
+                       "an unrouted app is not 'routed to' anywhere")
+    }
+
+    /// …and "routed to <device>" when routed, with the clean name (no visual
+    /// " (idle)" suffix leaking into speech) plus the discrete "not running"
+    /// phrase when idle.
+    func testAccessibilityLabelReadsRoutedToDeviceAndCleanNameWhenIdle() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: false)
+        let label = try! XCTUnwrap(row.test_accessibilityLabel)
+        XCTAssertTrue(label.contains("routed to Living Room"), "label was \"\(label)\"")
+        XCTAssertFalse(label.contains("(idle)"),
+                       "the visual idle suffix must not leak into the spoken label")
+        XCTAssertTrue(label.localizedCaseInsensitiveContains("not running"))
     }
 }

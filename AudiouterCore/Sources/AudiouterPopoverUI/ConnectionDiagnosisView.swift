@@ -26,7 +26,7 @@ public final class ConnectionDiagnosisView: NSView {
     private static let verticalInset: CGFloat = 4
     /// Padding between the tinted background's edge and its content.
     private static let contentPadding: CGFloat = 10
-    /// Corner radius of the warning-tinted background (brief §7.1).
+    /// Corner radius of the failure-tinted background (spec §5.6's warm inset card).
     private static let backgroundCornerRadius: CGFloat = 7
     /// Gap between the headline and the wrapping suggestion body.
     private static let headlineToSuggestion: CGFloat = 3
@@ -197,14 +197,27 @@ public final class ConnectionDiagnosisView: NSView {
         dismissButton.setAccessibilityLabel("Dismiss")
     }
 
-    /// Resolve the warning tint (brief §7.1) against the *current* effective
-    /// appearance and stamp it onto the layer. `CALayer.backgroundColor` is a
-    /// static `CGColor` — `NSColor.systemOrange` resolves to different concrete
-    /// values in light vs dark — so this must re-run on every appearance change,
-    /// not just at build time.
+    /// Fraction of the failure-exclusive red mixed into the panel seat —
+    /// spec §5.6's "warm-tinted inset card (`failure` at ~12% alpha)".
+    private static let failureTintFraction: CGFloat = 0.12
+
+    /// Resolve the warm failure tint (spec §5.6) against the *current*
+    /// effective appearance and stamp it onto the layer: the inset card sits
+    /// on `Tokens.Color.panel` — one ladder-step lighter than the canvas the
+    /// popover paints — washed with the FAILURE-EXCLUSIVE `Tokens.Color.failure`
+    /// at ~12% (warm, not alarm-orange; house rule 8 keeps this red off every
+    /// non-failure surface). Blending here is equivalent to compositing
+    /// `failure` at 12% alpha over the opaque `panel` seat, but yields an
+    /// opaque color so the tint reads identically regardless of what's behind
+    /// the row. `CALayer.backgroundColor` is a static `CGColor` and both
+    /// tokens are appearance-/Increase-Contrast-dynamic, so this must re-run
+    /// on every appearance change, not just at build time.
     private func applyBackgroundTint() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            background.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+            let seat = Tokens.Color.panel
+            let tinted = seat.blended(withFraction: Self.failureTintFraction,
+                                      of: Tokens.Color.failure) ?? seat
+            background.layer?.backgroundColor = tinted.cgColor
         }
     }
 

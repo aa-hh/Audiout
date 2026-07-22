@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The approved custom-drawn element of the Groups window (`../../AGENTS.md`):
 /// a large glyph with a single, always-present edit affordance, SHARED by the
@@ -16,8 +17,9 @@ import AppKit
 /// separate full-cover pencil-on-hover read as two conflicting affordances
 /// ("there's a pencil that does nothing, then a different pencil on hover").
 /// The whole well is the click target (a camera-badge-style pattern: the badge
-/// is the cue, the glyph is the button). Layer-backed properties, not a
-/// `draw(_:)` override — the same idiom `StatusDotView` uses.
+/// is the cue, the glyph is the button). The BADGE stays layer-backed
+/// properties; the WELL surface itself draws in `draw(_:)` (see the Warm
+/// Signal note below) so its warm tokens re-resolve live per appearance.
 ///
 /// The badge step-up goes through `setOverlayVisible(_:)`, so Reduce Motion
 /// (`../AGENTS.md`'s system-settings rule) disables the animation in one place:
@@ -37,11 +39,40 @@ import AppKit
 /// step-up of the corner badge's alpha through the same `setOverlayVisible(_:)`
 /// path — so a sighted keyboard user gets the same "this is interactive" cue a
 /// mouse user gets on hover, not just the ring.
+/// WARM SIGNAL (spec §1 / §5.3): the well now draws itself as a real *raised
+/// well* — a rounded rect filled with `Tokens.Color.raised` (§1's stated role
+/// for that token: "raised well (icon well…)") edged with the `hairline`
+/// token — so the 64 pt box reads as one clickable control whose LEFT EDGE
+/// aligns with the column (the previous bare glyph floated centered in an
+/// invisible box, which read as a left-alignment drift against the labels
+/// below it). Hovering (or keyboard focus) adds a neutral wash at
+/// `PopoverColumnGrid.rowHoverWashAlpha` — spec §4.8: hover is a neutral wash
+/// only, never gold — alongside the existing badge alpha step-up. When the
+/// shown group is the ACTIVE Main Out target (`isActiveGroup`, set by the
+/// group editor from `GroupController.activeGroupID`), the well's edge
+/// becomes the thin gold ring the spec's Groups section describes ("the icon
+/// well with its halo ring", §5.3) — drawing only, gold on an instrument per
+/// house rule 1. All fills/strokes resolve inside `draw(_:)` so every token
+/// re-resolves live per appearance + Increase Contrast, never a frozen
+/// `.cgColor` (the `WarmCanvasView` pattern).
 final class DeviceIconWellView: NSView {
 
     /// Square side length (approved: "~64pt"), one constant so the detail
     /// pane's and the editor's headers can never drift apart.
     static let size: CGFloat = 64
+
+    /// Corner radius of the raised-well rounded rect (and of the focus ring /
+    /// hover wash that trace the same shape).
+    private static let wellCornerRadius: CGFloat = 12
+
+    /// Inset from the well's edge to the glyph, so the symbol sits IN the
+    /// well rather than spanning the whole box edge-to-edge.
+    private static let glyphInset: CGFloat = 9
+
+    /// Stroke widths: the resting hairline edge vs the active-group gold ring
+    /// (thin per spec — an indicator, not a beacon; house rule 1 caps gold).
+    private static let hairlineWidth: CGFloat = 1
+    private static let activeRingWidth: CGFloat = 1.5
 
     private static let fadeDuration: TimeInterval = 0.12
 
@@ -59,6 +90,19 @@ final class DeviceIconWellView: NSView {
 
     /// Fired on a real click (mouse-down) anywhere in the well.
     var onClick: (() -> Void)?
+
+    /// Warm Signal §5.3: true when the group this well fronts is the ACTIVE
+    /// Main Out target — the well's edge draws as the thin gold ring instead
+    /// of the resting hairline. Pure model-state input (the host sets it from
+    /// `GroupController.activeGroupID`), never audio-driven, matching the
+    /// §3.3 "state, not signal" discipline. Drawing-only.
+    var isActiveGroup: Bool = false {
+        didSet { if isActiveGroup != oldValue { needsDisplay = true } }
+    }
+
+    /// Hover/keyboard-focus state — drives the neutral wash (§4.8) drawn in
+    /// `draw(_:)`; the badge alpha step-up animates separately.
+    private var isHighlighted: Bool = false
 
     private var trackingArea: NSTrackingArea?
 
@@ -88,10 +132,12 @@ final class DeviceIconWellView: NSView {
         badgeView.addSubview(badgePencilImageView)
 
         NSLayoutConstraint.activate([
-            iconImageView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            iconImageView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            iconImageView.topAnchor.constraint(equalTo: topAnchor),
-            iconImageView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Glyph inset from the well edge so the symbol reads as sitting
+            // IN a raised well, not spanning an invisible box.
+            iconImageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.glyphInset),
+            iconImageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.glyphInset),
+            iconImageView.topAnchor.constraint(equalTo: topAnchor, constant: Self.glyphInset),
+            iconImageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.glyphInset),
 
             // Rest-state badge, bottom-trailing corner, slightly inset.
             badgeView.widthAnchor.constraint(equalToConstant: Self.badgeDiameter),
@@ -111,6 +157,44 @@ final class DeviceIconWellView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    // MARK: Warm-well drawing (Warm Signal §1/§5.3)
+
+    /// Paints the raised well: `raised` fill, `hairline` edge (or the thin
+    /// gold ring while `isActiveGroup`), plus the neutral hover/focus wash.
+    /// A `draw(_:)` override — not frozen layer colors — so every token
+    /// re-resolves per appearance and Increase Contrast on every paint
+    /// (`WarmCanvasView`'s pattern). Static drawing: Reduce Motion /
+    /// Transparency need no special casing here (nothing animates, nothing
+    /// is translucent over foreign content).
+    override func draw(_ dirtyRect: NSRect) {
+        let strokeWidth = isActiveGroup ? Self.activeRingWidth : Self.hairlineWidth
+        // Inset by half the stroke so the edge draws fully inside bounds.
+        let rect = bounds.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2)
+        let path = NSBezierPath(roundedRect: rect,
+                                xRadius: Self.wellCornerRadius,
+                                yRadius: Self.wellCornerRadius)
+
+        Tokens.Color.raised.setFill()
+        path.fill()
+
+        if isHighlighted {
+            // Neutral wash only, never gold (§4.8) — `label` at the shared
+            // hover alpha flips light/dark with the appearance for free.
+            Tokens.Color.label.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+            path.fill()
+        }
+
+        let edge = isActiveGroup ? Tokens.Color.gold : Tokens.Color.hairline
+        edge.setStroke()
+        path.lineWidth = strokeWidth
+        path.stroke()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 
     // MARK: Hover tracking
 
@@ -180,12 +264,15 @@ final class DeviceIconWellView: NSView {
         return true
     }
 
-    /// Draws the standard system focus ring around the well's full bounds
-    /// while this view is the first responder in a key window — the same
-    /// automatic ring an `NSButton` gets, computed manually here since a
-    /// plain `NSView` has no default focus-ring mask.
+    /// Draws the standard system focus ring around the well's rounded-rect
+    /// shape while this view is the first responder in a key window — the
+    /// same automatic ring an `NSButton` gets, computed manually here since a
+    /// plain `NSView` has no default focus-ring mask. Traces the same rounded
+    /// rect the warm well paints so the ring hugs the visible control.
     override func drawFocusRingMask() {
-        NSBezierPath(rect: bounds).fill()
+        NSBezierPath(roundedRect: bounds,
+                     xRadius: Self.wellCornerRadius,
+                     yRadius: Self.wellCornerRadius).fill()
     }
 
     override var focusRingMaskBounds: NSRect { bounds }
@@ -198,6 +285,12 @@ final class DeviceIconWellView: NSView {
     /// test/snapshot call sites; there is no longer a full-coverage overlay —
     /// only the badge.)
     func setOverlayVisible(_ visible: Bool) {
+        // Neutral hover/focus wash on the well itself (§4.8) — an instant
+        // repaint (no animation), so Reduce Motion needs no branch for it.
+        if isHighlighted != visible {
+            isHighlighted = visible
+            needsDisplay = true
+        }
         let badgeAlpha = visible ? Self.badgeHoverAlpha : Self.badgeRestAlpha
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             badgeView.alphaValue = badgeAlpha
@@ -215,6 +308,10 @@ final class DeviceIconWellView: NSView {
     /// (`setOverlayVisible(_:)`), including the keyboard-focus case a headless
     /// run can't observe visually.
     var test_badgeAlpha: CGFloat { badgeView.alphaValue }
+
+    /// Whether the well is currently drawing the active-group gold ring
+    /// (Warm Signal §5.3) instead of the resting hairline edge.
+    var test_isDrawingActiveRing: Bool { isActiveGroup }
 
     /// Simulate a real Space/Return key press on this view via the actual
     /// `keyDown(with:)` override (not a direct `onClick?()` call) — proves

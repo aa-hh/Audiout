@@ -50,9 +50,19 @@ public final class IconPickerViewController: NSViewController {
     private let grid = NSGridView()
     private let searchField = NSSearchField()
     private let previewImageView = NSImageView()
+    /// Mini warm-canvas tile behind the exact-name preview glyph (Warm
+    /// Signal: the preview shows the symbol on the product's own surface,
+    /// not on bare popover material). Hidden/shown in lockstep with
+    /// `previewImageView`.
+    private let previewTile = WarmPreviewTileView()
     private let applyButton = NSButton()
     private let defaultButton = NSButton()
     private let emptyResultsLabel = NSTextField(labelWithString: "No matches")
+
+    /// The curated grid button currently carrying the gold selection ring
+    /// (the picker's current icon), so an appearance flip can re-resolve the
+    /// ring color live rather than trusting a frozen `.cgColor`.
+    private weak var selectionRingButton: NSButton?
 
     /// The full curated symbol set, pre-filtered through `DeviceIcon.isValid`
     /// once at build time (never trust the curation list blindly; a name can
@@ -82,7 +92,13 @@ public final class IconPickerViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        let container = NSView()
+        // Appearance-observing root so the gold selection ring's layer color
+        // re-resolves on a live theme flip (layer colors don't re-resolve on
+        // their own the way `draw(_:)` fills do).
+        let container = AppearanceObservingView()
+        container.onAppearanceChange = { [weak self] in
+            self?.refreshSelectionRingColor()
+        }
 
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowSpacing = 4
@@ -99,6 +115,12 @@ public final class IconPickerViewController: NSViewController {
         previewImageView.imageScaling = .scaleProportionallyUpOrDown
         previewImageView.contentTintColor = Tokens.Color.secondaryLabel
         previewImageView.isHidden = true
+
+        // The preview glyph sits centered on its mini warm-canvas tile; the
+        // tile (not the bare glyph) is what the search row shows/hides.
+        previewTile.translatesAutoresizingMaskIntoConstraints = false
+        previewTile.isHidden = true
+        previewTile.addSubview(previewImageView)
 
         applyButton.translatesAutoresizingMaskIntoConstraints = false
         applyButton.title = "Apply"
@@ -119,13 +141,19 @@ public final class IconPickerViewController: NSViewController {
         emptyResultsLabel.alignment = .center
         emptyResultsLabel.isHidden = true
 
-        let searchRow = NSStackView(views: [searchField, previewImageView, applyButton])
+        let searchRow = NSStackView(views: [searchField, previewTile, applyButton])
         searchRow.translatesAutoresizingMaskIntoConstraints = false
         searchRow.orientation = .horizontal
         searchRow.alignment = .centerY
         searchRow.spacing = 6
-        previewImageView.widthAnchor.constraint(equalToConstant: Self.cellSize * 0.6).isActive = true
-        previewImageView.heightAnchor.constraint(equalToConstant: Self.cellSize * 0.6).isActive = true
+        NSLayoutConstraint.activate([
+            previewTile.widthAnchor.constraint(equalToConstant: Self.cellSize * 0.8),
+            previewTile.heightAnchor.constraint(equalToConstant: Self.cellSize * 0.8),
+            previewImageView.centerXAnchor.constraint(equalTo: previewTile.centerXAnchor),
+            previewImageView.centerYAnchor.constraint(equalTo: previewTile.centerYAnchor),
+            previewImageView.widthAnchor.constraint(equalToConstant: Self.cellSize * 0.6),
+            previewImageView.heightAnchor.constraint(equalToConstant: Self.cellSize * 0.6),
+        ])
 
         for v in [grid, emptyResultsLabel, searchRow, defaultButton] {
             container.addSubview(v)
@@ -156,7 +184,19 @@ public final class IconPickerViewController: NSViewController {
     /// (Re)build the curated grid's rows/cells from ``curatedNames``, one
     /// borderless square `NSButton` per symbol, ``columnsPerRow`` per row.
     private func buildGridRows() {
-        while grid.numberOfRows > 0 { grid.removeRow(at: 0) }
+        selectionRingButton = nil   // rebuilt below if the current icon is offered
+        // `NSGridView.removeRow(at:)` does NOT remove the row's cell views
+        // from the view hierarchy (documented behavior) — without the
+        // explicit `removeFromSuperview()` every rebuild stacked the old
+        // buttons behind the new ones, so a search-narrowed grid still drew
+        // the full curated set underneath (latent; surfaced by the Warm
+        // Signal selection ring rendering on the stale copies too).
+        while grid.numberOfRows > 0 {
+            for column in 0..<grid.numberOfColumns {
+                grid.cell(atColumnIndex: column, rowIndex: 0).contentView?.removeFromSuperview()
+            }
+            grid.removeRow(at: 0)
+        }
         var rowCells: [NSView] = []
         for name in curatedNames {
             let button = makeCuratedButton(name: name)
@@ -187,7 +227,20 @@ public final class IconPickerViewController: NSViewController {
         // plain language; the button's own label is set explicitly too, since
         // an `NSImage`'s `accessibilityDescription` alone isn't guaranteed to
         // surface through a borderless, image-only `NSButton`.
-        let plainLabel = Self.accessibilityLabel(forSymbol: name)
+        var plainLabel = Self.accessibilityLabel(forSymbol: name)
+        // Warm Signal: the CURRENT icon's cell carries a thin gold selection
+        // ring (a sanctioned gold use — selection state on the icon
+        // instrument itself, not chrome). VoiceOver equivalent baked in
+        // alongside the ring: the label says "current icon" so the state is
+        // never color-only.
+        let isCurrent = name == effectiveCurrentSymbolName
+        if isCurrent {
+            plainLabel += ", current icon"
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 7
+            button.layer?.borderWidth = 1.5
+            selectionRingButton = button
+        }
         let image = NSImage(systemSymbolName: name, accessibilityDescription: plainLabel)
         image?.isTemplate = true
         button.image = image
@@ -196,7 +249,28 @@ public final class IconPickerViewController: NSViewController {
         button.action = #selector(curatedButtonTapped(_:))
         button.identifier = NSUserInterfaceItemIdentifier(name)
         button.setAccessibilityLabel(plainLabel)
+        if isCurrent { refreshSelectionRingColor() }
         return button
+    }
+
+    /// The symbol the picker should mark as "current": the configured
+    /// override when set, else the configured default (what the well is
+    /// actually showing today). Empty-string default (pre-`configure`)
+    /// matches nothing.
+    private var effectiveCurrentSymbolName: String? {
+        currentSymbolName ?? (defaultSymbolName.isEmpty ? nil : defaultSymbolName)
+    }
+
+    /// (Re)resolve the gold ring's layer color against the picker's live
+    /// effective appearance — called at build time and again on every
+    /// appearance flip (layer colors are frozen snapshots; `Tokens.Color`
+    /// only re-resolves when asked under the right appearance).
+    private func refreshSelectionRingColor() {
+        guard let button = selectionRingButton, let layer = button.layer else { return }
+        let appearance = isViewLoaded ? view.effectiveAppearance : NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            layer.borderColor = Tokens.Color.gold.cgColor
+        }
     }
 
     /// Plain-language VoiceOver labels for `DeviceIcon.curated` — every symbol
@@ -240,13 +314,15 @@ public final class IconPickerViewController: NSViewController {
 
     // MARK: Configuration
 
-    /// Configure the picker before presenting it. `currentSymbolName` isn't
-    /// otherwise reflected in this compact layout (no persistent selection
-    /// highlight) — it's accepted for parity with other configure-style
-    /// entry points and future use.
+    /// Configure the picker before presenting it. Warm Signal: the effective
+    /// current symbol (`currentSymbolName`, falling back to
+    /// `defaultSymbolName`) is marked in the curated grid with a thin gold
+    /// selection ring + a ", current icon" VoiceOver label suffix, so the
+    /// grid rebuilds here in case the view was already loaded.
     public func configure(currentSymbolName: String?, defaultSymbolName: String) {
         self.currentSymbolName = currentSymbolName
         self.defaultSymbolName = defaultSymbolName
+        buildGridRows()
     }
 
     // MARK: Search validation
@@ -259,10 +335,12 @@ public final class IconPickerViewController: NSViewController {
             previewImageView.image = image
             previewImageView.contentTintColor = Tokens.Color.secondaryLabel
             previewImageView.isHidden = false
+            previewTile.isHidden = false
             applyButton.isEnabled = true
         } else {
             previewImageView.image = nil
             previewImageView.isHidden = true
+            previewTile.isHidden = true
             applyButton.isEnabled = false
         }
 
@@ -372,6 +450,46 @@ public final class IconPickerViewController: NSViewController {
     /// without traversing `NSGridView`'s button subviews.
     public static func test_accessibilityLabel(forCuratedSymbol name: String) -> String {
         accessibilityLabel(forSymbol: name)
+    }
+
+    /// The curated symbol currently carrying the gold "current icon"
+    /// selection ring, or `nil` when the current icon isn't in the visible
+    /// grid (filtered out, or the picker is unconfigured).
+    public var test_currentRingSymbolName: String? {
+        selectionRingButton?.identifier?.rawValue
+    }
+}
+
+// MARK: - Warm Signal helper views (drawing-only)
+
+/// Root view that reports effective-appearance flips to its owner so
+/// layer-color styling (the gold selection ring) can re-resolve live.
+private final class AppearanceObservingView: NSView {
+    var onAppearanceChange: (() -> Void)?
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onAppearanceChange?()
+    }
+}
+
+/// The mini warm-canvas tile the exact-name preview glyph renders on: a
+/// rounded rect filled with `Tokens.Color.canvas` and edged with `hairline`,
+/// so the preview shows the symbol on the product's own warm surface. Drawn
+/// in `draw(_:)` so both tokens re-resolve live per appearance + Increase
+/// Contrast (the `WarmCanvasView` pattern); flat fill, no grain.
+private final class WarmPreviewTileView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        Tokens.Color.canvas.setFill()
+        path.fill()
+        Tokens.Color.hairline.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

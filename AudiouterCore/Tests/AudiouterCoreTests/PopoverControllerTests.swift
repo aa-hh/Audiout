@@ -597,6 +597,187 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertNil(popover.test_diagnosisPanel(for: "office"))
     }
 
+    // MARK: Main Out halo ring — aggregate over the active target (spec §3.2 note)
+
+    /// The Main Out ring reflects the AGGREGATE of the active Selected-Devices
+    /// target: any live member ⇒ connected ring; else any connecting member ⇒
+    /// pending ring; else no ring.
+    func testMainOutRingAggregatesActiveTargetConnection() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+
+        // Both members still connecting → the Main Out ring is the pending ring.
+        var devices = backend.devices
+        for id in ["office", "homepod-bed"] {
+            if let i = devices.firstIndex(where: { $0.id == id }) {
+                devices[i].connectionState = .connecting
+            }
+        }
+        popover.update(devices: devices)
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .connecting,
+                       "all members connecting ⇒ the Main Out pending ring")
+
+        // One member connects → the aggregate promotes to the connected ring.
+        if let i = devices.firstIndex(where: { $0.id == "office" }) {
+            devices[i].connectionState = .connected
+        }
+        popover.update(devices: devices)
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .connected,
+                       "≥1 live member ⇒ the Main Out connected ring, even while another is still connecting")
+    }
+
+    /// No selected member is connecting/connected ⇒ the Main Out shows no ring.
+    func testMainOutRingIsNoneWhenTargetIdle() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        var devices = backend.devices
+        if let i = devices.firstIndex(where: { $0.id == "office" }) {
+            devices[i].connectionState = .off
+        }
+        popover.update(devices: devices)
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .none,
+                       "an idle target leaves the Main Out ring off")
+    }
+
+    // MARK: Membership bus — popover-level wiring (spec §4, S-BUS)
+
+    /// The bus originates at the Audio Out row (§4.1) and terminates at exactly
+    /// one device row — the LAST rendered node (rail-below false there, true
+    /// everywhere else).
+    func testBusOriginatesAtMainOutAndTerminatesAtTheLastDeviceRow() async throws {
+        let (popover, _, backend) = try await makePopover()
+        XCTAssertEqual(popover.test_mainOutRow.test_busOriginNode, .origin,
+                       "the Audio Out row launches the bus out of its dropdown column")
+        XCTAssertFalse(popover.test_mainOutRow.test_busOriginDimmed,
+                       "the origin renders at full ink under a Selected Devices target")
+        let railBelows = backend.devices.compactMap {
+            popover.test_deviceRow(for: $0.id)?.test_busRailBelow
+        }
+        XCTAssertEqual(railBelows.count, backend.devices.count, "every device row carries a bus segment")
+        XCTAssertEqual(railBelows.filter { $0 == false }.count, 1,
+                       "exactly one row terminates the line (the last node, §4.1)")
+    }
+
+    /// Node rendering across a real popover: members filled, non-members hollow,
+    /// the local-mix-blocked Mac distinct — and the node column x is identical
+    /// on every row (one fixed column, §4.1/R7).
+    func testBusNodesReflectMembershipAndShareOneColumn() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        await drain()
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNode, .member)
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_busNode, .member)
+        XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNode, .nonMember,
+                       "an untapped device's node is hollow — the line detours it")
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .blocked,
+                       "the Mac can't join a mixed set — the distinct blocked node (§4.6)")
+
+        // One fixed column: every node's center x is identical across rows AND
+        // unchanged when a membership toggles (zero layout shift, R7).
+        let officeX = popover.test_deviceRow(for: "office")?.test_busNodeCenterX()
+        let mixerX = popover.test_deviceRow(for: "airport-mixer")?.test_busNodeCenterX()
+        XCTAssertNotNil(officeX)
+        XCTAssertEqual(officeX ?? -1, mixerX ?? -2, accuracy: 0.001,
+                       "member and non-member nodes share one column x")
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+        await drain()
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNode, .nonMember)
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -1,
+                       officeX ?? -2, accuracy: 0.001,
+                       "toggling out moved nothing — only fill and line path change")
+    }
+
+    /// A FAILED group member renders at FULL emphasis regardless of dormancy
+    /// (failure outranks configuration — R2, §4.7): its node never tints, its
+    /// diagnosis panel attaches normally inside the dormant card, and
+    /// interacting with it never silently edits the saved group.
+    func testFailedGroupMemberKeepsFullEmphasisAndNeverEditsTheSavedGroup() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+
+        // Fail the member. The failure transition auto-deselects it from the
+        // CHECKED set (the honest toggle-off), which genuinely diverges the card
+        // — exactly the state §4.7's failure exemption is judged in.
+        var devices = backend.devices
+        let idx = try XCTUnwrap(devices.firstIndex { $0.id == "office" })
+        devices[idx].connectionState = .failed(.init(cause: .timedOut))
+        popover.update(devices: devices)
+
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"),
+                       ["Inactive — Audio Out is using '\(group.name)'"],
+                       "the failure auto-deselect diverged the checked set — the note "
+                       + "reconciled live off update(devices:)")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
+                       "the FAILED member never tints — failure outranks configuration (R2)")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Couldn't connect",
+                       "the failure sublabel renders at full emphasis inside the dormant card")
+        XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"),
+                        "the diagnosis panel attaches normally inside the dormant card")
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busNodeDimmed, true,
+                       "contrast: a healthy row outside the diverging target still recedes")
+
+        // Interacting with the failed member (toggle-on = the retry path)
+        // composes the CHECKED set only — the saved group is never edited.
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
+        await drain()
+        XCTAssertEqual(controller.groups.first?.memberIDs, group.memberIDs,
+                       "the retry edited the Selected set, never the saved group")
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+                       "…and re-deriving the checked set removed the note live")
+    }
+
+    // MARK: S4 (spec §4.6) — blocked row's in-place refusal note
+
+    /// A body-click on the local-mix-blocked row toggles a one-line in-place
+    /// refusal note (from `GroupController.localMixRefusalReason`) directly
+    /// under it — the reachable trigger; the disabled checkbox + tooltip is
+    /// never the only surfacing (stress-break §8.5).
+    func testBlockedRowBodyClickTogglesRefusalNote() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        await drain()
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        XCTAssertEqual(row.test_busNode, .blocked, "mixed set ⇒ the Mac is local-mix blocked")
+        XCTAssertFalse(popover.test_isBlockedNoteShown(id: "local-mac"),
+                       "no note before any ask")
+
+        row.test_simulateBlockedBodyClick()
+        XCTAssertTrue(popover.test_isBlockedNoteShown(id: "local-mac"),
+                      "the body-click mounted the in-place note under the row")
+        XCTAssertEqual(popover.test_lastRefusalReason, GroupController.localMixRefusalReason,
+                       "the note carries the model's refusal reason")
+
+        row.test_simulateBlockedBodyClick()
+        XCTAssertFalse(popover.test_isBlockedNoteShown(id: "local-mac"),
+                       "a second ask dismisses the note")
+    }
+
+    /// The NAME of a blocked row is part of the reachable trigger too (§4.6 "a
+    /// click anywhere on the row body / name / node") — it surfaces the same
+    /// note, never toggles membership, and the row's VoiceOver hint speaks the
+    /// same reason (S4's spoken equivalent).
+    func testBlockedRowNameClickSurfacesRefusalNote() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        await drain()
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+
+        row.test_clickName()
+        XCTAssertTrue(popover.test_isBlockedNoteShown(id: "local-mac"),
+                      "the name-click surfaced the same in-place note")
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"),
+                       "…without touching the blocked membership")
+        XCTAssertEqual(row.test_accessibilityHint, GroupController.localMixRefusalReason,
+                       "the blocked row's accessibility hint carries the refusal reason")
+    }
+
     /// T-3 — exact-fit sizing: the popover is exactly its visible content height,
     /// with no `NSScrollView` and no clipping. The resize primitive publishes the
     /// panel's settled `fittingSize` through `preferredContentSize` (the documented
@@ -985,9 +1166,12 @@ final class PopoverControllerTests: XCTestCase {
                                                      runningAppsProvider: routedApps)
 
         let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
-        XCTAssertEqual(titles.first, "No Redirect",
-                       "the menu leads with the standalone No Redirect entry")
-        let noRedirectIndex = titles.firstIndex(of: "No Redirect")
+        // The standalone sentinel DISPLAYS as the bridge phrase "Follows main
+        // output" (Warm Signal S6, spec §5.1 decision 3) even though the
+        // host-supplied `Destination.title` stays "No Redirect".
+        XCTAssertEqual(titles.first, "Follows main output",
+                       "the menu leads with the standalone entry, displayed as the bridge phrase")
+        let noRedirectIndex = titles.firstIndex(of: "Follows main output")
         let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
         let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
         XCTAssertNotNil(currentDeviceHeaderIndex, "the menu has a Current Device section")
@@ -1563,34 +1747,68 @@ final class PopoverControllerTests: XCTestCase {
                        "a freed-up app reappears as a selectable item")
     }
 
-    // MARK: A1 — dormant Devices card (group target)
+    // MARK: §4.7 FINAL (S5) — derived vs genuinely-diverging dormancy
 
-    /// Under a saved-group Main Out target the Devices card is DORMANT: it shows
-    /// the "Inactive — Audio Out is using '<group>'" note and dims every
-    /// membership checkbox (still clickable). Switching back to Selected Devices
-    /// clears both live.
+    /// FINAL dormant/derived-group semantics (spec §3.4/§4.7, S5 — replaces the
+    /// transitional "any group target dims everything + always posts the note"):
+    ///
+    /// - **Derived-equal** (checked set == active group's members): NO
+    ///   "Inactive" note, member rows at FULL emphasis — the Audio Out dropdown
+    ///   title carries the group identity.
+    /// - **Genuine divergence**: the note appears, and ONLY rows OUTSIDE the
+    ///   active target de-emphasize — via the bus-node TINT (checkbox at full
+    ///   alpha and interactive), never whole-row alpha.
     func testDormantDevicesCardNoteAndDimming() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_saveCurrentSetup(); await drain()
         let group = controller.groups[0]
 
-        // Point Main Out at the group ⇒ dormant.
+        // Point Main Out at the group; checked == members ⇒ DERIVED case.
         popover.test_selectMainOut(.group(id: group.id)); await drain()
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+                       "derived-equal (checked set == group members) posts NO note (§4.7)")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNode, .member,
+                       "the derived member keeps its filled node")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
+                       "…at full gold emphasis — no dormant tint")
+        XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed, false,
+                       "non-members keep full ink too in the derived case")
+        XCTAssertFalse(popover.test_mainOutRow.test_busOriginDimmed,
+                       "the bus origin keeps full ink in the derived case")
+
+        // Diverge: check a device the group doesn't hold ⇒ note + scoped tint.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain()
         XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"),
                        ["Inactive — Audio Out is using '\(group.name)'"],
-                       "dormant card carries the group's name in its note")
-        XCTAssertEqual(popover.test_deviceRowSelectionDimmed(id: "office"), true,
-                       "a device checkbox dims under a group target")
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_isEnabledOn ?? false, true,
-                       "office is still a member — dim is cosmetic, the checkbox stays interactive")
+                       "genuine divergence posts the note with the group's name")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
+                       "a row INSIDE the active target keeps full emphasis")
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_busNodeDimmed, true,
+                       "a checked row OUTSIDE the target de-emphasizes via node tint")
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_busNode, .member,
+                       "…keeping its membership fill — the dim is a tint, never a state change")
+        XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed, true,
+                       "an unchecked row outside the target recedes too")
+        XCTAssertTrue(popover.test_mainOutRow.test_busOriginDimmed,
+                      "the origin stub dims only under genuine divergence")
+        XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_isEnabledOn, true,
+                       "the tinted row's checkbox stays fully interactive (tint, never alpha)")
 
-        // Back to Selected Devices ⇒ no note, no dim.
+        // Un-diverge (checked set returns to the group's members) ⇒ derived
+        // again: the note unmounts LIVE off the membership toggle.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false); await drain()
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+                       "returning to the derived set removes the note live")
+        XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed, false,
+                       "…and releases every tint")
+
+        // Back to Selected Devices ⇒ no dormancy machinery at all.
         popover.test_selectMainOut(.selectedDevices); await drain()
         XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
                        "no dormancy note under Selected Devices")
         XCTAssertEqual(popover.test_deviceRowSelectionDimmed(id: "office"), false,
-                       "checkboxes undim under Selected Devices")
+                       "no dim under Selected Devices")
     }
 
     // MARK: A2 — live Selected Devices count

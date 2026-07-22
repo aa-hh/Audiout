@@ -6,10 +6,10 @@ import AudiouterSharedUI
 
 /// The static identity of one permission row (the parts that never change).
 struct PermissionRowContent {
-    /// SF Symbol shown in the leading icon tile (white, over `tileColor`).
+    /// SF Symbol shown in the leading icon tile. Every tile shares the same
+    /// warm-neutral `raised` well (spec §5.8 — the old per-row system-colour
+    /// chips are retired); the symbol alone warms to gold once granted.
     let symbolName: String
-    /// The tile fill — a system colour (System Settings-style category chip).
-    let tileColor: NSColor
     let title: String
     /// The plain-language "why we need this," in the user's mental model.
     let detail: String
@@ -61,9 +61,10 @@ func onboardingRowStatusLabel(_ text: String, symbol: String, tint: NSColor) -> 
     return stack
 }
 
-/// One permission row in the onboarding window: a leading colour icon tile, a
-/// title + wrapping "why" subtitle, and a trailing accessory that swaps with the
-/// live ``PermissionStatus`` — an Allow button, a spinner while probing, a
+/// One permission row in the onboarding window: a leading warm-neutral icon
+/// tile (gold-lit once granted — see ``IconTileView``), a title + wrapping
+/// "why" subtitle, and a trailing accessory that swaps with the live
+/// ``PermissionStatus`` — an Allow button, a spinner while probing, a
 /// green "Allowed", or a "Denied" + "Open System Settings" fallback.
 ///
 /// Rows are designed to sit inside a grouped ``RoundedContainerView`` (the
@@ -117,7 +118,6 @@ final class PermissionRowView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         iconTile = IconTileView(symbolName: content.symbolName,
-                                tint: content.tileColor,
                                 accessibility: content.title)
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -214,6 +214,12 @@ final class PermissionRowView: NSView {
     func update(status: PermissionStatus, isProbing: Bool) {
         lastStatus = status
         lastProbing = isProbing
+
+        // Granting "lights" the row's icon gold (spec §5.8 — the one onboarding
+        // choreography; ≤300 ms, skipped under Reduce Motion, see
+        // `IconTileView.setLit`). The VoiceOver-visible equivalent is the
+        // "Allowed" status chip below — the gold is redundant reinforcement.
+        iconTile.setLit(status == .granted)
 
         // Clear the accessory.
         for v in accessory.arrangedSubviews { accessory.removeArrangedSubview(v); v.removeFromSuperview() }
@@ -345,57 +351,113 @@ final class ProminentButton: NSButton {
 
 // MARK: - Appearance-adaptive rounded views
 
-/// A small rounded, colour-filled tile holding a white SF Symbol — the System
-/// Settings-style category icon chip. Layer-backed and repainted in
-/// `updateLayer`, where the view's `effectiveAppearance` is the current drawing
-/// appearance, so the system tile colour resolves correctly in light and dark.
+/// A small rounded tile holding an SF Symbol — the unified warm-neutral
+/// permission chip (spec §5.8). Every tile rests on the same `Tokens.Color.raised`
+/// well with a hairline rim (the old per-row systemBlue/Indigo/Purple/Teal
+/// category chips are retired); the SYMBOL alone "warms to gold" once its
+/// permission is granted — the one place gold marks success outside the
+/// instruments (house rule 1's flagged onboarding exception, spec §10).
+///
+/// The gold-lit swap is the only onboarding choreography: a ≤300 ms crossfade
+/// between two stacked symbol image views, skipped entirely under Reduce
+/// Motion and whenever the tile isn't on a visible window (first render,
+/// headless tests, the snapshot harness — steady states render settled).
+///
+/// Layer-backed and repainted in `updateLayer`, where the view's
+/// `effectiveAppearance` is the current drawing appearance, so the warm
+/// tokens resolve correctly in light and dark (and Increase Contrast).
 final class IconTileView: NSView {
 
-    private let tint: NSColor
     private let radius: CGFloat
     /// The row icon-chip side; the hero uses a larger explicit size.
     static let side: CGFloat = 30
 
+    /// The resting (warm-neutral) symbol and its gold-lit twin, stacked.
+    /// `setLit` crossfades their alphas rather than mutating one image view's
+    /// `contentTintColor` (which is not animatable).
+    private let restingImage = NSImageView()
+    private let litImage = NSImageView()
+    /// Whether the symbol is currently gold-lit (granted).
+    private(set) var isLit = false
+
     init(symbolName: String,
-         tint: NSColor,
          accessibility: String,
          side: CGFloat = IconTileView.side,
          pointSize: CGFloat = 15,
          cornerRadius: CGFloat = 7) {
-        self.tint = tint
         self.radius = cornerRadius
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        let image = NSImageView()
-        image.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibility)
-        image.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
-        image.contentTintColor = .white
-        image.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(image)
+        restingImage.image = NSImage(systemSymbolName: symbolName,
+                                     accessibilityDescription: accessibility)
+        restingImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
+        restingImage.contentTintColor = Tokens.Color.secondaryLabel
+        restingImage.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(restingImage)
+
+        // Decorative twin: VoiceOver reads the resting image (and the row's
+        // status chip carries the granted/denied state in words), so the gold
+        // layer is not its own accessibility element.
+        litImage.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        litImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
+        litImage.contentTintColor = Tokens.Color.gold
+        litImage.alphaValue = 0
+        litImage.setAccessibilityElement(false)
+        litImage.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(litImage)
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: side),
             heightAnchor.constraint(equalToConstant: side),
-            image.centerXAnchor.constraint(equalTo: centerXAnchor),
-            image.centerYAnchor.constraint(equalTo: centerYAnchor),
+            restingImage.centerXAnchor.constraint(equalTo: centerXAnchor),
+            restingImage.centerYAnchor.constraint(equalTo: centerYAnchor),
+            litImage.centerXAnchor.constraint(equalTo: centerXAnchor),
+            litImage.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Light (or un-light) the symbol gold. Animated only when the state
+    /// actually changes on a visible window AND Reduce Motion is off —
+    /// everywhere else (first render, snapshots, headless tests, Reduce
+    /// Motion) it's an instant swap, so steady states always render settled.
+    func setLit(_ lit: Bool) {
+        guard lit != isLit else { return }
+        isLit = lit
+        let litAlpha: CGFloat = lit ? 1 : 0
+        let restingAlpha: CGFloat = lit ? 0 : 1
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard !reduceMotion, window?.isVisible == true else {
+            litImage.alphaValue = litAlpha
+            restingImage.alphaValue = restingAlpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25   // ≤300 ms, spec §5.8
+            context.allowsImplicitAnimation = true
+            litImage.animator().alphaValue = litAlpha
+            restingImage.animator().alphaValue = restingAlpha
+        }
+    }
+
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = tint.cgColor
+        layer?.backgroundColor = Tokens.Color.raised.cgColor
+        layer?.borderColor = Tokens.Color.hairline.cgColor
+        layer?.borderWidth = 1
         layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
     }
 }
 
 /// A rounded rectangle with an appearance-adaptive fill and hairline border —
-/// the System Settings grouped inset-list container. Children (the permission
+/// the System Settings grouped inset-list container, defaulting to the Warm
+/// Signal `panel` card fill + `hairline` rim (spec §1/§5.8) so the permission
+/// card reads as a warm card on the warm canvas. Children (the permission
 /// rows + hairline separators) are laid out by the caller.
 final class RoundedContainerView: NSView {
 
@@ -403,8 +465,8 @@ final class RoundedContainerView: NSView {
     private let border: NSColor
     private let radius: CGFloat
 
-    init(fill: NSColor = .controlBackgroundColor,
-         border: NSColor = .separatorColor,
+    init(fill: NSColor = Tokens.Color.panel,
+         border: NSColor = Tokens.Color.hairline,
          radius: CGFloat = 10) {
         self.fill = fill
         self.border = border

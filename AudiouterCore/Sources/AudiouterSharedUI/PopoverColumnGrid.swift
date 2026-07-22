@@ -59,7 +59,7 @@ public enum PopoverColumnGrid {
 
     /// The device/Main-Out icon column. Bumped 22→26 (2026-07-17) when the
     /// connection-status indicator moved OFF a right-side slot and ONTO the icon
-    /// as a corner badge (``StatusDotView``) — a slightly larger glyph gives the
+    /// as a corner badge (`StatusDotView`) — a slightly larger glyph gives the
     /// badge somewhere to sit without crowding the symbol.
     public static let iconWidth: CGFloat = 26
     /// The volume/master slider column — one fixed width shared by every row so
@@ -85,7 +85,7 @@ public enum PopoverColumnGrid {
     // retired right-side status slot. These are grouped as NAMED CONSTANTS on
     // purpose: a future settings menu will offer compact/normal/large row
     // densities, so the icon + badge sizing must be swappable HERE, in one
-    // place, not scattered as magic numbers across `DeviceRowView`/``StatusDotView``.
+    // place, not scattered as magic numbers across `DeviceRowView`/``HaloRingView``.
 
     /// Diameter of the on-icon status badge (the connection-state dot).
     public static let statusDotDiameter: CGFloat = 10
@@ -112,6 +112,97 @@ public enum PopoverColumnGrid {
     /// sitting off in the box padding. Tuned live.
     public static let statusDotInset: CGFloat = 3
 
+    // MARK: Halo connection ring (Warm Signal v3 §3.2, S1)
+    //
+    // The ring drawn AROUND the device icon carries the connection lifecycle
+    // (`Device.connectionState`), replacing the retired corner connection dot.
+    // Geometry lives here (promoted per spec §3.2 "geometry off
+    // PopoverColumnGrid") so a future density setting swaps ring + icon sizing
+    // in one place. The visible ring circle is `haloRingDiameter` (21 pt) inside
+    // the 26 pt `iconWidth` box — the size the ≥3:1 `ringConnected` contrast
+    // floor is tested at (spec §3.2). The breathing pulse REUSES the
+    // `statusDotBreath*` timing constants above (spec §6: "breathing pulse
+    // (`statusDotBreathDuration` timing)").
+
+    /// Diameter of the visible connection-ring circle (the stroke centerline),
+    /// inside the `iconWidth` (26 pt) icon box. The contrast floor is tested at
+    /// this size (spec §3.2).
+    public static let haloRingDiameter: CGFloat = 21
+    /// Stroke width of the **connected** solid ring (spec §3.2 ≈1.6 pt).
+    public static let haloRingConnectedStroke: CGFloat = 1.6
+    /// Stroke width of the **connecting/reconnecting** dashed ring — same weight
+    /// as connected; the dashed FORM (not weight) carries "pending" (spec §3.2).
+    public static let haloRingConnectingStroke: CGFloat = 1.6
+    /// Stroke width of the **failed** solid ring — deliberately heavier than the
+    /// connected ring (spec §3.2 ≈1.8 pt) so a failed row wins the scan beside
+    /// flickering meters (redundant weight atop the failure hue).
+    public static let haloRingFailedStroke: CGFloat = 1.8
+    /// Dash segment length for the connecting ring (the "incomplete" form).
+    public static let haloRingDashLength: CGFloat = 2.6
+    /// Gap length between connecting-ring dashes.
+    public static let haloRingDashGap: CGFloat = 2.6
+
+    // MARK: Route-armed corner dot (Warm Signal v3 §3.3, S2)
+    //
+    // The gold "route armed & held" dot sits at the icon's bottom-right corner
+    // — the position the retired connection dot (`StatusDotView`) vacated,
+    // placed off the same `statusDotInset` corner pull-in. PURE MODEL STATE,
+    // never RMS (spec §3.3 / R3): the meter is the only signal-driven channel.
+    // Named here per the density-setting rule, like the halo-ring block above.
+
+    /// Diameter of the lit/socket route-armed dot disc (spec/S2 "6 pt gold
+    /// disc" — deliberately smaller than the retired 10 pt connection dot so a
+    /// lit dot reads as an indicator, not a beacon; R1's luminance/size cap).
+    public static let routeArmedDotDiameter: CGFloat = 6
+    /// Blur radius of the lit dot's STATIC `glow` halo (spec §3.3 "subtle
+    /// glow" — a resting shadow, not an animation; energy rule intact).
+    public static let routeArmedGlowRadius: CGFloat = 3
+    /// Opacity of the lit dot's static `glow` halo shadow.
+    public static let routeArmedGlowOpacity: Float = 0.55
+    /// Duration of the one-shot `ember → gold` bloom when a dot transitions
+    /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
+    /// instant under Reduce Motion; never fires on initial render).
+    public static let routeArmedBloomDuration: CFTimeInterval = 0.45
+    /// Side length of the square overlay view hosting the dot — big enough to
+    /// contain the disc plus its glow halo without clipping.
+    public static let routeArmedDotBoxSize: CGFloat = 14
+
+    // MARK: Membership bus (Warm Signal v3 §4, S-BUS)
+    //
+    // The "bus" replaces the membership CHECKBOX's DRAWING (spec §4): a continuous
+    // vertical line dropping down one fixed column past every device row, with a
+    // FILLED gold node on the line for a member and a HOLLOW node the line DETOURS
+    // around (a wire-hop arc) for a non-member. Only the drawing changes — the same
+    // real `NSButton` checkbox lives underneath (spec §4.8). Geometry is promoted
+    // here (spec §4.1 "constants promoted into PopoverColumnGrid") so a future
+    // density setting swaps node + column sizing in one place, exactly like the
+    // halo-ring block above.
+    //
+    // COLUMN X: the node column reuses `trailingControlCenterFromTrailing` (the
+    // checkbox's real current center, §0.1 / §4.1) — the bus IS the trailing
+    // column. Every node sits at exactly that x; toggling changes only FILL and
+    // LINE PATH, never position (zero layout shift — R7 / §4.1). No new column.
+
+    /// Diameter of a bus node (spec §4.1 "~13 pt, matching the current `.switch`
+    /// checkbox visual box").
+    public static let busNodeDiameter: CGFloat = 13
+    /// Stroke width of the bus line (spec §4.1 "~2 pt, `ember` token").
+    public static let busLineWidth: CGFloat = 2
+    /// Stroke width of the ember rim ringing a filled node / edging a hollow one
+    /// (spec §4.2 "solid `gold` disc with `ember` rim" / "hollow … with an
+    /// `ember`/`hairline` rim").
+    public static let busNodeRimWidth: CGFloat = 1.5
+    /// How far past the node radius the hop-arc bows outward when the line detours
+    /// a HOLLOW node (spec §4.2 "bows outward into a small semicircular hop arc").
+    /// The detour semicircle's radius is `busNodeDiameter/2 + busDetourBulge`.
+    public static let busDetourBulge: CGFloat = 4.5
+    /// Width of the non-interactive bus-overlay column view a row hosts, centered
+    /// on the node column x. Wide enough to contain the leading-side hop-arc
+    /// (`busNodeDiameter/2 + busDetourBulge` from center) plus the line width,
+    /// without clipping. The overlay spans the full row height so stacked rows'
+    /// rail segments read as one continuous line.
+    public static let busColumnWidth: CGFloat = 30
+
     // MARK: Unified row styling — body rows, hover, selection (2026-07-18)
     //
     // Visual tokens shared by `DeviceRowView` and `AppRowView` so both row types
@@ -131,6 +222,19 @@ public enum PopoverColumnGrid {
     /// Shared by AppRowView's single-selection highlight and DeviceRowView's
     /// mixer-window selection pill.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
+
+    // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
+    //
+    // A muted row's mute button gains a filled accent-tinted PILL behind its
+    // (never-slashed — locked decision) speaker glyph: drawing only, on the
+    // real `NSButton`'s backing layer; behavior/keyboard/VoiceOver untouched.
+
+    /// Alpha of the engaged pill's accent fill (subtle — config-adjacent, not
+    /// a signal; the gold budget governs gold, accent chrome is permitted).
+    public static let mutePillFillAlpha: CGFloat = 0.22
+    /// Corner radius of the engaged pill (capsule-ish over the `muteWidth`
+    /// column's glyph box). Tuned live.
+    public static let mutePillCornerRadius: CGFloat = 7
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //

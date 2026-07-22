@@ -200,6 +200,15 @@ public final class GroupEditorViewController: NSViewController {
 
         nameField.stringValue = group.name
         refreshIconWell(group: group)
+        // Warm Signal §5.3: the ACTIVE Main Out group's icon well carries the
+        // thin gold ring (drawing-only; pure model state from
+        // `GroupController.activeGroupID`, never audio-driven — §3.3).
+        // VoiceOver equivalent: the well's accessibilityValue mirrors the
+        // ring so the state isn't color-only (flagged for the C2 sweep to
+        // harmonize wording with the popover's LIVE vocabulary).
+        let isActive = groupController.activeGroupID == groupID
+        iconWell.isActiveGroup = isActive
+        iconWell.setAccessibilityValue(isActive ? "Active group" : "")
         rebuildCandidates(memberSet: Set(group.memberIDs))
     }
 

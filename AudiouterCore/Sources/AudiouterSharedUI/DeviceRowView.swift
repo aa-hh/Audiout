@@ -56,6 +56,13 @@ public final class DeviceRowView: NSView {
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String)
         /// The user flipped the row's primary "send audio here" ON/OFF switch.
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String)
+        /// The user clicked the BODY of a row whose membership toggle is BLOCKED
+        /// (the Phase-1 local-mix block, spec §4.6). The host surfaces the
+        /// in-place refusal note (from `GroupController.localMixRefusalReason`) —
+        /// the reachable trigger that a disabled control + tooltip alone lacked
+        /// (resolves the significant break §8.5). Default no-op so non-bus hosts
+        /// (mixer window, tests) are unaffected.
+        func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -72,19 +79,18 @@ public final class DeviceRowView: NSView {
     // (See `DeviceRowView.Delegate` extension at file end for the
     // `didToggleEnabled` default no-op.)
 
-    /// Which on-icon status dot the row is currently showing — a structural test
-    /// hook (`test_statusKind`) so tests can assert the right badge is visible
-    /// without reaching into the private badge subview. Redefined for the
-    /// 2026-07-17 on-icon redesign: the four states map directly off
-    /// `Device.connectionState`.
+    /// Which connection **halo ring** the row is currently showing — a structural
+    /// test hook (`test_statusKind`/`test_ringForm`) so tests can assert the ring
+    /// without reaching into the private ring subview. The four states map
+    /// directly off `Device.connectionState` (Warm Signal v3 §3.2).
     public enum StatusKind: Equatable {
-        /// `.off` — the badge is hidden.
+        /// `.off` — no ring.
         case none
-        /// `.connecting` / `.reconnecting` — the breathing neutral dot.
+        /// `.connecting` / `.reconnecting` — the dashed breathing ring.
         case connecting
-        /// `.connected` — the solid green dot.
+        /// `.connected` — the solid `ringConnected` ring.
         case connected
-        /// `.failed` — the solid amber dot.
+        /// `.failed` — the solid red `failure` ring.
         case failed
     }
 
@@ -102,6 +108,12 @@ public final class DeviceRowView: NSView {
     /// (the Mac can't join a mixed set) — the checkbox is greyed with a tooltip.
     private var isToggleBlocked: Bool = false
 
+    /// The refusal reason accompanying `isToggleBlocked` (spec §4.6), held so the
+    /// row can speak it: it rides the row's accessibility HINT (the VoiceOver
+    /// equivalent of the body-click refusal note — every visual state ships its
+    /// spoken counterpart) as well as the checkbox tooltip. `nil` when not blocked.
+    private var blockReasonText: String?
+
     /// Transient pointer-hover state (menu-less hosts). Kept SEPARATE from the
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
     /// re-parenting, so a hover can never "stick" as a stale highlight after the
@@ -115,15 +127,58 @@ public final class DeviceRowView: NSView {
     /// Devices set. Named `enableCheckbox`; centered on the trailing-control
     /// column via the shared grid.
     private let enableCheckbox = NSButton()
+    /// The **membership bus** node + rail overlay (spec §4), mounted only when
+    /// `showsBus` — the drawing-only skin over `enableCheckbox`, which is made
+    /// invisible-but-fully-functional (a no-op-drawing cell) underneath it. See
+    /// ``MembershipBusView``.
+    private let busView = MembershipBusView()
+    /// Whether this row draws the membership BUS in place of the checkbox's own
+    /// switch drawing (spec §4). The popover's Selected-Devices rows pass `true`;
+    /// the mixer window / group-member rows leave it `false` so their rendering is
+    /// byte-for-byte unchanged (the checkbox draws its normal switch).
+    private let showsBus: Bool
+    /// Whether the bus is actually mounted on THIS row: `showsBus` hosts only.
+    /// A `showsToggle == false` row (a group-member row — membership is fixed
+    /// there) keeps **no bus node** even under a bus host (spec §4.6/§3.6 "Group
+    /// member … showsToggle=false rows carry no membership control"), so the bus
+    /// never claims a membership the row can't toggle.
+    private var busActive: Bool { showsBus && showsToggle }
+    /// Whether this row is the LAST device node on the bus (spec §4.1 "runs to the
+    /// last device row's node") — set by the host via ``setBusTerminates(_:)`` so
+    /// the terminating node draws no rail below it. Structural, not per-device, so
+    /// it survives an in-place `apply` repaint.
+    private var busTerminates = false
+    /// The current dormant-divergent tint state of the bus node (spec §4.7) —
+    /// mirrors `selectionDimmed` for a bus row, where dimming is a node TINT, not
+    /// the checkbox alpha (§4.7 "dim via tint … checkbox at full alpha").
+    private var busNodeDimmed = false
     private let iconView = NSImageView()
-    /// The on-icon connection-status badge (2026-07-17): a small corner dot
-    /// overlapping the icon's bottom-right, driven off `device.connectionState`.
-    /// Replaced the retired right-side status slot. See ``StatusDotView``.
-    private let statusDotView = StatusDotView()
+    /// The connection **halo ring** (Warm Signal v3 §3.2, 2026-07-22): a ring
+    /// drawn AROUND the icon carrying the connection lifecycle, driven off
+    /// `device.connectionState` alone (teal retired — no routing rung on the
+    /// ring). Replaced the retired corner connection dot (`StatusDotView`,
+    /// deleted). The icon's corner is repurposed for the gold route-armed dot in
+    /// a later task (§3.3). See ``HaloRingView``.
+    private let haloRingView = HaloRingView()
+    /// The **gold route-armed corner dot** (Warm Signal v3 §3.3, S2) at the
+    /// icon's bottom-right — the position the retired connection dot vacated.
+    /// PURE MODEL STATE, never RMS: lit iff the §3.3 predicate holds (see
+    /// `routeArmed(...)` in ``apply``); dark/empty socket otherwise. Paused
+    /// and playing render identically here (R3 — only the meter differs).
+    private let armedDotView = RouteArmedDotView()
+    /// Whether the MASTER (Main Out) mute is currently engaged — folded into
+    /// the route-armed predicate (spec §3.3: master mute drains EVERY device
+    /// dot) and into the meter's mute-coerce gate. Host-supplied via `apply`.
+    private var isMasterMuted = false
+    /// Whether the row's live-feed set (`liveAppNames`) was non-empty at the
+    /// last `apply` — picks the "playing here" vs "armed" VoiceOver wording.
+    private var hasLiveFeeds = false
+    /// The armed predicate's last computed value (what the dot renders).
+    private var isRouteArmed = false
     private let nameLabel = NSTextField(labelWithString: "")
     /// The single sublabel line under the name, driven by a precedence ladder in
     /// ``resolveSublabel(routedAppNames:)``: `.failed` → "Couldn't connect"
-    /// (`.systemOrange`); unavailable → "Unavailable" (greyed); else a non-empty
+    /// (`failure` red); unavailable → "Unavailable" (greyed); else a non-empty
     /// routing set → the routing line ("System · <apps>"); else hidden (the row is
     /// single-line, name centered). All three sublabel kinds reuse this one label.
     private let statusLabel = NSTextField(labelWithString: "")
@@ -184,12 +239,14 @@ public final class DeviceRowView: NSView {
     private var isInMenu: Bool { enclosingMenuItem != nil }
 
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
-               paintsSelectionBackground: Bool = true, showsMeter: Bool = false) {
+               paintsSelectionBackground: Bool = true, showsMeter: Bool = false,
+               showsBus: Bool = false) {
         self.device = device
         self.indented = indented
         self.showsToggle = showsToggle
         self.paintsSelectionBackground = paintsSelectionBackground
         self.showsMeter = showsMeter
+        self.showsBus = showsBus
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
         // Fill the host's width, keep a fixed height (brief §2).
         autoresizingMask = [.width]
@@ -241,6 +298,17 @@ public final class DeviceRowView: NSView {
     ///     the row isn't blank while a redirect is pending. Only `NativeBackend`
     ///     ever populates this; `MockBackend`/`OwnToneBackend` leave it empty
     ///     unless a test/demo explicitly injects it.
+    ///   - masterMuted: whether the Main Out MASTER mute is engaged (spec
+    ///     §3.3): folded into the route-armed predicate so master mute drains
+    ///     every device dot — no "four gold lamps on a silent house". Defaults
+    ///     to `false` so existing callers are unchanged.
+    ///   - inActiveTarget: whether this device is a member of the **active
+    ///     Main Out target set** (the Selected Devices set when Main Out =
+    ///     Selected Devices, or the routed group's member set when Main Out =
+    ///     a saved group — spec §3.3 "membership is evaluated against the
+    ///     active target, not the Selected set"). `nil` (every existing
+    ///     caller) falls back to `selected`, which is exactly right whenever
+    ///     Main Out targets Selected Devices.
     ///   - iconSymbolName: an explicit SF Symbol name override for the icon
     ///     glyph, resolved through ``DeviceIcon/resolve(_:default:)`` (so an
     ///     unknown/invalid name falls back to `device.kind.symbolName`).
@@ -255,10 +323,13 @@ public final class DeviceRowView: NSView {
                       selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = [],
+                      masterMuted: Bool = false,
+                      inActiveTarget: Bool? = nil,
                       iconSymbolName: String? = nil) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
+        self.blockReasonText = blocked ? blockReason : nil
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
@@ -271,8 +342,12 @@ public final class DeviceRowView: NSView {
         enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked
         enableCheckbox.toolTip = (showsToggle && blocked) ? blockReason : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
-        // `selectionDimmed`, only the alpha is.
-        enableCheckbox.alphaValue = selectionDimmed ? Self.selectionDimmedAlpha : 1.0
+        // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):
+        // dimming is a NODE TINT, not the checkbox alpha ("dim via tint … checkbox
+        // at full alpha"), so a bus checkbox stays at alpha 1 and the tint rides on
+        // `busNodeDimmed` below instead.
+        enableCheckbox.alphaValue = (busActive || !selectionDimmed) ? 1.0 : Self.selectionDimmedAlpha
+        busNodeDimmed = busActive && selectionDimmed
 
         // `nil` (every existing caller) resolves straight to the kind default —
         // `DeviceIcon.resolve` short-circuits on a `nil` override — so behavior
@@ -294,16 +369,36 @@ public final class DeviceRowView: NSView {
         nameLabel.textColor = rowTextColor
         alphaValue = 1.0
 
-        // On-icon status badge: driven off connectionState. When the device has
-        // live per-app routes but is NOT in the whole-system output set, the
-        // badge shows a teal routing-active dot (T3) — visually distinct from
-        // the streaming-green (.connected) so a redirect-only row is never
-        // mistaken for a fully disconnected one.
-        let hasLiveRouting = !liveAppNames.isEmpty
-        statusDotView.apply(state: device.connectionState, routingActive: hasLiveRouting)
+        // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
+        // §3.1 — the ring is the connection channel; teal is retired, so a live
+        // per-app redirect no longer tints the ring). A redirect-only device
+        // reads via its gold route-armed dot + sublabel + bus node, never the
+        // ring. `liveAppNames` still feeds the routing sublabel below.
+        haloRingView.apply(device.connectionState)
+
+        // Route-armed corner dot (spec §3.3) — the normative predicate,
+        // PURE MODEL STATE, NEVER RMS (R3: paused == playing == fresh open;
+        // only the meter may differ):
+        //
+        //   routeArmed = ( inActiveTarget ∧ connected ∧ !rowMuted ∧ !masterMuted )
+        //              ∨ ( liveAppNames ≠ ∅ )
+        //
+        // The per-app `liveAppNames` branch is independent of both mutes
+        // (redirect streams bypass the main-out master). Membership is against
+        // the ACTIVE target (host-supplied `inActiveTarget`), so a playing
+        // group member lights its dot even while its Selected checkbox dims.
+        self.isMasterMuted = masterMuted
+        self.hasLiveFeeds = !liveAppNames.isEmpty
+        let activeMember = inActiveTarget ?? selected
+        let isConnected: Bool
+        if case .connected = device.connectionState { isConnected = true } else { isConnected = false }
+        let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
+        isRouteArmed = mainMixArmed || hasLiveFeeds
+        armedDotView.apply(armed: isRouteArmed)
+
         // Single sublabel precedence ladder (failed → unavailable → routing →
-        // none), evaluated here after `device`/`isSelectedInSet` are set so the
-        // precedence is unambiguous.
+        // none), evaluated here after `device`/`isSelectedInSet`/`isMasterMuted`
+        // are set so the precedence is unambiguous.
         resolveSublabel(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
 
         // Don't fight a live drag: only push the model value into the slider
@@ -331,27 +426,98 @@ public final class DeviceRowView: NSView {
         // its track.
         readoutLabel.textColor = slider.isEnabled ? Tokens.Color.secondaryLabel : Tokens.Color.tertiaryLabel
 
-        // The meter can only be showing a live level while the device is an
-        // actual selected, unmuted output — otherwise a stale bar could stick
-        // (same transient-reset discipline as `isHovered` above).
-        let isPlaying = device.isAvailable && isSelectedInSet && !device.isMuted
-        if showsMeter && !isPlaying {
-            meterView.reset()
+        // The meter can only be showing a live level while the route is armed
+        // (the §3.3 predicate — the exact set of states where audio can be
+        // flowing here); otherwise a stale bar could stick (same transient-
+        // reset discipline as `isHovered` above). HOW it empties matters (S3):
+        // when MUTE is the only blocker (the row would be armed if unmuted)
+        // the meter DRAINS through the existing decay ballistics — target 0,
+        // the bar eases down (snaps under Reduce Motion via `setLevel`'s own
+        // gate) — mirroring how mute sounds. Any other cause (deselected,
+        // disconnected, unavailable) hard-resets as before.
+        if showsMeter && !(device.isAvailable && isRouteArmed) {
+            let mutedOnly = device.isAvailable && activeMember && isConnected
+            if mutedOnly {
+                meterView.setLevel(0)   // ballistic drain (reused decay path)
+            } else {
+                meterView.reset()
+            }
             lastMeterLevel = 0
         }
+
+        // Membership bus (spec §4): re-derive the node from the freshly-applied
+        // membership/blocked/dim state. No-op when `showsBus` is false.
+        updateBus()
 
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
 
-    /// Updates the mute button's tint colour for the current `muteButton.state`
-    /// (V1) — `.on` (muted) reads as an accent-tinted glyph, `.off` as the
-    /// neutral secondary tint. Mirrors `MainOutRowView.updateMuteTint()`: the
-    /// glyph itself never changes (no alternate/slash image), only its tint.
-    /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
-    /// both paths land the same tint instantly.
+    /// Set whether this row is the terminating (last) node on the bus (spec §4.1)
+    /// — the host calls this once at build time; it survives in-place `apply`
+    /// repaints because it's structural, not per-device. The terminating node
+    /// draws no rail below it, so the line ends at the last node.
+    public func setBusTerminates(_ terminates: Bool) {
+        busTerminates = terminates
+        updateBus()
+    }
+
+    /// Re-derive and push the bus node rendering from the current membership /
+    /// blocked / availability / dim / terminate state (spec §4). No-op when the
+    /// row hosts no bus (`busActive` false).
+    private func updateBus() {
+        guard busActive else { return }
+        let node: MembershipBusView.Node
+        var dim = busNodeDimmed
+        if isToggleBlocked {
+            node = .blocked              // §4.6 greyed hollow node
+        } else if !device.isAvailable {
+            // Unavailable signature (spec §3.6 matrix): a HOLLOW, tinted node the
+            // line detours — an unavailable device is not currently in the mix,
+            // whatever its held checkbox state says. The `Unavailable` sublabel +
+            // row-level text dim keep it distinct from blocked (R5).
+            node = .nonMember
+            dim = true
+        } else if isSelectedInSet {
+            node = .member               // §4.3 filled gold node
+        } else {
+            node = .nonMember            // §4.4 hollow node, line detours
+        }
+        // A FAILED member always renders at full failure emphasis regardless of
+        // dormancy — never dim its node (the red ring/sublabel carry it, and the
+        // node stays a full member until an honest toggle-off).
+        if case .failed = device.connectionState { dim = false }
+        busView.apply(node: node, railAbove: true, railBelow: !busTerminates, dimmed: dim)
+    }
+
+    /// Updates the mute button's engaged treatment for the current
+    /// `muteButton.state` (V1 + S3, spec §3.4/§3.5): `.on` (muted) reads as an
+    /// accent-tinted glyph inside a **filled accent pill** (drawing-only, on
+    /// the real `NSButton`'s backing layer — behavior/keyboard/VoiceOver
+    /// untouched); `.off` reverts to the neutral secondary tint with no pill.
+    /// The glyph itself NEVER changes (no alternate/slash image — locked
+    /// decision). Mirrors `MainOutRowView.updateMuteTint()`. Called from
+    /// `apply` (model refresh) AND `muteToggled` (a live click) so both paths
+    /// land the same treatment instantly, and from
+    /// `viewDidChangeEffectiveAppearance` (the pill fill is a static CGColor).
     private func updateMuteTint() {
-        muteButton.contentTintColor = muteButton.state == .on ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        let engaged = muteButton.state == .on
+        muteButton.contentTintColor = engaged ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        muteButton.wantsLayer = true
+        muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            muteButton.layer?.backgroundColor = engaged
+                ? Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
+                : nil
+        }
+    }
+
+    /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
+    /// light/dark or Increase-Contrast switch (the dot/ring/bus subviews all
+    /// handle their own re-resolution).
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateMuteTint()
     }
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
@@ -362,12 +528,12 @@ public final class DeviceRowView: NSView {
     /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
     private static let routingTokenSeparator = " · "
 
-    // MERGE NOTE (2026-07-17, phase2b ← main): the old `applyConnectionStatus(_:)`
-    // (badge + failed-only sublabel) is gone — not dropped, SUPERSEDED. `apply`
-    // now drives `StatusDotView.apply(_:)` directly (same idempotent reset, so a
-    // repeated `apply` still can't leave a stale breathing animation running) and
-    // routes every sublabel through `resolveSublabel(routedAppNames:)`'s ladder,
-    // which subsumes the failed-only case as its highest rung.
+    // NOTE (2026-07-22, Warm Signal S1): the corner connection dot
+    // (`StatusDotView`) is retired; `apply` now drives `HaloRingView.apply(_:)`
+    // directly (same idempotent reset, so a repeated `apply` still can't leave a
+    // stale breathing animation running) and routes every sublabel through
+    // `resolveSublabel(routedAppNames:liveAppNames:)`'s ladder, which subsumes
+    // the failed-only case as its highest rung.
 
     /// Decide the single sublabel line via one precedence ladder (highest first;
     /// exactly one line, or none), then show/hide `statusLabel` and center the
@@ -388,14 +554,48 @@ public final class DeviceRowView: NSView {
     /// 4. else → no sublabel; single-line row (name centered).
     private func resolveSublabel(routedAppNames: [String], liveAppNames: [String]) {
         if case .failed = device.connectionState {
-            showSublabel("Couldn't connect", color: Tokens.Color.warning)
+            // Failure-exclusive red (spec §2/§3.5/R8) — paired with the red
+            // failed halo ring; supersedes the old systemOrange `warning` tint.
+            showSublabel("Couldn't connect", color: Tokens.Color.failure)
         } else if !device.isAvailable {
             showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
         } else if let routing = routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames) {
-            showSublabel(routing, color: Tokens.Color.secondaryLabel)
+            // S3 (spec §3.5): a ROW-muted device prepends the small-caps MUTED
+            // token to its EXISTING feed sublabel — never to a single-line row
+            // (this branch only runs when a sublabel already exists, so the
+            // row height is untouched — R7 no-reflow). Master mute adds NO
+            // token (matrix §3.6: the Main Out pill carries it; and since
+            // master mute is realized by muting every member, `isMasterMuted`
+            // is what distinguishes the two).
+            if device.isMuted && !isMasterMuted {
+                showMutedSublabel(feeds: routing)
+            } else {
+                showSublabel(routing, color: Tokens.Color.secondaryLabel)
+            }
         } else {
             hideSublabel()
         }
+    }
+
+    /// Show the sublabel as `MUTED · <feeds>` (spec §3.5 slot rung 3): the
+    /// leading MUTED token in the micro-label voice (spec §2 — SF Mono bold,
+    /// tracked, uppercase) with the feed list continuing in the sublabel's own
+    /// 10 pt voice. Same single `statusLabel`, same line, same row height.
+    private func showMutedSublabel(feeds: String) {
+        statusLabel.isHidden = false
+        let bodyFont = statusLabel.font ?? .systemFont(ofSize: 10)
+        let composed = NSMutableAttributedString(
+            string: "MUTED",
+            attributes: [.font: Tokens.Font.microLabel,
+                         .kern: Tokens.Font.microLabelKern,
+                         .foregroundColor: Tokens.Color.secondaryLabel])
+        composed.append(NSAttributedString(
+            string: Self.routingTokenSeparator + feeds,
+            attributes: [.font: bodyFont,
+                         .foregroundColor: Tokens.Color.secondaryLabel]))
+        statusLabel.attributedStringValue = composed
+        statusLabel.textColor = Tokens.Color.secondaryLabel
+        applyNameStackLayout(twoLine: true)
     }
 
     /// The routing line for the current selection + routed apps, or `nil` when
@@ -430,10 +630,15 @@ public final class DeviceRowView: NSView {
 
     /// Push a live RMS reading into the leading VU meter (task T3). No-op when
     /// `showsMeter` is false — the mixer window/`GroupRowView` never call this.
+    /// While the row is muted (row OR master — S3), an incoming push is coerced
+    /// to 0 so a straggling RMS event can never refill a drained meter: a muted
+    /// row's meter stays down until unmute (the decay ballistics still ease any
+    /// remaining bar toward 0, so the drain look is preserved).
     public func setLevel(_ rms: Float) {
         guard showsMeter else { return }
-        lastMeterLevel = rms
-        meterView.setLevel(rms)
+        let effective = (device.isMuted || isMasterMuted) ? 0 : rms
+        lastMeterLevel = effective
+        meterView.setLevel(effective)
     }
 
     /// Zero the leading VU meter with no animation (popover-close discipline —
@@ -482,12 +687,24 @@ public final class DeviceRowView: NSView {
                                         : PopoverColumnGrid.leadingInset
 
         enableCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        // Bus rows (spec §4): swap in a no-op-drawing cell BEFORE `setButtonType`
+        // so the checkbox stays a real, keyboard- and VoiceOver-operable `.switch`
+        // button that simply renders nothing — the ``MembershipBusView`` node is
+        // its visible skin (§4.8 "only the DRAWING changes"). `setButtonType`
+        // configures the existing cell in place, so the subclass survives it.
+        if busActive { enableCheckbox.cell = InvisibleSwitchCell() }
         enableCheckbox.setButtonType(.switch)       // AppKit checkbox
         enableCheckbox.title = ""                    // no inline title
         enableCheckbox.controlSize = .regular
         enableCheckbox.target = self
         enableCheckbox.action = #selector(enableToggled(_:))
         enableCheckbox.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Bus node/rail overlay (spec §4): non-interactive, spans the full row
+        // height at the node column, drawing this row's node + rail segment. Added
+        // BELOW the checkbox in z-order isn't required (it never hit-tests), but it
+        // must be present so clicks on the node area still reach the checkbox.
+        busView.translatesAutoresizingMaskIntoConstraints = false
         // Group-member rows hide the toggle (task C). Its leading slot is not
         // reused — the row already indents, keeping the icon column aligned.
         enableCheckbox.isHidden = !showsToggle
@@ -496,11 +713,15 @@ public final class DeviceRowView: NSView {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
-        // On-icon status badge: overlaps the icon's bottom-right corner. Not
-        // clipped by the icon (added as a row subview, positioned on the icon's
-        // corner) so the punch-out border shows around it.
-        statusDotView.translatesAutoresizingMaskIntoConstraints = false
-        statusDotView.setContentHuggingPriority(.required, for: .horizontal)
+        // Connection halo ring: a box the size of the icon, centered on the icon,
+        // drawing the ring circle around the glyph. Non-interactive overlay.
+        haloRingView.translatesAutoresizingMaskIntoConstraints = false
+        haloRingView.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Route-armed corner dot (spec §3.3): a small box riding the icon's
+        // bottom-right corner (the retired connection dot's position, off the
+        // same `statusDotInset` pull-in). Non-interactive overlay.
+        armedDotView.translatesAutoresizingMaskIntoConstraints = false
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.menuItem
@@ -550,10 +771,12 @@ public final class DeviceRowView: NSView {
         let nameClick = NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:)))
         nameLabel.addGestureRecognizer(nameClick)
 
+        if busActive { addSubview(busView) }
         addSubview(enableCheckbox)
         if showsMeter { addSubview(meterView) }
         addSubview(iconView)
-        addSubview(statusDotView)          // over the icon's corner
+        addSubview(haloRingView)           // ring around the icon glyph
+        addSubview(armedDotView)           // gold route-armed dot on its corner
         addSubview(nameLabel)
         addSubview(statusLabel)
         addSubview(slider)
@@ -586,17 +809,26 @@ public final class DeviceRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
-            // On-icon status badge: sized to the badge diameter, its center
-            // pulled IN from the icon's bottom-right corner by `statusDotInset`
-            // so it rides the (now box-filling) glyph's corner with a slight
-            // overhang, reading as a distinct badge over the symbol rather than
-            // floating in the box padding below it.
-            statusDotView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
-            statusDotView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.statusDotDiameter),
-            statusDotView.centerXAnchor.constraint(equalTo: iconView.trailingAnchor,
-                                                   constant: -PopoverColumnGrid.statusDotInset),
-            statusDotView.centerYAnchor.constraint(equalTo: iconView.bottomAnchor,
-                                                   constant: -PopoverColumnGrid.statusDotInset),
+            // Connection halo ring: a box matching the icon box, centered on the
+            // icon, so its inscribed `haloRingDiameter` circle rings the glyph.
+            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            haloRingView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
+            haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
+
+            // Route-armed dot: centered on the icon box's bottom-right corner,
+            // pulled in by `statusDotInset` (the retired connection dot's
+            // geometry, spec §3.3).
+            armedDotView.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.routeArmedDotBoxSize),
+            armedDotView.heightAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.routeArmedDotBoxSize),
+            armedDotView.centerXAnchor.constraint(
+                equalTo: iconView.trailingAnchor,
+                constant: -PopoverColumnGrid.statusDotInset),
+            armedDotView.centerYAnchor.constraint(
+                equalTo: iconView.bottomAnchor,
+                constant: -PopoverColumnGrid.statusDotInset),
 
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                constant: PopoverColumnGrid.iconToName),
@@ -641,6 +873,29 @@ public final class DeviceRowView: NSView {
                 constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
             enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
         ]
+
+        if busActive {
+            // The bus overlay is centered on the SAME node column x as the checkbox
+            // (both anchored to the trailing edge via the shared grid), so the node
+            // never moves when membership toggles — zero layout shift (spec §4.1 /
+            // R7). It spans the full row height for the continuous rail.
+            constraints.append(contentsOf: [
+                busView.centerXAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
+                busView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                busView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.busColumnWidth),
+                busView.heightAnchor.constraint(equalTo: heightAnchor),
+                // Pin the invisible checkbox to a deterministic hit area covering
+                // the node (the no-op cell draws nothing; without an explicit size
+                // its intrinsic hit target is undefined). Centered on the column, so
+                // a click on the node toggles membership exactly as before.
+                enableCheckbox.widthAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+                enableCheckbox.heightAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+            ])
+        }
 
         if showsMeter {
             constraints.append(contentsOf: [
@@ -713,11 +968,19 @@ public final class DeviceRowView: NSView {
     }
 
     /// Clicking the device NAME toggles the ENABLED checkbox (2026-07-17), firing
-    /// the SAME delegate path as the checkbox itself. A no-op when the checkbox is
-    /// disabled (Phase-1 local-mix block, or an unavailable device) — checks the
-    /// same conditions `enableCheckbox.isEnabled` uses. For a `.failed` device this
-    /// re-enables it (= retry), which is intended.
+    /// the SAME delegate path as the checkbox itself. On a BLOCKED row (spec §4.6
+    /// — "a click ANYWHERE on the row body / name / node") the click instead
+    /// requests the in-place refusal note, so the name is never a dead surface on
+    /// the one row whose toggle can't move (S4 — the label consumes the mouseDown,
+    /// so the row-body `mouseDown(with:)` branch alone can't cover it). Otherwise
+    /// a disabled checkbox (an unavailable device) keeps the click a no-op —
+    /// the same conditions `enableCheckbox.isEnabled` uses. For a `.failed`
+    /// device this re-enables it (= retry), which is intended.
     @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
+        if isToggleBlocked {
+            delegate?.deviceRowDidRequestBlockedExplanation(self)
+            return
+        }
         guard enableCheckbox.isEnabled else { return }
         let flipped = enableCheckbox.state != .on
         enableCheckbox.state = flipped ? .on : .off
@@ -725,14 +988,17 @@ public final class DeviceRowView: NSView {
     }
 
     /// The name/label colour for the current state: menu highlight wins, then a
-    /// dropped device greys out, then a blocked toggle (Phase-1 local-mix block)
-    /// greys the name too (V12 — the row reads consistently de-emphasized while
-    /// its membership control can't be touched), then a not-selected device
-    /// de-emphasizes (it's not in the Selected Devices set), then normal.
+    /// dropped device greys out, then a not-selected device de-emphasizes (it's
+    /// not in the Selected Devices set), then normal.
+    ///
+    /// A BLOCKED row deliberately keeps NORMAL text (spec §4.6/§7 R5, S4 —
+    /// supersedes the older V12 name-grey): its signature is the distinct greyed
+    /// bus node + the body-click refusal note. A row-level text dim here would
+    /// blur into the UNAVAILABLE signature (disabled text + "Unavailable"
+    /// sublabel + tinted node) — the two "can't" states must never look alike.
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
         if !device.isAvailable { return .disabledControlTextColor }
-        if isToggleBlocked { return Tokens.Color.tertiaryLabel }
         return isSelectedInSet ? Tokens.Color.label : Tokens.Color.secondaryLabel
     }
 
@@ -764,18 +1030,24 @@ public final class DeviceRowView: NSView {
     }
 
     /// Simulate the user clicking the device NAME (toggles the ENABLED checkbox,
-    /// same delegate path). A no-op when the checkbox is disabled, mirroring the
-    /// real gesture handler.
+    /// same delegate path). Mirrors the real gesture handler: on a BLOCKED row it
+    /// requests the in-place refusal note (spec §4.6, S4) instead; on any other
+    /// disabled checkbox it's a no-op.
     public func test_clickName() {
+        if isToggleBlocked {
+            delegate?.deviceRowDidRequestBlockedExplanation(self)
+            return
+        }
         guard enableCheckbox.isEnabled else { return }
         let flipped = enableCheckbox.state != .on
         enableCheckbox.state = flipped ? .on : .off
         delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
     }
 
-    /// Which on-icon status dot the row is currently showing — derived from
-    /// `device.connectionState` (the single source the badge renders from), so it
-    /// can never drift from what's actually on screen.
+    /// Which connection ring the row is currently showing — derived from
+    /// `device.connectionState` (the single source the ring renders from), so it
+    /// can never drift from what's actually on screen. (Named `statusKind` for
+    /// back-compat; it now reports the halo-ring form.)
     public var test_statusKind: StatusKind {
         switch device.connectionState {
         case .off:                        return .none
@@ -785,11 +1057,48 @@ public final class DeviceRowView: NSView {
         }
     }
 
+    /// The halo ring's ACTUAL rendered form, read from the ring view (not
+    /// re-derived from `connectionState`) — proves the ring is wired to the
+    /// state, catching a drive-path regression `test_statusKind` can't.
+    public var test_ringForm: StatusKind {
+        switch haloRingView.test_form {
+        case .none:        return .none
+        case .connecting:  return .connecting
+        case .connected:   return .connected
+        case .failed:      return .failed
+        }
+    }
+
+    /// The halo ring's current stroke color (resolved against the effective
+    /// appearance) — asserts connected (`ringConnected`) vs failed (`failure`)
+    /// use distinct hues.
+    public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
+
+    /// The halo ring's current stroke width — asserts the failed ring's heavier
+    /// weight (`haloRingFailedStroke`) vs the connected ring.
+    public var test_ringLineWidth: CGFloat { haloRingView.test_lineWidth }
+
+    /// Whether the halo ring is currently DASHED — the connecting/reconnecting
+    /// "incomplete" form, which survives (static) under Reduce Motion.
+    public var test_ringIsDashed: Bool { haloRingView.test_isDashed }
+
+    /// The row's current VoiceOver label — lets tests assert every connection
+    /// state has a spoken equivalent (the ring's accessible counterpart, spec
+    /// §4.8; absorbs A11Y-DEVICEROW for connection state).
+    public var test_accessibilityLabel: String? { accessibilityLabel() }
+
     /// The current sublabel's text, or `nil` when hidden. Reports whichever of the
     /// three sublabel kinds is showing (failed "Couldn't connect" / "Unavailable"
     /// / the routing line), since all three flow through the single `statusLabel`.
     public var test_statusText: String? {
         statusLabel.isHidden ? nil : statusLabel.stringValue
+    }
+
+    /// The sublabel's current text color, or `nil` when hidden — asserts the
+    /// failed sublabel uses the failure-exclusive red (R8), paired with the
+    /// failed ring.
+    public var test_statusColor: NSColor? {
+        statusLabel.isHidden ? nil : statusLabel.textColor
     }
 
     /// The composed routing sublabel string ("System …" joined by " · "), or
@@ -801,9 +1110,9 @@ public final class DeviceRowView: NSView {
         routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
     }
 
-    /// Whether the connecting/reconnecting badge's breathing pulse is installed
+    /// Whether the connecting/reconnecting ring's breathing pulse is installed
     /// (on screen + Reduce Motion off). Lets tests assert the animation hook.
-    public var test_dotIsPulsing: Bool { statusDotView.test_isBreathing }
+    public var test_ringIsBreathing: Bool { haloRingView.test_isBreathing }
 
     /// The primary ON/OFF checkbox's current state (for structural assertions).
     public var test_isEnabledOn: Bool { enableCheckbox.state == .on }
@@ -828,6 +1137,53 @@ public final class DeviceRowView: NSView {
     /// this tint does.
     public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
 
+    /// Whether the mute button is currently drawing its ENGAGED pill (S3, spec
+    /// §3.4/§3.5): `.on` state + the accent pill fill stamped on its layer.
+    public var test_isMutePillEngaged: Bool {
+        muteButton.state == .on && muteButton.layer?.backgroundColor != nil
+    }
+
+    // MARK: Route-armed dot (spec §3.3) test hooks
+
+    /// Whether the gold route-armed corner dot is currently LIT — reads the
+    /// dot view's rendered state (the §3.3 predicate's outcome), so it can't
+    /// drift from the pixels.
+    public var test_routeArmed: Bool { armedDotView.test_isLit }
+
+    /// The dot's current fill color (resolved) — gold when armed, the
+    /// dark/empty `dotSocket` otherwise.
+    public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
+
+    /// Whether the lit dot's STATIC glow halo is on (armed only).
+    public var test_dotHasGlow: Bool { armedDotView.test_hasGlow }
+
+    /// Whether the one-shot arm bloom is currently mid-flight (fires only on a
+    /// transition INTO armed after the first apply, on screen, Reduce Motion
+    /// off — spec §6).
+    public var test_dotIsBlooming: Bool { armedDotView.test_isBlooming }
+
+    /// The row's current VoiceOver VALUE ("muted" / "armed" / "playing here"
+    /// composition) — the spoken equivalent of the dot + mute channels.
+    public var test_accessibilityValue: String? { accessibilityValue() as? String }
+
+    /// The row's current VoiceOver HINT (`accessibilityHelp`) — carries the
+    /// local-mix refusal reason on a BLOCKED row (spec §4.6, S4), `nil` elsewhere.
+    public var test_accessibilityHint: String? { accessibilityHelp() }
+
+    /// The meter's current ballistics TARGET — with ``test_meterDisplayed``,
+    /// distinguishes the S3 mute DRAIN (target 0, displayed still easing down)
+    /// from a hard reset (both 0 instantly).
+    public var test_meterTarget: CGFloat { meterView.test_targetLevel }
+
+    /// The meter's currently DRAWN level.
+    public var test_meterDisplayed: CGFloat { meterView.test_displayedLevel }
+
+    /// Settle the meter's DRAWN level synchronously (no display link) — the
+    /// deterministic setup step for drain-vs-reset assertions and snapshots.
+    public func test_settleMeterDisplayed(_ level: CGFloat) {
+        meterView.test_setDisplayedLevel(level)
+    }
+
     /// The `%` readout's current text colour (V7) — dims to `.tertiaryLabelColor`
     /// in lockstep with the slider's disabled state, `.secondaryLabelColor`
     /// otherwise.
@@ -838,21 +1194,71 @@ public final class DeviceRowView: NSView {
     /// controllability/unsupported-ness gate it.
     public var test_isSliderEnabled: Bool { slider.isEnabled }
 
-    /// Whether the "Selected Devices" checkbox is currently rendered dimmed (A1)
-    /// — a visual de-emphasis (alpha ~0.4) that does NOT disable the control;
-    /// pair with `test_isEnabledOn`/clicking to confirm it's still interactive.
-    public var test_isSelectionDimmed: Bool { enableCheckbox.alphaValue < 1.0 }
+    /// Whether the "Selected Devices" membership is currently rendered dimmed (A1
+    /// / §4.7) — a visual de-emphasis that does NOT disable the control. For a
+    /// non-bus row this is the checkbox alpha (~0.4); for a BUS row it's the node
+    /// TINT (`busNodeDimmed`), since the bus dims via tint with the checkbox held
+    /// at full alpha (§4.7). Pair with `test_isEnabledOn`/clicking to confirm it's
+    /// still interactive.
+    public var test_isSelectionDimmed: Bool {
+        busNodeDimmed || enableCheckbox.alphaValue < 1.0
+    }
+
+    // MARK: Membership bus (spec §4) test hooks
+
+    /// The bus node currently drawn (spec §4) — `nil` when this row has no bus
+    /// (non-bus host, or a `showsToggle == false` group-member row, which keeps
+    /// NO bus node). Reads the same `MembershipBusView` state the drawing reads,
+    /// so it can't drift from the pixels.
+    public var test_busNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
+
+    /// Whether the bus draws a rail BELOW this row's node — `false` only on the
+    /// terminating last node (spec §4.1). `nil` when the row has no bus.
+    public var test_busRailBelow: Bool? { busActive ? busView.test_railBelow : nil }
+
+    /// Whether the bus node is ACTUALLY drawn in the de-emphasis tint — reads
+    /// the drawn value (dormant tint, unavailable tint, and the failed-member
+    /// never-dim exemption included), unlike `test_isSelectionDimmed` which
+    /// reports the host-driven dormancy input. `nil` when the row has no bus.
+    public var test_busNodeDimmed: Bool? { busActive ? busView.test_dimmed : nil }
+
+    /// The x-position (in this row's coordinates) of the bus node's center, after
+    /// layout — used to prove the node NEVER moves when membership toggles (spec
+    /// §4.1 / R7 "zero layout shift"). `nil` when the row has no bus.
+    public func test_busNodeCenterX() -> CGFloat? {
+        guard busActive else { return nil }
+        layoutSubtreeIfNeeded()
+        return busView.frame.midX
+    }
+
+    /// The membership control's (the node-skinned checkbox's) current VoiceOver
+    /// label — asserts the bus node speaks as the SAME real checkbox (spec §4.8:
+    /// the node IS the checkbox to VoiceOver; the checked/unchecked value comes
+    /// from the un-subclassed `NSButton` state machinery for free).
+    public var test_membershipAXLabel: String? { enableCheckbox.accessibilityLabel() }
+
+    /// Drive the REAL checkbox action dispatch (spec §4.8 — the checkbox stays the
+    /// control underneath). Mirrors `MainOutRowMenuDispatchTests`' house style:
+    /// set the checkbox's state then invoke its OWN `target`/`action` with the
+    /// checkbox as sender, exactly as AppKit does on a click — NOT the delegate
+    /// shortcut. Proves the node's toggle path is wired end-to-end through the
+    /// live control.
+    public func test_fireCheckboxAction(settingStateTo on: Bool) {
+        enableCheckbox.state = on ? .on : .off
+        guard let action = enableCheckbox.action,
+              let target = enableCheckbox.target as? NSObject else { return }
+        _ = target.perform(action, with: enableCheckbox)
+    }
+
+    /// Simulate a click on the BODY of a blocked row (spec §4.6) — runs the exact
+    /// production branch `mouseDown(with:)` runs, without synthesizing an event.
+    public func test_simulateBlockedBodyClick() { _ = handleBodyMouseDown() }
 
     /// The device name label's current colour (``rowTextColor``) — asserts the
     /// V12 blocked-name branch (`.tertiaryLabelColor`) alongside the ordinary
     /// available/selected states. `apply` already stamps this, so no `draw(_:)`
     /// call is needed to read it.
     public var test_nameColor: NSColor? { nameLabel.textColor }
-
-    /// Whether the routing-active teal indicator is currently showing on the
-    /// icon badge — true when the device has live per-app routes but is not in
-    /// the whole-system output set (T3). Delegates to the badge view.
-    public var test_isShowingRoutingIndicator: Bool { statusDotView.test_isShowingRoutingDot }
 
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
@@ -868,6 +1274,28 @@ public final class DeviceRowView: NSView {
 
     public override func mouseEntered(with event: NSEvent) { setHovered(true) }
     public override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// A click on the BODY of a BLOCKED row (spec §4.6) surfaces the refusal note
+    /// — the reachable trigger the disabled checkbox + tooltip alone lacked
+    /// (§8.5). A click landing on a live control (slider/mute) is consumed by
+    /// that subview and never reaches here; the NAME label also consumes its
+    /// clicks but routes a blocked row's to the same request via `nameClicked(_:)`
+    /// (S4 — "anywhere on the row body / name / node"); a click on the disabled
+    /// checkbox (disabled controls don't hit-test) or the row body lands here. On
+    /// a non-blocked row this falls through to the default handling.
+    public override func mouseDown(with event: NSEvent) {
+        if handleBodyMouseDown() { return }
+        super.mouseDown(with: event)
+    }
+
+    /// The blocked-body-click branch, factored out so the test hook exercises the
+    /// exact production logic without synthesizing an `NSEvent`. Returns `true`
+    /// when the click was handled as a blocked-explanation request.
+    private func handleBodyMouseDown() -> Bool {
+        guard isToggleBlocked else { return false }
+        delegate?.deviceRowDidRequestBlockedExplanation(self)
+        return true
+    }
 
     /// C3: a pointing-hand cursor over the NAME label only (its click toggles
     /// membership, ``nameClicked(_:)``) — scoped to `nameLabel.frame`, not the
@@ -1073,18 +1501,50 @@ public final class DeviceRowView: NSView {
         let stateClause = state.map { ", \($0)" } ?? ""
         setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
 
-        enableCheckbox.setAccessibilityLabel(
-            isSelectedInSet ? "Remove \(device.name) from Selected Devices"
-                            : "Add \(device.name) to Selected Devices")
+        // The row's VALUE carries the live signal channels (S2/S3 — every
+        // visual state has a spoken equivalent, shipped with the drawing):
+        // "muted" for the engaged mute pill / drained meter, and the armed
+        // dot's wording — "playing here" when a confirmed live feed lights it,
+        // "armed" for the held main-mix route.
+        var valueParts: [String] = []
+        if device.isMuted || isMasterMuted { valueParts.append("muted") }
+        if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
+        setAccessibilityValue(valueParts.joined(separator: ", "))
+
+        // Blocked local-mix row (spec §4.6, S4): the refusal reason rides the
+        // row's HINT — the spoken equivalent of the body-click refusal note, so
+        // the disabled control + tooltip is never the only surfacing for
+        // VoiceOver either. `nil` clears it on any non-blocked repaint.
+        setAccessibilityHelp(isToggleBlocked ? blockReasonText : nil)
+
+        if busActive {
+            // Bus rows (spec §4.8): the node IS the checkbox to VoiceOver. A
+            // checkbox's label stays STABLE across toggles — "include … in main
+            // audio" — and the checked/unchecked VALUE (from the untouched
+            // `NSButton` state machinery) carries the membership, so VoiceOver
+            // reads "Include Office in main audio, checked". Activation
+            // (Space/click → `enableToggled(_:)`) is unchanged.
+            enableCheckbox.setAccessibilityLabel("Include \(device.name) in main audio")
+        } else {
+            enableCheckbox.setAccessibilityLabel(
+                isSelectedInSet ? "Remove \(device.name) from Selected Devices"
+                                : "Add \(device.name) to Selected Devices")
+        }
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
         // The name-click is a mouse convenience; the switch stays the
         // authoritative accessibility control. A hint on the name label documents
-        // the click for VoiceOver users who land on it.
-        nameLabel.setAccessibilityHelp(
-            isSelectedInSet ? "Click to remove from Selected Devices"
-                            : "Click to add to Selected Devices")
+        // the click for VoiceOver users who land on it. On a BLOCKED row the
+        // name-click surfaces the refusal note instead (spec §4.6), so its hint
+        // carries the reason too.
+        if isToggleBlocked {
+            nameLabel.setAccessibilityHelp(blockReasonText)
+        } else {
+            nameLabel.setAccessibilityHelp(
+                isSelectedInSet ? "Click to remove from Selected Devices"
+                                : "Click to add to Selected Devices")
+        }
     }
 
     /// The accessibility-label clause for the current connection state
@@ -1108,4 +1568,39 @@ public extension DeviceRowView.Delegate {
     /// The real hosts (popover + mixer window) override this to call
     /// `GroupController.setDeviceEnabled`.
     func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {}
+    /// Default no-op so non-bus hosts (mixer window, narrow test doubles) needn't
+    /// implement the blocked-explanation surfacing (spec §4.6). The popover
+    /// overrides this to present the in-place refusal note.
+    func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {}
+}
+
+// MARK: - Invisible switch cell (spec §4.8)
+
+/// An `NSButtonCell` that draws NOTHING — used by a BUS row's `enableCheckbox`
+/// so the checkbox stays a real, focusable, keyboard- and VoiceOver-operable
+/// `.switch` button while the ``MembershipBusView`` node is its only visible
+/// skin (spec §4.8 "the real NSButton checkbox remains the control underneath …
+/// only the DRAWING changes"). It suppresses the cell's own bezel/interior
+/// rendering; state, target/action, keyEquivalent handling, and accessibility
+/// all come from the un-subclassed `NSButtonCell`/`NSButton` machinery, untouched.
+private final class InvisibleSwitchCell: NSButtonCell {
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {}
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {}
+
+    /// The keyboard focus ring traces the NODE, not the (invisible) switch
+    /// glyph's box (spec §4.8): a circle centered on the cell frame — the
+    /// checkbox is constrained centered on the node column, so this circle rings
+    /// the drawn node with a small breathing gap.
+    private func nodeRingRect(for cellFrame: NSRect) -> NSRect {
+        let d = PopoverColumnGrid.busNodeDiameter + 4
+        return NSRect(x: cellFrame.midX - d / 2, y: cellFrame.midY - d / 2, width: d, height: d)
+    }
+
+    override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {
+        nodeRingRect(for: cellFrame)
+    }
+
+    override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
+        NSBezierPath(ovalIn: nodeRingRect(for: cellFrame)).fill()
+    }
 }

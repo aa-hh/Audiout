@@ -64,6 +64,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
     private var statusItemController: StatusItemController!
 
+    /// Device IDs that currently have a non-empty CONFIRMED `.routedApps` app
+    /// list (T6's live "which app streams here now" signal, mirrored here off
+    /// the same events `PopoverController.applyRoutedApps` ingests — no new
+    /// polling). Feeds the menu-bar routing dot's predicate
+    /// (`StatusRoutingIndicator`, Warm Signal §5.5): a live per-app route
+    /// counts as broadcasting even when the Main Out target is passthrough.
+    private var liveRoutedDeviceIDs: Set<String> = []
+
     /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
     /// Wired with an explicit production `AppRoutingController` so app routes
@@ -863,6 +871,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // every other event — this call only updates state, it doesn't repaint
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+            // Mirror the same live-route signal for the status glyph's routing
+            // dot (empty list = the live set for this device went back to empty).
+            if appNames.isEmpty {
+                liveRoutedDeviceIDs.remove(deviceID)
+            } else {
+                liveRoutedDeviceIDs.insert(deviceID)
+            }
             log("event: \(describe(event))")
         case .routedAppRunning(let bundleID, let isRunning):
             // T4 (bug fix): a routed app quit or relaunched — update the popover's
@@ -879,7 +894,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // open), then drive the status symbol from the Main Out master.
         let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
-        statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        // Warm Signal §5.5 — the status glyph is a truthful glance: the arc is
+        // the Main Out master (drained while master-muted), the corner dot is
+        // the shared routing-live predicate over this same snapshot. The
+        // routed-apps set is intersected with the known fleet so a device that
+        // vanished mid-stream can't keep the dot lit.
+        let hasLiveAppRoutes = liveRoutedDeviceIDs.contains { devicesByID[$0] != nil }
+        statusItemController.update(
+            masterVolume: popoverController.statusMasterVolume,
+            isMainOutMuted: groupController.isMainOutMuted,
+            isRoutingLive: StatusRoutingIndicator.isRoutingLive(
+                devices: devices,
+                hasLiveAppRoutes: hasLiveAppRoutes))
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
     }

@@ -134,9 +134,29 @@ public final class AppRowView: NSView {
     /// list reads as one cohesive density instead of two interleaved ones.
     public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
+    /// The BRIDGE PHRASE (Warm Signal spec §5.1, decision 3): an unrouted
+    /// app's dropdown reads **"Follows main output"** — naming the app's
+    /// relationship to the main mix — instead of the host-supplied sentinel
+    /// title ("No Redirect"). Applied at DISPLAY time in `menuItem(for:)`
+    /// (this stage may not touch `PopoverController`, which supplies the
+    /// sentinel's `Destination.title`); every other entry keeps the host's
+    /// title verbatim, so a routed row's collapsed dropdown always names the
+    /// destination device.
+    private static let followsMainOutputTitle = "Follows main output"
+
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
     private var destinations: [Destination] = []
+    /// The plain app name from the last `apply(_:)` — kept separately from
+    /// `nameLabel` because the label may carry the composed "Name (idle)"
+    /// attributed string (spec §3.5's idle suffix) while VoiceOver must hear
+    /// the clean name plus discrete state phrases (`configureAccessibility`).
+    private var appName: String = ""
+    /// Whether the app's process was running at the last `apply(_:)` — stored
+    /// (rather than re-derived from `offlineBadge.isHidden`, which the idle
+    /// treatment now suppresses for routed rows) so `configureAccessibility`
+    /// can always voice "not running" when true state says so.
+    private var isRunning: Bool = true
     /// True iff the selected destination is the standalone "No Redirect" entry
     /// (`isStandalone`) — the neutral/unset state where the app just plays in the
     /// whole-system mix. The slider stays visible but dims/disables ONLY in this
@@ -221,7 +241,8 @@ public final class AppRowView: NSView {
         self.isHovered = false
 
         iconView.image = configuration.icon
-        nameLabel.stringValue = configuration.name
+        self.appName = configuration.name
+        self.isRunning = configuration.isRunning
 
         if !isDraggingSlider {
             slider.integerValue = configuration.volume
@@ -234,11 +255,59 @@ public final class AppRowView: NSView {
         slider.isEnabled = !isNoRedirect
         readoutLabel.textColor = isNoRedirect ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
 
-        // T4 offline indicator: badge and dimmed icon/name when not running.
-        let isRunning = configuration.isRunning
-        offlineBadge.isHidden = isRunning
+        // Name treatment (Warm Signal spec §2/§3.5, S6): the name color follows
+        // LIVENESS, not mere list presence — a live exception route is the
+        // bright anchor of the APP EXCEPTIONS section at full `label`; every
+        // non-live name sits at `secondaryLabel`. "Routed" = destination ≠ the
+        // standalone follows-main-output sentinel (an explicit Current Device
+        // pick IS an exception route with its own stream, Bug T2). LIVENESS
+        // PROXY: `Configuration` exposes only `isRunning` (process alive) —
+        // the confirmed-streaming signal (`BackendEvent.routedApps` /
+        // `liveAppNames`, which `PopoverController.applyRoutedApps` already
+        // holds for DEVICE rows) is not plumbed into this view's inputs, so
+        // routed ∧ running stands in for "live" until the host passes the real
+        // flag (noted for the staff-review gate; this stage may not rewire the
+        // controller).
+        //
+        // A routed-but-idle app (route saved, process not running) appends the
+        // spec's **" (idle)" tertiary suffix** (§3.5's `AppName (idle)`
+        // pattern) so an enabled-but-quiet slider always has a visible cause —
+        // this REPLACES the old warning-badge treatment for routed rows: idle
+        // is a calm, expected state, not an alert (and the badge's yellow
+        // reads gold-adjacent, violating the gold-is-signal-only budget).
+        let isRouted = !isNoRedirect
+        let showsIdleSuffix = isRouted && !isRunning
+        if showsIdleSuffix {
+            let truncatingTail = NSMutableParagraphStyle()
+            truncatingTail.lineBreakMode = .byTruncatingTail
+            let composed = NSMutableAttributedString(
+                string: configuration.name,
+                attributes: [
+                    .font: Tokens.Font.menuItem,
+                    .foregroundColor: Tokens.Color.secondaryLabel,
+                    .paragraphStyle: truncatingTail,
+                ])
+            composed.append(NSAttributedString(
+                string: " (idle)",
+                attributes: [
+                    .font: Tokens.Font.menuItem,
+                    .foregroundColor: Tokens.Color.tertiaryLabel,
+                    .paragraphStyle: truncatingTail,
+                ]))
+            nameLabel.attributedStringValue = composed
+        } else {
+            nameLabel.stringValue = configuration.name
+            nameLabel.font = Tokens.Font.menuItem
+            nameLabel.textColor = (isRouted && isRunning)
+                ? Tokens.Color.label : Tokens.Color.secondaryLabel
+        }
+
+        // The T4 warning badge survives ONLY for an unrouted, not-running row
+        // (no idle suffix shows there — an unrouted row's slider is already
+        // dimmed, so there is no "enabled but quiet" contradiction to explain).
+        // The dimmed icon still marks not-running in both cases.
+        offlineBadge.isHidden = isRunning || isRouted
         iconView.alphaValue = isRunning ? 1.0 : 0.5
-        nameLabel.textColor = isRunning ? Tokens.Color.label : Tokens.Color.secondaryLabel
 
         rebuildDestinationMenu(selecting: configuration.selectedDestinationID)
         configureAccessibility()
@@ -359,10 +428,20 @@ public final class AppRowView: NSView {
     ///   plain title (still setting `toolTip` from `subtitle`); `true` also
     ///   renders `subtitle` as a second attributed line under the title (A3
     ///   destination microcopy).
+    /// The title an entry DISPLAYS (menu item + the popup's collapsed label,
+    /// which mirrors the selected item): the standalone sentinel renders the
+    /// bridge phrase "Follows main output" (spec §5.1, decision 3) so the
+    /// collapsed dropdown always names the destination — the relationship
+    /// when unrouted, the device name when routed. Every other entry shows
+    /// the host-supplied title verbatim.
+    private func displayTitle(for entry: Destination) -> String {
+        entry.isStandalone ? Self.followsMainOutputTitle : entry.title
+    }
+
     private func menuItem(
         for entry: Destination, isCurrent: Bool, action: Selector, allowsAttributedSubtitle: Bool = true
     ) -> NSMenuItem {
-        let item = NSMenuItem(title: entry.title, action: action, keyEquivalent: "")
+        let item = NSMenuItem(title: displayTitle(for: entry), action: action, keyEquivalent: "")
         item.target = self
         item.state = isCurrent ? .on : .off
         item.representedObject = entry.id
@@ -375,7 +454,7 @@ public final class AppRowView: NSView {
             item.toolTip = subtitle
             if allowsAttributedSubtitle {
                 let attributedTitle = NSMutableAttributedString(
-                    string: entry.title,
+                    string: displayTitle(for: entry),
                     attributes: [.font: Tokens.Font.menuItem])
                 attributedTitle.append(NSAttributedString(string: "\n"))
                 attributedTitle.append(NSAttributedString(
@@ -702,6 +781,39 @@ public final class AppRowView: NSView {
     /// "No Redirect", secondary otherwise).
     public var test_readoutTextColor: NSColor? { readoutLabel.textColor }
 
+    // MARK: Test-support hooks — APP EXCEPTIONS treatment (S6)
+
+    /// The dropdown's collapsed title — must always name the destination:
+    /// the bridge phrase "Follows main output" when unrouted (spec §5.1,
+    /// decision 3) or the device name when routed.
+    public var test_collapsedDestinationTitle: String? { destinationPopUp.titleOfSelectedItem }
+
+    /// The name label's full displayed text — includes the " (idle)" tertiary
+    /// suffix when a routed app's process isn't running (spec §3.5 pattern).
+    public var test_nameDisplayText: String { nameLabel.stringValue }
+
+    /// The colour of the NAME portion of the label (position 0 of the
+    /// attributed string when the idle suffix is composed, else the label's
+    /// plain `textColor`): full `label` for a live exception route — the
+    /// section's bright anchor — `secondaryLabel` otherwise.
+    public var test_nameTextColor: NSColor? {
+        let attributed = nameLabel.attributedStringValue
+        if attributed.length > 0,
+           let color = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor {
+            return color
+        }
+        return nameLabel.textColor
+    }
+
+    /// The colour of the " (idle)" suffix when present — `nil` when the name
+    /// carries no idle suffix. Must be `tertiaryLabel` (spec §3.5 idle voice).
+    public var test_idleSuffixColor: NSColor? {
+        let attributed = nameLabel.attributedStringValue
+        guard attributed.length > 0, attributed.string.hasSuffix("(idle)") else { return nil }
+        return attributed.attribute(
+            .foregroundColor, at: attributed.length - 1, effectiveRange: nil) as? NSColor
+    }
+
     /// The row's composed VoiceOver label — name, volume, routing destination,
     /// and "not running" when applicable (`configureAccessibility()`). This
     /// row is a single AX leaf (`setAccessibilityElement(true)`), so this is
@@ -838,22 +950,31 @@ public final class AppRowView: NSView {
         // composed label — `setAccessibilityElement(true)` makes this row a
         // single AX leaf, so a status-only badge/subview (like `offlineBadge`'s
         // own "Not running" image description) is never independently reached
-        // by VoiceOver; it must be said here or not at all. Read live view
-        // state (`destinationPopUp`'s already-rebuilt selection,
-        // `offlineBadge`'s already-set visibility) rather than duplicating it
-        // into a second stored flag, same idiom as `DeviceRowView.isInMenu`.
-        var label = "\(nameLabel.stringValue), volume \(slider.integerValue) percent"
-        if let destinationTitle = destinationPopUp.selectedItem?.title, !destinationTitle.isEmpty {
+        // by VoiceOver; it must be said here or not at all. The stored
+        // `appName`/`isRunning` back this (rather than `nameLabel`, which may
+        // carry the visual " (idle)" suffix, and `offlineBadge`, which the
+        // idle treatment suppresses for routed rows) so VoiceOver hears the
+        // clean name plus discrete state phrases regardless of the visual
+        // rendering — every visual state above has its spoken equivalent here.
+        //
+        // Composition (S6 item 6): an UNROUTED app reads "…, follows main
+        // output" (the bridge phrase, spec §5.1); a routed app reads
+        // "…, routed to <destination>".
+        var label = "\(appName), volume \(slider.integerValue) percent"
+        if isNoRedirect {
+            label += ", follows main output"
+        } else if let destinationTitle = destinationPopUp.selectedItem?.title,
+                  !destinationTitle.isEmpty {
             label += ", routed to \(destinationTitle)"
         }
-        if !offlineBadge.isHidden {
+        if !isRunning {
             label += ", not running"
         }
         setAccessibilityLabel(label)
 
         slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("\(nameLabel.stringValue) volume")
-        destinationPopUp.setAccessibilityLabel("\(nameLabel.stringValue) destination")
+        slider.setAccessibilityLabel("\(appName) volume")
+        destinationPopUp.setAccessibilityLabel("\(appName) destination")
     }
 
     // MARK: Test-support hooks
@@ -894,8 +1015,9 @@ public final class AppRowView: NSView {
     /// ``resetLevel()``. Mirrors `DeviceRowView.test_meterLevel()`.
     public func test_meterLevel() -> Float { lastMeterLevel }
     /// The full ordered list of titles in the destination menu: the standalone
-    /// "No Redirect" entry, a separator (empty title), then the two disabled
-    /// section headers ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.
+    /// entry (displayed as the bridge phrase "Follows main output", S6), a
+    /// separator (empty title), then the two disabled section headers
+    /// ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.
     public var test_menuTitles: [String] { destinationPopUp.menu?.items.map(\.title) ?? [] }
     /// The currently checkmarked destination id.
     public var test_selectedDestinationID: String? {

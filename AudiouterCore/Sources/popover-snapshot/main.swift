@@ -24,7 +24,12 @@
 // failed row's diagnosis panel open, written to
 // `popover-connection-{light,dark}.png`. States are set directly on hand-built
 // `Device` values and pushed through `PopoverController.update(devices:)` —
-// no script timing to wait on, so the render is fully deterministic.
+// no script timing to wait on, so the render is fully deterministic. This is
+// the PRIMARY visual gate for the Warm Signal v3 §3.2 halo ring: `.off` → no
+// ring · `.connecting`/`.reconnecting` → dashed `ringConnected` ring (the
+// breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
+// is deterministic) · `.connected` → solid `ringConnected` ring · `.failed` →
+// heavier solid red `failure` ring + red "Couldn't connect" sublabel.
 
 import AppKit
 import AudiouterCore
@@ -350,9 +355,10 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
 /// A small fleet with one row per `ConnectionState` case, for the
 /// `connection-states` snapshot mode. Each device's name says what it's
 /// demoing so the PNG is self-explanatory without cross-referencing code. This
-/// now exercises the on-icon corner dot (2026-07-17): `.off` hides it,
-/// `.connecting`/`.reconnecting` breathe a neutral dot, `.connected` a green
-/// dot, `.failed` an amber dot with the "Couldn't connect" sublabel.
+/// now exercises the halo connection ring (Warm Signal v3 §3.2): `.off` shows
+/// no ring, `.connecting`/`.reconnecting` a dashed breathing `ringConnected`
+/// ring, `.connected` a solid `ringConnected` ring, `.failed` a heavier solid
+/// red `failure` ring with the red "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [
         Device(id: "cs-off", name: "Idle Speaker", kind: .generic,
@@ -449,10 +455,22 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
 /// label. Two app routes are seeded so the two rungs are visible side by
 /// side in one panel:
 ///   - "office": redirected to Music AND given a live `.routedApps` event ⇒
-///     its row shows the CONFIRMED label ("Music").
+///     its row shows the CONFIRMED label ("Music") — and (S2, spec §3.3) its
+///     GOLD route-armed corner dot, lit via the `liveAppNames` branch on an
+///     UNCHECKED row (redirect-only: hollow bus node + gold dot + bright feed
+///     token).
 ///   - "homepod-bed": redirected to Safari but given NO live event ⇒ its row
 ///     falls back to the INTENT-based label ("Safari"), demonstrating the
 ///     "routed but not yet confirmed streaming" fallback case.
+///
+/// S2+S3 additionally stage the **armed + muted mix** in the same panel:
+///   - "sonos-move": toggled INTO the Selected set (connected) ⇒ armed — gold
+///     dot lit on a member row (and Main Out's own dot lit via its aggregate
+///     `.connected` ring state).
+///   - "homepod-bed": toggled in AND then row-MUTED ⇒ the full mute channel —
+///     engaged accent mute pill, DARK corner dot (armed predicate loses its
+///     unmuted condition), drained meter, and the leading small-caps
+///     `MUTED · System · Safari` sublabel token (no reflow — same row height).
 @MainActor
 func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
@@ -481,6 +499,13 @@ func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDi
     }
     popover.configure(groupController: controller)
     controller.ensureDefaultSelection()
+
+    // S2+S3 armed+muted mix: "sonos-move" joins the Selected set (connected ⇒
+    // armed, gold dot); "homepod-bed" joins AND is row-muted (engaged pill,
+    // dark dot, drained meter, leading MUTED sublabel token).
+    _ = popover.test_toggleDeviceEnabled(deviceID: "sonos-move", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+    popover.test_toggleMute(deviceID: "homepod-bed", muted: true)
 
     // "office" gets a CONFIRMED live signal via the T9 MockBackend fixture;
     // "homepod-bed" deliberately does NOT, so its row stays on the

@@ -125,6 +125,13 @@ public final class AboutViewController: NSViewController {
     public override func loadView() {
         var rows: [NSView] = []
 
+        // Identity lockup (Warm Signal §5.2 — Settings stays chrome-adjacent:
+        // stock material, semantic colors, NO warm canvas, NO gold): icon on
+        // the leading edge with name + version stacked beside it, reading as
+        // one quiet unit rather than a form row with the icon exiled to the
+        // trailing control slot. Display voice = `Tokens.Font.heading` (the
+        // app's existing +3pt semibold display step — no new token; the spec
+        // names none for About).
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -136,7 +143,26 @@ public final class AboutViewController: NSViewController {
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
         ])
-        rows.append(SettingsForm.row(title: info.appName, subtitle: info.versionLine, control: icon))
+
+        let nameLabel = SettingsForm.label(info.appName)
+        nameLabel.font = Tokens.Font.heading
+        nameLabel.textColor = Tokens.Color.label
+
+        let versionLabel = SettingsForm.label(info.versionLine)
+        versionLabel.font = Tokens.Font.caption
+        versionLabel.textColor = Tokens.Color.secondaryLabel
+
+        let identityText = NSStackView(views: [nameLabel, versionLabel])
+        identityText.orientation = .vertical
+        identityText.alignment = .leading
+        identityText.spacing = 0
+
+        let lockup = NSStackView(views: [icon, identityText])
+        lockup.orientation = .horizontal
+        lockup.alignment = .centerY
+        lockup.spacing = 12
+        lockup.translatesAutoresizingMaskIntoConstraints = false
+        rows.append(lockup)
 
         sourceCodeButton.title = "View Source Code"
         sourceCodeButton.bezelStyle = .rounded
@@ -154,7 +180,11 @@ public final class AboutViewController: NSViewController {
         rows.append(creditsLabel)
         rows.append(makeCreditsScrollView())
 
+        // Same quiet-header voice as "Third-Party Notices" above, so the two
+        // minor sections read as one system.
         let supportLabel = SettingsForm.label("Support")
+        supportLabel.font = Tokens.Font.captionEmphasized
+        supportLabel.textColor = Tokens.Color.secondaryLabel
         rows.append(supportLabel)
 
         let supportBody = SettingsForm.label(AboutLinks.supportContactPlaceholder)
@@ -203,7 +233,7 @@ public final class AboutViewController: NSViewController {
         creditsTextView.drawsBackground = false
         creditsTextView.font = Tokens.Font.caption
         creditsTextView.textColor = Tokens.Color.secondaryLabel
-        creditsTextView.textContainerInset = NSSize(width: 6, height: 6)
+        creditsTextView.textContainerInset = NSSize(width: 8, height: 8)  // 4pt grid
         creditsTextView.string = AboutCredits.thirdPartyNoticesText
         creditsTextView.isVerticallyResizable = true
         creditsTextView.isHorizontallyResizable = false

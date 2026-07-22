@@ -273,6 +273,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     private var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
+    /// The mounted in-place refusal-note row per BLOCKED device id (spec §4.6):
+    /// a body-click on a local-mix-blocked row toggles a one-line note carrying
+    /// `GroupController.localMixRefusalReason` directly under it — the reachable
+    /// trigger the disabled checkbox + tooltip alone lacked (§8.5). Transient
+    /// (cleared by every `rebuild()`, like the hover/selection state), so it never
+    /// resurrects after a repaint.
+    private var blockedNoteByID: [String: NSView] = [:]
+
     /// The Applications card's `AppRowView`s, keyed by bundle id (stable identity —
     /// `AppRoute.bundleID`). Populated by `rebuild()` in `appRoutes` order (T-8,
     /// PLAN §C). Lets `test_` hooks look a row up by bundle id.
@@ -427,8 +435,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
             } else {
-                refreshDeviceRows()
-                refreshMainOutRow()
+                // A failure auto-deselect (handleConnectionTransitions above) can
+                // change the checked set under a group target, flipping the
+                // Devices card's dormancy note (S5) — the reconciling repaint
+                // escalates to a rebuild exactly when the note must change.
+                refreshDeviceRowsReconcilingCardNote()
                 reconcileDiagnosisPanels(animated: true)
             }
         }
@@ -565,6 +576,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
         // "rebuild() restores open panels").
         diagnosisPanelsByID.removeAll()
+        blockedNoteByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
 
@@ -615,12 +627,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                         collapsible: true,
                         collapsed: collapsedState(for: "Devices", default: false),
                         onToggle: { [weak self] in self?.toggleCard("Devices") })
-        // A1 dormancy: while Audio Out targets a saved GROUP the Selected
-        // Devices set isn't what's playing — annotate the card (a header-region
-        // note that survives collapse) and dim every membership checkbox (inside
-        // `applySelectionState`, via `isDevicesCardDormant`).
-        if let dormantGroupName = activeGroupNameIfDormant() {
-            panel.addCardNote("Inactive — Audio Out is using '\(dormantGroupName)'")
+        // Dormancy note (spec §4.7 FINAL, S5): only a GENUINELY-DIVERGING group
+        // target annotates the card ("Inactive — Audio Out is using 'X'", a
+        // header-region note that survives collapse). The derived-identity case
+        // (checked set == active group's members) posts NO note — the Audio Out
+        // dropdown title already carries the group identity, and the rows render
+        // at full emphasis. Row de-emphasis is scoped inside `applySelectionState`.
+        let devicesCardNote = devicesCardNoteText()
+        renderedDevicesCardNote = devicesCardNote
+        if let note = devicesCardNote {
+            panel.addCardNote(note)
         }
         if locals.isEmpty && airplay.isEmpty {
             panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
@@ -633,6 +649,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             if !airplay.isEmpty {
                 panel.addSubsectionHeader("AirPlay Devices")
                 for device in airplay { panel.addRow(makeDeviceRow(device, indented: false)) }
+            }
+            // Terminate the membership bus at the LAST rendered device node (spec
+            // §4.1 "runs to the last device row's node") so the line stops there
+            // rather than dangling below it. Rendered order is locals then airplay.
+            if let lastBusDevice = (locals + airplay).last {
+                deviceRowsByID[lastBusDevice.id]?.setBusTerminates(true)
             }
         }
 
@@ -765,7 +787,41 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         mainOutRow.apply(options: options,
                          current: controller.mainOut,
                          master: controller.mainOutMasterVolume,
-                         isMuted: controller.isMainOutMuted)
+                         isMuted: controller.isMainOutMuted,
+                         connectionState: mainOutConnectionState(controller),
+                         // S5 (spec §4.7 FINAL): the bus origin stub dims only
+                         // under a GENUINELY-DIVERGING group target — in the
+                         // derived-identity case the whole bus (origin included)
+                         // keeps full emphasis, the dropdown title carrying the
+                         // group identity.
+                         busOriginDimmed: devicesCardDivergence() != nil)
+    }
+
+    /// The AGGREGATE connection state driving the Main Out halo ring (spec §3.2
+    /// Main Out note / §6): resolved over the ACTIVE target's members (the
+    /// Selected Devices set, or the routed group's members), read from the live
+    /// device snapshots. Pending/connected only — a failed member shows its own
+    /// red ring on its device row, never the Main Out ring:
+    ///   - any member `.connected` → `.connected` (solid ring),
+    ///   - else any member `.connecting` / `.reconnecting` → `.connecting`
+    ///     (dashed pending ring, so a multi-second destination-switch handshake
+    ///     never reads as dead/broken),
+    ///   - else `.off` (no ring).
+    private func mainOutConnectionState(_ controller: GroupController) -> ConnectionState {
+        let memberIDs: [String]
+        switch controller.mainOut {
+        case .selectedDevices: memberIDs = Array(controller.selectedDeviceIDs)
+        case .group(let id):   memberIDs = controller.groups.first { $0.id == id }?.memberIDs ?? []
+        }
+        var anyConnecting = false
+        for id in memberIDs {
+            switch devicesByID[id]?.connectionState {
+            case .connected:                 return .connected
+            case .connecting, .reconnecting: anyConnecting = true
+            default:                         break
+            }
+        }
+        return anyConnecting ? .connecting : .off
     }
 
     // MARK: Device rows
@@ -775,8 +831,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // needed to highlight multiple selected devices at once here; the
         // card already separates rows, and the icon tint + switch state still
         // say "on"). The mixer window keeps the wash (its default `true`).
+        // `showsBus: true` — the Selected-Devices rows carry the membership BUS
+        // (spec §4) in place of the checkbox's switch drawing; the real checkbox
+        // lives on underneath (§4.8). The mixer window / group members keep the
+        // default `false` (plain switch), so their rendering is unchanged.
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false, showsMeter: true)
+                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true)
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -789,27 +849,81 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         !appRouting.routedAppNames(for: id).isEmpty
     }
 
-    /// Whether the Devices card is currently DORMANT (A1): Audio Out targets a
-    /// saved GROUP, so the Selected Devices set isn't what's playing. Drives both
-    /// the card's dormancy note and the per-row checkbox dimming.
-    private var isDevicesCardDormant: Bool {
-        if case .group = groupController?.mainOut { return true }
-        return false
+    /// The Devices card's genuinely-DIVERGING dormant state (spec §4.7 FINAL
+    /// semantics, S5 — replaces the transitional "any group target dims
+    /// everything" treatment): non-`nil` only when Audio Out targets a saved
+    /// group AND the checked (Selected Devices) set does NOT equal that group's
+    /// member set.
+    private struct DevicesCardDivergence {
+        /// The active group's display name, for the card note.
+        let groupName: String
+        /// The ACTIVE target's member ids — rows inside it keep full emphasis;
+        /// only rows OUTSIDE it de-emphasize (via node tint, never alpha).
+        let targetMemberIDs: Set<String>
     }
 
-    /// The name of the saved group Audio Out is routing to while the Devices card
-    /// is dormant (A1), or `nil` when Selected Devices is the target. Falls back
-    /// to a generic label if the group id no longer resolves to a saved group.
-    private func activeGroupNameIfDormant() -> String? {
+    /// Resolve the current divergence, or `nil` in the two full-emphasis cases:
+    ///
+    /// - Main Out targets Selected Devices (no dormancy at all), or
+    /// - the **derived-identity** case (spec §3.4/§4.7): Main Out targets a
+    ///   saved group and the checked set EQUALS its member set — the rows ARE
+    ///   what's playing, the dropdown title carries the group identity, so there
+    ///   is no note and nothing dims.
+    ///
+    /// A stale group id (no saved group resolves — shouldn't happen, defensive)
+    /// counts as fully diverged with an empty target: every row reads as outside
+    /// the unknown target, under a generic note.
+    private func devicesCardDivergence() -> DevicesCardDivergence? {
         guard let controller = groupController,
               case .group(let id) = controller.mainOut else { return nil }
-        return controller.groups.first(where: { $0.id == id })?.name ?? "a group"
+        guard let group = controller.groups.first(where: { $0.id == id }) else {
+            return DevicesCardDivergence(groupName: "a group", targetMemberIDs: [])
+        }
+        let target = Set(group.memberIDs)
+        guard controller.selectedDeviceIDs != target else { return nil }
+        return DevicesCardDivergence(groupName: group.name, targetMemberIDs: target)
+    }
+
+    /// The "Inactive" card note the Devices card should currently show, or `nil`
+    /// (spec §4.7: the note appears only under genuine divergence — the derived
+    /// case posts none).
+    private func devicesCardNoteText() -> String? {
+        devicesCardDivergence().map { "Inactive — Audio Out is using '\($0.groupName)'" }
+    }
+
+    /// The note text the LAST `rebuild()` actually rendered onto the Devices card
+    /// (`nil` = none). Because the note now depends on the checked set — not just
+    /// the Main Out target — a membership toggle or a failure auto-deselect can
+    /// flip it, and in-place repaint paths compare against this to decide whether
+    /// a structural `rebuild()` is required (see
+    /// `refreshDeviceRowsReconcilingCardNote()`).
+    private var renderedDevicesCardNote: String?
+
+    /// In-place device-section repaint that escalates to a full `rebuild()` when
+    /// the Devices card's dormancy note must appear/disappear/rename (a card-note
+    /// change is structural — only `rebuild()` mounts/unmounts it). Everything
+    /// else stays the cheap `refreshDeviceRows()` + `refreshMainOutRow()` path.
+    private func refreshDeviceRowsReconcilingCardNote() {
+        if devicesCardNoteText() != renderedDevicesCardNote {
+            rebuild()
+            panel.panelContentDidChangeHeight(animated: true)
+        } else {
+            refreshDeviceRows()
+            refreshMainOutRow()
+        }
     }
 
     /// Push the current membership + local-block state into a device row.
     private func applySelectionState(to row: DeviceRowView, device: Device) {
-        // A1: under a group target every checkbox dims (but stays clickable).
-        let dimmed = isDevicesCardDormant
+        // Dormant de-emphasis (spec §4.7 FINAL, S5): dim ONLY rows that fall
+        // OUTSIDE a genuinely-diverging group target — via node TINT, never
+        // alpha (DeviceRowView.apply handles that split; the checkbox stays at
+        // full alpha and fully clickable). The derived-identity case and rows
+        // INSIDE the active target render at full emphasis. A FAILED member is
+        // additionally exempted inside `DeviceRowView.updateBus` (failure
+        // outranks configuration, R2).
+        let divergence = devicesCardDivergence()
+        let dimmed = divergence.map { !$0.targetMemberIDs.contains(device.id) } ?? false
         guard let controller = groupController else {
             // No controller ⇒ nothing routable ⇒ not controllable.
             row.apply(device, selected: false, controllable: false,
@@ -820,8 +934,30 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
+        // Row mute is VOLUME-BASED in `GroupController` (Q4 — `explicitMute`
+        // in memberState; the backend `Device.isMuted` flag is never driven by
+        // the popover's mute path), so overlay the controller's mute truth
+        // onto the snapshot before the row renders (S3): without this the
+        // engaged pill / dark armed dot / MUTED token would all silently
+        // revert on the first model repaint after a mute click.
+        var device = device
+        device.isMuted = device.isMuted || controller.isMuted(device.id)
         // Block only the local device when it can't currently be turned ON.
         let blocked = device.isLocalDevice && !selected && !controller.canSelectLocalSpeaker(device.id)
+        // Route-armed inputs (spec §3.3, S2): membership is evaluated against
+        // the ACTIVE Main Out target — the Selected set when Main Out targets
+        // Selected Devices, the group's member set when it targets a saved
+        // group (so a playing group member lights its dot even while its
+        // Selected checkbox dims in the dormant card). Master mute is folded
+        // in so it drains every device dot.
+        let inActiveTarget: Bool
+        switch controller.mainOut {
+        case .selectedDevices:
+            inActiveTarget = selected
+        case .group(let id):
+            inActiveTarget = controller.groups.first { $0.id == id }?
+                .memberIDs.contains(device.id) ?? false
+        }
         row.apply(device,
                   selected: selected,
                   controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
@@ -830,6 +966,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                  masterMuted: controller.isMainOutMuted,
+                  inActiveTarget: inActiveTarget,
                   iconSymbolName: deviceIconController?.symbolName(for: device))
     }
 
@@ -870,6 +1008,58 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
                                             constant: -PopoverColumnGrid.leadingInset),
             label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+        ])
+        return wrapper
+    }
+
+    // MARK: Blocked local-mix refusal note (spec §4.6)
+
+    /// Toggle the in-place refusal note under the blocked device row `id`: mount
+    /// it directly beneath the row when absent, remove it when a second body-click
+    /// asks again. No-op if the row isn't currently mounted.
+    private func toggleBlockedNote(for id: String, reason: String) {
+        if let existing = blockedNoteByID.removeValue(forKey: id) {
+            panel.removeRow(existing, animated: true)
+            panel.panelContentDidChangeHeight(animated: true)
+            return
+        }
+        guard let row = deviceRowsByID[id] else { return }
+        let note = makeRefusalNoteRow(text: reason)
+        blockedNoteByID[id] = note
+        panel.insertRow(note, after: row, animated: true)
+        panel.panelContentDidChangeHeight(animated: true)
+    }
+
+    /// A one-line refusal-note row (spec §4.6): an `info` glyph + `reason` in
+    /// tertiary text, indented to the name column so it reads as annotating the
+    /// row above it. Non-interactive.
+    private func makeRefusalNoteRow(text: String) -> NSView {
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .regular))
+        icon.contentTintColor = Tokens.Color.tertiaryLabel
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        let label = NSTextField(labelWithString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = Tokens.Font.caption
+        label.textColor = Tokens.Color.tertiaryLabel
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        wrapper.addSubview(icon)
+        wrapper.addSubview(label)
+        let nameColumnLeading = PopoverColumnGrid.leadingInset
+            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        NSLayoutConstraint.activate([
+            wrapper.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterRowHeight),
+            icon.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            icon.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
+                                            constant: -PopoverColumnGrid.leadingInset),
         ])
         return wrapper
     }
@@ -1265,9 +1455,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             test_lastRefusalReason = nil
         }
         // Repaint device rows (auto-swap may have flipped the local row; a refusal
-        // must bounce the switch back to its real state).
-        refreshDeviceRows()
-        refreshMainOutRow()
+        // must bounce the switch back to its real state). Under a group target a
+        // membership toggle can also flip the card between the derived-equal and
+        // diverging dormant states (S5), which mounts/unmounts the "Inactive"
+        // note — the reconciling repaint escalates to a rebuild exactly then.
+        refreshDeviceRowsReconcilingCardNote()
 
         // A4: an auto-swap toggled the LOCAL row's membership for the user (not a
         // direct click on that row), so flash it once to draw the eye. Must run
@@ -1427,6 +1619,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public func test_deviceRowSelectionDimmed(id: String) -> Bool? {
         deviceRowsByID[id]?.test_isSelectionDimmed
     }
+    /// Whether a blocked-row in-place refusal note (spec §4.6, S4) is currently
+    /// mounted under device row `id`.
+    public func test_isBlockedNoteShown(id: String) -> Bool {
+        blockedNoteByID[id] != nil
+    }
     /// Whether device row `id` is mid attention-flash (A4). `nil` if no such row.
     public func test_deviceRowFlashing(id: String) -> Bool? {
         deviceRowsByID[id]?.test_isFlashing
@@ -1563,6 +1760,17 @@ extension PopoverController: DeviceRowView.Delegate {
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         handleSelection(result, deviceID: id)
+    }
+
+    /// The blocked local-mix row's body-click (spec §4.6): surface the refusal
+    /// reason as an in-place one-line note under the row (toggled — a second click
+    /// dismisses it), reusing `GroupController.localMixRefusalReason`. This is the
+    /// reachable trigger the disabled checkbox + tooltip alone lacked (§8.5).
+    public func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {
+        let reason = GroupController.localMixRefusalReason
+        test_lastRefusalReason = reason
+        presentRefusal(reason)
+        toggleBlockedNote(for: row.device.id, reason: reason)
     }
 }
 

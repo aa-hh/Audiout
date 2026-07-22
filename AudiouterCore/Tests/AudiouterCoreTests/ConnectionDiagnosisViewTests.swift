@@ -4,6 +4,7 @@ import XCTest
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
+import AudiouterSharedUI
 
 /// Structural coverage for the standalone diagnosis panel (brief §7.1). This
 /// view has no backend/pasteboard access of its own, so these tests only cover
@@ -126,16 +127,18 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         view.appearance = NSAppearance(named: .darkAqua)
         let dark = view.test_backgroundTint
 
-        // systemOrange resolves to different concrete values per appearance; a
-        // tint captured once at build time would be identical across the switch.
+        // The warm tokens resolve to different concrete values per appearance;
+        // a tint captured once at build time would be identical across the switch.
         XCTAssertNotEqual(light?.components, dark?.components,
-                          "the warning tint must re-resolve on a live light/dark switch")
+                          "the failure tint must re-resolve on a live light/dark switch")
 
-        // And the re-resolved color is exactly systemOrange(0.12) under the
-        // NEW appearance, not some third value.
+        // And the re-resolved color is exactly the spec §5.6 treatment — the
+        // `panel` seat washed with the failure-exclusive red at ~12% — under
+        // the NEW appearance, not some third value.
         var expected: CGColor?
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
-            expected = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+            let seat = Tokens.Color.panel
+            expected = (seat.blended(withFraction: 0.12, of: Tokens.Color.failure) ?? seat).cgColor
         }
         XCTAssertEqual(dark?.components, expected?.components)
     }

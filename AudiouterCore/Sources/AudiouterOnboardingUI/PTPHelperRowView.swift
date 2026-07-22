@@ -22,7 +22,10 @@ final class PTPHelperRowView: NSView {
     private let onOpenLoginItems: () -> Void
 
     private var iconTile: IconTileView!
-    private let titleLabel = NSTextField(labelWithString: "AirPlay 2 Clock Sync")
+    // "Speaker Sync", not "AirPlay 2 Clock Sync": onboarding copy says plain
+    // "speakers", never "AirPlay" (spec §5.8, decision m) — and this name now
+    // matches what the permission-lost banner calls it.
+    private let titleLabel = NSTextField(labelWithString: "Speaker Sync")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
     /// The swappable trailing area (status word ± "Open Login Items…" button).
     private let accessory = NSStackView()
@@ -42,15 +45,14 @@ final class PTPHelperRowView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         iconTile = IconTileView(symbolName: "clock.arrow.2.circlepath",
-                                tint: .systemTeal,
-                                accessibility: "AirPlay 2 Clock Sync")
+                                accessibility: "Speaker Sync")
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
         titleLabel.font = Tokens.Font.bodyEmphasized
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        detailLabel.stringValue = "AirPlay 2 speakers share one clock through a small "
-            + "background helper. Approve it once in Login Items to enable it."
+        detailLabel.stringValue = "Your speakers play in perfect time by sharing one "
+            + "clock, through a small helper. Approve it once in Login Items."
         detailLabel.font = Tokens.Font.caption
         detailLabel.textColor = Tokens.Color.secondaryLabel
         detailLabel.lineBreakMode = .byWordWrapping
@@ -118,6 +120,10 @@ final class PTPHelperRowView: NSView {
     /// Repaint the trailing accessory for the current PTP helper status.
     func update(status: PTPHelperStatus) {
         lastStatus = status
+
+        // Approval "lights" the icon gold, same as a granted permission row
+        // (spec §5.8; the "Enabled" chip below is the VoiceOver-visible state).
+        iconTile.setLit(status == .enabled)
 
         for v in accessory.arrangedSubviews { accessory.removeArrangedSubview(v); v.removeFromSuperview() }
 

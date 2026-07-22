@@ -221,7 +221,7 @@ final class OnboardingUITests: XCTestCase {
                                           onOpenSettings: { _ in }, onDone: {})
         let text = vc.test_permissionLostBannerText ?? ""
         XCTAssertTrue(text.contains("System Audio"), text)
-        XCTAssertTrue(text.contains("PTP helper"), text)
+        XCTAssertTrue(text.contains("Speaker Sync"), text)
     }
 
     func testWindowControllerThreadsReasonThroughToTheContentViewController() {

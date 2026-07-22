@@ -72,6 +72,25 @@ public final class MainOutRowView: NSView {
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
     private let iconView = NSImageView()
+    /// The connection **halo ring** around the Main Out icon (Warm Signal v3
+    /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
+    /// active Audio Out target's members — **pending** (dashed breathing) during
+    /// a destination-switch handshake so the multi-second gap never reads as
+    /// dead/broken (spec §6), **connected** (solid `ringConnected`) once ≥1
+    /// member is live, no ring when idle. The host computes the aggregate and
+    /// passes it to ``apply(options:current:master:isMuted:connectionState:)``.
+    private let haloRingView = HaloRingView()
+    /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
+    /// v3 §3.3, S2): lit iff the active target set has a connected member AND
+    /// the master is unmuted — the aggregate `.connected` ring state already
+    /// implies "target set non-empty ∧ ≥1 member connected", so armed =
+    /// `connectionState == .connected ∧ !isMuted`. Pure model state, never RMS
+    /// (R3): paused and playing render identically; only the meter differs.
+    private let armedDotView = RouteArmedDotView()
+    /// Whether the master mute is currently engaged — gates the armed dot and
+    /// coerces incoming meter pushes to 0 so the drained master meter stays
+    /// down while muted (S3).
+    private var isMasterMutedState = false
     /// The System row's name — "Audio Out" (2026-07-14), matching SoundSource's
     /// "Output" row and filling the shared name column so it aligns with the
     /// device/group rows below.
@@ -86,6 +105,16 @@ public final class MainOutRowView: NSView {
     /// selected target. Replaces the old circular icon button. Owns the
     /// two-section menu directly.
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The membership bus's **origin stub** (spec §4.1: "the bus starts at the
+    /// Audio Out row, at the same column where its destination dropdown sits"):
+    /// a short straight rail launching downward out of the dropdown's column
+    /// toward the device rows below, so the line visibly begins HERE. Rendered
+    /// in the dormant de-emphasis tint only while the checked set genuinely
+    /// DIVERGES from an active group target (spec §4.7 FINAL, S5 — the
+    /// derived-identity case keeps full ink; the host resolves it via
+    /// `apply(busOriginDimmed:)`). Non-interactive (`MembershipBusView.hitTest`
+    /// returns nil) and animation-free.
+    private let busOriginView = MembershipBusView()
 
     private var options: [Option] = []
     private var isDraggingMaster = false
@@ -107,10 +136,54 @@ public final class MainOutRowView: NSView {
 
     /// Repopulate the selector, set the master slider + readout, and check the
     /// current target. `master` is the proportional master of the current target.
-    public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false) {
+    ///
+    /// `connectionState` is the AGGREGATE lifecycle of the active target's
+    /// members (spec §3.2 Main Out note): `.off` → no ring; `.connecting` /
+    /// `.reconnecting` → the dashed pending ring during a destination-switch
+    /// handshake (spec §6); `.connected` → the solid connected ring. Defaults to
+    /// `.off` so existing callers/tests that omit it render no ring, unchanged.
+    ///
+    /// `busOriginDimmed` is the host-resolved dormancy of the bus's origin stub
+    /// (spec §4.7 FINAL, S5): the popover passes `true` only under a
+    /// GENUINELY-DIVERGING group target (checked set ≠ the active group's member
+    /// set) — the derived-identity case keeps the origin at full ink. `nil`
+    /// (legacy callers/tests) falls back to the transitional any-group-target
+    /// derivation.
+    public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false,
+                      connectionState: ConnectionState = .off,
+                      busOriginDimmed: Bool? = nil) {
         self.options = options
+        isMasterMutedState = isMuted
         muteButton.state = isMuted ? .on : .off
         updateMuteTint()
+        haloRingView.apply(connectionState)
+
+        // Route-armed dot (spec §3.3, Main Out variant): armed = the active
+        // target has ≥1 CONNECTED member (the aggregate ring state, which
+        // already implies a non-empty target set) ∧ master unmuted. Pure model
+        // state — never RMS.
+        let isConnected: Bool
+        if case .connected = connectionState { isConnected = true } else { isConnected = false }
+        armedDotView.apply(armed: isConnected && !isMuted)
+
+        // Master mute drains the master meter through the existing decay
+        // ballistics (S3 — no new animation machinery; Reduce Motion snaps
+        // via the meter's own gate; the meter's zero-at-rest guard makes a
+        // repeated muted apply free). Unmuting doesn't refill it here — the
+        // next live RMS push does, honestly.
+        if isMuted {
+            meterView.setLevel(0)
+        }
+
+        // Bus origin (spec §4.1/§4.7): the launch stub renders in the dormant
+        // de-emphasis tint only when the host says the bus is genuinely
+        // diverging from the active group target (S5 — mirrors the device rows'
+        // node-tint scoping; the derived-identity case keeps full ink). The stub
+        // itself never moves or resizes — only its ink changes. Legacy callers
+        // that omit `busOriginDimmed` keep the old any-group-target derivation.
+        let isGroupTarget: Bool
+        if case .group = current { isGroupTarget = true } else { isGroupTarget = false }
+        busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget)
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
@@ -166,9 +239,11 @@ public final class MainOutRowView: NSView {
     }
 
     /// Push a live RMS reading to the master meter (task T4a). Main Out shares
-    /// the same level feed as the device rows for now.
+    /// the same level feed as the device rows for now. While the master is
+    /// muted (S3) an incoming push is coerced to 0 so a straggling RMS event
+    /// can never refill the drained master meter.
     public func setLevel(_ rms: Float) {
-        meterView.setLevel(rms)
+        meterView.setLevel(isMasterMutedState ? 0 : rms)
     }
 
     /// Zero the master meter with no animation (popover-close discipline —
@@ -209,6 +284,13 @@ public final class MainOutRowView: NSView {
         // only, connection status lives on the icon as a corner badge.
         iconView.contentTintColor = Tokens.Color.secondaryLabel
         iconView.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Connection halo ring around the Main Out icon (spec §3.2 Main Out note).
+        haloRingView.translatesAutoresizingMaskIntoConstraints = false
+        haloRingView.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Route-armed corner dot on the Main Out icon (spec §3.3, S2).
+        armedDotView.translatesAutoresizingMaskIntoConstraints = false
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.minValue = 0
@@ -264,8 +346,13 @@ public final class MainOutRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        busOriginView.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(busOriginView)
         addSubview(meterView)
         addSubview(iconView)
+        addSubview(haloRingView)
+        addSubview(armedDotView)
         addSubview(nameLabel)
         addSubview(muteButton)
         addSubview(slider)
@@ -294,6 +381,25 @@ public final class MainOutRowView: NSView {
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+
+            // Connection halo ring: a box matching the icon box, centered on it.
+            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            haloRingView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
+            haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
+
+            // Route-armed dot: the icon box's bottom-right corner, pulled in
+            // by `statusDotInset` — same geometry as the device rows (§3.3).
+            armedDotView.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.routeArmedDotBoxSize),
+            armedDotView.heightAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.routeArmedDotBoxSize),
+            armedDotView.centerXAnchor.constraint(
+                equalTo: iconView.trailingAnchor,
+                constant: -PopoverColumnGrid.statusDotInset),
+            armedDotView.centerYAnchor.constraint(
+                equalTo: iconView.bottomAnchor,
+                constant: -PopoverColumnGrid.statusDotInset),
 
             // "Audio Out" name fills the shared name column, icon → slider.
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
@@ -328,19 +434,47 @@ public final class MainOutRowView: NSView {
                 equalToConstant: PopoverColumnGrid.trailingControlWidth),
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
+
+            // Bus origin stub (spec §4.1): centered on the SAME node column x
+            // the device rows' nodes use (the shared grid's trailing-control
+            // center), dropping from just under the destination dropdown to the
+            // row's bottom edge — the line's launch point out of the dropdown.
+            busOriginView.centerXAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
+            busOriginView.topAnchor.constraint(equalTo: destinationPopUp.bottomAnchor,
+                                               constant: 1),
+            busOriginView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            busOriginView.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.busColumnWidth),
         ])
     }
 
     // MARK: Private Helpers
 
-    /// Updates the mute button's tint color and accessibility label based on current state.
+    /// Updates the mute button's engaged treatment (tint + the S3 filled
+    /// accent pill, spec §3.4/§3.5) and accessibility label for the current
+    /// state. Drawing-only, on the real `NSButton`'s backing layer — behavior,
+    /// keyboard, and VoiceOver untouched; the glyph NEVER swaps to a slash
+    /// (locked decision). Mirrors `DeviceRowView.updateMuteTint()`.
     private func updateMuteTint() {
-        if muteButton.state == .on {
-            muteButton.contentTintColor = Tokens.Color.accent
-        } else {
-            muteButton.contentTintColor = Tokens.Color.secondaryLabel
+        let engaged = muteButton.state == .on
+        muteButton.contentTintColor = engaged ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        muteButton.wantsLayer = true
+        muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            muteButton.layer?.backgroundColor = engaged
+                ? Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
+                : nil
         }
         configureAccessibility()
+    }
+
+    /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
+    /// light/dark or Increase-Contrast switch (ring/dot/bus handle their own).
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateMuteTint()
     }
 
     // MARK: Actions
@@ -351,6 +485,10 @@ public final class MainOutRowView: NSView {
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
+        // AppKit already flipped the pushOnPushOff state; land the engaged
+        // treatment (and the "muted" AX value / meter push-gate) instantly on
+        // the live click rather than waiting for the host-driven `apply`.
+        isMasterMutedState = sender.state == .on
         updateMuteTint()
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
@@ -379,6 +517,13 @@ public final class MainOutRowView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Audio Out, master volume \(slider.integerValue) percent")
+        // The row's VALUE carries the live signal channels (S2/S3): "muted"
+        // for the engaged master-mute pill, "armed" for the lit route-armed
+        // dot — the spoken equivalents shipped with the drawing.
+        var valueParts: [String] = []
+        if isMasterMutedState { valueParts.append("muted") }
+        if armedDotView.test_isLit { valueParts.append("armed") }
+        setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("Audio Out master volume")
         muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Audio Out" : "Mute Audio Out")
@@ -409,6 +554,45 @@ public final class MainOutRowView: NSView {
     }
     /// Whether the master mute button is currently in its muted (`.on`) state.
     public var test_isMasterMuted: Bool { muteButton.state == .on }
+
+    /// The bus origin stub's node rendering (always `.origin` — the launch
+    /// stub, spec §4.1) — proves the bus starts at the Audio Out row.
+    public var test_busOriginNode: MembershipBusView.Node { busOriginView.test_node }
+    /// Whether the origin stub renders in the dormant de-emphasis tint (Audio
+    /// Out targets a saved group, so the Selected-Devices bus is inactive).
+    public var test_busOriginDimmed: Bool { busOriginView.test_dimmed }
+
+    /// The Main Out connection ring's current form (spec §3.2 Main Out note) —
+    /// `.none` idle, `.connecting` during a destination-switch handshake,
+    /// `.connected` once the active target is live.
+    public var test_ringForm: HaloRingView.Form { haloRingView.test_form }
+    /// Whether the Main Out ring's pending-handshake breathing pulse is installed.
+    public var test_ringIsBreathing: Bool { haloRingView.test_isBreathing }
+
+    /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
+    /// target has a connected member ∧ master unmuted) — reads the dot view's
+    /// rendered state, so it can't drift from the pixels.
+    public var test_routeArmed: Bool { armedDotView.test_isLit }
+    /// The dot's current fill color (resolved) — gold armed / socket dark.
+    public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
+    /// Whether the master-mute button is drawing its ENGAGED pill (S3).
+    public var test_isMutePillEngaged: Bool {
+        muteButton.state == .on && muteButton.layer?.backgroundColor != nil
+    }
+    /// The row's current VoiceOver VALUE ("muted" / "armed" composition).
+    public var test_accessibilityValue: String? { accessibilityValue() as? String }
+    /// The master meter's current ballistics TARGET (with
+    /// ``test_meterDisplayed``, proves the master-mute DRAIN — target 0 while
+    /// the bar is still easing down — vs a hard reset).
+    public var test_meterTarget: CGFloat { meterView.test_targetLevel }
+    /// The master meter's currently DRAWN level.
+    public var test_meterDisplayed: CGFloat { meterView.test_displayedLevel }
+
+    /// Settle the master meter's DRAWN level synchronously (no display link) —
+    /// deterministic setup for drain-vs-reset assertions and snapshots.
+    public func test_settleMeterDisplayed(_ level: CGFloat) {
+        meterView.test_setDisplayedLevel(level)
+    }
 
     /// Simulate the user toggling the master mute button.
     public func test_toggleMasterMute() {

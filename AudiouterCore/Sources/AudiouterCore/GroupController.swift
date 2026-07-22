@@ -195,9 +195,14 @@ public final class GroupController {
     }
 
     /// The user-facing reason the Mac's own output is blocked from a mixed
-    /// Selected Devices set (SPEC §9 Phase-1 local rule).
+    /// Selected Devices set (SPEC §9 Phase-1 local rule). Original copy
+    /// ("Synced everywhere-audio arrives with the new engine") didn't actually
+    /// say why the combination was refused; Alec's replacement names the real
+    /// cause (the Mac's local output isn't yet in the AirPlay devices' PTP
+    /// sync domain — see `wouldMixLocalWithAirPlay`/the Phase-1 doc comment
+    /// above) rather than reading as unexplained jargon.
     public static let localMixRefusalReason =
-        "Synced everywhere-audio arrives with the new engine"
+        "Can't combine with AirPlay yet"
 
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { backend.devices.first(where: \.isLocalDevice)?.id }

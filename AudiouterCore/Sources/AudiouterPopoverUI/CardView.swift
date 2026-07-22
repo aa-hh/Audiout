@@ -63,6 +63,13 @@ final class CardView: NSView {
     /// terminal `isHidden`/constraint change against a newer in-flight animation
     /// (PLAN §E risk 1: "rapid toggles retarget cleanly, never queue or fight").
     private var collapseGeneration = 0
+    /// The clip height the most recent ANIMATED collapse/expand started from — the
+    /// value the height constraint held (and the layer animates FROM) at the
+    /// instant the animator retargeted it. Recorded for the regression test that
+    /// pins first-collapse-vs-second-collapse trajectory parity: a correct collapse
+    /// always begins at the expanded height (`target`), never a stale `0` (see
+    /// `setBodyCollapsed`'s collapse branch). `nil` until the first animated toggle.
+    private(set) var lastAnimatedStartHeight: CGFloat?
 
     /// Collapse/expand animation duration — matches the popover's own resize pace
     /// (PLAN §E risk 1: "match your 0.2s so they track").
@@ -185,9 +192,12 @@ final class CardView: NSView {
     /// Set the collapsed state.
     ///
     /// Choreography (PLAN §E risk 1):
-    /// - **collapse:** fade the body out and animate the clip height to 0 in the
-    ///   same `NSAnimationContext` group; set `isHidden` on the body ONLY in the
-    ///   completion handler (so it stays rendered — and fading — throughout).
+    /// - **collapse:** SEED the clip-height constraint with the current expanded
+    ///   height BEFORE animating it to 0 (symmetric with expand's explicit floor),
+    ///   fade the body out in the same `NSAnimationContext` group, and set
+    ///   `isHidden` on the body ONLY in the completion handler (so it stays
+    ///   rendered — and fading — throughout). The seed is what makes the FIRST
+    ///   collapse of a never-toggled card animate rather than snap (see the branch).
     /// - **expand:** clear `isHidden` and restore `alphaValue` to 1 BEFORE
     ///   animating, then animate the clip height from 0 up to the body's fitting
     ///   height (deactivating the pinned-0 constraint at the end).
@@ -242,9 +252,24 @@ final class CardView: NSView {
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             if collapsed {
-                // Pin to 0 and animate DOWN. Body fades during the shrink; it is
-                // hidden only in the completion handler so it renders throughout.
+                // Seed the constraint with the CURRENT expanded height BEFORE
+                // animating it to 0 — mirroring the expand branch's explicit floor
+                // below. Without this seed, the FIRST collapse of a freshly-built
+                // card animates from the constraint's AS-CREATED constant (0):
+                // `bodyHeightConstraint`'s constant is only ever set to `target` as
+                // a side effect of a prior EXPAND animation, so on a never-expanded
+                // card activating it here pins the clip to 0 IMMEDIATELY while
+                // `animator().constant = 0` animates 0→0 (a no-op) — the body height
+                // SNAPS shut (only its alpha fades), and the rail overlay, which
+                // tracks the live clip floor every layout pass, snaps with it. That
+                // was the visible "content jumps on the first collapse only" glitch.
+                // Seeding `target` gives the first collapse the identical target→0
+                // travel every later collapse already gets (a prior expand left the
+                // constant at `target`), so all collapses squeeze identically.
+                bodyHeightConstraint.constant = target
                 bodyHeightConstraint.isActive = true
+                layoutSubtreeIfNeeded()
+                lastAnimatedStartHeight = target
                 bodyHeightConstraint.animator().constant = 0
                 bodyStack.animator().alphaValue = 0
             } else {
@@ -256,6 +281,7 @@ final class CardView: NSView {
                 bodyHeightConstraint.isActive = true
                 bodyHeightConstraint.constant = 0
                 layoutSubtreeIfNeeded()
+                lastAnimatedStartHeight = 0
                 bodyHeightConstraint.animator().constant = target
                 bodyStack.animator().alphaValue = 1
             }

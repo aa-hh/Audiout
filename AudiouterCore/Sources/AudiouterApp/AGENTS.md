@@ -16,9 +16,10 @@ package layout, backends, and core types, see
   app needs must be wired explicitly; any action with no keyboard path needs
   a visible on-screen affordance.
 - **Backend is chosen once, from the environment.** `makeBackend()` reads
-  `AIRPLAY_BACKEND` (default `.mock`); the mock also reads
-  `AIRPLAY_MOCK_SCENARIO`. Everything downstream holds `OutputBackend`, never
-  a concrete type — run offline with `AIRPLAY_BACKEND=mock`.
+  `AIRPLAY_BACKEND` (default `.native`; the mock is opt-in only, via
+  `AIRPLAY_BACKEND=mock`, which also reads `AIRPLAY_MOCK_SCENARIO`).
+  Everything downstream holds `OutputBackend`, never a concrete type — run
+  offline with `AIRPLAY_BACKEND=mock`.
 - **Subscribe before `start()`, and start exactly once.** All backend startup
   goes through `startBackendIfNeeded()`, which attaches
   `subscribeToBackendEvents()` before `backend.start()` (or the initial

@@ -3,8 +3,14 @@ import XCTest
 
 final class BackendKindResolutionTests: XCTestCase {
 
-    func testDefaultsToMockWithNoExplicitArgOrEnv() {
-        XCTAssertEqual(BackendKind.resolved(explicit: nil, environment: [:]), .mock)
+    func testDefaultsToNativeWithNoExplicitArgOrEnv() {
+        // Mock is opt-in only: a plain launch (no arg, no env) must resolve to
+        // the real backend, never fabricated demo speakers.
+        XCTAssertEqual(BackendKind.resolved(explicit: nil, environment: [:]), .native)
+    }
+
+    func testMockRequiresExplicitEnv() {
+        XCTAssertEqual(BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "mock"]), .mock)
     }
 
     func testExplicitArgBeatsEnv() {
@@ -25,9 +31,9 @@ final class BackendKindResolutionTests: XCTestCase {
         XCTAssertEqual(resolved, .ownTone)
     }
 
-    func testUnknownEnvValueFallsBackToMock() {
+    func testUnknownEnvValueFallsBackToNative() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "sonos"])
-        XCTAssertEqual(resolved, .mock, "an unrecognized value should fall back to mock, not crash")
+        XCTAssertEqual(resolved, .native, "an unrecognized value should fall back to the native default, not crash or silently mock")
     }
 
     func testEnvVarSelectsNative() {

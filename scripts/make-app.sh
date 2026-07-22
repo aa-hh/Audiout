@@ -324,10 +324,14 @@ plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 # Info.plist at all).
 #
 #   AIRPLAY_BACKEND=native — a double-clicked release MUST drive real speakers.
-#     BackendKind.resolved() defaults to the MOCK backend (fabricated devices,
-#     silent) when this is unset, so without it a paying customer gets no audio
-#     (crash-hang.md). Override in dev with `AIRPLAY_BACKEND=mock <binary>` (direct
-#     exec ignores LSEnvironment) or by running via SwiftPM.
+#     BackendKind.resolved() already defaults to `.native` in code (mock is
+#     opt-in only), so this is belt-and-suspenders: it makes the release intent
+#     explicit AND is robust if the code default ever changes. (It also can't be
+#     relied on ALONE — a shared-bundle-id LaunchServices collision can launch
+#     this binary while resolving LSEnvironment from a different registration, so
+#     the native code default is what actually guarantees real audio.) Override
+#     in dev with `AIRPLAY_BACKEND=mock <binary>` (direct exec ignores
+#     LSEnvironment) or by running via SwiftPM.
 #   AIRPLAY_CONTROL_PANEL=1 — ship the control-panel window shell as the default
 #     chrome (AppDelegate reads `== "1"`). Off in dev/tests, where the env is
 #     unset; override a bundled build by launching the raw binary with the var
@@ -336,7 +340,7 @@ echo "==> Writing LSEnvironment (release backend + control-panel defaults)"
 plutil -insert LSEnvironment -dictionary "$PLIST"
 plutil -insert LSEnvironment.AIRPLAY_BACKEND -string "native" "$PLIST"
 plutil -insert LSEnvironment.AIRPLAY_CONTROL_PANEL -string "1" "$PLIST"
-plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — a double-clicked release would fall back to the mock backend (no audio)" >&2; exit 1; }
+plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
 plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_CONTROL_PANEL missing from Info.plist" >&2; exit 1; }
 
 # --- Strip extended attributes ---------------------------------------------

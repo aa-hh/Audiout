@@ -791,27 +791,34 @@ public enum BackendKind {
 
     /// Resolve which backend to use, in priority order: an explicit argument
     /// (e.g. a CLI flag already parsed by the caller) → the `AIRPLAY_BACKEND`
-    /// env var (`mock` | `owntone`, case-insensitive) → default `.mock`.
+    /// env var (`mock` | `owntone` | `native`, case-insensitive) → default
+    /// `.native`.
     ///
-    /// An unrecognized env value is treated as absent: it falls back to
-    /// `.mock` and prints one warning to stderr rather than crashing, since
-    /// this is a dev convenience knob, not user-facing configuration.
+    /// `.native` is the default so a plain launch drives real speakers — and so
+    /// the native-only onboarding/permission paths run (``SetupModel/shouldPresentOnLaunch(settings:backendKind:)``
+    /// and `AppDelegate`'s reactivate/wake permission re-audit both gate on
+    /// `.native`). Mock is opt-in ONLY: it requires `AIRPLAY_BACKEND=mock`
+    /// explicitly, never as a fallback — a build that can't reach a real backend
+    /// must fail loudly, not silently swap in fabricated demo speakers. An
+    /// unrecognized env value is treated as absent: it falls back to `.native`
+    /// and prints one warning to stderr rather than crashing, since this is a
+    /// dev convenience knob, not user-facing configuration.
     public static func resolved(
         explicit: BackendKind? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> BackendKind {
         if let explicit { return explicit }
 
-        guard let raw = environment[environmentVariableName] else { return .mock }
+        guard let raw = environment[environmentVariableName] else { return .native }
         switch raw.lowercased() {
         case "mock":    return .mock
         case "owntone": return .ownTone
         case "native":  return .native
         default:
             FileHandle.standardError.write(
-                Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — falling back to mock\n".utf8)
+                Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — falling back to native\n".utf8)
             )
-            return .mock
+            return .native
         }
     }
 }
@@ -821,7 +828,7 @@ public enum BackendKind {
 ///
 /// Pass `nil` (the default) to resolve the backend via
 /// ``BackendKind/resolved(explicit:environment:)`` — explicit arg → the
-/// `AIRPLAY_BACKEND` env var → `.mock`.
+/// `AIRPLAY_BACKEND` env var → `.native`.
 /// - Parameter resolvePID: bundle ID → running app's pid, for per-app capture
 ///   (T6/T7). Core can't import AppKit (`NSRunningApplication`), so this is
 ///   threaded in from the AppKit layer (`AppDelegate`). Defaults to "nothing

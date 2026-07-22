@@ -75,40 +75,55 @@ public final class BusRailOverlayView: NSView {
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // Origin hook: horizontal turn INTO the Main Audio master strip's
-            // leading edge, then the vertical drops from there down the spine.
-            // Warm Signal v4.1 item 1 pins the strip's leading edge to `cx`
-            // itself, so this horizontal segment is now degenerate (zero
-            // length) in practice — kept as a no-op guard rather than deleted,
-            // so a future geometry tweak that reintroduces an offset (a wider
-            // strip, a different anchor) still draws correctly without needing
-            // this call site touched again.
-            let hookColor = anchor.gold ? Tokens.Color.gold : Tokens.Color.ember
-            let hook = NSBezierPath()
-            hook.lineWidth = lw
-            hook.lineCapStyle = .round
-            hook.lineJoinStyle = .round
-            hook.move(to: NSPoint(x: anchor.leadingX, y: anchor.centerY))
-            hook.line(to: NSPoint(x: cx, y: anchor.centerY))
-            hookColor.setStroke()
-            hook.stroke()
+            // Origin point (Warm Signal v4.1 CORRECTIONS, item 2 — reworking
+            // the earlier "hook into the meter" treatment): the rail simply
+            // BEGINS here, at Main Audio's own gutter column. The master
+            // meter moved under the Main Audio name (item 1), clear of the
+            // gutter entirely, so there is no leading strip to jog into and
+            // no junction to fuse — `anchor.leadingX` already equals `cx`
+            // (both derive from `railGutterCenterX`); a defensive horizontal
+            // segment is drawn only in case a future anchor ever diverges.
+            let originColor = anchor.gold ? Tokens.Color.gold : Tokens.Color.ember
+            if abs(anchor.leadingX - cx) > 0.01 {
+                let jog = NSBezierPath()
+                jog.lineWidth = lw
+                jog.lineCapStyle = .round
+                jog.lineJoinStyle = .round
+                jog.move(to: NSPoint(x: anchor.leadingX, y: anchor.centerY))
+                jog.line(to: NSPoint(x: cx, y: anchor.centerY))
+                originColor.setStroke()
+                jog.stroke()
+            }
 
-            // Junction dot (item 1): a small filled disc at the rail-to-strip
-            // turn — where the vertical spine meets the master strip's leading
-            // end — marking the plug-in point the rail rises into.
-            let dotR = PopoverColumnGrid.masterMeterJunctionDotDiameter / 2
+            // A small clean origin dot marks where the spine starts — never a
+            // junction fused into anything else.
+            let dotR = PopoverColumnGrid.busOriginDotDiameter / 2
             let dot = NSBezierPath(ovalIn: NSRect(x: cx - dotR, y: anchor.centerY - dotR,
                                                    width: dotR * 2, height: dotR * 2))
-            hookColor.setFill()
+            originColor.setFill()
             dot.fill()
 
             var currentY = anchor.centerY
             for stop in stops {
                 let onSpine = Self.onSpine(stop.node)
                 let stopR = MembershipBusView.nodeRadius(for: stop.node)
-                let segColor: NSColor = stop.dimmed
-                    ? Tokens.Color.tertiaryLabel
-                    : (stop.node == .member ? Tokens.Color.gold : Tokens.Color.ember)
+                // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9):
+                //   • member (connected)  → GOLD (the lit spine at rest),
+                //   • pending / connecting → ember (the energize "coming online"
+                //     sweep — brightens to gold top-to-bottom AS each fills),
+                //   • FAILED               → DIM (item 9: "failed devices stay
+                //     failure-red, their segment dim" — the red node/halo ring
+                //     carries the failure; the rail into it recedes so a dead
+                //     room never reads as a lit feed),
+                //   • dormant-divergent    → DIM (the §4.7 tint the node uses).
+                let segColor: NSColor
+                if stop.dimmed || stop.node == .failed {
+                    segColor = Tokens.Color.tertiaryLabel
+                } else if stop.node == .member {
+                    segColor = Tokens.Color.gold
+                } else {
+                    segColor = Tokens.Color.ember
+                }
                 segColor.setStroke()
 
                 if onSpine {

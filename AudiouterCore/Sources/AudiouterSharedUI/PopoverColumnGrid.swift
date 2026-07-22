@@ -98,10 +98,15 @@ public enum PopoverColumnGrid {
 
     /// Thickness of the Main Audio master meter bar (spec ~6 pt, vs the device
     /// meters' `meterUnderNameHeight` 3 pt). Length stays `meterUnderNameWidth`.
+    /// The meter itself now sits UNDER THE "Main Audio" NAME, exactly where a
+    /// device meter sits under its device name (Warm Signal v4.1 CORRECTIONS,
+    /// item 1) — thickness alone still signifies "master bus."
     public static let masterMeterThickness: CGFloat = 6
-    /// Diameter of the small filled dot marking where the left rail's spine
-    /// turns and plugs into the master meter's leading end (spec item 1).
-    public static let masterMeterJunctionDotDiameter: CGFloat = 5
+    /// Diameter of the small filled dot marking the rail's ORIGIN at the Main
+    /// Audio row's left gutter (Warm Signal v4.1 CORRECTIONS, item 2). The
+    /// meter moved under the name and no longer sits in the gutter, so this is
+    /// a clean origin point, never a junction fused into the meter.
+    public static let busOriginDotDiameter: CGFloat = 5
 
     // MARK: Fixed column widths
 
@@ -136,6 +141,32 @@ public enum PopoverColumnGrid {
     /// visually touches the row's trailing inset. Drives `DeviceRowView`'s
     /// STATIC "+N" overflow measurement.
     public static let feedColumnWidth: CGFloat = trailingControlWidth - 4
+
+    /// The FEED composite's derived-colour app CHIP (Warm Signal v4.1
+    /// CORRECTIONS "FEED needs the colour chip, not just tinted text") — a
+    /// small square swatch in `AppTetherColor`'s tone, prefixed onto a
+    /// redirected app's name segment. The SAME chip (same size/radius) marks
+    /// that app's name in the App Exceptions row so the tether reads at both
+    /// ends. Edge length only — never the state-carrying halo ring or meter
+    /// (house rule: tether colour lives on FEED/redirect app-name text only).
+    public static let feedChipSize: CGFloat = 5
+    /// Visual gap between a chip and the app-name text that follows it, baked
+    /// into the chip's own attachment width (no separate space glyph) so
+    /// stripping the attachment character back out of `attributedStringValue`
+    /// never leaves a stray leading space in a test's plain-text read. Kept
+    /// tight — the FEED column's `feedColumnWidth` is unchanged by this
+    /// task, so a multi-segment composite's existing STATIC "+N" overflow
+    /// threshold must not shift just because a chip was added to it (a
+    /// two-chip composite like "System · Music · Safari" measured ~119pt of
+    /// ~136pt available before chips; each chip's `feedChipSize + feedChipGap`
+    /// eats straight into that ~17pt margin).
+    public static let feedChipGap: CGFloat = 2
+    /// Corner radius of the chip's rounded square — a soft chip, not a bare
+    /// square or a full pill (spec reference `v41-fixes.html` `.feed .chip`).
+    /// Proportionally small relative to `feedChipSize` (unlike the
+    /// reference's 9px/2px ratio) so the chip still reads as a SQUARE at the
+    /// compact size the FEED column's tight width budget forces it to.
+    public static let feedChipCornerRadius: CGFloat = 1
 
     // MARK: On-icon status badge (2026-07-17)
     //
@@ -281,17 +312,18 @@ public enum PopoverColumnGrid {
     /// Diameter of a bus node (spec §4.1 "~13 pt, matching the `.switch` box").
     public static let busNodeDiameter: CGFloat = 13
     /// Diameter of a SELECTED (on-spine — member/connecting/pending/failed) bus
-    /// node, size joining fill as a selection signal (Warm Signal v4.1 item 4).
-    /// Same value as `busNodeDiameter` today; named separately so the
-    /// unselected diameter below can shrink independently. Wired into
-    /// `MembershipBusView.nodeRadius(for:)`, which both the node's own drawing
-    /// and `BusRailOverlayView`'s gap/arc math read, so rail geometry always
-    /// meets the node's true drawn edge.
-    public static let busNodeDiameterSelected: CGFloat = 13
+    /// node, size joining fill as a selection signal (Warm Signal v4.1
+    /// CORRECTIONS, item 3 — "selected is bigger," not "others are smaller"):
+    /// grown PAST the old 13 pt baseline so selection reads as emphasis. Wired
+    /// into `MembershipBusView.nodeRadius(for:)`, which both the node's own
+    /// drawing and `BusRailOverlayView`'s gap/arc math read, so rail geometry
+    /// always meets the node's true drawn edge.
+    public static let busNodeDiameterSelected: CGFloat = 15
     /// Diameter of an UNSELECTED (hollow non-member) bus node — visibly
-    /// smaller than `busNodeDiameterSelected` (spec item 4 "~9–10 pt") so
-    /// selection reads via size AND fill, not fill alone.
-    public static let busNodeDiameterUnselected: CGFloat = 9.5
+    /// smaller than `busNodeDiameterSelected` so selection reads via size AND
+    /// fill, not fill alone. Raised from 9.5 (Warm Signal v4.1 CORRECTIONS,
+    /// item 3 — it read too weak at the old value once selected nodes grew).
+    public static let busNodeDiameterUnselected: CGFloat = 11
     /// Stroke width of the bus line (spec §4.1 "~2 pt").
     public static let busLineWidth: CGFloat = 2
     /// Stroke width of the rim ringing a filled node / edging a hollow one.

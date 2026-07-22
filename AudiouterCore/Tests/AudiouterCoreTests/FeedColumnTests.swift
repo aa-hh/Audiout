@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import XCTest
+import AppKit
 import AudiouterCore
 @testable import AudiouterSharedUI
 
@@ -177,13 +178,51 @@ final class FeedColumnTests: IsolatedTestCase {
         XCTAssertNil(row.test_feedText, "a non-bus host has no free trailing slot to draw into")
     }
 
-    // MARK: Tether-tint seam (for T7) — pinned today, T7 asserts the swap
+    // MARK: Tether-tint + chip (T7, Warm Signal v4.1 CORRECTIONS)
 
-    func testAppSegmentColorIsFlatSecondaryLabelToday() {
+    func testAppSegmentColorUsesTheHostSuppliedTetherTintNotFlatSecondaryLabel() {
         let row = makeBusRow()
-        XCTAssertEqual(row.test_feedAppSegmentColor(for: "Music"), Tokens.Color.secondaryLabel,
-                       "T7 rewires this one seam to AppTetherColor — pinned here so that "
-                       + "change reads as intentional, not silent drift")
+        let tint = NSColor(srgbRed: 0.42, green: 0.58, blue: 0.47, alpha: 1)
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"],
+                  appTintColors: ["Music": tint])
+        XCTAssertEqual(row.test_feedAppSegmentColor(for: "Music"), tint,
+                       "T7 rewired this seam to the host-supplied AppTetherColor tint")
+        XCTAssertNotEqual(row.test_feedAppSegmentColor(for: "Music"), Tokens.Color.secondaryLabel,
+                          "no longer the flat secondaryLabel it was before T7")
+    }
+
+    func testAppSegmentColorFallsBackToNeutralTetherWhenUnmapped() {
+        let row = makeBusRow()
+        XCTAssertEqual(row.test_feedAppSegmentColor(for: "Music"), AppTetherColor.neutralFallback,
+                       "an app the host never mapped still reads as a tether tone, not the "
+                       + "neutral main-mix secondaryLabel")
+    }
+
+    func testAppRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true,
+                  routedAppNames: ["Music", "Safari"],
+                  appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
+        XCTAssertEqual(row.test_feedText, "System · Music · Safari")
+        XCTAssertEqual(row.test_feedChipCount, 2,
+                       "one chip per app segment; the neutral 'System' segment wears none")
+    }
+
+    func testAppOnlyRedirectFeedStillWearsItsChip() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"],
+                  appTintColors: ["Safari": .systemTeal])
+        XCTAssertEqual(row.test_feedText, "Safari")
+        XCTAssertEqual(row.test_feedChipCount, 1)
+    }
+
+    func testErrorOverrideFeedNeverWearsAChip() {
+        let row = makeBusRow()
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
+                  selected: true, controllable: true, routedAppNames: ["Music"],
+                  appTintColors: ["Music": .systemGreen])
+        XCTAssertEqual(row.test_feedText, "Couldn't connect")
+        XCTAssertEqual(row.test_feedChipCount, 0)
     }
 
     // MARK: VoiceOver — one composed announcement, no double-speaking

@@ -644,6 +644,46 @@ final class AppRowViewTests: XCTestCase {
         XCTAssertNil(row.test_idleSuffixColor)
     }
 
+    // MARK: Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7)
+
+    private func makeThreeStateRow(selected: String, isRunning: Bool, tetherColor: NSColor?) -> AppRowView {
+        let row = AppRowView()
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: selected, destinations: makeThreeStateDestinations(),
+            isRunning: isRunning, tetherColor: tetherColor))
+        return row
+    }
+
+    func testDeviceRedirectWithATetherColorWearsTheChip() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: true, tetherColor: .systemGreen)
+        XCTAssertTrue(row.test_hasTetherChip)
+        XCTAssertEqual(row.test_nameDisplayText, "Example App",
+                       "the chip is a prefixed glyph, not a change to the spoken/plain name text")
+        XCTAssertEqual(row.test_nameTextColor, .labelColor,
+                       "the chip is additive — the existing liveness-driven name colour is unchanged")
+    }
+
+    func testNoTetherColorMeansNoChip() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: true, tetherColor: nil)
+        XCTAssertFalse(row.test_hasTetherChip)
+    }
+
+    func testUnroutedAppNeverWearsAChipEvenIfHostPassedOne() {
+        // Defensive: a real host only ever passes a tetherColor for an actual
+        // device redirect, but the view itself must not depend on that — it
+        // renders whatever it's given.
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true, tetherColor: .systemGreen)
+        XCTAssertTrue(row.test_hasTetherChip, "the view renders whatever the host supplies")
+    }
+
+    func testIdleSuffixWithATetherColorStillWearsTheChipAndTheIdleSuffix() {
+        let row = makeThreeStateRow(selected: "device-1", isRunning: false, tetherColor: .systemGreen)
+        XCTAssertTrue(row.test_hasTetherChip)
+        XCTAssertEqual(row.test_nameDisplayText, "Example App (idle)")
+        XCTAssertEqual(row.test_idleSuffixColor, .tertiaryLabelColor)
+    }
+
     /// S6 item 6: the composed VoiceOver label reads "…, follows main output"
     /// for an unrouted app — the spoken equivalent of the bridge phrase —
     /// never "routed to No Redirect".

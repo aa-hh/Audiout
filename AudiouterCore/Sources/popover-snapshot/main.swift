@@ -381,6 +381,131 @@ private var connectionStatesFleet: [Device] {
     ]
 }
 
+/// The fleet for the `energize` scenarios (Warm Signal v4.1 item 9). Four
+/// AirPlay members caught mid-switch to a group plus one that fails:
+///   - `en-kitchen` — already `.connected` (the top of the sweep has landed:
+///     filled gold node + gold rail segment),
+///   - `en-living` — `.connecting` (mid-handshake: gold DASHED node, ember
+///     segment) in the mid-sequence variant; `.connected` in the settled
+///     Reduce-Motion variant so there is no in-flight residue to strip,
+///   - `en-office` / `en-bedroom` — still `.off`: these carry the energize
+///     PENDING beat (ember dashed node) mid-sequence, and SNAP to their
+///     resolved filled-gold member node under Reduce Motion,
+///   - `en-patio` — `.failed` (never toggled in, so it bounces off selection
+///     exactly like the `connection-states` fixture's failed row): red halo
+///     ring + "Couldn't connect" + auto-expanded diagnosis panel.
+private func energizeFleet(livingConnecting: Bool) -> [Device] {
+    [
+        Device(id: "en-kitchen", name: "Kitchen HomePod", kind: .homePod,
+               volume: 55, isSelected: true, connectionState: .connected),
+        Device(id: "en-living", name: "Living Room TV", kind: .appleTV,
+               volume: 42, isSelected: true,
+               connectionState: livingConnecting ? .connecting : .connected),
+        Device(id: "en-office", name: "Office", kind: .sonos,
+               volume: 48, connectionState: .off),
+        Device(id: "en-bedroom", name: "Bedroom HomePod", kind: .homePod,
+               volume: 50, connectionState: .off),
+        Device(id: "en-patio", name: "Patio Speaker", kind: .generic,
+               volume: 30,
+               connectionState: .failed(ConnectionFailure(cause: .notResponding))),
+    ]
+}
+
+/// Shared staging for both energize fixtures: discover the fleet, select the
+/// four non-failed members, push their states, open the panel, then force the
+/// energize pending beat on the two still-`.off` members with a fixed Reduce
+/// Motion posture (so the render is byte-deterministic regardless of the host
+/// machine's accessibility settings). Returns the laid-out panel view.
+@MainActor
+private func stageEnergize(fleet: [Device], reduceMotion: Bool,
+                          appearanceName: NSAppearance.Name) -> NSView? {
+    let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: fleet.count) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return nil
+    }
+    popover.configure(groupController: controller)
+
+    // Select every non-failed member (the failed one bounces off, as in
+    // `connection-states`), so the rail runs Main Audio → the lowest member.
+    for device in fleet {
+        if case .failed = device.connectionState { continue }
+        _ = popover.test_toggleDeviceEnabled(deviceID: device.id, on: true)
+    }
+    popover.update(devices: fleet)          // push states + auto-expand the failed panel
+    popover.test_simulateOpen()             // rebuild as if reopened → rows mounted
+
+    // Fixed Reduce Motion posture on the still-`.off` members, THEN raise the
+    // pending beat: mid-sequence (motion on) → ember dashed pending nodes;
+    // settled (motion reduced) → the beat is dropped, the members render their
+    // resolved filled-gold member nodes (snap to resolved).
+    for id in ["en-office", "en-bedroom"] {
+        popover.test_deviceRow(for: id)?.test_reduceMotionOverride = reduceMotion
+    }
+    popover.test_setEnergizePending(["en-office", "en-bedroom"])
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+    // Re-assert the beat AFTER the final layout pass (a mid-open reflow can run
+    // an extra `applySelectionState`; re-forcing keeps the frozen frame exact).
+    popover.test_setEnergizePending(["en-office", "en-bedroom"])
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.05)
+    return panelView
+}
+
+/// Render the `energize-mid-sequence` scenario (Warm Signal v4.1 item 9): a
+/// FROZEN mid-switch frame — one member landed (gold), one connecting (gold
+/// dashed), two on the ember PENDING beat, one failed — so the whole energize
+/// vocabulary reads in one panel. Motion ON (the pending nodes are dashed).
+@MainActor
+func snapshotEnergizeMidSequence(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    guard let panelView = stageEnergize(fleet: energizeFleet(livingConnecting: true),
+                                        reduceMotion: false, appearanceName: appearanceName)
+    else { return }
+    let url = outDir.appendingPathComponent("popover-energize-mid-\(label).png")
+    renderPNG(view: panelView, to: url)
+    panelView.window?.contentView = NSView()
+}
+
+/// Render the `energize-reduce-motion-static` scenario (item 9's motion gate):
+/// the SAME switch under Reduce Motion — the sweep is removed, so the two
+/// would-be-pending members snap straight to their resolved filled-gold member
+/// nodes and the connecting member is settled to connected; only the genuine
+/// failure stays red. No animation residue, at rest.
+@MainActor
+func snapshotEnergizeReduceMotion(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    guard let panelView = stageEnergize(fleet: energizeFleet(livingConnecting: false),
+                                        reduceMotion: true, appearanceName: appearanceName)
+    else { return }
+    let url = outDir.appendingPathComponent("popover-energize-reduce-motion-\(label).png")
+    renderPNG(view: panelView, to: url)
+    panelView.window?.contentView = NSView()
+}
+
 /// Render the `connection-states` scenario (brief §8): one row per
 /// `ConnectionState` case, with the failed row's diagnosis panel open. Bypasses
 /// `ConnectScript` timing entirely — the fleet's `Device` values already carry
@@ -927,6 +1052,18 @@ func run() -> Int32 {
     if mode == "feed-composite" {
         snapshotFeedComposite(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotFeedComposite(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "energize-mid-sequence" {
+        snapshotEnergizeMidSequence(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotEnergizeMidSequence(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "energize-reduce-motion-static" {
+        snapshotEnergizeReduceMotion(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotEnergizeReduceMotion(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

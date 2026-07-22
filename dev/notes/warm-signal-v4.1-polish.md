@@ -1,5 +1,31 @@
 # Warm Signal v4.1 — Polish batch + tether wiring + energize
 
+## CORRECTIONS from Alec's review (2026-07-22) — supersede the items below where they conflict
+Reference mock (the corrected look, verified): scratchpad `v41-fixes.html`.
+- **Master out meter (item 1) — FINAL placement (Alec, 2026-07-22):** it lives UNDER the
+  "Main Audio" title, EXACTLY like device meters sit under their device names — same position,
+  same geometry — but THICKER (`masterMeterThickness` ~6pt vs device 3pt) to denote the master
+  bus. NOT floating below the row, NOT below the icon, NOT under the fader.
+  - This DROPS the earlier "rail fuses into the master meter" idea (the meter is now under the
+    name, right of the icon, so the rail can't reach it without crossing the icon — the thing we
+    were avoiding). Instead the RAIL ORIGINATES cleanly at Main Audio on the left gutter (a small
+    gutter origin point at the Main Audio row — does NOT cross the icon, does NOT fuse into the
+    meter, no floating strip, no junction-into-meter dot). Consistency with device rows wins over
+    the fusion.
+- **Selected-node sizing (item 4) was INVERTED** — T1/T5 kept "selected" at the old 13pt default
+  and only shrank "unselected" to 9.5pt, so nothing grew. CORRECT: grow the SELECTED (filled)
+  node PAST the old baseline (`busNodeDiameterSelected` 13 → ~15pt) so selection reads as
+  EMPHASIS; unselected ~11pt. The point is "selected is bigger," not "others are smaller."
+- **FEED needs the COLOUR CHIP, not just tinted text** — each app source in the feed shows a
+  small derived-colour square chip + the app name (`[chip] Music`), matching the chip on that
+  app's redirect dropdown so the tether reads at both ends. (Extends items 3 + 7.)
+- **Cards: REJECTED.** Keep the continuous panel (stays true to the early de-nest); do NOT card
+  the device rows.
+- **Energize (item 9): CONFIRMED build-as-shown** — rail drops to pending, rooms light
+  top-to-bottom, failures stay red, settles to the calm solid spine with group-name feed labels;
+  no residue at rest. Reduce Motion still removes the animation entirely (snap to resolved).
+
+
 **Status: LOCKED by Alec in the 2026-07-22 design session.** Extends
 `warm-signal-v4-rail-and-tether.md` (Calls 1–3). Call 1 is already implemented + committed
 (2c3c836): left-gutter continuous rail, spine-to-lowest-selected with detours + node

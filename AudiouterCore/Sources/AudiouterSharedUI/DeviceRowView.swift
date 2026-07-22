@@ -213,6 +213,37 @@ public final class DeviceRowView: NSView {
     /// (`routedAppNames`), mirroring the retired sublabel's own T9 precedence.
     /// Recomputed every `apply`.
     private var feedAppNames: [String] = []
+    /// The host-supplied per-app tether tint (Warm Signal v4.1 CORRECTIONS,
+    /// extending T7/item 7): app display name → `AppTetherColor`-derived
+    /// color, computed once per bundle id and cached there — this row only
+    /// looks names up, it never derives a color itself (it doesn't hold app
+    /// icons/bundle ids, only the display names `feedAppNames` carries). Set
+    /// every `apply`; read by ``appSegmentColor(for:)``.
+    private var appTintColors: [String: NSColor] = [:]
+    /// Whether the row's controls currently render the "muted-unconnected"
+    /// treatment (v4 §Call-1 + v4.1 item 8): desaturated fader/readout AND —
+    /// new in item 8 — dimmed FEED text. Stored (not just a local in
+    /// ``apply``) so ``updateFeedText()`` dims the composite the same way
+    /// ``faderCell``/``readoutLabel`` already do. Set every `apply`.
+    private var controlsMuted = false
+    /// `device.connectionState` as of the PREVIOUS `apply`, `nil` before the
+    /// first one. Tracked ONLY to detect the item-8 "successful connect" EDGE
+    /// (connecting/reconnecting → connected) that triggers ``brightenOnConnect()``
+    /// — a pure animation trigger, never read by any model/routing logic.
+    private var previousConnectionState: ConnectionState?
+    /// The **energize "press-play" pending beat** (Warm Signal v4.1 item 9): a
+    /// DRAWING-ONLY flag the host raises on the members of a Main-Audio source
+    /// switch that haven't started connecting yet (`connectionState == .off`),
+    /// so at the switch instant the rail drops to ember PENDING and those nodes
+    /// render hollow-dashed (`MembershipBusView.Node.pending`) BEFORE the
+    /// backend reports `.connecting`. It NEVER changes the model — the moment
+    /// the device's real `connectionState` leaves `.off` (→ `.connecting`, then
+    /// `.member`), that model state supersedes this beat in ``updateBus()``, so
+    /// the host can leave the flag raised and the node still hands off cleanly.
+    /// Gated OFF under Reduce Motion (the beat is the sweep — "removes the
+    /// animation entirely, snap to resolved", spec item 9). Set every `apply`;
+    /// defaults off so non-energize callers are byte-for-byte unchanged.
+    private var energizePending = false
     private let slider = NSSlider()
     /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
     /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
@@ -299,6 +330,18 @@ public final class DeviceRowView: NSView {
         buildSubviews()
         apply(device)
         configureAccessibility()
+        // Item 8/9's motion-gating rule: reconcile a mid-session Reduce
+        // Motion toggle by cancelling an in-flight brighten cross-fade (see
+        // `accessibilityDisplayOptionsDidChange`). Registered after the
+        // above so this instance's `self` is fully initialized first.
+        // Selector-based observation needs no matching `removeObserver` —
+        // AppKit auto-unregisters on dealloc since 10.11 (same reasoning as
+        // `RouteArmedDotView`).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -368,6 +411,15 @@ public final class DeviceRowView: NSView {
     ///     Defaults to `nil`, in which case the row behaves exactly as before —
     ///     `device.kind.symbolName` is used directly. Existing callers all omit
     ///     this, so their behavior is byte-for-byte unchanged.
+    ///   - appTintColors: display name → `AppTetherColor`-derived tint for
+    ///     every app the HOST currently has a route for (Warm Signal v4.1
+    ///     CORRECTIONS, extending T7/item 7) — the same map the host builds
+    ///     for the matching App Exceptions row, so both ends of a tether
+    ///     agree on the color. Only names appearing in ``feedAppNames`` are
+    ///     ever looked up; an unmapped name falls back to
+    ///     `AppTetherColor.neutralFallback` (see ``appSegmentColor(for:)``).
+    ///     Defaults to empty so a caller that never redirects anything here
+    ///     is unaffected.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
@@ -376,13 +428,16 @@ public final class DeviceRowView: NSView {
                       selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = [],
+                      appTintColors: [String: NSColor] = [:],
                       masterMuted: Bool = false,
                       inActiveTarget: Bool? = nil,
                       mainOutTargetsGroupName: String? = nil,
+                      energizePending: Bool = false,
                       iconSymbolName: String? = nil) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
+        self.energizePending = energizePending
         self.blockReasonText = blocked ? blockReason : nil
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
@@ -457,19 +512,46 @@ public final class DeviceRowView: NSView {
         // VoiceOver feed clause share one source of truth.
         self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
         self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
+        self.appTintColors = appTintColors
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
         faderCell.isRouteArmed = isRouteArmed
-        // Muted-unconnected controls (v4 §Call-1): a connecting/reconnecting or
-        // failed device — or an unavailable one — renders its controls muted
-        // (desaturated + lower-contrast), "not adjustable right now"; a connected
-        // member is full-gold. Drives the fader dim and the readout tint below.
-        let controlsMuted: Bool
+        // Muted-unconnected controls (v4 §Call-1 + v4.1 item 8): a
+        // connecting/reconnecting or failed device — or an unavailable one —
+        // renders its controls muted (desaturated + lower-contrast), "not
+        // adjustable right now"; a connected member is full-gold. Drives the
+        // fader dim, the readout tint, and (item 8) the FEED composite's dim
+        // below. Stored on `self` (not just local) so `updateFeedText()`
+        // reads the same value.
         switch device.connectionState {
         case .connecting, .reconnecting, .failed: controlsMuted = true
         case .connected, .off:                    controlsMuted = !device.isAvailable
         }
         faderCell.isMutedControl = controlsMuted
+
+        // Item 8's brighten EDGE — "on successful connect it brightens to
+        // full gold/normal": fires ONLY on a connecting/reconnecting →
+        // connected transition (off `connectionState` alone, not the broader
+        // `controlsMuted`, which also covers unavailable/failed flaps that
+        // must NOT brighten). A `.failed` landing fires nothing — spec item 8
+        // "on failure it stays muted and the FEED shows the red error"; the
+        // red override alone carries that, no animation. Must run BEFORE
+        // `resolveSublabel()`/`updateFeedText()`/the bus below actually
+        // mutate the drawn state, so the added `CATransition` captures the
+        // pre-brighten snapshot to cross-dissolve FROM.
+        let wasConnectingOrReconnecting: Bool
+        if let previous = previousConnectionState {
+            switch previous {
+            case .connecting, .reconnecting: wasConnectingOrReconnecting = true
+            default: wasConnectingOrReconnecting = false
+            }
+        } else {
+            wasConnectingOrReconnecting = false
+        }
+        previousConnectionState = device.connectionState
+        if wasConnectingOrReconnecting && isConnected {
+            brightenOnConnect()
+        }
 
         // Sublabel (state words only, v4.1 item 3) + FEED column (the routing
         // composite / failure override), each with their own single ladder —
@@ -566,6 +648,16 @@ public final class DeviceRowView: NSView {
             // row-level text dim keep it distinct from blocked (R5).
             node = .nonMember
             dim = true
+        } else if energizePending, !reduceMotion, case .off = device.connectionState {
+            // Energize "press-play" pending beat (v4.1 item 9): a member of a
+            // source switch that hasn't started connecting yet renders the
+            // hollow ember DASHED pending node ON the spine, instantly, before
+            // the backend reports `.connecting`. Guarded to `.off` so the beat
+            // never overrides a real in-flight/resolved state — the moment
+            // `connectionState` advances, the branches below take over. Reduce
+            // Motion drops the beat entirely (the node falls through to its
+            // settled member/non-member rendering — "snap to resolved").
+            node = .pending
         } else if isSelectedInSet {
             // Selected members key their node off the CONNECTION state (v4
             // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
@@ -583,6 +675,72 @@ public final class DeviceRowView: NSView {
         // stays in the spine until an honest toggle-off).
         if case .failed = device.connectionState { dim = false }
         busView.apply(node: node, railAbove: busRailAbove, railBelow: busRailBelow, dimmed: dim)
+    }
+
+    // MARK: Connect-edge brighten (v4.1 item 8)
+
+    /// `CALayer` reserves this EXACT string for a `CATransition` — regardless
+    /// of what key you pass to `add(_:forKey:)`, a `CATransition` is always
+    /// filed under `"transition"` (verified empirically: a custom key is
+    /// silently ignored). `layer.animation(forKey:)`/`removeAnimation(forKey:)`
+    /// must use this same reserved key to see/cancel it — a private
+    /// project-specific key here would just never match.
+    private static let brightenTransitionKey = "transition"
+
+    /// Reduce Motion override seam — mirrors `RouteArmedDotView`/
+    /// `HaloRingView`. `nil` (the default) reads the live workspace value; a
+    /// test drives BOTH sides of the toggle by setting this then posting the
+    /// real `accessibilityDisplayOptionsDidChangeNotification`.
+    public var test_reduceMotionOverride: Bool?
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Live accessibility-display reconcile (item 8/9's shared motion-gating
+    /// rule — "Reduce Motion removes the animation entirely"): if Reduce
+    /// Motion just turned ON, strip any in-flight brighten cross-fade so the
+    /// row lands on its already-settled (model) state instantly instead of
+    /// finishing a transition the user asked not to see. Nothing else needs
+    /// re-stamping here — every color this row paints is a plain dynamic
+    /// `NSColor`/`Tokens.Color`, which AppKit already re-resolves on its own
+    /// appearance-change path; only a raw `CALayer` animation (like this one,
+    /// or `RouteArmedDotView`'s bloom) needs a manual cancel.
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        if reduceMotion {
+            layer?.removeAnimation(forKey: Self.brightenTransitionKey)
+        }
+        // Item 9's energize beat is gated on `reduceMotion` inside `updateBus`,
+        // but that gate is read at draw-derivation time — a mid-flight Reduce
+        // Motion toggle arrives through neither `apply` nor an appearance
+        // change, so re-derive the node here so a raised `energizePending`
+        // snaps to (or resumes from) its resolved rendering the instant the
+        // user flips the setting. Idempotent + cheap; no-op off a bus row.
+        updateBus()
+    }
+
+    /// One-shot CROSS-FADE from the muted-unconnected treatment to full gold/
+    /// normal on a successful connect (v4.1 item 8 — "the per-device
+    /// counterpart of the energize beat"). Called from `apply` BEFORE the
+    /// rest of that method mutates the row's drawn state (fader fill,
+    /// readout tint, FEED dim, bus node, meter reveal), so by the time this
+    /// returns the layer already holds a pending transition to
+    /// cross-dissolve FROM the pre-brighten snapshot TO whatever `apply`
+    /// settles next — the exact "animate over settled presentation layers"
+    /// contract `HaloRingView`/`RouteArmedDotView` established: the
+    /// transition is self-removing (`isRemovedOnCompletion` default), so a
+    /// `cacheDisplay` snapshot taken before or after it plays (never
+    /// mid-flight) is byte-identical regardless of capture timing.
+    /// No-op off screen (`window == nil` — covers the row's own `init`
+    /// apply, which can never be a connect edge anyway) or under Reduce
+    /// Motion (a snap to the already-resolved state, matching item 9).
+    private func brightenOnConnect() {
+        guard window != nil, !reduceMotion else { return }
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = PopoverColumnGrid.routeArmedBloomDuration
+        transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer?.add(transition, forKey: Self.brightenTransitionKey)
     }
 
     /// Updates the mute button's engaged treatment for the current
@@ -790,26 +948,51 @@ public final class DeviceRowView: NSView {
             setFeedText("Unavailable", color: Tokens.Color.failure)
             return
         }
-        var segments: [(text: String, color: NSColor)] = []
-        if let mainMixSourceName { segments.append((mainMixSourceName, Tokens.Color.secondaryLabel)) }
+        var segments: [FeedSegment] = []
+        // The neutral main-mix segment (spec item 3's own word "carries" the
+        // reason) NEVER wears a chip — only a redirected app does (v4.1
+        // CORRECTIONS "keep neutral segments … untinted"). Item 8: while the
+        // row is in the muted-unconnected treatment, both segment kinds dim —
+        // the neutral word drops to `tertiaryLabel`, an app's tether tint
+        // desaturates (never discarded outright, so the association still
+        // reads once the row brightens back).
+        let neutralColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        if let mainMixSourceName { segments.append(.init(text: mainMixSourceName, color: neutralColor, hasChip: false)) }
         for name in feedAppNames {
-            // SEAM for T7 (v4.1 item 7): `appSegmentColor(for:)` is the ONLY
-            // call this later task rewires (to `AppTetherColor`, computed once
-            // per bundle id and cached) — nothing else about composition,
-            // precedence, or overflow changes.
-            segments.append((name, appSegmentColor(for: name)))
+            var color = appSegmentColor(for: name)
+            if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
+            segments.append(.init(text: name, color: color, hasChip: true))
         }
         let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
         setFeedSegments(segments, tag: tag)
     }
 
-    /// SEAM for T7: resolves the tint for one FEED app-name segment. A flat
-    /// pass-through to the standard secondary label color today — T7 wires
-    /// `AppTetherColor` in here (and into the matching App Exceptions redirect
-    /// chip) without touching `updateFeedText`'s composition/precedence/
-    /// overflow logic at all.
+    /// Alpha applied to an app-tint FEED segment while the row is in the
+    /// muted-unconnected treatment (v4.1 item 8's "muted feed text") —
+    /// desaturates the tether tint rather than discarding it, so the
+    /// app↔device association still reads once the row brightens back.
+    private static let feedMutedTintAlpha: CGFloat = 0.5
+
+    /// One FEED composite segment: its text, its resolved color, and whether
+    /// it wears the derived-colour chip (an app-redirect segment does; the
+    /// neutral main-mix segment never does).
+    private struct FeedSegment {
+        let text: String
+        let color: NSColor
+        let hasChip: Bool
+    }
+
+    /// Resolves the tint for one FEED app-name segment (Warm Signal v4.1
+    /// CORRECTIONS, extending T7/item 7): the host-supplied ``appTintColors``
+    /// map (an `AppTetherColor` tint per bundle id, computed and cached
+    /// there), keyed by display name since that's all this row carries for a
+    /// feed entry. A name the host never mapped (defensive — every real
+    /// caller populates the map from the same routes that produced
+    /// `feedAppNames`) falls back to `AppTetherColor.neutralFallback` rather
+    /// than the flat `secondaryLabel` a neutral segment uses, so an app
+    /// segment always reads as "a specific app," never as the neutral word.
     private func appSegmentColor(for appName: String) -> NSColor {
-        Tokens.Color.secondaryLabel
+        appTintColors[appName] ?? AppTetherColor.neutralFallback
     }
 
     /// Render a single failure-red override string (no tag, no segments) into
@@ -827,23 +1010,34 @@ public final class DeviceRowView: NSView {
     /// TAIL one at a time (never cut a segment mid-string) and append a
     /// trailing "+N" for the dropped count — no interactive reveal, locked.
     /// Hides the label when there is nothing to show at all.
-    private func setFeedSegments(_ segments: [(text: String, color: NSColor)], tag: String?) {
+    private func setFeedSegments(_ segments: [FeedSegment], tag: String?) {
         guard !segments.isEmpty else {
             feedLabel.isHidden = true
             feedLabel.attributedStringValue = NSAttributedString()
             return
         }
         let font = Tokens.Font.caption
+        // Item 8: the separator dot and the AP1 micro-tag dim in lockstep
+        // with the segments they sit between — the same `controlsMuted`
+        // gate ``updateFeedText()`` used to build `segments`.
+        let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
         let separatorAttrs: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: Tokens.Color.secondaryLabel,
+            .font: font, .foregroundColor: chromeColor,
         ]
-        func attributed(_ segment: (text: String, color: NSColor)) -> NSAttributedString {
-            NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: segment.color])
+        func attributed(_ segment: FeedSegment) -> NSAttributedString {
+            let result = NSMutableAttributedString()
+            // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music") — an app
+            // segment only, never the neutral main-mix segment.
+            if segment.hasChip {
+                result.append(FeedChip.attachmentString(color: segment.color, font: font))
+            }
+            result.append(NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: segment.color]))
+            return result
         }
         let tagPrefix: NSAttributedString? = tag.map {
             NSAttributedString(string: $0 + " ", attributes: [
                 .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
-                .foregroundColor: Tokens.Color.secondaryLabel,
+                .foregroundColor: chromeColor,
             ])
         }
         let available = PopoverColumnGrid.feedColumnWidth
@@ -1418,11 +1612,31 @@ public final class DeviceRowView: NSView {
     /// hosts no FEED column at all (a non-bus host). Concatenates the composed
     /// attributed string's characters — including a static "AP1 " prefix or a
     /// trailing "+N" when present — so a test can assert the rendered words
-    /// without parsing per-segment color runs itself.
+    /// without parsing per-segment color runs itself. Strips the chip
+    /// attachments' object-replacement characters (Warm Signal v4.1
+    /// CORRECTIONS) so a test reading WORDS never has to know chips exist —
+    /// the chip bakes its own trailing gap into its attachment width (no
+    /// following space glyph), so stripping leaves no stray space either.
     public var test_feedText: String? {
         guard busActive, !feedLabel.isHidden else { return nil }
         let text = feedLabel.attributedStringValue.string
+            .replacingOccurrences(of: FeedChip.objectReplacementCharacter, with: "")
         return text.isEmpty ? nil : text
+    }
+
+    /// The number of derived-colour chips CURRENTLY rendered in the FEED
+    /// composite (Warm Signal v4.1 CORRECTIONS) — one per app-redirect
+    /// segment, never for the neutral main-mix segment or an error override.
+    /// Counts `NSTextAttachment` runs directly rather than re-deriving from
+    /// `feedAppNames`, so a test asserts what's actually painted.
+    public var test_feedChipCount: Int {
+        guard busActive, !feedLabel.isHidden else { return 0 }
+        let attr = feedLabel.attributedStringValue
+        var count = 0
+        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, _, _ in
+            if value != nil { count += 1 }
+        }
+        return count
     }
 
     /// Whether the FEED text is CURRENTLY rendering in the failure-red override
@@ -1439,6 +1653,31 @@ public final class DeviceRowView: NSView {
         return abs(resolved.redComponent - failure.redComponent) < 0.01
             && abs(resolved.greenComponent - failure.greenComponent) < 0.01
             && abs(resolved.blueComponent - failure.blueComponent) < 0.01
+    }
+
+    /// The FEED composite's leading run's CURRENTLY-painted foreground color
+    /// (the neutral main-mix segment when not an error override) — item 8's
+    /// "muted feed text" dims this from `secondaryLabel` to `tertiaryLabel`
+    /// while ``controlsMuted``. Reads what's actually painted, like
+    /// ``test_feedIsErrorColored``.
+    public var test_feedNeutralColor: NSColor? {
+        guard busActive, !feedLabel.isHidden else { return nil }
+        let attr = feedLabel.attributedStringValue
+        guard attr.length > 0 else { return nil }
+        return attr.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
+
+    /// Whether the row is CURRENTLY rendering the muted-unconnected treatment
+    /// (v4 §Call-1 + v4.1 item 8) — the same flag ``faderCell.isMutedControl``
+    /// and the FEED dim above both read.
+    public var test_controlsMuted: Bool { controlsMuted }
+
+    /// Whether the item-8 connect-edge brighten CROSS-FADE is currently
+    /// mid-flight — present on the layer the instant it's added (same idiom
+    /// as `RouteArmedDotView.test_isBlooming`: no run loop needed to assert
+    /// it fired).
+    public var test_isBrightening: Bool {
+        layer?.animation(forKey: Self.brightenTransitionKey) != nil
     }
 
     /// Whether the FEED column is currently showing the static "+N" overflow
@@ -1589,6 +1828,12 @@ public final class DeviceRowView: NSView {
     /// never-dim exemption included), unlike `test_isSelectionDimmed` which
     /// reports the host-driven dormancy input. `nil` when the row has no bus.
     public var test_busNodeDimmed: Bool? { busActive ? busView.test_dimmed : nil }
+
+    /// Whether the host has raised the energize "press-play" pending beat on this
+    /// row (item 9) — the drawing-only input, distinct from `test_busNode` which
+    /// reads the RESOLVED node (the beat only becomes a `.pending` node while the
+    /// device is `.off` AND Reduce Motion is off).
+    public var test_energizePending: Bool { energizePending }
 
     /// The x-position (in this row's coordinates) of the bus node's center, after
     /// layout — used to prove the node NEVER moves when membership toggles (spec
@@ -1968,6 +2213,14 @@ public final class DeviceRowView: NSView {
     /// The accessibility-label clause for the current connection state
     /// (brief §6), or `nil` for `.off` — enriches the row label for VoiceOver.
     private var accessibilityStateSuffix: String? {
+        // The energize pending node (item 9) is a new VISUAL state, so it ships
+        // its spoken equivalent here: a `.off` member flagged for the pending
+        // beat speaks "connecting" (the same word the ring/`.connecting` node
+        // gets), so a VoiceOver user hears the source switch begin. Under
+        // Reduce Motion the beat isn't drawn, so it isn't spoken either.
+        if energizePending, !reduceMotion, case .off = device.connectionState {
+            return "connecting"
+        }
         switch device.connectionState {
         case .off:           return nil
         case .connecting:    return "connecting"

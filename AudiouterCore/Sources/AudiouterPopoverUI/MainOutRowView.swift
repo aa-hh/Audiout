@@ -63,21 +63,16 @@ public final class MainOutRowView: NSView {
     /// A touch taller than a device row — this is the module's headline control.
     public static let rowHeight: CGFloat = 44
 
-    /// Vertical gap from the row's bottom edge to the master strip's bottom
-    /// edge (Warm Signal v4.1 item 1). `PopoverColumnGrid` is read-only for
-    /// this task (T1 owns it), so this stays a file-local named constant
-    /// rather than a shared one; tuned live to seat the strip clearly below
-    /// the icon without touching the row boundary.
-    private static let masterMeterBottomInset: CGFloat = 2
-
     public weak var delegate: Delegate?
 
     /// Leading VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
     /// Main Out shares the same level as the device meters for now, until
-    /// true per-output metering exists). Warm Signal v4.1 item 1: this is the
-    /// MASTER STRIP the left rail plugs into — same length as a device meter
-    /// but thicker (`masterMeterThickness`, 6pt vs 3pt), so the per-instance
-    /// `thickness` param is threaded through instead of the shared default.
+    /// true per-output metering exists). Warm Signal v4.1 CORRECTIONS, item 1:
+    /// it lives UNDER THE "Main Audio" NAME, exactly like a device meter sits
+    /// under its device name — same position, same geometry — but THICKER
+    /// (`masterMeterThickness`, 6pt vs the device rows' 3pt) to denote the
+    /// master bus, so the per-instance `thickness` param is threaded through
+    /// instead of the shared default.
     private let meterView = LevelMeterView(thickness: PopoverColumnGrid.masterMeterThickness)
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
@@ -108,12 +103,11 @@ public final class MainOutRowView: NSView {
     /// §Call-1; was "Audio Out"), filling the shared name column so it aligns
     /// with the device rows below.
     private let nameLabel = NSTextField(labelWithString: "Main Audio")
-    /// The name cluster: just **name** now (Warm Signal v4.1 item 1 pulled the
-    /// meter OUT of this stack). Left-aligned, vertically centred in the row.
-    /// Previously held `nameLabel` over `meterView` (the device-row anatomy);
-    /// the master strip instead sits BELOW THE ICON at the rail-gutter x (see
-    /// `meterView`'s own constraints below) so the rail can plug straight into
-    /// its left end without a horizontal jog across the icon or the name.
+    /// The name cluster: **name over meter**, exactly the device-row anatomy
+    /// (Warm Signal v4.1 CORRECTIONS, item 1 — reworking the earlier,
+    /// shipped-wrong "meter below the icon" treatment). Left-aligned,
+    /// vertically centred in the row; the stack recentres its visible lines,
+    /// so no manual name-offset juggling is needed when the meter shows/hides.
     private let identityStack = NSStackView()
     private let slider = NSSlider()
     /// The Warm Signal fader skin over the master slider (drawing-only
@@ -131,13 +125,18 @@ public final class MainOutRowView: NSView {
     /// selected target. Replaces the old circular icon button. Owns the
     /// two-section menu directly.
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    /// The membership bus's **origin stub** (spec §4.1: "the bus starts at the
-    /// Audio Out row, at the same column where its destination dropdown sits"):
-    /// a short straight rail launching downward out of the dropdown's column
-    /// toward the device rows below, so the line visibly begins HERE. Rendered
-    /// in the dormant de-emphasis tint only while the checked set genuinely
-    /// DIVERGES from an active group target (spec §4.7 FINAL, S5 — the
-    /// derived-identity case keeps full ink; the host resolves it via
+    /// The membership bus's **origin marker** (Warm Signal v4.1 CORRECTIONS,
+    /// item 2, reworking the earlier shipped-wrong "stub into the meter"
+    /// treatment): sits at the SAME left-gutter column (`railGutterCenterX`)
+    /// the device rows below centre their own bus node on, spanning the row's
+    /// full height like a device row's bus column — a clean gutter origin
+    /// point that never crosses the icon and never fuses into the meter. It
+    /// draws no node of its own (`.origin` is a no-draw state in
+    /// `MembershipBusView`); `BusRailOverlayView` reads its live frame (via
+    /// `railHookAnchor`) to place the small origin dot and drop the spine.
+    /// Rendered in the dormant de-emphasis tint only while the checked set
+    /// genuinely DIVERGES from an active group target (spec §4.7 FINAL, S5 —
+    /// the derived-identity case keeps full ink; the host resolves it via
     /// `apply(busOriginDimmed:)`). Non-interactive (`MembershipBusView.hitTest`
     /// returns nil) and animation-free.
     private let busOriginView = MembershipBusView()
@@ -388,21 +387,22 @@ public final class MainOutRowView: NSView {
 
         busOriginView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Name cluster (v4.1 item 1: meter pulled out — see meterView's own
-        // constraints below).
+        // Name cluster (v4.1 CORRECTIONS, item 1: name over meter, the
+        // device-row anatomy — reworking the earlier "meter below the icon"
+        // treatment).
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
         identityStack.spacing = 2
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
+        identityStack.addArrangedSubview(meterView)
 
         addSubview(busOriginView)
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
         addSubview(identityStack)
-        addSubview(meterView)
         addSubview(muteButton)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -447,27 +447,25 @@ public final class MainOutRowView: NSView {
                 equalTo: iconView.bottomAnchor,
                 constant: -PopoverColumnGrid.statusDotInset),
 
-            // Identity cluster ("Main Audio" over the under-name meter), centred
-            // as a group; yields to the mute glyph so the name truncates.
+            // Identity cluster ("Main Audio" over the under-name meter, the
+            // device-row anatomy — Warm Signal v4.1 CORRECTIONS item 1),
+            // centred as a group; yields to the mute glyph so the name
+            // truncates. The meter is an arranged subview of this stack (added
+            // in `buildSubviews`), so it inherits the SAME position + geometry
+            // a device meter gets under its device name — only its own
+            // width/height below (thicker: `masterMeterThickness`) differ.
             identityStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                     constant: PopoverColumnGrid.iconToName),
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             identityStack.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor,
                                                     constant: -PopoverColumnGrid.nameToSlider),
 
-            // Master strip (Warm Signal v4.1 item 1): same LENGTH as a device
-            // meter (`meterUnderNameWidth`) but thicker (`masterMeterThickness`,
-            // wired via the `LevelMeterView(thickness:)` init above), seated
-            // BELOW THE ICON with its LEADING EDGE pinned to the rail-gutter x
-            // (`railGutterCenterX` — the same x `DeviceRowView` centers its bus
-            // node on). Anchoring off `leadingAnchor` directly (not the name
-            // column) means the left rail's vertical drop lands exactly on the
-            // strip's left end with no horizontal jog across the icon or name;
-            // `BusRailOverlayView` draws the junction dot at that meeting point.
-            meterView.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                               constant: PopoverColumnGrid.railGutterCenterX),
-            meterView.bottomAnchor.constraint(equalTo: bottomAnchor,
-                                              constant: -Self.masterMeterBottomInset),
+            // Master meter's fixed size (v4.1 CORRECTIONS item 1): same LENGTH
+            // as a device meter (`meterUnderNameWidth`) but thicker
+            // (`masterMeterThickness`, wired via the `LevelMeterView(thickness:)`
+            // init above) — thickness alone signifies "master bus." No
+            // separate leading/bottom anchors — the stack positions it, exactly
+            // like `DeviceRowView` positions its own under-name meter.
             meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterUnderNameWidth),
             meterView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.masterMeterThickness),
 
@@ -496,16 +494,21 @@ public final class MainOutRowView: NSView {
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
 
-            // Bus origin HOOK (v4 §Call-1): the rail rises at `railGutterCenterX`
-            // in the LEFT gutter and turns INTO the under-name meter. The view is
-            // framed leading-edge → the identity cluster's leading (= the meter's
-            // leading, left-aligned), and top → the cluster's bottom (the meter's
-            // band) → row bottom; `MembershipBusView.origin` draws the L from the
-            // row bottom up to the top-right corner (the meter's leading edge).
-            busOriginView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            busOriginView.trailingAnchor.constraint(equalTo: identityStack.leadingAnchor),
-            busOriginView.topAnchor.constraint(equalTo: identityStack.bottomAnchor),
-            busOriginView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Bus origin marker (Warm Signal v4.1 CORRECTIONS, item 2 —
+            // reworking the earlier "hook into the meter" treatment): centred
+            // on `railGutterCenterX` in the LEFT gutter, spanning the full row
+            // height, exactly like a device row centres its own bus node/column
+            // — a clean gutter origin point that never crosses the icon and
+            // never reaches into the meter (which now sits under the name,
+            // clear of the gutter). `MembershipBusView.origin` draws no node
+            // of its own; `BusRailOverlayView` reads this view's live frame
+            // (via `railHookAnchor`) to place the small origin dot and drop
+            // the spine from there.
+            busOriginView.centerXAnchor.constraint(
+                equalTo: leadingAnchor, constant: PopoverColumnGrid.railGutterCenterX),
+            busOriginView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            busOriginView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.busColumnWidth),
+            busOriginView.heightAnchor.constraint(equalTo: heightAnchor),
         ])
     }
 
@@ -706,19 +709,18 @@ public final class MainOutRowView: NSView {
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
 
 extension MainOutRowView: RailHookProviding {
-    /// The origin-hook anchor for the continuous rail overlay: the master
-    /// strip's leading edge + centre-y, converted into `view`'s coordinates,
-    /// plus whether the spine is armed (gold vs ember). `meterView` is a plain
-    /// subview now (Warm Signal v4.1 item 1 pulled it out of `identityStack`,
-    /// pinned to `railGutterCenterX`), so its constrained frame is valid — and
-    /// already sits exactly on the rail's centreline — whether or not it is
-    /// currently hidden (`isHidden` only suppresses drawing, never layout for
-    /// a plain constrained subview), so no visible/hidden branch is needed
-    /// here any more.
+    /// The origin-point anchor for the continuous rail overlay (Warm Signal
+    /// v4.1 CORRECTIONS, item 2): `busOriginView`'s centre, converted into
+    /// `view`'s coordinates, plus whether the spine is armed (gold vs ember).
+    /// `busOriginView` is centred on `railGutterCenterX` — the SAME column the
+    /// device rows below centre their own bus node on — so the returned x
+    /// already sits on the rail's centreline; the overlay no longer needs a
+    /// horizontal jog to reach it (the meter moved under the name and is no
+    /// longer in the gutter at all).
     public func railHookAnchor(in view: NSView) -> (leadingX: CGFloat, centerY: CGFloat, gold: Bool)? {
         layoutSubtreeIfNeeded()
-        let rectInSelf = meterView.convert(meterView.bounds, to: self)
-        let point = convert(NSPoint(x: rectInSelf.minX, y: rectInSelf.midY), to: view)
+        let rectInSelf = busOriginView.convert(busOriginView.bounds, to: self)
+        let point = convert(NSPoint(x: rectInSelf.midX, y: rectInSelf.midY), to: view)
         return (point.x, point.y, isArmedState)
     }
 }

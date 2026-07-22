@@ -115,9 +115,19 @@ public final class AppRowView: NSView {
         /// the route destination). Defaults to `true` so existing callers and
         /// tests that don't pass this field see no behavior change.
         public let isRunning: Bool
+        /// This app's `AppTetherColor` tint when it currently redirects to an
+        /// AirPlay DEVICE (Warm Signal v4.1 CORRECTIONS, extending item 7's
+        /// "wire the same chip onto that app's App Exceptions redirect entry
+        /// so the tether reads at both ends") — `nil` for "No Redirect" or
+        /// "Current Device" (nothing on a device's own FEED column to match
+        /// against). The HOST computes this the same way it computes the
+        /// matching `DeviceRowView` FEED chip's color, so both ends agree.
+        /// Defaults to `nil` so every existing caller renders exactly as
+        /// before (no chip).
+        public let tetherColor: NSColor?
         public init(appID: String, name: String, icon: NSImage?, volume: Int,
                    selectedDestinationID: String, destinations: [Destination],
-                   isRunning: Bool = true) {
+                   isRunning: Bool = true, tetherColor: NSColor? = nil) {
             self.appID = appID
             self.name = name
             self.icon = icon
@@ -125,6 +135,7 @@ public final class AppRowView: NSView {
             self.selectedDestinationID = selectedDestinationID
             self.destinations = destinations
             self.isRunning = isRunning
+            self.tetherColor = tetherColor
         }
     }
 
@@ -284,22 +295,43 @@ public final class AppRowView: NSView {
         // reads gold-adjacent, violating the gold-is-signal-only budget).
         let isRouted = !isNoRedirect
         let showsIdleSuffix = isRouted && !isRunning
+        // The derived-colour tether CHIP (Warm Signal v4.1 CORRECTIONS,
+        // extending item 7): prefixed onto the name ONLY when the host says
+        // this app currently redirects to an AirPlay device — the identical
+        // chip a matching `DeviceRowView` FEED segment wears, so the tether
+        // reads at both ends. Doesn't change the existing liveness-driven
+        // TEXT color logic below at all — the chip is a separate, additive
+        // glyph, never a substitute for it.
+        let chipPrefix: NSAttributedString? = configuration.tetherColor.map {
+            FeedChip.attachmentString(color: $0, font: Tokens.Font.menuItem)
+        }
         if showsIdleSuffix {
             let truncatingTail = NSMutableParagraphStyle()
             truncatingTail.lineBreakMode = .byTruncatingTail
-            let composed = NSMutableAttributedString(
+            let composed = NSMutableAttributedString()
+            if let chipPrefix { composed.append(chipPrefix) }
+            composed.append(NSAttributedString(
                 string: configuration.name,
                 attributes: [
                     .font: Tokens.Font.menuItem,
                     .foregroundColor: Tokens.Color.secondaryLabel,
                     .paragraphStyle: truncatingTail,
-                ])
+                ]))
             composed.append(NSAttributedString(
                 string: " (idle)",
                 attributes: [
                     .font: Tokens.Font.menuItem,
                     .foregroundColor: Tokens.Color.tertiaryLabel,
                     .paragraphStyle: truncatingTail,
+                ]))
+            nameLabel.attributedStringValue = composed
+        } else if let chipPrefix {
+            let composed = NSMutableAttributedString(attributedString: chipPrefix)
+            composed.append(NSAttributedString(
+                string: configuration.name,
+                attributes: [
+                    .font: Tokens.Font.menuItem,
+                    .foregroundColor: (isRouted && isRunning) ? Tokens.Color.label : Tokens.Color.secondaryLabel,
                 ]))
             nameLabel.attributedStringValue = composed
         } else {
@@ -794,19 +826,40 @@ public final class AppRowView: NSView {
 
     /// The name label's full displayed text — includes the " (idle)" tertiary
     /// suffix when a routed app's process isn't running (spec §3.5 pattern).
-    public var test_nameDisplayText: String { nameLabel.stringValue }
+    /// Strips a leading tether-chip attachment's object-replacement character
+    /// (Warm Signal v4.1 CORRECTIONS), if present, so a test reading WORDS
+    /// never has to know a chip exists.
+    public var test_nameDisplayText: String {
+        nameLabel.stringValue.replacingOccurrences(of: FeedChip.objectReplacementCharacter, with: "")
+    }
 
-    /// The colour of the NAME portion of the label (position 0 of the
-    /// attributed string when the idle suffix is composed, else the label's
-    /// plain `textColor`): full `label` for a live exception route — the
-    /// section's bright anchor — `secondaryLabel` otherwise.
+    /// The colour of the NAME portion of the label (the first character AFTER
+    /// any leading tether-chip attachment, when the idle suffix or a chip is
+    /// composed, else the label's plain `textColor`): full `label` for a live
+    /// exception route — the section's bright anchor — `secondaryLabel`
+    /// otherwise. Skipping the chip run (Warm Signal v4.1 CORRECTIONS) keeps
+    /// this reading the NAME's own color, not the chip's.
     public var test_nameTextColor: NSColor? {
         let attributed = nameLabel.attributedStringValue
-        if attributed.length > 0,
-           let color = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor {
+        guard attributed.length > 0 else { return nameLabel.textColor }
+        let plain = attributed.string as NSString
+        var index = 0
+        while index < plain.length, plain.character(at: index) == 0xFFFC { index += 1 }
+        guard index < attributed.length else { return nameLabel.textColor }
+        if let color = attributed.attribute(.foregroundColor, at: index, effectiveRange: nil) as? NSColor {
             return color
         }
         return nameLabel.textColor
+    }
+
+    /// Whether the name label currently wears the leading tether CHIP (Warm
+    /// Signal v4.1 CORRECTIONS) — `true` only when the host supplied a
+    /// non-nil `Configuration.tetherColor` (this app currently redirects to
+    /// an AirPlay device).
+    public var test_hasTetherChip: Bool {
+        let attributed = nameLabel.attributedStringValue
+        guard attributed.length > 0 else { return false }
+        return attributed.attribute(.attachment, at: 0, effectiveRange: nil) != nil
     }
 
     /// The colour of the " (idle)" suffix when present — `nil` when the name

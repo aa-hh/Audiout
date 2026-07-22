@@ -54,9 +54,14 @@ public final class MembershipBusView: NSView {
         /// DASHED rim (spec §Call-1 "connecting = gold dashed"). The controls
         /// render muted (not adjustable yet).
         case connecting
-        /// The energize "refresh" pending beat (spec §Call-1 / Call 3 step 1) —
-        /// a HOLLOW node with an `ember` DASHED rim. Call 1 renders it statically;
-        /// the energize agent sequences into/out of it.
+        /// The energize "refresh" pending beat (spec §Call-1 / Call 3 step 1,
+        /// v4.1 item 9) — a HOLLOW node with an `ember` DASHED rim. Raised by
+        /// the host on the members of a Main-Audio source switch that haven't
+        /// started connecting yet (`DeviceRowView.energizePending` while the
+        /// device is still `.off`), so the switch reads as an instant
+        /// "press-play" drop to ember pending; each node then hands off to
+        /// `.connecting` → `.member` as its real `connectionState` advances.
+        /// Reduce Motion removes the beat (the node renders its resolved form).
         case pending
         /// A member that failed to connect — a HOLLOW node with a heavier
         /// FAILURE-RED solid ring (spec §Call-1 "failed = failure-red ring"). It

@@ -273,6 +273,33 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     private var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
+    // MARK: Energize (Warm Signal v4.1 item 9 — source-switch "press-play")
+
+    /// The device ids currently showing the energize PENDING beat (item 9): the
+    /// members of the just-switched Main-Audio target that hadn't started
+    /// connecting yet (`connectionState == .off`) at the switch instant. Their
+    /// rows render `MembershipBusView.Node.pending` (ember dashed, on-spine) —
+    /// the instant "press-play" drop — until their real `connectionState`
+    /// advances (`→ .connecting`, then `→ .member`), at which point
+    /// `reconcileEnergize()` prunes them and the model state carries the node.
+    /// It is a PRESENTATION set only — it never gates membership/connection/
+    /// routing. Empty (and untouched) under Reduce Motion, so the sweep is
+    /// removed and every row snaps to its resolved state (spec item 9).
+    private var energizePendingIDs: Set<String> = []
+
+    /// Whether an energize sequence is mid-flight (a source switch is still
+    /// resolving). Gates the one-shot settle announcement so it fires exactly
+    /// once, when the active target stops moving.
+    private var energizeActive = false
+
+    /// Display name of the target the current energize is switching TO ("Selected
+    /// Devices" or a saved group's name), for the VoiceOver announcements.
+    private var energizeTargetName: String?
+
+    /// The last VoiceOver announcement the energize posted — a deterministic
+    /// test seam (headless runs can't observe the real accessibility post).
+    private var lastEnergizeAnnouncement: String?
+
     /// The mounted in-place refusal-note row per BLOCKED device id (spec §4.6):
     /// a body-click on a local-mix-blocked row toggles a one-line note carrying
     /// `GroupController.localMixRefusalReason` directly under it — the reachable
@@ -802,6 +829,133 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                          busOriginDimmed: devicesCardDivergence() != nil)
     }
 
+    // MARK: Energize (Warm Signal v4.1 item 9)
+
+    /// Start the energize "press-play" sequence for a Main-Audio source switch
+    /// (Selected Devices ↔ a group). Raises the PENDING beat on the target's
+    /// members that haven't started connecting yet, so the switch reads as an
+    /// instant drop to ember pending; the natural `connectionState` progression
+    /// (`.off → .connecting → .connected`) then plays the top-to-bottom fill
+    /// over the live model, and `reconcileEnergize()` closes it out. Purely
+    /// presentational — it never touches membership/connection/routing.
+    ///
+    /// **Scope.** The beat is raised on the SELECTED-DEVICES set (the members
+    /// the left rail already runs through), so the clean cases — switching TO
+    /// Selected Devices, or to a group whose members equal the checked set
+    /// (derived identity, §3.4) — light their spine. A switch to a group that
+    /// genuinely DIVERGES from the checked set leaves that rail dormant (§4.7)
+    /// rather than energizing devices that aren't the ones now playing.
+    ///
+    /// **Reduce Motion** removes the sweep entirely: the pending set stays
+    /// empty, so every row renders its resolved model state immediately (the
+    /// rows' own `energizePending` gate makes this belt-and-suspenders).
+    private func beginEnergize(to target: MainOutTarget) {
+        guard let controller = groupController else { return }
+        energizeTargetName = energizeTargetDisplayName(target, controller: controller)
+        // Announce the transition FIRST — the spoken equivalent of the visual
+        // drop-to-pending is an accessibility affordance, independent of the
+        // motion setting: a VoiceOver user with Reduce Motion on still hears the
+        // switch even though the sweep isn't drawn.
+        announceEnergize("Switching Main Audio to \(energizeTargetName ?? "the new source")")
+        // Reduce Motion removes the sweep: raise no beat, so every member snaps
+        // straight to its resolved node (the rows' own gate is belt-and-braces).
+        guard !reduceMotionActive else {
+            energizePendingIDs = []
+            energizeActive = false
+            return
+        }
+        // Only members not yet online get the pending beat — a member already
+        // `.connecting`/`.connected` shows its real node, no "press-play" drop.
+        energizePendingIDs = Set(controller.selectedDeviceIDs.filter { isPreConnect($0) })
+        energizeActive = !energizePendingIDs.isEmpty
+    }
+
+    /// Prune the pending beat off members that have left `.off`, and — once the
+    /// switched target stops moving (no member still `.off`/`.connecting`/
+    /// `.reconnecting`) — fire the one-shot settle announcement. Called at the
+    /// top of `refreshDeviceRows()` (every in-place repaint / model update), so
+    /// the beat tracks the live connection progression with no timers.
+    private func reconcileEnergize() {
+        guard energizeActive else { return }
+        energizePendingIDs = energizePendingIDs.filter { isPreConnect($0) }
+        guard energizeTargetSettled() else { return }
+        energizeActive = false
+        energizePendingIDs = []
+        let (connected, failed) = energizeTargetTally()
+        var summary = "\(energizeTargetName ?? "Main Audio") ready"
+        if connected > 0 { summary += " — \(connected) connected" }
+        if failed > 0 { summary += ", \(failed) didn’t connect" }
+        announceEnergize(summary)
+    }
+
+    /// Whether a device is still waiting to come online (`.off`, or absent from
+    /// the current snapshot) — the pending-beat / settle predicate.
+    private func isPreConnect(_ id: String) -> Bool {
+        switch devicesByID[id]?.connectionState {
+        case .some(.off), .none: return true
+        default:                 return false
+        }
+    }
+
+    /// The switched target has stopped moving when none of its members is `.off`
+    /// or mid-handshake — every member has landed on `.connected` or `.failed`.
+    private func energizeTargetSettled() -> Bool {
+        guard let controller = groupController else { return true }
+        for id in controller.selectedDeviceIDs {
+            switch devicesByID[id]?.connectionState {
+            case .some(.off), .some(.connecting), .some(.reconnecting), .none:
+                return false
+            default:
+                continue
+            }
+        }
+        return true
+    }
+
+    /// Count the switched target's members that landed connected vs failed, for
+    /// the settle announcement.
+    private func energizeTargetTally() -> (connected: Int, failed: Int) {
+        guard let controller = groupController else { return (0, 0) }
+        var connected = 0, failed = 0
+        for id in controller.selectedDeviceIDs {
+            switch devicesByID[id]?.connectionState {
+            case .some(.connected): connected += 1
+            case .some(.failed):    failed += 1
+            default:                break
+            }
+        }
+        return (connected, failed)
+    }
+
+    /// The spoken name for a source-switch target.
+    private func energizeTargetDisplayName(_ target: MainOutTarget,
+                                           controller: GroupController) -> String {
+        switch target {
+        case .selectedDevices: return "Selected Devices"
+        case .group(let id):   return controller.groups.first { $0.id == id }?.name ?? "the group"
+        }
+    }
+
+    /// Post a VoiceOver announcement for an energize milestone (the transition's
+    /// accessibility equivalent — the visual sweep has no other spoken form), and
+    /// record it for the deterministic test seam. High priority so it isn't
+    /// dropped mid-scan. No-op-safe headlessly (the post simply reaches no AT).
+    private func announceEnergize(_ message: String) {
+        lastEnergizeAnnouncement = message
+        NSAccessibility.post(
+            element: panel.view,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ])
+    }
+
+    /// Live Reduce Motion value, overridable for headless determinism.
+    private var reduceMotionActive: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     /// The AGGREGATE connection state driving the Main Out halo ring (spec §3.2
     /// Main Out note / §6): resolved over the ACTIVE target's members (the
     /// Selected Devices set, or the routed group's members), read from the live
@@ -945,7 +1099,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                      appTintColors: appTintColorsByName(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
+                      energizePending: energizePendingIDs.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device))
             return
         }
@@ -982,13 +1138,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                  appTintColors: appTintColorsByName(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
                   mainOutTargetsGroupName: activeMainOutGroupName,
+                  energizePending: energizePendingIDs.contains(device.id),
                   iconSymbolName: deviceIconController?.symbolName(for: device))
     }
 
     private func refreshDeviceRows() {
+        // Item 9: prune the energize pending beat off any member that has left
+        // `.off` (started connecting / resolved) BEFORE re-applying rows, so the
+        // repaint reflects the current beat, and fire the one-shot settle
+        // announcement when the switch finishes moving.
+        reconcileEnergize()
         for (id, row) in deviceRowsByID {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
@@ -1293,6 +1456,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
         let row = AppRowView(showsMeter: true)
         row.delegate = self
+        // Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7): only
+        // an actual AirPlay-device redirect has a matching device-row FEED
+        // segment to tether to — "No Redirect"/"Current Device" get no chip.
+        let tetherColor: NSColor?
+        if case .device = route.destination {
+            tetherColor = appTintColor(for: route.bundleID)
+        } else {
+            tetherColor = nil
+        }
         row.apply(AppRowView.Configuration(
             appID: route.bundleID,
             name: route.displayName,
@@ -1300,7 +1472,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
             destinations: appDestinations(devices: devices),
-            isRunning: !offlineBundleIDs.contains(route.bundleID)),
+            isRunning: !offlineBundleIDs.contains(route.bundleID),
+            tetherColor: tetherColor),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
@@ -1400,6 +1573,33 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
+    }
+
+    /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
+    /// extending T7/item 7) — derived from the same icon `appIcon(for:)`
+    /// resolves for the App Exceptions row, so a routed-but-quit app (icon
+    /// falls back to the generic placeholder) and a running one resolve
+    /// identically to whichever a redirect target's device row shows.
+    /// `AppTetherColor.color(forBundleID:icon:)` caches per bundle id itself
+    /// (Warm Signal v4 §Call 2), so repeated calls here are cheap.
+    private func appTintColor(for bundleID: String) -> NSColor {
+        AppTetherColor.color(forBundleID: bundleID, icon: appIcon(for: bundleID))
+    }
+
+    /// Every currently-routed app's tether tint, keyed by DISPLAY NAME —
+    /// `DeviceRowView`'s FEED column only carries app display names (never
+    /// bundle ids), so this is the map its `apply(appTintColors:)` parameter
+    /// needs. Built from `appRouting.appRoutes` regardless of each route's
+    /// destination (a device row only ever looks up names that are actually
+    /// in ITS OWN `feedAppNames`, i.e. routed to that specific device, so an
+    /// unrelated "Current Device"/"No Redirect" entry in this map is simply
+    /// never read).
+    private func appTintColorsByName() -> [String: NSColor] {
+        var result: [String: NSColor] = [:]
+        for route in appRouting.appRoutes {
+            result[route.displayName] = appTintColor(for: route.bundleID)
+        }
+        return result
     }
 
     // MARK: Actions
@@ -1751,6 +1951,38 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         rebuild()
     }
 
+    // MARK: Energize test hooks (item 9)
+
+    /// Overrides the live Reduce Motion read for `beginEnergize` (`nil` = use the
+    /// real workspace value) so a headless test drives BOTH sides deterministically.
+    public var test_reduceMotionOverride: Bool?
+
+    /// Drive a Main-Audio source switch through the EXACT production delegate
+    /// path (`setMainOut` + `beginEnergize` + `rebuild`), so tests exercise the
+    /// energize start beat + announcement the live dropdown does — unlike
+    /// `test_selectMainOut`, which is the older plain-switch hook.
+    public func test_switchMainOut(_ target: MainOutTarget) {
+        mainOutRow(mainOutRow, didSelect: target)
+    }
+
+    /// The device ids currently carrying the energize pending beat (item 9).
+    public var test_energizePendingIDs: Set<String> { energizePendingIDs }
+
+    /// Whether an energize sequence is mid-flight.
+    public var test_energizeActive: Bool { energizeActive }
+
+    /// The last VoiceOver announcement the energize posted (start or settle).
+    public var test_lastEnergizeAnnouncement: String? { lastEnergizeAnnouncement }
+
+    /// Force a specific pending set + repaint — the snapshot harness stages a
+    /// frozen mid-sequence frame with it (bypassing the async connection
+    /// progression that a headless MockBackend never plays).
+    public func test_setEnergizePending(_ ids: Set<String>) {
+        energizePendingIDs = ids
+        energizeActive = !ids.isEmpty
+        refreshDeviceRows()
+    }
+
     public func test_saveCurrentSetup() { saveCurrentSetup() }
 
     /// Simulate flipping a device row's membership switch through its delegate.
@@ -1849,6 +2081,11 @@ extension PopoverController: MainOutRowView.Delegate {
 
     public func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget) {
         groupController?.setMainOut(target)
+        // Item 9: the source switch plays the energize sequence. Raise the
+        // pending beat over the (now-current) member states BEFORE `rebuild()`
+        // so the fresh rows render the instant drop-to-pending; the live
+        // connection progression + `reconcileEnergize()` carry it to rest.
+        beginEnergize(to: target)
         rebuild()
     }
 

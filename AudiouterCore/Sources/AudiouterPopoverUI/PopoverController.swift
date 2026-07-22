@@ -821,6 +821,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                          master: controller.mainOutMasterVolume,
                          isMuted: controller.isMainOutMuted,
                          connectionState: mainOutConnectionState(controller),
+                         restingArmed: mainOutIsLocalOnlyArmed(controller),
                          // S5 (spec §4.7 FINAL): the bus origin stub dims only
                          // under a GENUINELY-DIVERGING group target — in the
                          // derived-identity case the whole bus (origin included)
@@ -981,6 +982,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             }
         }
         return anyConnecting ? .connecting : .off
+    }
+
+    /// The Main Audio ring's RESTING form predicate (ring-resting-state task,
+    /// separate from `mainOutConnectionState` above — which stays untouched):
+    /// true iff the active target's members are ALL the local device (the set
+    /// non-empty) and the master is unmuted. This is exactly the case where
+    /// audio is genuinely playing (locally, through the Mac) but there's no
+    /// remote AirPlay handshake for `mainOutConnectionState` to report, so it
+    /// correctly falls through to `.off` — leaving the rail's curve into the
+    /// ring with nothing to land on unless the ring renders its resting form.
+    private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {
+        let memberIDs: [String]
+        switch controller.mainOut {
+        case .selectedDevices: memberIDs = Array(controller.selectedDeviceIDs)
+        case .group(let id):   memberIDs = controller.groups.first { $0.id == id }?.memberIDs ?? []
+        }
+        guard !memberIDs.isEmpty,
+              memberIDs.allSatisfy({ devicesByID[$0]?.isLocalDevice == true })
+        else { return false }
+        return !controller.isMainOutMuted
     }
 
     // MARK: Device rows

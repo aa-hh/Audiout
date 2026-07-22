@@ -49,4 +49,36 @@ final class MainOutRowRingTests: XCTestCase {
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50)
         XCTAssertEqual(row.test_ringForm, .none)
     }
+
+    // MARK: Resting ring (ring-resting-state task — local-only playback, no
+    // remote AirPlay handshake to track)
+
+    func testRestingRingWhenLocalOnlyArmed() {
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .off, restingArmed: true)
+        XCTAssertEqual(row.test_ringForm, .resting,
+                       "local-only playback (off + restingArmed) shows the quiet resting ring, not none")
+    }
+
+    func testDefaultRestingArmedLeavesNoRing() {
+        // Legacy/omitted `restingArmed` (default `false`) must render exactly as
+        // before — an idle target still shows no ring.
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .off)
+        XCTAssertEqual(row.test_ringForm, .none,
+                       "omitting restingArmed must not change the .off rendering")
+    }
+
+    func testConnectedRingIsUnaffectedByRestingArmed() {
+        // A genuine remote `.connected` state must render identically whether or
+        // not `restingArmed` happens to be true — `.resting` only ever fires for
+        // `.off`.
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .connected, restingArmed: true)
+        XCTAssertEqual(row.test_ringForm, .connected,
+                       "a real connected ring is untouched by restingArmed")
+    }
 }

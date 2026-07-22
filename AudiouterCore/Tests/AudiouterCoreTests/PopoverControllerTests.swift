@@ -641,6 +641,47 @@ final class PopoverControllerTests: XCTestCase {
                        "an idle target leaves the Main Out ring off")
     }
 
+    // MARK: Main Out halo ring — resting form (ring-resting-state task)
+
+    /// The default {local device} passthrough target — audio genuinely playing
+    /// through the Mac, unmuted, with no remote AirPlay handshake for
+    /// `mainOutConnectionState` to report — shows the RESTING ring (not `.none`,
+    /// not `.connected`), so the rail's curve into the ring always lands on
+    /// something. `mainOutConnectionState` itself still correctly resolves `.off`
+    /// for this target (untouched by this task).
+    func testMainOutRingIsRestingForLocalOnlyPassthrough() async throws {
+        let (popover, controller, _) = try await makePopover()
+        XCTAssertTrue(controller.isPassthrough, "default set == {local} ⇒ passthrough")
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .resting,
+                       "local-only armed playback shows the quiet resting ring")
+    }
+
+    /// Muting the local-only target drops `restingArmed` (the predicate requires
+    /// unmuted) — the ring falls back to no ring, exactly like any other idle
+    /// target.
+    func testMainOutRingIsNoneWhenLocalOnlyTargetMuted() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        controller.setMainOutMuted(true)
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .none,
+                       "a muted local-only target is not 'armed' — no resting ring")
+    }
+
+    /// An idle NON-local target (a selected AirPlay device that hasn't connected
+    /// yet) must still show `.none`, never `.resting` — the resting form is
+    /// reserved for a target whose members are ALL the local device.
+    func testMainOutRingStaysNoneForIdleNonLocalTarget() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        var devices = backend.devices
+        if let i = devices.firstIndex(where: { $0.id == "office" }) {
+            devices[i].connectionState = .off
+        }
+        popover.update(devices: devices)
+        XCTAssertEqual(popover.test_mainOutRow.test_ringForm, .none,
+                       "an idle non-local target shows no ring, not the local-only resting form")
+    }
+
     // MARK: Membership bus — popover-level wiring (spec §4, S-BUS)
 
     /// The bus originates at the Main Audio row (the `.origin` hook) and runs to

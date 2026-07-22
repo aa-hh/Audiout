@@ -1612,6 +1612,12 @@ public final class DeviceRowView: NSView {
         case .connecting:  return .connecting
         case .connected:   return .connected
         case .failed:      return .failed
+        // `.resting` (ring-resting-state task) is Main Audio-only — a device
+        // row's `haloRingView.apply(_:)` call never passes `restingArmed`, so
+        // this case is unreachable here; mapped defensively to `.none` (the
+        // form `.off` would render without that bit) rather than widening
+        // `StatusKind` for a form this view can never actually produce.
+        case .resting:     return .none
         }
     }
 

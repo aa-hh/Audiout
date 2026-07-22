@@ -182,14 +182,23 @@ public final class MainOutRowView: NSView {
     /// set) — the derived-identity case keeps the origin at full ink. `nil`
     /// (legacy callers/tests) falls back to the transitional any-group-target
     /// derivation.
+    /// `restingArmed` (ring-resting-state task) is the host-computed bit
+    /// deciding the ring's `.resting` form: true iff the active target's
+    /// members are all the local device (non-empty) and unmuted — the
+    /// local-only-playback case where a genuine AirPlay handshake never
+    /// happens, so `connectionState` correctly falls through to `.off`
+    /// (`PopoverController.mainOutConnectionState` is untouched) but the
+    /// rail's curve into the ring still needs something to land on. Defaults
+    /// to `false` (legacy callers/tests render exactly as before).
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false,
                       connectionState: ConnectionState = .off,
+                      restingArmed: Bool = false,
                       busOriginDimmed: Bool? = nil) {
         self.options = options
         isMasterMutedState = isMuted
         muteButton.state = isMuted ? .on : .off
         updateMuteTint()
-        haloRingView.apply(connectionState)
+        haloRingView.apply(connectionState, restingArmed: restingArmed)
 
         // Route-armed dot (spec §3.3, Main Out variant): armed = the active
         // target has ≥1 CONNECTED member (the aggregate ring state, which

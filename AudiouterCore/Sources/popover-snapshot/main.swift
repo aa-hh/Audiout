@@ -36,6 +36,12 @@
 // `snapshotFeedComposite` for the per-row breakdown (multi-source composite,
 // group-name wording, the AP1 micro-tag, the failure-red override, and the
 // STATIC "+N" overflow).
+//
+// `AIRPLAY_SNAPSHOT_MODE=resting-ring` renders the ring-resting-state task's
+// scenario: the DEFAULT {local device} passthrough selection (no toggles) —
+// the Main Audio ring shows its thin, hue-neutral RESTING form instead of
+// hiding, since audio is genuinely playing locally with no remote AirPlay
+// handshake to report. See `snapshotRestingRing`.
 
 import AppKit
 import AudiouterCore
@@ -802,6 +808,56 @@ func snapshotRailDepth(appearanceName: NSAppearance.Name, label: String, outDir:
     window.contentView = NSView()
 }
 
+/// Render the `resting-ring` scenario (ring-resting-state task): the DEFAULT
+/// {local device} passthrough selection with no toggles applied — audio is
+/// genuinely playing through the Mac, unmuted, but there's no remote AirPlay
+/// handshake for `mainOutConnectionState` to report, so the Main Audio ring
+/// shows its RESTING form (thin, hue-neutral `ringConnected`, never the gold/
+/// ember `connected` override) rather than hiding — the rail's curve into the
+/// ring always has something to land on.
+@MainActor
+func snapshotRestingRing(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()   // {local device} only — no toggles.
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-resting-ring-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 /// Render the `local-mix-blocked` scenario (spec §4.6, the §4.8 fixture list's
 /// **greyed-blocked** and **hover** nodes): an AirPlay device (Office) is
 /// checked, so the Mac's own row ("MacBook Pro Speakers") is local-mix BLOCKED —
@@ -1040,6 +1096,12 @@ func run() -> Int32 {
     if mode == "local-mix-blocked" {
         snapshotLocalMixBlocked(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLocalMixBlocked(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "resting-ring" {
+        snapshotRestingRing(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotRestingRing(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

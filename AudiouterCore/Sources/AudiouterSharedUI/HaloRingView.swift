@@ -14,7 +14,10 @@ import AudiouterCore
 /// The FORM carries the state, not just the color — so the ladder survives
 /// Reduce Motion (the **blocking** stress-test break §8.2):
 ///
-/// - `.off` → **no ring** (hidden — discovered, nothing to report).
+/// - `.off` → **no ring** (hidden — discovered, nothing to report), UNLESS
+///   the caller passes `restingArmed: true` (Main Audio only — see
+///   `apply(_:restingArmed:)`), in which case it renders the **resting**
+///   form instead.
 /// - `.connecting` / `.reconnecting` → **dashed ring, breathing** (opacity +
 ///   scale pulse). Under Reduce Motion the dashed FORM survives, STATIC (no
 ///   animation) — "incomplete", legible frozen. Same `ringConnected` hue as
@@ -24,6 +27,19 @@ import AudiouterCore
 ///   (26 px, Warm Signal v4.1 item 2), both themes.
 /// - `.failed` → **red solid ring**, `failure` token, stroke ~1.8 pt (heavier so
 ///   the failed row wins the scan beside flickering meters).
+/// - **`.resting`** (Main Audio only, ring-resting-state task) — audio is
+///   genuinely playing to the local Mac and unmuted, but `connectionState` is
+///   `.off` because there's no remote AirPlay handshake to track (the
+///   `mainOutConnectionState` fallthrough is correct and untouched). Without
+///   this form the rail's curve into the ring (`BusRailOverlayView`) lands on
+///   a hidden ring and reads as unfinished. Renders the SHARED, hue-neutral
+///   `ringConnected` token at the SHARED `haloRingConnectedStroke` (1.6 pt) —
+///   deliberately thinner than Main Audio's bespoke gold/ember
+///   `mainAudioRingConnectedStroke` (2 pt, matched to the rail's own
+///   `busLineWidth`) and never recolored via `connectedStrokeColorOverride`/
+///   `connectedStrokeWidthOverride` (those apply to `.connected` only), so a
+///   quiet thin neutral ring is visually distinct from any real remote
+///   `.connected` ring, which always wears the gold/ember override.
 ///
 /// Geometry comes from `PopoverColumnGrid` NAMED CONSTANTS (`haloRingDiameter`,
 /// stroke widths, dash lengths, breathing timing) so a future density setting
@@ -58,6 +74,12 @@ public final class HaloRingView: NSView {
         case connected
         /// `.failed` — solid red ring, `failure`, heavier stroke.
         case failed
+        /// Main Audio only: armed local-only playback with no remote target
+        /// to track (`state == .off && restingArmed == true`) — solid quiet
+        /// ring at the shared `ringConnected` hue and shared (thinner)
+        /// `haloRingConnectedStroke`, never the Main Audio gold/ember
+        /// override, so it reads as distinct from a real `.connected` ring.
+        case resting
     }
 
     private let ringLayer = CAShapeLayer()
@@ -67,6 +89,14 @@ public final class HaloRingView: NSView {
     /// visibility, color, stroke, dashing, and whether the breathing animation
     /// should be installed.
     private var state: ConnectionState = .off
+    /// Main Audio's host-computed bit (ring-resting-state task): true iff the
+    /// active target's members are all the local device (non-empty) and the
+    /// master is unmuted — the `.resting` form fires only when this is true
+    /// AND `state == .off`. Every device row (and any caller using the
+    /// single-argument `apply(_:)`) leaves this `false`, so `.resting` is
+    /// reachable ONLY through Main Audio's own call site — existing behavior
+    /// elsewhere is unchanged.
+    private var restingArmed = false
 
     /// Bespoke ring diameter override (Warm Signal nitpicks — the Main Audio
     /// ring is the rail's terminus, not a peer of the device rows' rings, so
@@ -131,8 +161,13 @@ public final class HaloRingView: NSView {
     /// unrelated re-render can never leave a stale breathing animation running
     /// under a since-changed state (the same idempotent-reset discipline the
     /// retired corner dot used).
-    public func apply(_ state: ConnectionState) {
+    /// - Parameter restingArmed: Main Audio's host-computed bit (default
+    ///   `false`, a no-op everywhere else): when `state == .off`, `true` here
+    ///   renders the `.resting` form instead of hiding the ring. Every device
+    ///   row call site omits this, so their `.off` handling is unchanged.
+    public func apply(_ state: ConnectionState, restingArmed: Bool = false) {
         self.state = state
+        self.restingArmed = restingArmed
         isHidden = form == .none
         updateLayerAppearance()
         reconcileBreathing()
@@ -141,7 +176,7 @@ public final class HaloRingView: NSView {
     /// The ring form for the current connection state.
     public var form: Form {
         switch state {
-        case .off:                        return .none
+        case .off:                        return restingArmed ? .resting : .none
         case .connecting, .reconnecting:  return .connecting
         case .connected:                  return .connected
         case .failed:                     return .failed
@@ -186,6 +221,17 @@ public final class HaloRingView: NSView {
         case .failed:
             strokeToken = Tokens.Color.failure
             width = PopoverColumnGrid.haloRingFailedStroke
+            dashed = false
+        case .resting:
+            // Deliberately NOT `connectedStrokeColorOverride`/
+            // `connectedStrokeWidthOverride` — those exist so a real
+            // `.connected` ring can match the rail's gold/ember + matched
+            // stroke. `.resting` stays the shared hue-neutral token at the
+            // shared (thinner) stroke so it never wears that combination —
+            // the one visual signature Main Audio's real connected ring
+            // always carries.
+            strokeToken = Tokens.Color.ringConnected
+            width = PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         }
         ringLayer.lineWidth = width

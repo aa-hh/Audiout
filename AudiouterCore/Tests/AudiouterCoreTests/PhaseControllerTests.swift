@@ -270,6 +270,63 @@ final class PhaseControllerTests: IsolatedTestCase {
         XCTAssertLessThan(worstTail, 0.02, "converges to ≈ zero from a large offset")
     }
 
+    /// A pathological, wildly-outsized error (far beyond anything the clamp is
+    /// meant for) must saturate the correction at EXACTLY `maxPpm` (never a hair
+    /// over) and hold there — the clamp boundary itself, not just "somewhere in the
+    /// validated range" as the other convergence tests check.
+    func test_controller_saturatesAtExactPpmClampBoundary_bothSigns() {
+        for sign: Double in [1, -1] {
+            let controller = PhaseController()
+            // A single cycle's error many frames wide — enough to blow past both
+            // the proportional term and the slew limit's ability to reach the clamp
+            // within a handful of cycles.
+            let nsPerFrame = 1_000_000_000.0 / 48_000.0
+            for _ in 0..<200 {
+                _ = controller.update(phaseErrorNanos: sign * 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
+            }
+            XCTAssertEqual(controller.correctionPpm, sign * controller.maxPpm, accuracy: 1e-9,
+                           "sign \(sign): correction must saturate at exactly ±maxPpm, never exceed it")
+            // One more update at the same huge error must NOT push it past the clamp.
+            _ = controller.update(phaseErrorNanos: sign * 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
+            XCTAssertLessThanOrEqual(abs(controller.correctionPpm), controller.maxPpm + 1e-9,
+                                     "sign \(sign): repeated saturating updates must never exceed the clamp")
+            XCTAssertEqual(controller.ratio, 1.0 + sign * controller.maxPpm * 1e-6, accuracy: 1e-12,
+                          "sign \(sign): the resampler ratio at the clamp must be exactly 1 ± maxPpm·1e-6")
+        }
+    }
+
+    /// The integrator's own anti-windup clamp (`integralMaxFrames`) must likewise
+    /// hold — driving a huge CONSTANT error for a long time must not let the
+    /// integral term wind up past what `Ki` would need to hit `maxPpm` alone, which
+    /// is what would otherwise cause an overshoot once the error suddenly reverses.
+    func test_controller_integratorAntiWindupBoundsOvershootAfterSignReversal() {
+        let controller = PhaseController()
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        // Saturate hard in the positive direction for a long time (simulates a huge
+        // stale offset sitting at the clamp for many cycles).
+        for _ in 0..<5_000 {
+            _ = controller.update(phaseErrorNanos: 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
+        }
+        XCTAssertEqual(controller.correctionPpm, controller.maxPpm, accuracy: 1e-9)
+
+        // Error reverses sign abruptly (e.g. the real error was actually opposite
+        // and clamped wrongly is not the case here — this proves anti-windup, not
+        // correctness of sign): the correction must swing back down at the slew
+        // rate, not stay pinned at +maxPpm for many extra cycles from a wound-up
+        // integrator.
+        var cyclesToCrossZero = 0
+        for i in 0..<200 {
+            _ = controller.update(phaseErrorNanos: -1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
+            if controller.correctionPpm <= 0 { cyclesToCrossZero = i + 1; break }
+        }
+        XCTAssertGreaterThan(cyclesToCrossZero, 0, "correction must actually cross back through zero")
+        // With slewPpmPerCycle = 25 and a 400 ppm total swing (+200 → −200), an
+        // UN-wound-up loop crosses zero in ~8 cycles (200/25); anti-windup keeps it
+        // in that neighborhood rather than the integrator adding a long extra delay.
+        XCTAssertLessThan(cyclesToCrossZero, 20,
+                          "anti-windup: reversal must not be delayed by a wound-up integrator")
+    }
+
     // MARK: - Integrated: SyncedLocalSink render core under synthetic device skew
 
     #if canImport(AVFoundation)

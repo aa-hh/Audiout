@@ -10,6 +10,17 @@
 #include "utils.h"
 
 #define AIRPTP_SHM_NAME "/airptp_shm"
+#define AIRPTP_SHM_NAME_MAXLEN 64
+
+// Mutable, overridable via airptp_shm_name_override() (declared in
+// ../airptp.h, defined in airptp.c alongside airptp_event_port/
+// airptp_general_port). A fixed buffer, not a `const char *`, because the
+// override copies its argument in rather than just storing the pointer - a
+// caller (e.g. a Swift test using String.withCString {}) may not be able to
+// keep the original storage alive past the override call. daemon.c and
+// airptp.c must read this instead of the AIRPTP_SHM_NAME macro directly so a
+// test override actually takes effect.
+extern char airptp_shm_name[AIRPTP_SHM_NAME_MAXLEN];
 
 #define AIRPTP_SHM_STRUCTS_VERSION_MAJOR 0
 #define AIRPTP_SHM_STRUCTS_VERSION_MINOR 1

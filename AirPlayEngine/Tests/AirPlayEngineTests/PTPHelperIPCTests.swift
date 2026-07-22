@@ -50,12 +50,34 @@ final class PTPHelperIPCTests: XCTestCase {
     private static let eventPort: UInt16 = 30319
     private static let generalPort: UInt16 = 30320
 
+    /// Test-only shm name (never the production "/airptp_shm"). A real
+    /// ptp-helper daemon installed via SMAppService runs as root and owns
+    /// "/airptp_shm"; an unprivileged test process can't shm_unlink() a
+    /// root-owned segment of that name, so daemon_shm_create() would fail
+    /// with EACCES whenever the real daemon happens to be running. See
+    /// airptp_shm_name_override() (libairptp/airptp.h).
+    private static let shmName = "/airptp_shm_test"
+
+    override func tearDown() {
+        // ptp_test_ports_override()/ptp_test_shm_name_override() mutate plain
+        // C process-globals (libairptp/src/airptp.c), not per-test state -
+        // restore the shipping defaults (PTP_EVENT_PORT/PTP_GENERAL_PORT =
+        // 319/320, AIRPTP_SHM_NAME = "/airptp_shm") so this test can't leak
+        // its overrides into any sibling test that shares the process (e.g.
+        // one exercising the engine's production ptpd_setup -> daemon_find
+        // path, shims/ptpd.c).
+        ptp_test_ports_override(319, 320)
+        "/airptp_shm".withCString { ptp_test_shm_name_override($0) }
+        super.tearDown()
+    }
+
     func testFindClockReadAndPeerAddRemoveOverLoopback() throws {
         // Every libairptp entry point in this test reads/writes process-wide
-        // globals (airptp_event_port/airptp_general_port - see
-        // libairptp/src/airptp.c), so apply the override before the master
-        // binds.
+        // globals (airptp_event_port/airptp_general_port/airptp_shm_name -
+        // see libairptp/src/airptp.c), so apply the overrides before the
+        // master binds.
         ptp_test_ports_override(Self.eventPort, Self.generalPort)
+        Self.shmName.withCString { ptp_test_shm_name_override($0) }
 
         // MARK: master role (stands in for the future root helper, minus
         // root - these are high ports so no privilege is required).

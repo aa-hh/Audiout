@@ -75,35 +75,28 @@ public final class BusRailOverlayView: NSView {
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // Origin point (Warm Signal v4.1 CORRECTIONS, item 2 — reworking
-            // the earlier "hook into the meter" treatment): the rail simply
-            // BEGINS here, at Main Audio's own gutter column. The master
-            // meter moved under the Main Audio name (item 1), clear of the
-            // gutter entirely, so there is no leading strip to jog into and
-            // no junction to fuse — `anchor.leadingX` already equals `cx`
-            // (both derive from `railGutterCenterX`); a defensive horizontal
-            // segment is drawn only in case a future anchor ever diverges.
+            // Terminus (Warm Signal nitpicks — "rail into the ring"): the
+            // rail no longer stops at a bare gutter dot. It curves up from the
+            // gutter column and lands directly on the Main Audio ring's own
+            // left edge, stroked at the SAME width the ring uses while
+            // connected (`PopoverColumnGrid.mainAudioRingConnectedStroke` ==
+            // `busLineWidth`), so the two read as one continuous line at their
+            // join rather than a line touching a separate shape.
             let originColor = anchor.gold ? Tokens.Color.gold : Tokens.Color.ember
-            if abs(anchor.leadingX - cx) > 0.01 {
-                let jog = NSBezierPath()
-                jog.lineWidth = lw
-                jog.lineCapStyle = .round
-                jog.lineJoinStyle = .round
-                jog.move(to: NSPoint(x: anchor.leadingX, y: anchor.centerY))
-                jog.line(to: NSPoint(x: cx, y: anchor.centerY))
-                originColor.setStroke()
-                jog.stroke()
-            }
+            let ringLeftX = anchor.ringCenterX - anchor.ringRadius
+            let ringCY = anchor.centerY
+            let hook = NSBezierPath()
+            hook.lineWidth = lw
+            hook.lineCapStyle = .round
+            hook.lineJoinStyle = .round
+            hook.move(to: NSPoint(x: ringLeftX, y: ringCY))
+            hook.curve(to: NSPoint(x: cx, y: ringCY - PopoverColumnGrid.railRingHookLandingDrop),
+                       controlPoint1: NSPoint(x: ringLeftX - PopoverColumnGrid.railRingHookBulge, y: ringCY),
+                       controlPoint2: NSPoint(x: cx, y: ringCY - PopoverColumnGrid.railRingHookControlDrop))
+            originColor.setStroke()
+            hook.stroke()
 
-            // A small clean origin dot marks where the spine starts — never a
-            // junction fused into anything else.
-            let dotR = PopoverColumnGrid.busOriginDotDiameter / 2
-            let dot = NSBezierPath(ovalIn: NSRect(x: cx - dotR, y: anchor.centerY - dotR,
-                                                   width: dotR * 2, height: dotR * 2))
-            originColor.setFill()
-            dot.fill()
-
-            var currentY = anchor.centerY
+            var currentY = ringCY - PopoverColumnGrid.railRingHookLandingDrop
             for stop in stops {
                 let onSpine = Self.onSpine(stop.node)
                 let stopR = MembershipBusView.nodeRadius(for: stop.node)
@@ -192,10 +185,15 @@ public protocol RailNodeProviding: AnyObject {
     var railNodeBounds: NSRect { get }
 }
 
-/// The Main Audio row's origin-hook anchor for the continuous rail.
+/// The Main Audio row's origin-hook anchor for the continuous rail (Warm
+/// Signal nitpicks — "rail into the ring"): the rail's terminus is now the
+/// Main Audio ring itself, not a bare gutter dot, so the anchor describes the
+/// ring's own geometry (centre + radius) rather than a single leading point.
 public protocol RailHookProviding: AnyObject {
-    /// The hook target (the meter's leading edge x + centre y) converted into
-    /// `view`'s coordinates, plus whether the spine is armed (gold vs ember).
-    /// `nil` if the anchor can't be resolved (no window / not laid out).
-    func railHookAnchor(in view: NSView) -> (leadingX: CGFloat, centerY: CGFloat, gold: Bool)?
+    /// The ring's centre-Y and centre-X (both converted into `view`'s
+    /// coordinates) plus its radius, and whether the spine is armed (gold vs
+    /// ember). `nil` if the anchor can't be resolved (no window / not laid
+    /// out). The overlay curves the rail from the gutter column up to this
+    /// ring's left edge (`ringCenterX - ringRadius`, `centerY`).
+    func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)?
 }

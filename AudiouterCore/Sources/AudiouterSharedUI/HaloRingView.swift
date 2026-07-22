@@ -68,6 +68,33 @@ public final class HaloRingView: NSView {
     /// should be installed.
     private var state: ConnectionState = .off
 
+    /// Bespoke ring diameter override (Warm Signal nitpicks — the Main Audio
+    /// ring is the rail's terminus, not a peer of the device rows' rings, so
+    /// it owns its own size rather than sharing `haloRingDiameter`). `nil`
+    /// (every device row) keeps the shared `PopoverColumnGrid.haloRingDiameter`
+    /// unchanged.
+    public var diameterOverride: CGFloat? {
+        didSet { needsLayout = true }
+    }
+    /// Bespoke stroke-width override for the **connected** form only (Warm
+    /// Signal nitpicks — the Main Audio ring's stroke is set to match the
+    /// rail's own `busLineWidth` so the two read as one continuous line where
+    /// they meet). `nil` keeps the shared per-form widths
+    /// (`haloRingConnectedStroke`/`haloRingConnectingStroke`/`haloRingFailedStroke`).
+    public var connectedStrokeWidthOverride: CGFloat? {
+        didSet { updateLayerAppearance() }
+    }
+    /// Bespoke stroke-COLOR override for the **connected** form only (Warm
+    /// Signal nitpicks): the Main Audio ring is the rail's terminus, so its
+    /// connected color must match whatever tone the rail's curve is drawn in
+    /// (gold when armed, ember otherwise — the same two-tone the rail itself
+    /// uses, not the device rows' hue-neutral `ringConnected` token) for the
+    /// join to read as one continuous line rather than two different colors
+    /// touching. `nil` keeps the shared `Tokens.Color.ringConnected`.
+    public var connectedStrokeColorOverride: NSColor? {
+        didSet { updateLayerAppearance() }
+    }
+
     public init() {
         super.init(frame: .zero)
         wantsLayer = true
@@ -153,8 +180,8 @@ public final class HaloRingView: NSView {
             width = PopoverColumnGrid.haloRingConnectingStroke
             dashed = true
         case .connected:
-            strokeToken = Tokens.Color.ringConnected
-            width = PopoverColumnGrid.haloRingConnectedStroke
+            strokeToken = connectedStrokeColorOverride ?? Tokens.Color.ringConnected
+            width = connectedStrokeWidthOverride ?? PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         case .failed:
             strokeToken = Tokens.Color.failure
@@ -183,7 +210,7 @@ public final class HaloRingView: NSView {
         // matches the 26 pt icon box). The layer fills the view; the path is the
         // inscribed circle.
         ringLayer.frame = bounds
-        let diameter = PopoverColumnGrid.haloRingDiameter
+        let diameter = diameterOverride ?? PopoverColumnGrid.haloRingDiameter
         let rect = NSRect(x: bounds.midX - diameter / 2,
                           y: bounds.midY - diameter / 2,
                           width: diameter, height: diameter)

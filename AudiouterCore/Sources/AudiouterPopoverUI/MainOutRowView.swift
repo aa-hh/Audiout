@@ -84,7 +84,15 @@ public final class MainOutRowView: NSView {
     /// dead/broken (spec §6), **connected** (solid `ringConnected`) once ≥1
     /// member is live, no ring when idle. The host computes the aggregate and
     /// passes it to ``apply(options:current:master:isMuted:connectionState:)``.
-    private let haloRingView = HaloRingView()
+    private let haloRingView: HaloRingView = {
+        let ring = HaloRingView()
+        // Bespoke terminus sizing (Warm Signal nitpicks — Main Audio's ring is
+        // the rail's terminus, not a peer of the device rows' rings): matches
+        // the rail's own stroke weight so the join reads as one line.
+        ring.diameterOverride = PopoverColumnGrid.mainAudioRingDiameter
+        ring.connectedStrokeWidthOverride = PopoverColumnGrid.mainAudioRingConnectedStroke
+        return ring
+    }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
     /// v3 §3.3, S2): lit iff the active target set has a connected member AND
     /// the master is unmuted — the aggregate `.connected` ring state already
@@ -191,6 +199,11 @@ public final class MainOutRowView: NSView {
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
         isArmedState = armed
+        // The ring's CONNECTED color matches the rail curve's own two-tone
+        // (gold armed / ember otherwise — Warm Signal nitpicks, "rail into
+        // the ring"), so the join reads as one continuous line, not a gold
+        // line touching a hue-neutral ring.
+        haloRingView.connectedStrokeColorOverride = armed ? Tokens.Color.gold : Tokens.Color.ember
         armedDotView.apply(armed: armed)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
@@ -426,11 +439,13 @@ public final class MainOutRowView: NSView {
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
 
             // Connection halo ring: a box GROWN past the icon box (Warm Signal
-            // v4.1 item 2 — `haloRingHostBoxDiameter`, not `iconWidth`), still
-            // centered on it, so the ring floats a breathing-room gap off the
-            // glyph without shifting the icon/name/fader column alignment.
-            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
-            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.haloRingHostBoxDiameter),
+            // nitpicks — `mainAudioRingHostBoxDiameter`, the BESPOKE terminus
+            // sizing, not the shared `haloRingHostBoxDiameter` device rows
+            // use), still centered on it, so the ring floats a breathing-room
+            // gap off the glyph without shifting the icon/name/fader column
+            // alignment.
+            haloRingView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.mainAudioRingHostBoxDiameter),
+            haloRingView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.mainAudioRingHostBoxDiameter),
             haloRingView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 
@@ -709,18 +724,16 @@ public final class MainOutRowView: NSView {
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
 
 extension MainOutRowView: RailHookProviding {
-    /// The origin-point anchor for the continuous rail overlay (Warm Signal
-    /// v4.1 CORRECTIONS, item 2): `busOriginView`'s centre, converted into
-    /// `view`'s coordinates, plus whether the spine is armed (gold vs ember).
-    /// `busOriginView` is centred on `railGutterCenterX` — the SAME column the
-    /// device rows below centre their own bus node on — so the returned x
-    /// already sits on the rail's centreline; the overlay no longer needs a
-    /// horizontal jog to reach it (the meter moved under the name and is no
-    /// longer in the gutter at all).
-    public func railHookAnchor(in view: NSView) -> (leadingX: CGFloat, centerY: CGFloat, gold: Bool)? {
+    /// The Main Audio ring's own geometry (Warm Signal nitpicks — "rail into
+    /// the ring"): the icon's centre, converted into `view`'s coordinates,
+    /// plus the ring's radius (a distance, unaffected by the sibling-view
+    /// coordinate conversion) and whether the spine is armed (gold vs ember).
+    /// The overlay curves the rail up to meet this ring's left edge directly,
+    /// replacing the old bare gutter-dot terminus.
+    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
         layoutSubtreeIfNeeded()
-        let rectInSelf = busOriginView.convert(busOriginView.bounds, to: self)
-        let point = convert(NSPoint(x: rectInSelf.midX, y: rectInSelf.midY), to: view)
-        return (point.x, point.y, isArmedState)
+        let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
+        let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)
+        return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isArmedState)
     }
 }

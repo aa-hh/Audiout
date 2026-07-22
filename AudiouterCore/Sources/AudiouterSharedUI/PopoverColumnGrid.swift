@@ -106,7 +106,58 @@ public enum PopoverColumnGrid {
     /// Audio row's left gutter (Warm Signal v4.1 CORRECTIONS, item 2). The
     /// meter moved under the name and no longer sits in the gutter, so this is
     /// a clean origin point, never a junction fused into the meter.
+    /// SUPERSEDED (Warm Signal nitpicks — "rail into the ring"): the rail now
+    /// curves up and terminates directly on the Main Audio ring instead of a
+    /// bare gutter dot, so this constant is unused in that terminus's drawing;
+    /// kept only in case a future non-connecting state needs a bare origin mark.
     public static let busOriginDotDiameter: CGFloat = 5
+
+    // MARK: Main Audio ring — rail terminus (Warm Signal nitpicks)
+    //
+    // Alec, reviewing the rail-into-ring mock: the Main Audio ring is the
+    // rail's TERMINUS, not a peer of the device rows' connection rings — it
+    // gets its OWN size/weight (his call, "bespoke since its origin/master"),
+    // tuned so the rail's `busLineWidth` stroke and the ring's stroke read as
+    // one continuous line where the rail curves into it, matching the
+    // `warm-signal-nitpicks` mock's `ringLeftX`/`mr` geometry.
+
+    /// Diameter of the Main Audio ring's visible circle (stroke centerline).
+    /// Deliberately its OWN constant, not `haloRingDiameter` — grown slightly
+    /// past the device-row ring so the heavier matched stroke doesn't read
+    /// cramped against the icon glyph.
+    public static let mainAudioRingDiameter: CGFloat = 30
+    /// Stroke width of the Main Audio ring while connected — set equal to
+    /// `busLineWidth` (the rail's own stroke) so the rail and ring read as ONE
+    /// continuous line at their join, not two different-weight strokes
+    /// touching. Only the CONNECTED form uses this; connecting/failed keep the
+    /// shared `haloRingConnectingStroke`/`haloRingFailedStroke` weights (the
+    /// rail's tone already matches those states via `segColor`, and neither
+    /// state is the "one continuous line" case this override exists for).
+    public static var mainAudioRingConnectedStroke: CGFloat { busLineWidth }
+    /// Extra headroom (mirrors `haloBreathingRoomGap`) added to the Main Audio
+    /// ring's own host box past `iconWidth`, so the larger `mainAudioRingDiameter`
+    /// ring plus its heavier matched stroke has drawing room without crowding
+    /// the row's other controls.
+    public static let mainAudioRingHostBoxGap: CGFloat = 6
+    /// The Main Audio ring's host square diameter once breathing room is
+    /// applied — mirrors `haloRingHostBoxDiameter`'s derivation but off the
+    /// bespoke `mainAudioRingDiameter`/`mainAudioRingHostBoxGap`.
+    public static var mainAudioRingHostBoxDiameter: CGFloat {
+        iconWidth + mainAudioRingHostBoxGap * 2
+    }
+    /// How far the rail's hook-curve bulges LEFT of the ring's own left edge
+    /// before curving back in to the gutter column — the "pull away, then
+    /// hook back" shape from the `warm-signal-nitpicks` mock's cubic bezier
+    /// (`ringLeftX - 10`), so the join reads as a deliberate curve rather than
+    /// a straight diagonal jog.
+    public static let railRingHookBulge: CGFloat = 10
+    /// Vertical drop (from the ring's own center-Y) where the hook-curve's
+    /// second control point sits — mirrors the mock's `ringCY + 6`.
+    public static let railRingHookControlDrop: CGFloat = 6
+    /// Vertical drop (from the ring's own center-Y) where the hook-curve lands
+    /// on the gutter column and the ordinary straight rail begins — mirrors
+    /// the mock's `ringCY + 16`.
+    public static let railRingHookLandingDrop: CGFloat = 16
 
     // MARK: Fixed column widths
 

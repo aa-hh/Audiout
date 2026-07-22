@@ -1,0 +1,27 @@
+#!/bin/sh
+# GUARD 5 (BLOCKING): the full test suite must pass before a merge lands.
+#
+# Guard 4 (pre-commit) already runs the full suite when a WORKTREE BRANCH
+# commit touches AudiouterCore Swift — but a normal, conflict-free
+# `git merge` never invokes `pre-commit` at all (verified: see the comment on
+# Guard 1 in pre-commit). In the standard flow that's fine, because the
+# commit being merged already passed Guard 4 on its own branch — but it means
+# nothing re-checks AT THE MERGE ITSELF. If a branch commit's check was ever
+# skipped (`--no-verify`), or a branch predates this system, nothing would
+# catch it on the way into main.
+#
+# `pre-merge-commit` closes that gap: git DOES invoke this hook for a clean,
+# conflict-free `--no-ff` merge (verified empirically — unlike `pre-commit`),
+# right before the merge commit is created. Same shared full-suite logic as
+# Guard 4 (lib/run-full-suite-if-swift-changed.sh), diffed against the
+# pre-merge HEAD so it only fires when the incoming merge actually changes
+# AudiouterCore Swift files.
+#
+# Escape hatch: `git merge --no-verify` for a deliberate emergency.
+
+hook_dir=$(dirname "$0")
+lib="$hook_dir/lib/run-full-suite-if-swift-changed.sh"
+[ -f "$lib" ] || exit 0
+
+sh "$lib" "Guard 5" HEAD || exit 1
+exit 0

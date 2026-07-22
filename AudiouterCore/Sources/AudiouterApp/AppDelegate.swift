@@ -438,7 +438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             localNetwork: LocalNetworkPrimerFactory.makeDefault(),
             remoteControl: RemoteControlPrimerFactory.makeDefault(),
             ptpHelper: SMAppServicePTPHelper(),
-            settings: settings)
+            settings: settings,
+            localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model
 
         isAuditingRequiredPermissions = true
@@ -487,7 +488,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             localNetwork: LocalNetworkPrimerFactory.makeDefault(),
             remoteControl: RemoteControlPrimerFactory.makeDefault(),
             ptpHelper: SMAppServicePTPHelper(),
-            settings: settings)
+            settings: settings,
+            localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model
         let controller = OnboardingWindowController(model: model, reason: reason) { [weak self] in
             guard let self else { return }

@@ -165,6 +165,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stream finishes cleanly and we don't leak it past app exit.
     private var eventTask: Task<Void, Never>?
 
+    /// Turns a transport key pressed ON A SPEAKER (`BackendEvent.remoteTransport`)
+    /// into a Mac media key so the frontmost player responds. Owns the one-time
+    /// Accessibility prompt the feature needs.
+    private let mediaKeyController = MediaKeyController()
+
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
     /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
@@ -870,6 +875,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // so the row paint reflects the new state on the next cycle.
             popoverController.applyRoutedAppRunning(bundleID: bundleID, isRunning: isRunning)
             log("event: \(describe(event))")
+        case .remoteTransport(let command):
+            // A transport key pressed on the speaker itself. Drive the Mac's media
+            // playback so the actual song responds. No device model to repaint — this
+            // targets whatever app is playing — so handle it and return.
+            mediaKeyController.handle(command)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -904,6 +916,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
+        case .remoteTransport(let command):
+            return "remoteTransport(\(command)) — driving Mac media playback"
         }
     }
 

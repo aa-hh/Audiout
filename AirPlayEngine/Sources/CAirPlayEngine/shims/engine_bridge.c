@@ -104,3 +104,27 @@ airplayengine_feed_raop_device(const char *name, const char *hostname, int famil
                                family, address, port, txt);
   return 0;
 }
+
+/* ---- Receiver -> sender remote control (engine_bridge.h) ----------------
+ *
+ * A plain function pointer + context, mirroring the outputs_engine_state hook.
+ * Set-once on the engine thread before the events thread exists, cleared after
+ * it is joined (see THREADING in engine_bridge.h), so no lock is needed. */
+static airplayengine_remote_event_cb airplayengine_remote_cb = NULL;
+static void *airplayengine_remote_ctx = NULL;
+
+void
+airplayengine_remote_event_set(airplayengine_remote_event_cb cb, void *context)
+{
+  airplayengine_remote_cb = cb;
+  airplayengine_remote_ctx = context;
+}
+
+void
+airplayengine_remote_fire(uint64_t device_id,
+                          enum airplayengine_remote_event event,
+                          double volume)
+{
+  if (airplayengine_remote_cb)
+    airplayengine_remote_cb(device_id, event, volume, airplayengine_remote_ctx);
+}

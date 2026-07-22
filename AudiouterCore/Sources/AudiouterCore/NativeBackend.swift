@@ -297,6 +297,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     private var stateStreamTask: Task<Void, Never>?
 
+    /// Drains the engine's remote-control stream (speaker transport keys). Same
+    /// `stateQueue` confinement as ``stateStreamTask``.
+    private var remoteEventStreamTask: Task<Void, Never>?
+
+    /// The sender-side DACP endpoint: how a volume change made ON THE SPEAKER
+    /// reaches us (the receiver calls this back — see ``DACPServer``). Started in
+    /// `start()` with the engine's DACP-ID so its advertised `iTunes_Ctrl_<id>`
+    /// matches what the engine tells receivers. Volume travels here, not the RTSP
+    /// event channel — confirmed against the AirPlay spec + OwnTone's httpd_dacp.
+    private let dacpServer = DACPServer()
+
     /// The in-flight engine-teardown Task from the last `stop()` (C1). Stored so
     /// `stopAndWait(timeout:)` can await it on the app's terminate path. Confined to
     /// `stateQueue` like everything else.
@@ -797,6 +808,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    zombie detection — but push, not poll.
             self.subscribeStateStream()
 
+            // 3b. Subscribe the engine's remote-control stream: a user pressing a
+            //     transport key ON THE SPEAKER flows in here (→ a Mac media key).
+            self.subscribeRemoteEventStream()
+
+            // 3c. Start the DACP endpoint: a user changing the volume ON THE SPEAKER
+            //     reaches us here (the receiver calls back over DACP, not the event
+            //     channel). Advertise under the SAME id the engine sends receivers,
+            //     and route each report to that speaker's slider.
+            self.dacpServer.onVolume = { [weak self] token, level in
+                self?.applyDacpVolume(activeRemote: token, level: level)
+            }
+            self.dacpServer.onVolumeStep = { [weak self] token, direction in
+                self?.applyDacpVolumeStep(activeRemote: token, direction: direction)
+            }
+            self.dacpServer.start(dacpID: self.engine.dacpID)
+
             // 4. Now safe to browse: resolved AP2 descriptors will land on a running
             //    engine.
             self.discovery.start()
@@ -857,6 +884,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
+        // Stop advertising / listening for DACP (speaker-initiated volume).
+        dacpServer.onVolume = nil
+        dacpServer.onVolumeStep = nil
+        dacpServer.stop()
 
         // Engine teardown stays fire-and-forget so `stop()` never blocks its caller,
         // but the Task is now STORED (C1) so the app layer can await it via
@@ -874,6 +905,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // backend or interleaving the two writes.
             self.stateStreamTask?.cancel()
             self.stateStreamTask = nil
+            self.remoteEventStreamTask?.cancel()
+            self.remoteEventStreamTask = nil
             self.started = false
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
@@ -2605,6 +2638,124 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    // MARK: Engine remote-control stream → media keys + slider (push, no poll)
+
+    /// Subscribe the engine's remote-control stream (speaker transport keys + the
+    /// speaker's own volume). Same start/stop-race discipline as
+    /// ``subscribeStateStream()``: the task is stashed (or cancelled) on
+    /// `stateQueue` so a start()→stop() can't leak a consumer against a torn-down
+    /// backend.
+    private func subscribeRemoteEventStream() {
+        let stream = engine.makeRemoteEventStream()
+        let task = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.applyRemoteEvent(event)
+            }
+        }
+        stateQueue.async {
+            if self.started {
+                self.remoteEventStreamTask = task
+            } else {
+                task.cancel()
+            }
+        }
+    }
+
+    /// Fold one remote-control event from a speaker into the app.
+    private func applyRemoteEvent(_ event: RemoteEvent) {
+        switch event {
+        case .transport(let command):
+            // Transport is global (one Mac media session), so it isn't tied to a
+            // device: republish it as a backend event and let `AppDelegate` turn it
+            // into a Mac media key (the same layering `systemVolumeChanged` uses).
+            stateQueue.async { self.emit(.remoteTransport(command.backendCommand)) }
+        case .volume(let outputID, let level):
+            applyRemoteVolume(outputID: outputID, level: level)
+        }
+    }
+
+    /// The speaker changed its OWN volume, as reported over the RTSP event channel
+    /// (``RemoteEvent/volume(_:level:)``). Move that device's slider. On `stateQueue`.
+    ///
+    /// NOTE: in practice AirPlay 2 receivers report volume over DACP, not the event
+    /// channel (see ``applyDacpVolume(activeRemote:level:)``), so this path is rarely
+    /// exercised — kept so a receiver that DOES use the event channel still works.
+    private func applyRemoteVolume(outputID: OutputID, level: Double) {
+        stateQueue.async {
+            guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
+            self.setSpeakerVolume(id: id, outputID: outputID, level: level)
+        }
+    }
+
+    /// The speaker changed its OWN volume, reported over **DACP** (the receiver
+    /// called our ``DACPServer`` back — the real path for Sonos et al.). The
+    /// `Active-Remote` token is the low 32 bits of the device id (`airplay.c`), so
+    /// match it against the known outputs and move that one speaker's slider.
+    /// Internal (not private) so the routing is unit-testable without a live socket.
+    func applyDacpVolume(activeRemote: UInt32, level: Double) {
+        stateQueue.async {
+            guard let match = self.outputIDs.first(where: {
+                UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
+            }) else { return }
+            self.setSpeakerVolume(id: match.key, outputID: match.value, level: level)
+        }
+    }
+
+    /// Shared core for a speaker-initiated volume change (event channel or DACP).
+    /// On `stateQueue`.
+    ///
+    /// A speaker-side control is a REQUEST, not a report: the sender owns AirPlay
+    /// volume, so the speaker's audible level only actually moves once we write
+    /// the requested value back out (SET_PARAMETER, via ``pushVolume``). The
+    /// first live test proved the failure mode of NOT writing back: the Sonos's
+    /// own baseline never advanced, so a full swipe on the speaker moved our
+    /// slider a few points and every subsequent swipe restarted from the same
+    /// stale level. So: move the slider AND push the level to the engine.
+    ///
+    /// The same-value guard is what keeps this loop-safe: a receiver reflecting
+    /// our own write back arrives equal to `known` and dies here, and the
+    /// −30…0 dB ↔ 0…100 map is linear both ways so a round-trip is
+    /// rounding-stable. Swipe bursts are absorbed by ``pushVolume``'s
+    /// in-flight coalescing (latest wins), never dropped.
+    private func setSpeakerVolume(id: String, outputID: OutputID, level: Double) {   // on stateQueue
+        let pct = Int((level * 100).rounded()).clampedToVolume
+        if muted.contains(id) {
+            // Don't un-mute from a knob turn; record the intended level so a later
+            // unmute restores what the user dialed in on the speaker.
+            stashedVolume[id] = pct
+            return
+        }
+        guard pct != known[id]?.volume else { return }
+        applyLocal(id) { $0.volume = pct }
+        pushVolume(outputID, engineValue: Self.engineVolume(pct))
+    }
+
+    /// A relative `volumeup`/`volumedown` DACP verb from the speaker
+    /// (`direction` is ±1): step from the level the app currently holds — that
+    /// is what makes consecutive presses/swipe-ticks ACCUMULATE instead of
+    /// re-basing on a stale value. Step size is a guess pending live-test
+    /// calibration (Sonos observed sending absolute `setproperty` instead, so
+    /// this is a safety net for receivers that use the relative verbs).
+    /// Internal (not private) so the routing is unit-testable without a socket.
+    func applyDacpVolumeStep(activeRemote: UInt32, direction: Int) {
+        stateQueue.async {
+            guard let match = self.outputIDs.first(where: {
+                UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
+            }) else { return }
+            let id = match.key
+            let current = self.muted.contains(id)
+                ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
+                : (self.known[id]?.volume ?? 0)
+            let target = current + direction.signum() * Self.speakerVolumeStep
+            self.setSpeakerVolume(id: id, outputID: match.value,
+                                  level: Double(target.clampedToVolume) / 100.0)
+        }
+    }
+
+    /// UI points one relative `volumeup`/`volumedown` verb moves the slider.
+    static let speakerVolumeStep = 2
+
     // MARK: Mapping + merge
 
     /// Map a ``DiscoveredDevice`` onto a ``Device``, folding in app-side mute state.
@@ -3143,6 +3294,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 }
 
+private extension TransportCommand {
+    /// Map the engine's transport command onto the backend-neutral one the base
+    /// ``OutputBackend`` seam publishes (``RemoteTransportCommand``).
+    var backendCommand: RemoteTransportCommand {
+        switch self {
+        case .playPause: return .playPause
+        case .next:      return .next
+        case .previous:  return .previous
+        }
+    }
+}
+
 /// One-shot resume guard for a `CheckedContinuation` raced between two Tasks
 /// (`stopAndWait`'s teardown-vs-timeout race). Whichever Task calls `resume()`
 /// first wins; every later call is a no-op, so the continuation is resumed exactly
@@ -3193,6 +3356,11 @@ protocol EngineControlling: Sendable {
     /// no-op so a conformer that doesn't route per-app streams compiles unchanged.
     func write(pcm: Data, streamId: UInt32, pts: timespec)
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
+    func makeRemoteEventStream() -> AsyncStream<RemoteEvent>
+
+    /// The DACP-ID the engine advertises to receivers (see ``AirPlayEngine/dacpID``),
+    /// so the backend's DACP server can advertise the matching `iTunes_Ctrl_<id>`.
+    var dacpID: UInt64 { get }
 
     /// Whether a PTP clock was available as of the engine's last `start()`
     /// (T4 — mirrors `AirPlayEngine/ptpClockAvailable`). `false` means no
@@ -3249,6 +3417,8 @@ struct EngineAdapter: EngineControlling {
         engine.write(pcm: pcm, streamId: streamId, pts: pts)
     }
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { engine.makeStateStream() }
+    func makeRemoteEventStream() -> AsyncStream<RemoteEvent> { engine.makeRemoteEventStream() }
+    var dacpID: UInt64 { engine.dacpID }
     var ptpClockAvailable: Bool {
         get async { await engine.ptpClockAvailable }
     }

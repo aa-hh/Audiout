@@ -182,19 +182,20 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertFalse(result.autoSwappedCurrentDevice, "no auto-swap when local isn't the sole member")
     }
 
-    func testLocalMixBlockRefusesAndSurfacesReason() async throws {
+    func testAddingLocalIntoAMixedSetIsAllowed() async throws {
+        // T-GROUPCTL (Q5): the synced local sink lifted the old pre-engine
+        // local-mix block. The Mac may now join a mixed Selected Devices set.
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
-        XCTAssertFalse(controller.canSelectLocalSpeaker("local-mac"))
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"))
         let result = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
-        XCTAssertFalse(result.applied, "adding local into a mixed set is refused")
-        XCTAssertEqual(result.refusalReason, GroupController.localMixRefusalReason)
-        XCTAssertFalse(controller.isSpeakerSelected("local-mac"))
-        XCTAssertEqual(popover.test_lastRefusalReason, GroupController.localMixRefusalReason,
-                       "the popover surfaced the refusal reason")
-        // The local row's toggle is presented disabled (blocked) with the reason.
+        XCTAssertTrue(result.applied, "adding local into a mixed set is now allowed")
+        XCTAssertNil(result.refusalReason)
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"))
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "AirPlay member stays — Mac joins, nothing drops")
+        // The local row's toggle is presented enabled (not blocked).
         let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
-        XCTAssertFalse(row.test_isEnabledOn)
+        XCTAssertTrue(row.test_isEnabledOn)
     }
 
     func testMainOutMasterReflectsCurrentTarget() async throws {

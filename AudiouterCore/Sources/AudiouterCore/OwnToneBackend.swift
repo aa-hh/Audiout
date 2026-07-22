@@ -889,6 +889,21 @@ public func makeBackend(
         // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
+        // T-BACKEND: builds the delayed local sink ("play everywhere") the first
+        // time the selection is Mac + ≥1 AirPlay device. Constructed at the
+        // AirPlay engine's own format (44.1 kHz / 2ch) — T-FANOUT feeds it the
+        // SAME already-converted PCM it hands the engine, reusing that
+        // conversion pipeline rather than running a second resample pass at the
+        // sink's own 48 kHz default. `presentationDelayMs` reads the backend's
+        // OWN live `startBufferMs` (T-ENGINE-DELAY / R4) so a later buffer-size
+        // change moves local playback with it, rather than a stale copy of the
+        // value at launch.
+        nativeBackend.syncedLocalSinkFactory = {
+            SyncedLocalSink(
+                renderSampleRate: 44_100,
+                channelCount: 2,
+                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs })
+        }
         return nativeBackend
     }
 }

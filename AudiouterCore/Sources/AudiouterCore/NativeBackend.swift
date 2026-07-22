@@ -110,6 +110,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// mutated after wiring, so no synchronization on the reference is needed.
     public var localPlaybackEngine: LocalPlaybackControlling?
 
+    /// Supplies whether `id` is currently a member of "Selected Devices" — the
+    /// signal T-BACKEND needs to detect "Mac + ≥1 AirPlay" ("play everywhere"),
+    /// since `GroupController.applyRouting` always filters the local device out
+    /// of the `ids` this backend's `setOutputSet` receives (the local Mac is
+    /// never a real engine output). `GroupController` already exposes exactly
+    /// this via its public `isSpeakerSelected(_:)`; `AppDelegate` wires it in
+    /// once both are constructed. Assigned once, before any selection change —
+    /// same discipline as `captureCoordinator`/`localPlaybackEngine` — so no
+    /// synchronization is needed on the reference itself. `nil` in tests / the
+    /// UI-only smoke path, in which case "play everywhere" never activates
+    /// (read as "Mac not selected").
+    public var selectedDevicesQuery: ((String) -> Bool)?
+
+    /// Builds the real delayed-local-sink instance the first time "play
+    /// everywhere" activates (T-BACKEND). `makeBackend(_:)` wires the production
+    /// closure — constructed at 44.1 kHz / 2ch to match the AirPlay engine's own
+    /// format, since T-FANOUT feeds the sink the SAME already-converted PCM it
+    /// hands the engine rather than running a second resample pass. Tests inject
+    /// a spy conforming to ``SyncedLocalSinkControlling``. `nil` in the UI-only
+    /// smoke path, in which case "play everywhere" is inert (same posture as a
+    /// `nil` `captureCoordinator`).
+    public var syncedLocalSinkFactory: (() -> SyncedLocalSinkControlling)?
+
+    /// The constructed sink (real or test spy), built lazily on first enable and
+    /// reused across later disable/re-enable cycles rather than rebuilt every
+    /// time. Confined to `captureControlQueue` — the same serial queue every
+    /// attach/start/stop below runs on.
+    private var syncedLocalSink: SyncedLocalSinkControlling?
+
+    /// Whether "play everywhere" is currently enabled — the last decision made
+    /// by `setOutputSet`'s synced-local-sink reconciliation. Confined to
+    /// `stateQueue` like every other selection-derived flag (`captureRunning`,
+    /// `expectedSelected`); the actual attach/start/stop work it triggers runs
+    /// on `captureControlQueue`.
+    private var syncedLocalSinkEnabled = false
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -1079,7 +1115,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // flips for one device overwrite `desiredOn[id]` N times but issue at most
         // one op at a time (root cause 1) — intermediate flips are simply dropped.
         // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
-        let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
+        let (toKick, syncedLocalTransition): ([(id: String, outputID: OutputID)], Bool?) = stateQueue.sync {
             self.expectedSelected = ids
 
             // Only ids we can actually stream to — a known discovered receiver
@@ -1133,7 +1169,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
-            return kicks
+
+            // T-BACKEND: "play everywhere" is Mac + ≥1 AirPlay device. `ids` here
+            // IS the AirPlay-only side of that set (`GroupController` never hands
+            // the local device through); the Mac's own membership comes from
+            // `selectedDevicesQuery`, wired externally (AppDelegate). Decided in
+            // this SAME critical section as the capture gate above so a burst of
+            // rapid selection changes settles on the LAST decision only, exactly
+            // like `reconcileCaptureGate` — `nil` below means "no change," so a
+            // repeat decision (e.g. Mac+AirPlay → Mac+2×AirPlay) never re-kicks
+            // the attach/start work.
+            let macSelected = self.selectedDevicesQuery?(Self.localDeviceID) ?? false
+            let wantSyncedLocal = macSelected && !ids.isEmpty
+            var syncedLocalDecision: Bool?
+            if wantSyncedLocal != self.syncedLocalSinkEnabled {
+                self.syncedLocalSinkEnabled = wantSyncedLocal
+                syncedLocalDecision = wantSyncedLocal
+            }
+
+            return (kicks, syncedLocalDecision)
+        }
+
+        // Runs on `captureControlQueue` — the same serial queue the capture
+        // gate's start/stop above was just enqueued on — so a tap recreate
+        // triggered by `attachSyncedLocalSink` (self-exclude pid change, T-FANOUT)
+        // never races a capture-gate start/stop for the same tap.
+        if let enable = syncedLocalTransition {
+            captureControlQueue.async { [weak self] in
+                self?.applySyncedLocalSinkTransition(enable: enable)
+            }
         }
 
         for (id, outputID) in toKick {
@@ -1141,6 +1205,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard let self else { return }
                 await self.convergeDevice(id: id, outputID: outputID)
             }
+        }
+    }
+
+    /// Execute the "play everywhere" enable/disable transition decided by
+    /// `setOutputSet` above (T-BACKEND). Must run on `captureControlQueue`.
+    ///
+    /// Enable order (plan T-BACKEND): construct-if-needed → attach (wires the
+    /// fan-out + tap self-exclude, T-FANOUT) → start → observe lifecycle events
+    /// (T-LIFECYCLE then picks up default-device changes / sleep / wake).
+    /// Disable is the mirror image — stop → stop observing → detach — so the
+    /// sink is fully quiesced before its self-exclude is lifted. Either way, the
+    /// whole-system tap's `.mutedWhenTapped` mode (`NativeCaptureCoordinator`'s
+    /// default) is what actually keeps the Mac's raw output muted whenever ≥1
+    /// AirPlay device is selected (`reconcileCaptureGate`'s `captureRunning`) —
+    /// that mechanism is entirely independent of this sink's own on/off state,
+    /// so disabling "play everywhere" while AirPlay devices stay selected
+    /// correctly leaves the raw system mix muted.
+    private func applySyncedLocalSinkTransition(enable: Bool) {
+        if enable {
+            let sink: SyncedLocalSinkControlling
+            if let existing = syncedLocalSink {
+                sink = existing
+            } else if let factory = syncedLocalSinkFactory {
+                sink = factory()
+                syncedLocalSink = sink
+            } else {
+                return   // no factory wired (tests / UI-only smoke) — inert
+            }
+            attachSyncedLocalSink(sink)
+            try? sink.start()
+            sink.startObservingLifecycleEvents()
+        } else {
+            guard let sink = syncedLocalSink else { return }
+            sink.stop()
+            sink.stopObservingLifecycleEvents()
+            attachSyncedLocalSink(nil)
         }
     }
 
@@ -3514,3 +3614,18 @@ extension CaptureControlling {
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
+
+/// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
+/// fan-out target itself (``SyncedLocalPCMSink``, T-FANOUT) plus start/stop and
+/// the T-LIFECYCLE device-change/sleep-wake observers. Lets ``NativeBackend``
+/// own WHEN "play everywhere" (Mac + ≥1 AirPlay device) turns on/off against
+/// either the real ``SyncedLocalSink`` or a test spy, with no `AVAudioEngine`
+/// in the loop for the enable/disable unit tests.
+public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
+    func start() throws
+    func stop()
+    func startObservingLifecycleEvents()
+    func stopObservingLifecycleEvents()
+}
+
+extension SyncedLocalSink: SyncedLocalSinkControlling {}

@@ -261,6 +261,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
+        // "Selected Devices" (not just which AirPlay devices are) to detect
+        // "play everywhere" — `GroupController.applyRouting` always filters the
+        // local device out of what it hands `backend.setOutputSet`, so that call
+        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
+        // existing public read that does; wire it in once, here, right after
+        // both are constructed. `backend as? NativeBackend` is nil for
+        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
+        // `LatencyConfigurable` optional-capability pattern used below.
+        (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
+            self?.groupController?.isSpeakerSelected(id) ?? false
+        }
 
         // Construct the production AppRoutingController explicitly (T-11), using
         // the default store directory so app routes persist to Application Support.

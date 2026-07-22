@@ -136,6 +136,30 @@ public enum OutputState: Sendable, Equatable {
     }
 }
 
+/// A transport command a user pressed on a speaker's own playback controls.
+/// macOS exposes a single Play/Pause *toggle* media key, and the vendored event
+/// path collapses the device's distinct play/pause into one command, so both
+/// arrive here as ``playPause``.
+public enum TransportCommand: Sendable, Equatable {
+    case playPause
+    case next
+    case previous
+}
+
+/// Something the user did ON THE SPEAKER itself, reported back to the sender over
+/// the AirPlay reverse event channel (``AirPlayEngine/makeRemoteEventStream()``).
+/// The app turns each into a local action — a Mac media key for ``transport``, a
+/// slider move for ``volume``.
+public enum RemoteEvent: Sendable, Equatable {
+    /// A transport key (play/pause/next/previous). Global: it targets the Mac's
+    /// single media session, not one speaker, so it carries no ``OutputID``.
+    case transport(TransportCommand)
+    /// The identified speaker changed its OWN volume to `level` (0.0…1.0) — e.g.
+    /// its physical buttons or the Sonos app. Routed to that one output so only
+    /// its slider follows.
+    case volume(OutputID, level: Double)
+}
+
 /// Errors surfaced from the engine's async surface.
 public enum AirPlayEngineError: Error, Sendable, Equatable {
     /// `start()`/init hasn't completed (or `stop()` already ran).

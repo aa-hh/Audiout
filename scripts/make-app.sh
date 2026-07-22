@@ -470,6 +470,24 @@ plutil -insert LSEnvironment.AIRPLAY_CONTROL_PANEL -string "1" "$PLIST"
 plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
 plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_CONTROL_PANEL missing from Info.plist" >&2; exit 1; }
 
+# Opt-in dev diagnostics, baked into LSEnvironment so an `open`-launched bundle
+# still sees them: an `open`ed app does NOT inherit the shell env, and it MUST be
+# launched via `open` (not the raw binary) for a correct TCC identity — so these
+# can't be passed on the command line. Only written when set at build time, so a
+# normal release carries none of them.
+#   AUDIOUTER_STATUS_LABEL — tags the menu-bar item so side-by-side dev builds
+#     (which share the bundle id, hence collide in LaunchServices) are visually
+#     distinguishable; see the multiple-app-copies-collide hazard.
+#   AIRPLAYENGINE_LOG_FILE / _LEVEL — append engine + DACP diagnostics to a file
+#     an `open`-launched session (stderr/os_log swallowed) can still be read from.
+for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL; do
+  eval "val=\${$diag:-}"
+  if [ -n "$val" ]; then
+    plutil -insert "LSEnvironment.$diag" -string "$val" "$PLIST"
+    echo "==> LSEnvironment.$diag = $val (dev diagnostic)"
+  fi
+done
+
 # --- Strip extended attributes ---------------------------------------------
 # codesign refuses to sign anything carrying AppleDouble/resource-fork-style
 # metadata ("resource fork, Finder information, or similar detritus not

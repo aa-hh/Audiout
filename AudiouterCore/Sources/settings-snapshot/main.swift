@@ -29,15 +29,40 @@ func tempDir() -> URL {
     return dir
 }
 
+/// Render `view` (already laid out, hosted in a window) to a PNG at `url` under
+/// `appearance`. Creates a deterministic @2x bitmap representation regardless of
+/// the host screen's backing scale factor.
 @MainActor
 func renderPNG(view: NSView, to url: URL) {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
-    guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else {
+    
+    // Create an explicit @2x bitmap rep (pixel dims = 2x point dims) so the
+    // PNG is deterministic regardless of the host screen's backingScaleFactor.
+    let pixelsWide = Int(bounds.width * 2)
+    let pixelsHigh = Int(bounds.height * 2)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: pixelsWide,
+        pixelsHigh: pixelsHigh,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 32
+    ) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
         return
     }
+    
+    // Set the size so the rep reports correct point dimensions (backing scale = 2).
+    rep.size = bounds.size
+    
+    // Cache the view's display into the bitmap rep.
     view.cacheDisplay(in: bounds, to: rep)
+    
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
         return
@@ -49,6 +74,11 @@ func renderPNG(view: NSView, to url: URL) {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
     }
 }
+
+
+
+
+
 
 @MainActor
 func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {

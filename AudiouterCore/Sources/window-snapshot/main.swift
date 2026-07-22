@@ -40,18 +40,59 @@ func tempDir() -> URL {
     return dir
 }
 
+/// Render `view` (already laid out, hosted in a window) to a PNG at `url` under
+/// `appearance`. Creates a deterministic @2x bitmap representation regardless of
+/// the host screen's backing scale factor.
+/// One capture of `view` into a fresh explicit-@2x bitmap, PNG-encoded.
+/// Explicit pixel dimensions (2x the point size) keep the output independent
+/// of the host screen's backingScaleFactor.
+@MainActor
+private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
+    let pixelsWide = Int(bounds.width * 2)
+    let pixelsHigh = Int(bounds.height * 2)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: pixelsWide,
+        pixelsHigh: pixelsHigh,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 32
+    ) else { return nil }
+    // Set the size so the rep reports correct point dimensions (backing scale = 2).
+    rep.size = bounds.size
+    view.cacheDisplay(in: bounds, to: rep)
+    return rep.representation(using: .png, properties: [:])
+}
+
 @MainActor
 func renderPNG(view: NSView, to url: URL) {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
-    guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else {
-        print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
-        return
+
+    // Capture-until-stable: material backdrops (and an appearance switch's
+    // re-tint) settle asynchronously, so the FIRST capture after a window is
+    // built or its appearance flips can race that settling — a fixed-length
+    // drain is only accidentally long enough. Instead, re-capture with short
+    // drains until two consecutive captures are byte-identical; that settled
+    // state is deterministic, so the goldens are too.
+    var data = captureOnce(view: view, bounds: bounds)
+    var stable = false
+    for _ in 0..<40 {
+        drain(0.05)
+        let next = captureOnce(view: view, bounds: bounds)
+        if next != nil && next == data { stable = true; break }
+        data = next
     }
-    view.cacheDisplay(in: bounds, to: rep)
-    guard let data = rep.representation(using: .png, properties: [:]) else {
+    guard let data else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
         return
+    }
+    if !stable {
+        print("  WARN  \(url.lastPathComponent) never stabilized after 40 recaptures; writing last")
     }
     do {
         try data.write(to: url)
@@ -60,6 +101,11 @@ func renderPNG(view: NSView, to url: URL) {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
     }
 }
+
+
+
+
+
 
 @MainActor
 func waitForFleet(_ backend: MockBackend, count: Int, timeout: TimeInterval = 3) -> Bool {
@@ -82,10 +128,17 @@ func drain(_ interval: TimeInterval = 0.15) {
 func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
     let appearance = NSAppearance(named: appearanceName)
     window.appearance = appearance
+    // Pin the titlebar separator: AppKit decides it dynamically from the
+    // content's perceived scroll-under state, and that decision settles
+    // differently run-to-run (a 1pt full-width line at the titlebar's bottom
+    // edge flickered in and out of dark captures). Either style is fine for
+    // goldens; it just must be the SAME every run.
+    window.titlebarSeparatorStyle = .line
     window.layoutIfNeeded()
     window.contentView?.layoutSubtreeIfNeeded()
-    drain(0.1)
     let frameView = window.contentView?.superview ?? window.contentView!
+    pinMaterialsWithinWindow(in: frameView)
+    drain(0.1)
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
 }
@@ -95,10 +148,39 @@ func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppeara
 /// headless run. Mirrors `popover-snapshot`'s pattern: host the view in an
 /// offscreen borderless window so materials/vibrancy render under the
 /// requested appearance, then snapshot just the view.
+/// Remove overlay scrollers from a captured view subtree. Overlay scroller
+/// knobs fade on their own animation clock, so a capture races the fade and
+/// the PNG differs run-to-run (observed: mixer-2-create-sheet-dark drifting
+/// by a few hundred bytes). The knob is transient in real use anyway; a
+/// deterministic golden simply omits it.
+@MainActor
+func stripScrollers(in view: NSView) {
+    if let scrollView = view as? NSScrollView {
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+    }
+    for subview in view.subviews { stripScrollers(in: subview) }
+}
+
+/// Force every behind-window material in a captured hierarchy to blend
+/// within-window instead. Behind-window vibrancy samples the LIVE desktop
+/// (wallpaper, Dock, the ticking menu-bar clock near the mock status-item
+/// anchor), so captures drift run-to-run with wall-clock time — the goldens
+/// were only accidentally stable while runs were fast. Within-window blending
+/// samples the window's own backing store: identical every run.
+@MainActor
+func pinMaterialsWithinWindow(in view: NSView) {
+    if let effectView = view as? NSVisualEffectView, effectView.blendingMode == .behindWindow {
+        effectView.blendingMode = .withinWindow
+    }
+    for subview in view.subviews { pinMaterialsWithinWindow(in: subview) }
+}
+
 @MainActor
 func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
     let appearance = NSAppearance(named: appearanceName)
     view.appearance = appearance
+    stripScrollers(in: view)
     view.layoutSubtreeIfNeeded()
     let size = view.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -123,6 +205,7 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
     view.frame = frame
     host.setContentSize(size)
     host.layoutIfNeeded()
+    pinMaterialsWithinWindow(in: backdrop)
     view.layoutSubtreeIfNeeded()
     drain(0.1)
 
@@ -218,11 +301,28 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     contentLayer.layer?.masksToBounds = true
     container.addSubview(contentLayer)
 
-    // Render the panel's content view into the content layer.
+    // Render the panel's content view into the content layer. Materials are
+    // pinned within-window and the rep scale pinned @2x for the same
+    // determinism reasons as `renderPNG` (behind-window vibrancy samples the
+    // live desktop; `bitmapImageRepForCachingDisplay` inherits the host
+    // screen's scale).
     panelContent.appearance = appearance
+    pinMaterialsWithinWindow(in: panelContent)
     panelContent.layoutSubtreeIfNeeded()
     let contentBounds = NSRect(x: 0, y: 0, width: containerWidth, height: panel.frame.height)
-    if let rep = panelContent.bitmapImageRepForCachingDisplay(in: contentBounds) {
+    if let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(contentBounds.width * 2),
+        pixelsHigh: Int(contentBounds.height * 2),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 32
+    ) {
+        rep.size = contentBounds.size
         panelContent.cacheDisplay(in: contentBounds, to: rep)
         if let layer = contentLayer.layer,
            let cgImage = rep.cgImage {

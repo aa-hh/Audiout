@@ -67,4 +67,12 @@ airptp_errmsg_get(void);
 void
 airptp_ports_override(unsigned short event_port, unsigned short general_port);
 
+// By default airptp publishes its shared clock state under the name
+// /airptp_shm, but for testing you can override that here - e.g. so an
+// unprivileged test process doesn't collide with a real, root-owned daemon
+// of the same name already running on the host. Must be called before
+// airptp_daemon_bind()/airptp_daemon_start()/airptp_daemon_find().
+void
+airptp_shm_name_override(const char *name);
+
 #endif // __AIRPTP_H__

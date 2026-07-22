@@ -31,6 +31,9 @@ struct airptp_handle;
 void
 ptp_test_ports_override(unsigned short event_port, unsigned short general_port);
 
+void
+ptp_test_shm_name_override(const char *name);
+
 struct airptp_handle *
 ptp_test_daemon_bind(const char *node);
 

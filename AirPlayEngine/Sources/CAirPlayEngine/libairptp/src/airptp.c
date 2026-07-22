@@ -44,6 +44,7 @@ SOFTWARE.
 
 unsigned short airptp_event_port = PTP_EVENT_PORT;
 unsigned short airptp_general_port = PTP_GENERAL_PORT;
+char airptp_shm_name[AIRPTP_SHM_NAME_MAXLEN] = AIRPTP_SHM_NAME;
 
 struct airptp_callbacks __thread airptp_cb;
 const char __thread *airptp_errmsg;
@@ -183,7 +184,7 @@ airptp_daemon_find(void)
   int fd = -1;
   int ret __attribute__((unused));
 
-  fd = shm_open(AIRPTP_SHM_NAME, O_RDONLY, 0);
+  fd = shm_open(airptp_shm_name, O_RDONLY, 0);
   if (fd < 0)
     RETURN_ERROR(AIRPTP_ERR_NOTFOUND, "No airptp daemon found");
 
@@ -310,4 +311,10 @@ airptp_ports_override(unsigned short event_port, unsigned short general_port)
 {
   airptp_event_port = event_port;
   airptp_general_port = general_port;
+}
+
+void
+airptp_shm_name_override(const char *name)
+{
+  snprintf(airptp_shm_name, sizeof(airptp_shm_name), "%s", name);
 }

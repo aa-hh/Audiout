@@ -127,11 +127,35 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **SF Symbols for every glyph**, template-rendered so tint and appearance track
   automatically. Don't ship custom assets for something SF Symbols covers.
 - **System colors and materials, never hardcoded hex** — so Dark Mode, accent
-  color and contrast settings all work for free.
+  color and contrast settings all work for free. **One sanctioned exception:**
+  `Tokens` (`AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift`, sub-namespaces
+  `Tokens.Color`, `` Tokens.`Type` ``, `Tokens.Layout`, `Tokens.Material`) is the
+  only place a custom palette value may ever live. Everywhere else in the app
+  stays plain semantic `NSColor`/`NSFont`/`NSVisualEffectView.Material` — do not
+  add a second token module or a raw hex/RGB literal anywhere outside this file.
+  Any custom color the module ever holds must ship light, dark, and Increase
+  Contrast variants plus a written contrast rationale before it lands.
 - **Respect system settings**: Reduce Motion, Increase Contrast, Reduce
   Transparency.
-- **When in doubt, match Control Center / System Settings** — the design brief
-  (SPEC.md §9) is explicitly modeled on them, not a bespoke design language.
+- **"Match Control Center / System Settings" is retired as guidance.** For the
+  sanctioned custom-drawn Warm Signal pieces (canvas, connection ring, signal
+  dot, meter, bus control, fader skin, shell bubble fill) the design authority
+  is the Warm Signal spec, `dev/notes/warm-signal-v3.md` — not Control Center.
+  Stock AppKit behavior, controls, and accessibility remain mandatory
+  regardless: the spec governs paint, not interaction model.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.
+- **Gold-budget house rules, in short:**
+  1. Stock AppKit controls before custom drawing, everywhere except the
+     sanctioned Warm Signal surfaces.
+  2. All custom color lives in `Tokens` and nowhere else.
+  3. Every `Tokens.Color` case ships light + dark + Increase Contrast variants
+     with a documented contrast rationale.
+  4. Warm Signal spec (`dev/notes/warm-signal-v3.md`) governs the sanctioned
+     custom pieces; Control Center is no longer the reference.
+  5. SF Symbols, template-rendered, for every glyph.
+  6. Respect Reduce Motion, Increase Contrast, Reduce Transparency.
+  7. No second token module, ever — `Tokens` is the one governed exception.
+  8. Any other deviation from system chrome gets a documented "why" in the
+     nearest AGENTS.md.

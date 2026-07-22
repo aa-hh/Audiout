@@ -32,3 +32,4 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
 .swiftpm/xcode/
+__pycache__/

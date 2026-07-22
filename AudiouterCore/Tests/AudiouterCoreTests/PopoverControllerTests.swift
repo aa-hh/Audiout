@@ -482,8 +482,9 @@ final class PopoverControllerTests: XCTestCase {
         let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
         XCTAssertEqual(row.test_statusKind, .connected)
         // The retried device is a selected member with no routed apps, so its
-        // routing sublabel is the bare "System" token (selected ⇒ in the set).
-        XCTAssertEqual(row.test_statusText, "System", "selected device shows the System routing token")
+        // FEED column is the bare "System" token (selected ⇒ in the set; v4.1
+        // item 3 moved this off the sublabel).
+        XCTAssertEqual(row.test_feedText, "System", "selected device shows the System FEED token")
         XCTAssertTrue(row.test_isEnabledOn, "the honest toggle now rests ON")
     }
 
@@ -727,8 +728,8 @@ final class PopoverControllerTests: XCTestCase {
                        + "reconciled live off update(devices:)")
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
                        "the FAILED member never tints — failure outranks configuration (R2)")
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Couldn't connect",
-                       "the failure sublabel renders at full emphasis inside the dormant card")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Couldn't connect",
+                       "the failure FEED override renders at full emphasis inside the dormant card")
         XCTAssertNotNil(popover.test_diagnosisPanel(for: "office"),
                         "the diagnosis panel attaches normally inside the dormant card")
         XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busNodeDimmed, true,
@@ -1617,14 +1618,14 @@ final class PopoverControllerTests: XCTestCase {
         // check below re-fetches the row rather than holding a reference across
         // a call — a held reference would go stale the moment rebuild() swaps
         // in a fresh `DeviceRowView` instance.
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music",
                        "intent-based label before any live signal arrives")
 
         // A confirmed live signal takes over, even though it carries a
         // different string, to make the precedence unambiguous in the assertion.
         popover.applyRoutedApps(deviceID: "office", appNames: ["Music (confirmed)"])
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music (confirmed)",
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music (confirmed)",
                        "the confirmed live set takes precedence over the intent-based label")
     }
 
@@ -1641,13 +1642,13 @@ final class PopoverControllerTests: XCTestCase {
         // `testApplyRoutedAppsOverridesIntentLabelWhenNonEmpty` above.
         popover.applyRoutedApps(deviceID: "office", appNames: ["Music (confirmed)"])
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music (confirmed)")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music (confirmed)")
 
         // The live mapping clears (capture stopped, or the route left this
         // device) — falls back to the intent-based label, not a blank row.
         popover.applyRoutedApps(deviceID: "office", appNames: [])
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music",
                        "an empty live mapping reverts to the intent-based label")
     }
 
@@ -1659,7 +1660,7 @@ final class PopoverControllerTests: XCTestCase {
         let (popover, _, backend) = try await makePopover()
         popover.applyRoutedApps(deviceID: "office", appNames: ["Music"])
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music")
 
         // The device drops off the network entirely.
         popover.update(devices: backend.devices.filter { $0.id != "office" })
@@ -1668,7 +1669,7 @@ final class PopoverControllerTests: XCTestCase {
         // It reappears with no route and no fresh live signal — must show
         // nothing, not the stale "Music" from before it left.
         popover.update(devices: backend.devices)
-        XCTAssertNil(popover.test_deviceRow(for: "office")?.test_statusText,
+        XCTAssertNil(popover.test_deviceRow(for: "office")?.test_feedText,
                      "a stale live mapping must not resurface after the device left and returned")
     }
 
@@ -1696,7 +1697,7 @@ final class PopoverControllerTests: XCTestCase {
         task.cancel()
 
         popover.update(devices: backend.devices)
-        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusText, "Music",
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Music",
                        "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 

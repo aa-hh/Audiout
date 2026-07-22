@@ -615,13 +615,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         devicesPlaceholderShown = false
         // Combined header row: "Output Devices" title on the left, "VOLUME" over
         // the slider. The membership "Selected" column MOVED to the left spine
-        // (v4 §Call-1), so this card no longer heads a trailing column — its
-        // device rows reserve the trailing dropdown column but leave it empty
-        // (column alignment holds via the shared grid). The trailing accessory
-        // (F1) saves the current Selected Devices set as a group; its enabled
-        // state tracks `canSaveCurrentSetup`, kept fresh via
+        // (v4 §Call-1), so this card no longer heads a membership column — but
+        // its device rows' trailing dropdown column, once left empty, now
+        // fills the FEED composite (v4.1 item 3), so the header names it
+        // "Feed" (`DeviceRowView.updateFeedText`/`feedLabel`). The trailing
+        // accessory (F1) saves the current Selected Devices set as a group;
+        // its enabled state tracks `canSaveCurrentSetup`, kept fresh via
         // `refreshDevicesAccessory()` on selection repaints.
-        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: nil,
+        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Feed",
                         trailingAccessory: PopoverPanelViewController.HeaderAccessory(
                             symbol: "plus",
                             label: "Save Selected Devices as group",
@@ -917,6 +918,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
+    /// The ACTIVE Main Out target's saved-group name, when it currently
+    /// targets a group — `nil` when it targets Selected Devices. Feeds
+    /// `DeviceRowView.apply`'s `mainOutTargetsGroupName` (Warm Signal v4.1
+    /// item 3 FEED column wording: "System" for a manual member, the group's
+    /// name for a group-target member).
+    private var activeMainOutGroupName: String? {
+        guard let controller = groupController, case .group(let id) = controller.mainOut else { return nil }
+        return controller.groups.first { $0.id == id }?.name
+    }
+
     /// Push the current membership + local-block state into a device row.
     private func applySelectionState(to row: DeviceRowView, device: Device) {
         // Dormant de-emphasis (spec §4.7 FINAL, S5): dim ONLY rows that fall
@@ -934,6 +945,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                      mainOutTargetsGroupName: activeMainOutGroupName,
                       iconSymbolName: deviceIconController?.symbolName(for: device))
             return
         }
@@ -972,6 +984,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
+                  mainOutTargetsGroupName: activeMainOutGroupName,
                   iconSymbolName: deviceIconController?.symbolName(for: device))
     }
 

@@ -127,7 +127,7 @@ public final class MembershipBusView: NSView {
         // The `.origin` carries no node — the continuous rail overlay draws the
         // Main Audio hook.
         guard node != .origin else { return }
-        let r = PopoverColumnGrid.busNodeDiameter / 2
+        let r = Self.nodeRadius(for: node)
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
             // NODE ONLY (Warm Signal v4 §Call-1, Alec's continuity correction):
@@ -187,6 +187,21 @@ public final class MembershipBusView: NSView {
         node == .connecting || node == .pending
     }
 
+    /// The drawn disc radius for a node kind (Warm Signal v4.1 item 4 "larger
+    /// selected nodes"): size joins fill as a selection signal, so a node still
+    /// IN the mix (on-spine — member/connecting/pending/failed, the same set
+    /// `BusRailOverlayView.onSpine` treats as "the rail runs through it") draws
+    /// at `busNodeDiameterSelected`; a genuine non-member/blocked node (off-spine,
+    /// detoured) draws at the visibly smaller `busNodeDiameterUnselected`. Reuses
+    /// `onSpine` rather than re-deriving the split, so the node's size and the
+    /// rail's straight-through-vs-detour choice can never disagree. Node CENTER
+    /// is unaffected — only this radius, so click targets and layout hold.
+    static func nodeRadius(for node: Node) -> CGFloat {
+        BusRailOverlayView.onSpine(node)
+            ? PopoverColumnGrid.busNodeDiameterSelected / 2
+            : PopoverColumnGrid.busNodeDiameterUnselected / 2
+    }
+
     // MARK: Test-support hooks
 
     /// The node rendering currently drawn (structural hook — the same `node` the
@@ -201,4 +216,8 @@ public final class MembershipBusView: NSView {
     /// Whether this row's node is rendered dimmed via the dormant-divergent tint
     /// (spec §4.7) — a tint, never alpha.
     public var test_dimmed: Bool { dimmed }
+    /// The disc radius this row's node currently draws at (v4.1 item 4 — size
+    /// joins fill as a selection signal). Structural hook, same value `draw`
+    /// reads, so it can't drift from the pixels.
+    public var test_nodeRadius: CGFloat { Self.nodeRadius(for: node) }
 }

@@ -53,9 +53,10 @@ public final class BusRailOverlayView: NSView {
     public override func draw(_ dirtyRect: NSRect) {
         guard let mainOutRow, let anchor = mainOutRow.railHookAnchor(in: self) else { return }
 
-        let r = PopoverColumnGrid.busNodeDiameter / 2
-        let gap = r + PopoverColumnGrid.busNodeRailGap
-        let arcR = r + PopoverColumnGrid.busDetourBulge
+        // Warm Signal v4.1 item 4 ("larger selected nodes"): the gap/arc math
+        // is keyed off each STOP's OWN node radius (`MembershipBusView.nodeRadius`)
+        // rather than one fixed radius, so the rail still meets a large member
+        // node and a small detoured non-member node cleanly at their true edges.
         let lw = PopoverColumnGrid.busLineWidth
         let cx = PopoverColumnGrid.railGutterCenterX
 
@@ -74,8 +75,14 @@ public final class BusRailOverlayView: NSView {
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // Origin hook: horizontal turn INTO the Main Audio meter's leading
-            // edge, then the vertical drops from there down the spine.
+            // Origin hook: horizontal turn INTO the Main Audio master strip's
+            // leading edge, then the vertical drops from there down the spine.
+            // Warm Signal v4.1 item 1 pins the strip's leading edge to `cx`
+            // itself, so this horizontal segment is now degenerate (zero
+            // length) in practice — kept as a no-op guard rather than deleted,
+            // so a future geometry tweak that reintroduces an offset (a wider
+            // strip, a different anchor) still draws correctly without needing
+            // this call site touched again.
             let hookColor = anchor.gold ? Tokens.Color.gold : Tokens.Color.ember
             let hook = NSBezierPath()
             hook.lineWidth = lw
@@ -86,22 +93,36 @@ public final class BusRailOverlayView: NSView {
             hookColor.setStroke()
             hook.stroke()
 
+            // Junction dot (item 1): a small filled disc at the rail-to-strip
+            // turn — where the vertical spine meets the master strip's leading
+            // end — marking the plug-in point the rail rises into.
+            let dotR = PopoverColumnGrid.masterMeterJunctionDotDiameter / 2
+            let dot = NSBezierPath(ovalIn: NSRect(x: cx - dotR, y: anchor.centerY - dotR,
+                                                   width: dotR * 2, height: dotR * 2))
+            hookColor.setFill()
+            dot.fill()
+
             var currentY = anchor.centerY
             for stop in stops {
                 let onSpine = Self.onSpine(stop.node)
+                let stopR = MembershipBusView.nodeRadius(for: stop.node)
                 let segColor: NSColor = stop.dimmed
                     ? Tokens.Color.tertiaryLabel
                     : (stop.node == .member ? Tokens.Color.gold : Tokens.Color.ember)
                 segColor.setStroke()
 
                 if onSpine {
-                    // The rail runs THROUGH the node with a breathing gap above.
+                    // The rail runs THROUGH the node with a breathing gap above,
+                    // sized off THIS node's own (larger, selected) radius.
+                    let gap = stopR + PopoverColumnGrid.busNodeRailGap
                     let topApproach = stop.y + gap
                     strokeVertical(from: currentY, to: topApproach, x: cx, lineWidth: lw)
                     if !stop.below { break }              // terminus — nothing below
                     currentY = stop.y - gap
                 } else {
-                    // Detour ARC around a bypassed non-member node.
+                    // Detour ARC around a bypassed non-member node, sized off
+                    // THIS node's own (smaller, unselected) radius.
+                    let arcR = stopR + PopoverColumnGrid.busDetourBulge
                     let topApproach = stop.y + arcR
                     strokeVertical(from: currentY, to: topApproach, x: cx, lineWidth: lw)
                     let arc = NSBezierPath()

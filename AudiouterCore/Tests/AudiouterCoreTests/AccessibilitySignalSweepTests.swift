@@ -58,7 +58,11 @@ final class AccessibilitySignalSweepTests: IsolatedTestCase {
         let label = row.test_accessibilityLabel ?? ""
         XCTAssertTrue(label.hasPrefix("Sweep Speaker, "), "identity leads the announcement")
         XCTAssertTrue(label.contains(", in main audio"), "bus membership rides the one row label")
-        XCTAssertTrue(label.hasSuffix(", connected"), "the ring's state is the trailing clause")
+        // v4.1 item 3: the FEED clause ("feeding System") now trails the ring's
+        // connection-state clause — one more channel in the same composed
+        // announcement, not a replacement for it.
+        XCTAssertTrue(label.hasSuffix(", connected, feeding System"),
+                      "the ring's state leads, the FEED clause trails, in the same announcement")
         XCTAssertEqual(label.components(separatedBy: "connected").count - 1, 1,
                        "the connection state is spoken exactly once")
 

@@ -48,8 +48,18 @@ public final class LevelMeterView: NSView {
 
     /// Thickness (height) of the under-name meter bar — matches
     /// `PopoverColumnGrid.meterUnderNameHeight` (kept as a `public static let`
-    /// for the shared symbol contract). Drives the bar's rounded end caps.
+    /// for the shared symbol contract: it is the DEFAULT thickness every
+    /// existing caller gets, and stays the device-row value). Drives the bar's
+    /// rounded end caps for any instance that doesn't override ``thickness``.
     public static let columnWidth: CGFloat = PopoverColumnGrid.meterUnderNameHeight
+
+    /// Per-instance bar thickness (Warm Signal v4.1 item 1 — the master
+    /// strip): device/app meters keep the shared ``columnWidth`` default, the
+    /// Main Audio row's meter passes `PopoverColumnGrid.masterMeterThickness`
+    /// (6 pt vs 3 pt) so it reads as a heavier-gauge sibling of the device
+    /// meters. Drives both the track/fill corner radius (rounded caps scale
+    /// with thickness) and, via ``intrinsicContentSize``, the bar's height.
+    private let thickness: CGFloat
 
     /// Attack coefficient (rising level) — larger than `decay` so the bar
     /// jumps up quickly on a transient.
@@ -85,13 +95,18 @@ public final class LevelMeterView: NSView {
 
     private var displayLink: CVDisplayLink?
 
-    public init() {
+    /// - Parameter thickness: bar thickness (height). Defaults to the shared
+    ///   ``columnWidth`` — every pre-existing caller (`DeviceRowView`,
+    ///   `AppRowView`, tests) is unaffected. `MainOutRowView` is the one
+    ///   caller that overrides it, to `PopoverColumnGrid.masterMeterThickness`.
+    public init(thickness: CGFloat = LevelMeterView.columnWidth) {
+        self.thickness = thickness
         super.init(frame: .zero)
         wantsLayer = true
-        trackLayer.cornerRadius = Self.columnWidth / 2
+        trackLayer.cornerRadius = thickness / 2
         // The visible fill's rounded cap comes from the MASK (the moving bar),
         // not the fixed gradient sheet it reveals.
-        fillMaskLayer.cornerRadius = Self.columnWidth / 2
+        fillMaskLayer.cornerRadius = thickness / 2
         fillMaskLayer.backgroundColor = NSColor.black.cgColor   // opaque = revealed
         // Left-to-right ramp: startPoint is the bar's base (ember, leading),
         // endPoint the track's ceiling (caution, trailing).
@@ -125,8 +140,7 @@ public final class LevelMeterView: NSView {
     }
 
     public override var intrinsicContentSize: NSSize {
-        NSSize(width: PopoverColumnGrid.meterUnderNameWidth,
-               height: PopoverColumnGrid.meterUnderNameHeight)
+        NSSize(width: PopoverColumnGrid.meterUnderNameWidth, height: thickness)
     }
 
     /// Non-interactive: the meter never intercepts clicks/hover meant for the

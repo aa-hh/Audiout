@@ -178,12 +178,41 @@ public final class DeviceRowView: NSView {
     /// The armed predicate's last computed value (what the dot renders).
     private var isRouteArmed = false
     private let nameLabel = NSTextField(labelWithString: "")
-    /// The single sublabel line under the name, driven by a precedence ladder in
-    /// ``resolveSublabel(routedAppNames:)``: `.failed` → "Couldn't connect"
-    /// (`failure` red); unavailable → "Unavailable" (greyed); else a non-empty
-    /// routing set → the routing line ("System · <apps>"); else hidden (the row is
-    /// single-line, name centered). All three sublabel kinds reuse this one label.
+    /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
+    /// re-scoped from the retired routing ladder): carries ONLY state words now.
+    /// The one remaining rung is the small-caps MUTED token, shown iff the
+    /// device is row-muted (not master-muted) AND neither failed nor
+    /// unavailable — see ``resolveSublabel()``. Failed/unavailable and the
+    /// routing/redirect composite all moved to ``feedLabel`` (the FEED column).
     private let statusLabel = NSTextField(labelWithString: "")
+    /// The trailing **FEED** column (Warm Signal v4.1 item 3): a right-aligned,
+    /// multi-source TEXT composite of what's feeding this device — the neutral
+    /// main-mix segment (``mainMixSourceName``, "System" or the active group's
+    /// name) plus one tinted segment per redirected app (``feedAppNames``),
+    /// joined by ``feedSegmentSeparator``. A `.failed`/unavailable device
+    /// OVERRIDES this with failure-red words instead ("Couldn't connect" /
+    /// "Unavailable"). Mounted and constrained ONLY on a bus row
+    /// (``busActive``) — that's the one host where the trailing control column
+    /// (`PopoverColumnGrid.trailingControlWidth`, centered at
+    /// `trailingControlCenterFromTrailing`) is otherwise reserved-but-EMPTY
+    /// (the membership control moved to the left rail gutter on a bus row), so
+    /// there is a free slot to draw into; a non-bus host (mixer window) keeps
+    /// its real checkbox there and never mounts this label. See
+    /// ``updateFeedText()``.
+    private let feedLabel = NSTextField(labelWithString: "")
+    /// The FEED column's main-mix segment text, or `nil` when this row is not
+    /// currently a member of the ACTIVE main-mix target (a redirect-only row
+    /// can still show app segments alone). "System" for a manual Selected-
+    /// Devices member, the active group's name when Main Out targets a saved
+    /// group (``apply``'s `mainOutTargetsGroupName`). Recomputed every
+    /// `apply`; read by both ``updateFeedText()`` and the VoiceOver feed
+    /// clause so the visual and spoken channels can't drift apart.
+    private var mainMixSourceName: String?
+    /// The FEED column's redirect-app segment list — the CONFIRMED live set
+    /// (`liveAppNames`) when non-empty, else the routing INTENT set
+    /// (`routedAppNames`), mirroring the retired sublabel's own T9 precedence.
+    /// Recomputed every `apply`.
+    private var feedAppNames: [String] = []
     private let slider = NSSlider()
     /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
     /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
@@ -325,6 +354,14 @@ public final class DeviceRowView: NSView {
     ///     active target, not the Selected set"). `nil` (every existing
     ///     caller) falls back to `selected`, which is exactly right whenever
     ///     Main Out targets Selected Devices.
+    ///   - mainOutTargetsGroupName: the ACTIVE Main Out target's saved-group
+    ///     name when it currently targets a group, else `nil` (targets
+    ///     Selected Devices). Drives the FEED column's main-mix segment
+    ///     wording (Warm Signal v4.1 item 3): "System" when `nil`, the
+    ///     group's name when non-nil — applied ONLY on a row that is a member
+    ///     of that active target (`inActiveTarget`); a non-member shows no
+    ///     main-mix segment regardless of this value. Defaults to `nil` so
+    ///     every existing caller keeps showing "System", unchanged.
     ///   - iconSymbolName: an explicit SF Symbol name override for the icon
     ///     glyph, resolved through ``DeviceIcon/resolve(_:default:)`` (so an
     ///     unknown/invalid name falls back to `device.kind.symbolName`).
@@ -341,6 +378,7 @@ public final class DeviceRowView: NSView {
                       liveAppNames: [String] = [],
                       masterMuted: Bool = false,
                       inActiveTarget: Bool? = nil,
+                      mainOutTargetsGroupName: String? = nil,
                       iconSymbolName: String? = nil) {
         self.device = device
         self.isSelectedInSet = selected
@@ -411,6 +449,14 @@ public final class DeviceRowView: NSView {
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
         isRouteArmed = mainMixArmed || hasLiveFeeds
         armedDotView.apply(armed: isRouteArmed)
+
+        // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
+        // manual member, the active group's name for a group-target member;
+        // `nil` for a non-member (no main-mix segment; a redirect-only row may
+        // still show app segments alone). Stored so `updateFeedText()`/the
+        // VoiceOver feed clause share one source of truth.
+        self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
+        self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
         faderCell.isRouteArmed = isRouteArmed
@@ -425,10 +471,12 @@ public final class DeviceRowView: NSView {
         }
         faderCell.isMutedControl = controlsMuted
 
-        // Single sublabel precedence ladder (failed → unavailable → routing →
-        // none), evaluated here after `device`/`isSelectedInSet`/`isMasterMuted`
-        // are set so the precedence is unambiguous.
-        resolveSublabel(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
+        // Sublabel (state words only, v4.1 item 3) + FEED column (the routing
+        // composite / failure override), each with their own single ladder —
+        // evaluated here after `device`/`isSelectedInSet`/`isMasterMuted`/
+        // `mainMixSourceName`/`feedAppNames` are set so both are unambiguous.
+        resolveSublabel()
+        updateFeedText()
 
         // Don't fight a live drag: only push the model value into the slider
         // when the user isn't dragging it. (The readout is kept live during a
@@ -582,40 +630,53 @@ public final class DeviceRowView: NSView {
     // `resolveSublabel(routedAppNames:liveAppNames:)`'s ladder, which subsumes
     // the failed-only case as its highest rung.
 
-    /// Decide the single sublabel line via one precedence ladder (highest first;
-    /// exactly one line, or none), then show/hide `statusLabel` and center the
-    /// name accordingly. Reuses the single `statusLabel` for all three sublabel
-    /// kinds so `test_statusText` reports whichever is showing.
-    ///
-    /// 1. `.failed` connection → "Couldn't connect" (`.systemOrange`). Highest.
-    /// 2. else device unavailable → "Unavailable" (`.tertiaryLabelColor`, greyed).
-    /// 3. else routing set non-empty → the routing line (`.secondaryLabelColor`).
-    ///    The routing set is non-empty iff selected OR an app-name list (live or
-    ///    intent) is non-empty. Tokens: "System" first when selected, then each
-    ///    app name in order, joined by `routingTokenSeparator`. The app names
-    ///    come from `liveAppNames` (T9's confirmed-streaming signal) when it's
-    ///    non-empty, else fall back to `routedAppNames` (routing INTENT/config —
-    ///    no "playing"/"active" language on its own). Using `liveAppNames` when
-    ///    present is the one case that genuinely IS a playback claim: it only
-    ///    ever carries names the backend confirmed are actually streaming there.
-    /// 4. else → no sublabel; single-line row (name centered).
-    private func resolveSublabel(routedAppNames: [String], liveAppNames: [String]) {
+    /// On a **bus row** the sublabel carries ONLY state words now (Warm Signal
+    /// v4.1 item 3 — the routing/failure content that used to live here moved
+    /// to the FEED column, ``updateFeedText()``): a ROW-muted (never master-
+    /// muted — the Main Out pill carries that) device that is neither failed
+    /// nor unavailable shows the small-caps MUTED token alone; every other
+    /// state hides the sublabel. A **non-bus row** (mixer window / a generic
+    /// caller) has no FEED column to fall back on — it keeps the FULL legacy
+    /// ladder (``resolveLegacySublabel()``) so that host doesn't silently lose
+    /// failed/unavailable/routing information v4.1 never gave it anywhere else
+    /// to go.
+    private func resolveSublabel() {
+        guard busActive else {
+            resolveLegacySublabel()
+            return
+        }
+        if case .failed = device.connectionState {
+            hideSublabel()
+        } else if !device.isAvailable {
+            hideSublabel()
+        } else if device.isMuted && !isMasterMuted {
+            showMutedSublabel()
+        } else {
+            hideSublabel()
+        }
+    }
+
+    /// The pre-v4.1 sublabel precedence ladder (failed → unavailable →
+    /// routing[+MUTED] → none), preserved verbatim for a non-bus host. Reuses
+    /// ``mainMixSourceName``/``feedAppNames`` (the same precedence-resolved
+    /// values the FEED column reads) rather than re-deriving them, so the two
+    /// paths can never drift out of agreement on WHAT the current mix/redirect
+    /// state is — only on where it's drawn.
+    private func resolveLegacySublabel() {
         if case .failed = device.connectionState {
             // Failure-exclusive red (spec §2/§3.5/R8) — paired with the red
-            // failed halo ring; supersedes the old systemOrange `warning` tint.
+            // failed halo ring.
             showSublabel("Couldn't connect", color: Tokens.Color.failure)
         } else if !device.isAvailable {
             showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
-        } else if let routing = routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames) {
+        } else if let routing = legacyRoutingLine() {
             // S3 (spec §3.5): a ROW-muted device prepends the small-caps MUTED
             // token to its EXISTING feed sublabel — never to a single-line row
             // (this branch only runs when a sublabel already exists, so the
-            // row height is untouched — R7 no-reflow). Master mute adds NO
-            // token (matrix §3.6: the Main Out pill carries it; and since
-            // master mute is realized by muting every member, `isMasterMuted`
-            // is what distinguishes the two).
+            // row height is untouched — R7 no-reflow, this host only). Master
+            // mute adds NO token (matrix §3.6: the Main Out pill carries it).
             if device.isMuted && !isMasterMuted {
-                showMutedSublabel(feeds: routing)
+                showLegacyMutedSublabel(feeds: routing)
             } else {
                 showSublabel(routing, color: Tokens.Color.secondaryLabel)
             }
@@ -624,11 +685,37 @@ public final class DeviceRowView: NSView {
         }
     }
 
-    /// Show the sublabel as `MUTED · <feeds>` (spec §3.5 slot rung 3): the
-    /// leading MUTED token in the micro-label voice (spec §2 — SF Mono bold,
-    /// tracked, uppercase) with the feed list continuing in the sublabel's own
-    /// 10 pt voice. Same single `statusLabel`, same line, same row height.
-    private func showMutedSublabel(feeds: String) {
+    /// `mainMixSourceName` + `feedAppNames` joined exactly as the retired
+    /// routing line used to (`"System · <apps>"`) — the non-bus host's own
+    /// composite, kept separate from the FEED column's segment/color
+    /// machinery since it renders as plain text on one label.
+    private func legacyRoutingLine() -> String? {
+        var tokens: [String] = []
+        if let mainMixSourceName { tokens.append(mainMixSourceName) }
+        tokens.append(contentsOf: feedAppNames)
+        guard !tokens.isEmpty else { return nil }
+        return tokens.joined(separator: Self.routingTokenSeparator)
+    }
+
+    /// Show the sublabel as the standalone small-caps `MUTED` token (spec §2
+    /// micro-label voice — SF Mono bold, tracked, uppercase) — the bus-row
+    /// case, where the feed list lives in its own column so MUTED needs no
+    /// existing line to piggyback on.
+    private func showMutedSublabel() {
+        statusLabel.isHidden = false
+        statusLabel.attributedStringValue = NSAttributedString(
+            string: "MUTED",
+            attributes: [.font: Tokens.Font.microLabel,
+                         .kern: Tokens.Font.microLabelKern,
+                         .foregroundColor: Tokens.Color.secondaryLabel])
+        statusLabel.textColor = Tokens.Color.secondaryLabel
+        applyNameStackLayout(twoLine: true)
+    }
+
+    /// Show the sublabel as `MUTED · <feeds>` — the non-bus host's own rung,
+    /// unchanged from pre-v4.1: the leading MUTED token in the micro-label
+    /// voice with the feed list continuing in the sublabel's own 10 pt voice.
+    private func showLegacyMutedSublabel(feeds: String) {
         statusLabel.isHidden = false
         let bodyFont = statusLabel.font ?? .systemFont(ofSize: 10)
         let composed = NSMutableAttributedString(
@@ -645,18 +732,147 @@ public final class DeviceRowView: NSView {
         applyNameStackLayout(twoLine: true)
     }
 
-    /// The routing line for the current selection + routed apps, or `nil` when
-    /// the routing set is empty (not selected AND no app names on either list).
-    /// "System" leads when selected, then the effective app-name list in the
-    /// given order — `liveAppNames` (confirmed streaming, T9) when non-empty,
-    /// else `routedAppNames` (routing intent) as the fallback so a device with a
-    /// pending redirect isn't left with no label at all.
+    /// Retained as a pure precedence helper for ``test_sourceText(routedAppNames:liveAppNames:)``
+    /// only — no production call site reads this anymore (both
+    /// ``resolveLegacySublabel()`` and ``updateFeedText()`` read the shared
+    /// ``mainMixSourceName``/``feedAppNames`` instead). Kept separate so the T9
+    /// live-vs-intent precedence stays covered by its own focused test.
     private func routingLine(routedAppNames: [String], liveAppNames: [String]) -> String? {
         var tokens: [String] = []
         if isSelectedInSet { tokens.append("System") }
         tokens.append(contentsOf: liveAppNames.isEmpty ? routedAppNames : liveAppNames)
         guard !tokens.isEmpty else { return nil }
         return tokens.joined(separator: Self.routingTokenSeparator)
+    }
+
+    // MARK: FEED column (Warm Signal v4.1 item 3)
+
+    /// Separator joining FEED composite segments: space, U+00B7 MIDDLE DOT,
+    /// space — visually identical to the retired sublabel's own separator but
+    /// kept as an independent constant so the two columns can evolve apart.
+    private static let feedSegmentSeparator = " · "
+
+    /// The one monochrome SF Mono uppercase micro-tag this column ever shows,
+    /// prefixed ahead of the composite for a true protocol exception. AP2 is
+    /// the default and is never badged (spec item 3 "attributes/flags").
+    private static let ap1FeedTag = "AP1"
+
+    /// Re-derive and push the FEED column's text from the current device/mix/
+    /// redirect state (``mainMixSourceName``/``feedAppNames``, set by
+    /// ``apply``). No-op — hides `feedLabel` — when this row hosts no FEED
+    /// column (`busActive` false: a non-bus host's trailing column is the real
+    /// checkbox, not a free slot).
+    ///
+    /// Precedence (highest first, mirrors ``resolveSublabel()``'s split ladder
+    /// but for the FEED half):
+    /// 1. `.failed` connection → "Couldn't connect", failure-red (spec item 3
+    ///    "error overrides the feed" — pairs with the red halo ring).
+    /// 2. else device unavailable → "Unavailable", failure-red (the spec
+    ///    groups both under "failure-red words").
+    /// 3. else the MULTI-SOURCE COMPOSITE: `mainMixSourceName` (when non-nil)
+    ///    followed by one segment per `feedAppNames` entry, in order, joined
+    ///    by `feedSegmentSeparator` — NEVER collapsed to a single reason.
+    ///    Empty (nil main-mix AND no app names) renders nothing.
+    /// Connecting/reconnecting/buffering and muted are DELIBERATELY absent
+    /// here (spec item 3) — the halo ring and the mute control/MUTED sublabel
+    /// token own those signals; duplicating them would be noise.
+    private func updateFeedText() {
+        guard busActive else {
+            feedLabel.isHidden = true
+            feedLabel.attributedStringValue = NSAttributedString()
+            return
+        }
+        if case .failed = device.connectionState {
+            setFeedText("Couldn't connect", color: Tokens.Color.failure)
+            return
+        }
+        if !device.isAvailable {
+            setFeedText("Unavailable", color: Tokens.Color.failure)
+            return
+        }
+        var segments: [(text: String, color: NSColor)] = []
+        if let mainMixSourceName { segments.append((mainMixSourceName, Tokens.Color.secondaryLabel)) }
+        for name in feedAppNames {
+            // SEAM for T7 (v4.1 item 7): `appSegmentColor(for:)` is the ONLY
+            // call this later task rewires (to `AppTetherColor`, computed once
+            // per bundle id and cached) — nothing else about composition,
+            // precedence, or overflow changes.
+            segments.append((name, appSegmentColor(for: name)))
+        }
+        let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
+        setFeedSegments(segments, tag: tag)
+    }
+
+    /// SEAM for T7: resolves the tint for one FEED app-name segment. A flat
+    /// pass-through to the standard secondary label color today — T7 wires
+    /// `AppTetherColor` in here (and into the matching App Exceptions redirect
+    /// chip) without touching `updateFeedText`'s composition/precedence/
+    /// overflow logic at all.
+    private func appSegmentColor(for appName: String) -> NSColor {
+        Tokens.Color.secondaryLabel
+    }
+
+    /// Render a single failure-red override string (no tag, no segments) into
+    /// `feedLabel` — the "Couldn't connect" / "Unavailable" rungs.
+    private func setFeedText(_ text: String, color: NSColor) {
+        feedLabel.attributedStringValue = NSAttributedString(
+            string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
+        feedLabel.isHidden = false
+    }
+
+    /// Compose `segments` (main-mix + app tokens, already colored) into
+    /// `feedLabel`, prefixing `tag` (the AP1 micro-tag) when present, with the
+    /// spec item 3 STATIC overflow rule: try the full composite first; if it
+    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop segments from the
+    /// TAIL one at a time (never cut a segment mid-string) and append a
+    /// trailing "+N" for the dropped count — no interactive reveal, locked.
+    /// Hides the label when there is nothing to show at all.
+    private func setFeedSegments(_ segments: [(text: String, color: NSColor)], tag: String?) {
+        guard !segments.isEmpty else {
+            feedLabel.isHidden = true
+            feedLabel.attributedStringValue = NSAttributedString()
+            return
+        }
+        let font = Tokens.Font.caption
+        let separatorAttrs: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: Tokens.Color.secondaryLabel,
+        ]
+        func attributed(_ segment: (text: String, color: NSColor)) -> NSAttributedString {
+            NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: segment.color])
+        }
+        let tagPrefix: NSAttributedString? = tag.map {
+            NSAttributedString(string: $0 + " ", attributes: [
+                .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                .foregroundColor: Tokens.Color.secondaryLabel,
+            ])
+        }
+        let available = PopoverColumnGrid.feedColumnWidth
+
+        var visibleCount = segments.count
+        var committed = NSAttributedString()
+        while visibleCount > 0 {
+            let trial = NSMutableAttributedString()
+            if let tagPrefix { trial.append(tagPrefix) }
+            for (index, segment) in segments.prefix(visibleCount).enumerated() {
+                if index > 0 {
+                    trial.append(NSAttributedString(string: Self.feedSegmentSeparator, attributes: separatorAttrs))
+                }
+                trial.append(attributed(segment))
+            }
+            let overflowCount = segments.count - visibleCount
+            if overflowCount > 0 {
+                trial.append(NSAttributedString(string: " +\(overflowCount)", attributes: separatorAttrs))
+            }
+            // Always accept the last candidate (`visibleCount == 1`) even if it
+            // still overflows — a clipped single segment beats showing nothing.
+            if trial.size().width <= available || visibleCount == 1 {
+                committed = trial
+                break
+            }
+            visibleCount -= 1
+        }
+        feedLabel.attributedStringValue = committed
+        feedLabel.isHidden = false
     }
 
     /// Show `statusLabel` with `text`/`color` and raise the name so the name +
@@ -776,6 +992,19 @@ public final class DeviceRowView: NSView {
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.isHidden = true   // single-line by default until the first `apply`
 
+        // FEED column (v4.1 item 3): right-aligned text, clipped rather than
+        // ellipsized — `setFeedSegments` pre-measures and drops WHOLE segments
+        // (STATIC "+N" overflow) so a real mid-run ellipsis should never fire;
+        // clipping is the honest fallback if a single unsplittable segment
+        // still overflows. Only mounted/constrained on a bus row (`busActive`)
+        // — the one host where this trailing slot is reserved-but-empty.
+        feedLabel.translatesAutoresizingMaskIntoConstraints = false
+        feedLabel.font = Tokens.Font.caption
+        feedLabel.alignment = .right
+        feedLabel.lineBreakMode = .byClipping
+        feedLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        feedLabel.isHidden = true
+
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
         // target configuration below (a cell swap resets cell-held state, so
@@ -837,6 +1066,8 @@ public final class DeviceRowView: NSView {
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
+        // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
+        if busActive { addSubview(feedLabel) }
 
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
@@ -927,6 +1158,17 @@ public final class DeviceRowView: NSView {
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
                 enableCheckbox.heightAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+                // FEED column (v4.1 item 3): the trailing control column is
+                // otherwise empty on a bus row (the membership control moved to
+                // the left rail gutter above) — draw the composite text there,
+                // right-aligned, trailing-anchored + centered exactly like the
+                // header's own trailing column label (`beginCard`'s
+                // `trailingTitle`), so the two line up.
+                feedLabel.trailingAnchor.constraint(
+                    equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
+                feedLabel.widthAnchor.constraint(
+                    lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
+                feedLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         } else {
             constraints.append(contentsOf: [
@@ -1167,6 +1409,57 @@ public final class DeviceRowView: NSView {
     /// to assert the T9 live-precedence-over-intent behavior. Test hook.
     public func test_sourceText(routedAppNames: [String], liveAppNames: [String] = []) -> String? {
         routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
+    }
+
+    // MARK: FEED column (v4.1 item 3) test hooks
+
+    /// The FEED column's current plain-text content, or `nil` when it has
+    /// nothing to show (no main-mix membership + no redirects) or this row
+    /// hosts no FEED column at all (a non-bus host). Concatenates the composed
+    /// attributed string's characters — including a static "AP1 " prefix or a
+    /// trailing "+N" when present — so a test can assert the rendered words
+    /// without parsing per-segment color runs itself.
+    public var test_feedText: String? {
+        guard busActive, !feedLabel.isHidden else { return nil }
+        let text = feedLabel.attributedStringValue.string
+        return text.isEmpty ? nil : text
+    }
+
+    /// Whether the FEED text is CURRENTLY rendering in the failure-red override
+    /// (`Couldn't connect` / `Unavailable`, spec item 3) — reads the first run's
+    /// resolved color (an error message is never mixed with normal segments),
+    /// so a test can't drift from what's actually painted.
+    public var test_feedIsErrorColored: Bool {
+        guard busActive, !feedLabel.isHidden else { return false }
+        let attr = feedLabel.attributedStringValue
+        guard attr.length > 0,
+              let color = attr.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+              let resolved = color.usingColorSpace(.sRGB),
+              let failure = Tokens.Color.failure.usingColorSpace(.sRGB) else { return false }
+        return abs(resolved.redComponent - failure.redComponent) < 0.01
+            && abs(resolved.greenComponent - failure.greenComponent) < 0.01
+            && abs(resolved.blueComponent - failure.blueComponent) < 0.01
+    }
+
+    /// Whether the FEED column is currently showing the static "+N" overflow
+    /// suffix (spec item 3 "locked" — capped visible segments, no interactive
+    /// reveal).
+    public var test_feedHasOverflow: Bool {
+        guard let text = test_feedText else { return false }
+        return text.range(of: #"\+\d+$"#, options: .regularExpression) != nil
+    }
+
+    /// Whether the FEED column is currently prefixed with the monochrome AP1
+    /// micro-tag (spec item 3 "attributes/flags" — the one true-exception tag;
+    /// AP2 is the default and is never badged).
+    public var test_feedHasAP1Tag: Bool { test_feedText?.hasPrefix("\(Self.ap1FeedTag) ") == true }
+
+    /// The color a FEED app-name segment for `appName` currently resolves to —
+    /// the seam T7 rewires (``appSegmentColor(for:)``) to `AppTetherColor`.
+    /// Exposed so a test can pin today's flat `secondaryLabel` value; T7's swap
+    /// then shows up as an intentional, asserted change rather than silent drift.
+    public func test_feedAppSegmentColor(for appName: String) -> NSColor {
+        appSegmentColor(for: appName)
     }
 
     /// Whether the connecting/reconnecting ring's breathing pulse is installed
@@ -1595,7 +1888,14 @@ public final class DeviceRowView: NSView {
         // entirely for `.off` so an unrouted row's label is unchanged.
         let state = accessibilityStateSuffix
         let stateClause = state.map { ", \($0)" } ?? ""
-        setAccessibilityLabel("\(device.name), \(membership), volume \(device.volume) percent\(stateClause)")
+        // FEED clause (v4.1 item 3): the ONE spoken mention of what's feeding
+        // this device — gated `nil` on failed/unavailable (already spoken via
+        // `stateClause`'s "couldn't connect", or simply silent for
+        // unavailable) so the composed announcement never double-speaks the
+        // same fact through two channels.
+        let feedClause = feedAccessibilityClause.map { ", \($0)" } ?? ""
+        setAccessibilityLabel(
+            "\(device.name), \(membership), volume \(device.volume) percent\(stateClause)\(feedClause)")
 
         // The row's VALUE carries the live signal channels (S2/S3 — every
         // visual state has a spoken equivalent, shipped with the drawing):
@@ -1641,6 +1941,28 @@ public final class DeviceRowView: NSView {
                 isSelectedInSet ? "Click to remove from Selected Devices"
                                 : "Click to add to Selected Devices")
         }
+    }
+
+    /// The spoken FEED clause (v4.1 item 3) — the same `mainMixSourceName` +
+    /// `feedAppNames` the visual column composes, but joined with a natural
+    /// ", " rather than the visual " · " glyph, and NEVER visually truncated
+    /// (VoiceOver has no viewport to overflow, so the STATIC "+N" cap is a
+    /// screen-only concern). `nil` when there's nothing to say (mirrors the
+    /// FEED column's own empty case) or when the connection state already owns
+    /// the words (failed/unavailable — `accessibilityStateSuffix` speaks
+    /// "couldn't connect"; unavailable stays silent on this channel too, same
+    /// as the FEED column itself no longer distinguishing the two visually
+    /// beyond color) so the composed announcement never says the same fact
+    /// twice.
+    private var feedAccessibilityClause: String? {
+        guard busActive else { return nil }
+        if case .failed = device.connectionState { return nil }
+        if !device.isAvailable { return nil }
+        var names: [String] = []
+        if let mainMixSourceName { names.append(mainMixSourceName) }
+        names.append(contentsOf: feedAppNames)
+        guard !names.isEmpty else { return nil }
+        return "feeding " + names.joined(separator: ", ")
     }
 
     /// The accessibility-label clause for the current connection state

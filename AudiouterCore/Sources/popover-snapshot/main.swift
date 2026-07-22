@@ -30,6 +30,12 @@
 // breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
 // is deterministic) · `.connected` → solid `ringConnected` ring · `.failed` →
 // heavier solid red `failure` ring + red "Couldn't connect" sublabel.
+//
+// `AIRPLAY_SNAPSHOT_MODE=feed-composite` renders the Warm Signal v4.1 item 3
+// FEED column's full precedence ladder in one panel — see
+// `snapshotFeedComposite` for the per-row breakdown (multi-source composite,
+// group-name wording, the AP1 micro-tag, the failure-red override, and the
+// STATIC "+N" overflow).
 
 import AppKit
 import AudiouterCore
@@ -758,6 +764,106 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
     window.contentView = NSView()
 }
 
+/// Render the `feed-composite` scenario (Warm Signal v4.1 item 3): a device
+/// row per FEED-column rung, so the whole precedence ladder is visible in one
+/// panel. Main Out stays on **Selected Devices** throughout (Main Out is one
+/// GLOBAL target for the whole popover, so a group-target row can't share a
+/// panel with a "System" row — the group-name wording is covered instead by
+/// `popover-harness`'s `[23] FEED column` section and `FeedColumnTests`) —
+///   - "feed-manual": a MANUAL member (checked into Selected Devices) with
+///     "Music" redirected to it ⇒ FEED reads **"System · Music"** — the
+///     multi-source composite, never collapsed to one reason.
+///   - "feed-group": a plain manual member with no redirect ⇒ FEED reads the
+///     bare **"System"** token, for contrast against the composite above.
+///   - "feed-ap1": an AP1-only device (`supportsAirPlay2: false`), also a
+///     manual member ⇒ FEED reads **"AP1 System"** — the one monochrome
+///     micro-tag exception, prefixed ahead of the composite.
+///   - "feed-failed": `.failed` ⇒ FEED reads **"Couldn't connect"** — the
+///     failure-red override, replacing the composite entirely (paired with
+///     the red halo ring + open diagnosis panel).
+///   - "feed-overflow": FIVE apps redirected to it, not itself a mix member
+///     ⇒ FEED overflows to a STATIC "+N" suffix (no interactive reveal).
+/// Every row's sublabel is asserted empty by `popover-harness`'s `[23] FEED
+/// column` section — this snapshot is the visual counterpart.
+@MainActor
+func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    // A hand-built fleet (rather than `.demoFleet`) so every FEED rung has an
+    // unambiguous, purpose-named row instead of overloading the shared fleet's
+    // existing device roles.
+    let fleet: [Device] = [
+        Device(id: "feed-manual", name: "Office Speaker", kind: .homePod,
+              volume: 55, isSelected: true, connectionState: .connected),
+        Device(id: "feed-group", name: "Living Room Sonos", kind: .sonos,
+              volume: 60, isSelected: true, connectionState: .connected),
+        Device(id: "feed-ap1", name: "Attic AirPort Express", kind: .airportExpress,
+              supportsAirPlay2: false, volume: 40, isSelected: true, connectionState: .connected),
+        Device(id: "feed-failed", name: "Basement Speaker", kind: .generic,
+              volume: 45, connectionState: .failed(ConnectionFailure(cause: .notResponding))),
+        Device(id: "feed-overflow", name: "Overflow Speaker", kind: .appleTV,
+              volume: 35, connectionState: .connected),
+    ]
+    let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let musicBundleID = "com.apple.Music"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "feed-manual"), for: musicBundleID)
+
+    // Five-app overflow fixture on "feed-overflow" — none of the five apps
+    // ever gets its OWN row (only the first counts toward the Applications
+    // card's redirect-destination UI); `applyRoutedApps` (T9's confirmed-live
+    // signal) is enough on its own to drive the FEED column's segment list
+    // without seeding five real app routes.
+    let overflowAppNames = [
+        "Alpha Streaming App", "Bravo Streaming App", "Charlie Streaming App",
+        "Delta Streaming App", "Echo Streaming App",
+    ]
+
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: fleet.count) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+
+    // Manual members: Main Out stays on Selected Devices (the default) for
+    // this fixture, so every non-failed row's neutral segment reads "System".
+    _ = popover.test_toggleDeviceEnabled(deviceID: "feed-manual", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "feed-group", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "feed-ap1", on: true)
+
+    popover.applyRoutedApps(deviceID: "feed-overflow", appNames: overflowAppNames)
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()   // reopen-style rebuild so the Applications card expands
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-feed-composite-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 @MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
@@ -815,6 +921,12 @@ func run() -> Int32 {
     if mode == "rail-depth" {
         snapshotRailDepth(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotRailDepth(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "feed-composite" {
+        snapshotFeedComposite(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotFeedComposite(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

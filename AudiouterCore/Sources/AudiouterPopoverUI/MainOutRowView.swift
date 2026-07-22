@@ -63,12 +63,22 @@ public final class MainOutRowView: NSView {
     /// A touch taller than a device row — this is the module's headline control.
     public static let rowHeight: CGFloat = 44
 
+    /// Vertical gap from the row's bottom edge to the master strip's bottom
+    /// edge (Warm Signal v4.1 item 1). `PopoverColumnGrid` is read-only for
+    /// this task (T1 owns it), so this stays a file-local named constant
+    /// rather than a shared one; tuned live to seat the strip clearly below
+    /// the icon without touching the row boundary.
+    private static let masterMeterBottomInset: CGFloat = 2
+
     public weak var delegate: Delegate?
 
     /// Leading VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
     /// Main Out shares the same level as the device meters for now, until
-    /// true per-output metering exists).
-    private let meterView = LevelMeterView()
+    /// true per-output metering exists). Warm Signal v4.1 item 1: this is the
+    /// MASTER STRIP the left rail plugs into — same length as a device meter
+    /// but thicker (`masterMeterThickness`, 6pt vs 3pt), so the per-instance
+    /// `thickness` param is threaded through instead of the shared default.
+    private let meterView = LevelMeterView(thickness: PopoverColumnGrid.masterMeterThickness)
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
     private let iconView = NSImageView()
@@ -98,9 +108,12 @@ public final class MainOutRowView: NSView {
     /// §Call-1; was "Audio Out"), filling the shared name column so it aligns
     /// with the device rows below.
     private let nameLabel = NSTextField(labelWithString: "Main Audio")
-    /// The vertical identity cluster (Warm Signal v4 §Call-1): **name / meter**,
-    /// left-aligned, centred as a group — the under-name meter, same anatomy as
-    /// the device rows. The rail's `.origin` hook terminates into this meter.
+    /// The name cluster: just **name** now (Warm Signal v4.1 item 1 pulled the
+    /// meter OUT of this stack). Left-aligned, vertically centred in the row.
+    /// Previously held `nameLabel` over `meterView` (the device-row anatomy);
+    /// the master strip instead sits BELOW THE ICON at the rail-gutter x (see
+    /// `meterView`'s own constraints below) so the rail can plug straight into
+    /// its left end without a horizontal jog across the icon or the name.
     private let identityStack = NSStackView()
     private let slider = NSSlider()
     /// The Warm Signal fader skin over the master slider (drawing-only
@@ -375,20 +388,21 @@ public final class MainOutRowView: NSView {
 
         busOriginView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Identity cluster (v4 §Call-1): "Main Audio" over the under-name meter.
+        // Name cluster (v4.1 item 1: meter pulled out — see meterView's own
+        // constraints below).
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
         identityStack.spacing = 2
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
-        identityStack.addArrangedSubview(meterView)
 
         addSubview(busOriginView)
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
         addSubview(identityStack)
+        addSubview(meterView)
         addSubview(muteButton)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -441,9 +455,21 @@ public final class MainOutRowView: NSView {
             identityStack.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor,
                                                     constant: -PopoverColumnGrid.nameToSlider),
 
-            // The under-name meter's fixed size (v4 §Call-1).
+            // Master strip (Warm Signal v4.1 item 1): same LENGTH as a device
+            // meter (`meterUnderNameWidth`) but thicker (`masterMeterThickness`,
+            // wired via the `LevelMeterView(thickness:)` init above), seated
+            // BELOW THE ICON with its LEADING EDGE pinned to the rail-gutter x
+            // (`railGutterCenterX` — the same x `DeviceRowView` centers its bus
+            // node on). Anchoring off `leadingAnchor` directly (not the name
+            // column) means the left rail's vertical drop lands exactly on the
+            // strip's left end with no horizontal jog across the icon or name;
+            // `BusRailOverlayView` draws the junction dot at that meeting point.
+            meterView.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                               constant: PopoverColumnGrid.railGutterCenterX),
+            meterView.bottomAnchor.constraint(equalTo: bottomAnchor,
+                                              constant: -Self.masterMeterBottomInset),
             meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterUnderNameWidth),
-            meterView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.meterUnderNameHeight),
+            meterView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.masterMeterThickness),
 
             // Speaker mute button, LEFT of the slider.
             muteButton.trailingAnchor.constraint(equalTo: slider.leadingAnchor,
@@ -680,14 +706,18 @@ public final class MainOutRowView: NSView {
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
 
 extension MainOutRowView: RailHookProviding {
-    /// The origin-hook anchor for the continuous rail overlay: the under-name
-    /// meter's leading edge + centre-y (or, when the meter is hidden on an idle
-    /// Main Audio, the identity cluster's leading + centre), converted into
-    /// `view`'s coordinates, plus whether the spine is armed (gold vs ember).
+    /// The origin-hook anchor for the continuous rail overlay: the master
+    /// strip's leading edge + centre-y, converted into `view`'s coordinates,
+    /// plus whether the spine is armed (gold vs ember). `meterView` is a plain
+    /// subview now (Warm Signal v4.1 item 1 pulled it out of `identityStack`,
+    /// pinned to `railGutterCenterX`), so its constrained frame is valid — and
+    /// already sits exactly on the rail's centreline — whether or not it is
+    /// currently hidden (`isHidden` only suppresses drawing, never layout for
+    /// a plain constrained subview), so no visible/hidden branch is needed
+    /// here any more.
     public func railHookAnchor(in view: NSView) -> (leadingX: CGFloat, centerY: CGFloat, gold: Bool)? {
         layoutSubtreeIfNeeded()
-        let anchorView: NSView = meterView.isHidden ? identityStack : meterView
-        let rectInSelf = anchorView.convert(anchorView.bounds, to: self)
+        let rectInSelf = meterView.convert(meterView.bounds, to: self)
         let point = convert(NSPoint(x: rectInSelf.minX, y: rectInSelf.midY), to: view)
         return (point.x, point.y, isArmedState)
     }

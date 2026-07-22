@@ -129,6 +129,13 @@ public enum PopoverColumnGrid {
     /// the count-free "Selected Devices" (decision m), fit a small-control
     /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
     public static let trailingControlWidth: CGFloat = 140
+    /// The FEED column's available text width (Warm Signal v4.1 item 3) — the
+    /// same physical slot as `trailingControlWidth` (the reserved-but-empty
+    /// trailing column on a bus row, since the membership control moved to the
+    /// left rail gutter), pulled in slightly so the composite text never
+    /// visually touches the row's trailing inset. Drives `DeviceRowView`'s
+    /// STATIC "+N" overflow measurement.
+    public static let feedColumnWidth: CGFloat = trailingControlWidth - 4
 
     // MARK: On-icon status badge (2026-07-17)
     //
@@ -273,11 +280,13 @@ public enum PopoverColumnGrid {
     public static let railGutterCenterX: CGFloat = 20
     /// Diameter of a bus node (spec §4.1 "~13 pt, matching the `.switch` box").
     public static let busNodeDiameter: CGFloat = 13
-    /// Diameter of a SELECTED (filled member) bus node once size joins fill as
-    /// a selection signal (Warm Signal v4.1 item 4) — same value as
-    /// `busNodeDiameter` today; named separately so the unselected diameter
-    /// below can shrink independently. UNUSED until the larger-node task wires
-    /// selected vs. unselected sizing into `MembershipBusView`.
+    /// Diameter of a SELECTED (on-spine — member/connecting/pending/failed) bus
+    /// node, size joining fill as a selection signal (Warm Signal v4.1 item 4).
+    /// Same value as `busNodeDiameter` today; named separately so the
+    /// unselected diameter below can shrink independently. Wired into
+    /// `MembershipBusView.nodeRadius(for:)`, which both the node's own drawing
+    /// and `BusRailOverlayView`'s gap/arc math read, so rail geometry always
+    /// meets the node's true drawn edge.
     public static let busNodeDiameterSelected: CGFloat = 13
     /// Diameter of an UNSELECTED (hollow non-member) bus node — visibly
     /// smaller than `busNodeDiameterSelected` (spec item 4 "~9–10 pt") so

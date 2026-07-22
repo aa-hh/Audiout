@@ -405,6 +405,12 @@ func run() -> Int32 {
     print("\n[22] Connection-status flow (scripted MockBackend)")
     runConnectionStatusChecks(checks)
 
+    // --- 23. FEED column (Warm Signal v4.1 item 3): the multi-source
+    // composite, the manual-vs-group wording, the failure-red override, and
+    // that the sublabel carries no words on a bus row anymore.
+    print("\n[23] FEED column")
+    runFeedColumnChecks(checks)
+
     print("\n----------------------------------------")
     if checks.failures == 0 {
         print("PASS: all \(checks.total) popover-structure checks passed")
@@ -507,6 +513,65 @@ func runConnectionStatusChecks(_ checks: Checks) {
                   "the honest toggle now rests ON")
     checks.expect(popover.test_diagnosisPanel(for: "office") == nil,
                   "connected cleared the diagnosis panel")
+}
+
+/// Drive the FEED column (Warm Signal v4.1 item 3) against a fresh, fully
+/// isolated popover — the existing numbered checks above interleave Main Out
+/// target/membership state too tightly to reuse for this without disturbing
+/// their own assertions, so this stands up its own backend/controller exactly
+/// like `runConnectionStatusChecks` does for the connection-status flow.
+@MainActor
+func runFeedColumnChecks(_ checks: Checks) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let musicBundleID = "com.apple.Music"
+    appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
+    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+
+    let popover = PopoverController(appRouting: appRouting)
+    popover.test_isShownOverride = true
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        checks.expect(false, "FEED-check fleet discovered"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    // Manual membership + one app redirect → "System · Music".
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+    popover.update(devices: backend.devices)
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_feedText, "System · Music",
+                       "a manual member with a redirect shows the multi-source composite")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_statusText == nil,
+                  "the sublabel carries no words — the feed moved to its own column")
+
+    // App-only redirect, device NOT in the mix → bare app name, no "System".
+    checks.expectEqual(popover.test_deviceRow(for: "homepod-bed")?.test_feedText, nil,
+                       "an uninvolved device shows nothing in its FEED column")
+
+    // Group target: the neutral segment's WORD switches to the group's name.
+    _ = popover.test_saveCurrentSetup()
+    guard let group = controller.groups.first else {
+        checks.expect(false, "FEED-check group saved"); return
+    }
+    popover.test_selectMainOut(.group(id: group.id))
+    popover.update(devices: backend.devices)
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_feedText, "\(group.name) · Music",
+                       "a group-target member shows the GROUP NAME instead of System")
+
+    // Failure overrides the composite entirely.
+    var devices = backend.devices
+    if let idx = devices.firstIndex(where: { $0.id == "office" }) {
+        devices[idx].connectionState = .failed(.init(cause: .notResponding))
+    }
+    popover.update(devices: devices)
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Couldn't connect",
+                       "a failed device's FEED column shows the failure-red override, not the composite")
 }
 
 func tempDir() -> URL {

@@ -60,8 +60,12 @@ final class MembershipBusTests: XCTestCase {
         XCTAssertEqual(row.test_busNode, .nonMember, "an unavailable device's node is hollow")
         XCTAssertEqual(row.test_busNodeDimmed, true, "…and tinted (the unavailable signature)")
         // Distinct from blocked (R5): blocked is `.blocked`, unavailable is a
-        // tinted `.nonMember` + the "Unavailable" sublabel.
-        XCTAssertEqual(row.test_statusText, "Unavailable")
+        // tinted `.nonMember` + the "Unavailable" FEED override (v4.1 item 3
+        // moved this word off the sublabel and onto the FEED column, since
+        // this row is a bus row).
+        XCTAssertEqual(row.test_feedText, "Unavailable")
+        XCTAssertTrue(row.test_feedIsErrorColored)
+        XCTAssertNil(row.test_statusText, "the sublabel carries no words on a bus row's unavailable state")
     }
 
     func testMuteKeepsTheNodeFilled() {

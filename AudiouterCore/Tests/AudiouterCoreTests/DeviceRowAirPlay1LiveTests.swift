@@ -8,7 +8,10 @@ import AudiouterCore
 /// an AP2 row — full alpha, an enabled checkbox/slider/mute, and a normal
 /// accessibility label with no "not yet supported" wording. `supportsAirPlay2`
 /// is purely informational now (NativeBackend/T7 drives AP1 through the same
-/// shared engine as AP2); `DeviceRowView` never reads it at all.
+/// shared engine as AP2); `DeviceRowView` reads it for exactly ONE thing (v4.1
+/// item 3): the monochrome "AP1" micro-tag prefixed to a bus row's FEED
+/// column (`test_feedHasAP1Tag`) — never for anything gating alpha,
+/// enablement, or wording, which is what THIS file covers.
 final class DeviceRowAirPlay1LiveTests: XCTestCase {
 
     private func makeAP1Device(isSelected: Bool = false) -> Device {

@@ -115,6 +115,52 @@ final class SetupModelTests: XCTestCase {
         XCTAssertFalse(model.isProbingAudio)
     }
 
+    // MARK: Local Network — ungated OS (macOS < 15, no privacy gate exists)
+
+    /// On macOS < 15 there is no Local Network privacy permission, so the model is
+    /// constructed with `localNetworkGated: false`: it must start `.granted`, never
+    /// run a Bonjour browse, and never surface as a missing required permission
+    /// (which is what produced the dead-end "Open Settings" → nonexistent pane).
+    private func makeUngatedModel(localNetwork net: SpyLocalNetwork) -> SetupModel {
+        SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                   localNetwork: net,
+                   remoteControl: SpyRemoteControl(),
+                   ptpHelper: FakePTPHelper(),
+                   settings: AppSettings(defaults: defaults),
+                   localNetworkGated: false)
+    }
+
+    func testUngatedLocalNetworkStartsGrantedAndNeverProbes() async {
+        let net = SpyLocalNetwork()
+        net.reachable = false   // even a "not reachable" probe must be irrelevant
+        let model = makeUngatedModel(localNetwork: net)
+
+        // Starts satisfied — there's no gate on this OS to grant.
+        XCTAssertEqual(model.localNetworkStatus, .granted)
+
+        // "Allow…" is a no-op: stays granted, and never touches the network.
+        await model.primeLocalNetwork()
+        XCTAssertEqual(model.localNetworkStatus, .granted)
+        XCTAssertEqual(net.probeCount, 0, "ungated OS must not run a Bonjour browse")
+
+        // Never a required-but-missing permission → no dead-end row.
+        XCTAssertFalse(model.requiredPermissionsNotGranted().contains(.localNetwork))
+        XCTAssertFalse(model.unmetRequiredPermissions().contains(.localNetwork))
+    }
+
+    func testUngatedLocalNetworkSurvivesRefreshAndAudit() async {
+        let net = SpyLocalNetwork()
+        net.reachable = false
+        let model = makeUngatedModel(localNetwork: net)
+
+        await model.refreshStatuses()
+        _ = await model.auditRequiredPermissions()
+
+        XCTAssertEqual(model.localNetworkStatus, .granted,
+                       "must not be downgraded on an OS without the gate")
+        XCTAssertEqual(net.probeCount, 0, "refresh/audit must not browse on an ungated OS")
+    }
+
     // MARK: Audio probe transitions
 
     func testAudioProbeGranted() async {

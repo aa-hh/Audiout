@@ -93,6 +93,18 @@ public final class AudioSettingsViewController: NSViewController {
     private let latency: LatencySettingModel?
     private let wakeRestore: WakeAudioRestoreModel?
 
+    /// Persistence for the connect-volume row. Read/written DIRECTLY here (not via
+    /// an injected app-layer model like `latency`/`wakeRestore`) on purpose: the
+    /// seed that consumes it — ``NativeBackend/connectVolumeSeed`` — reads
+    /// `AppSettings.connectVolume` LIVE on the next connect, so persisting the new
+    /// value is the whole job; there is nothing to push to a running session.
+    /// Injectable so tests use a throwaway `UserDefaults` suite, never `.standard`.
+    private let settings: AppSettings
+
+    // Connect-volume state.
+    private let connectVolumeSlider = NSSlider()
+    private let connectVolumeValueLabel = NSTextField(labelWithString: "")
+
     // Wake-restore state (nil/untouched when `wakeRestore` is nil).
     private let wakeRestorePopup = NSPopUpButton()
 
@@ -117,10 +129,12 @@ public final class AudioSettingsViewController: NSViewController {
 
     public init(excluded: ExcludedAppsController,
                 runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
+                settings: AppSettings = AppSettings(),
                 latency: LatencySettingModel? = nil,
                 wakeRestore: WakeAudioRestoreModel? = nil) {
         self.excluded = excluded
         self.runningAppsProvider = runningAppsProvider
+        self.settings = settings
         self.latency = latency
         self.wakeRestore = wakeRestore
         super.init(nibName: nil, bundle: nil)
@@ -160,6 +174,11 @@ public final class AudioSettingsViewController: NSViewController {
         column.spacing = 8
         column.translatesAutoresizingMaskIntoConstraints = false
 
+        for sectionView in makeConnectVolumeSectionViews() {
+            column.addArrangedSubview(sectionView)
+            sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        }
+
         if wakeRestore != nil {
             for sectionView in makeWakeRestoreSectionViews() {
                 column.addArrangedSubview(sectionView)
@@ -188,6 +207,64 @@ public final class AudioSettingsViewController: NSViewController {
         ])
         view = container
         rebuildList()
+    }
+
+    // MARK: Connect volume (G1-N1)
+
+    /// Format a percent as a bare locale-aware number + "%".
+    private static func percentLabel(_ percent: Int) -> String {
+        "\(msFormatter.string(from: NSNumber(value: percent)) ?? String(percent))%"
+    }
+
+    /// The connect-volume sub-section: hairline + heading + a slider row. Mounts
+    /// unconditionally (a universal preference; only the native backend acts on it,
+    /// which is the shipping backend). The slider is bounded to
+    /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume`` so the UI
+    /// itself can never select 0/silent. Persists on change — no CTA, since it only
+    /// affects the NEXT speaker connect, never a live session.
+    private func makeConnectVolumeSectionViews() -> [NSView] {
+        var views: [NSView] = []
+
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        views.append(hairline)
+
+        connectVolumeSlider.translatesAutoresizingMaskIntoConstraints = false
+        connectVolumeSlider.minValue = Double(AppSettings.minConnectVolume)
+        connectVolumeSlider.maxValue = Double(AppSettings.maxConnectVolume)
+        connectVolumeSlider.integerValue = settings.connectVolume
+        connectVolumeSlider.isContinuous = true
+        connectVolumeSlider.target = self
+        connectVolumeSlider.action = #selector(connectVolumeChanged)
+        connectVolumeSlider.setAccessibilityLabel("Volume when connecting a speaker")
+        connectVolumeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+
+        connectVolumeValueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        connectVolumeValueLabel.textColor = .secondaryLabelColor
+        connectVolumeValueLabel.alignment = .right
+        connectVolumeValueLabel.stringValue = Self.percentLabel(settings.connectVolume)
+        // Fixed width so the row doesn't shift as the number's digit count changes.
+        connectVolumeValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
+        let control = NSStackView(views: [connectVolumeSlider, connectVolumeValueLabel])
+        control.orientation = .horizontal
+        control.alignment = .centerY
+        control.spacing = 8
+        control.translatesAutoresizingMaskIntoConstraints = false
+
+        views.append(SettingsForm.row(
+            title: "Volume when connecting a speaker",
+            subtitle: "The starting volume a speaker gets the moment it connects. "
+                + "Each speaker's own slider takes over right after.",
+            control: control))
+        return views
+    }
+
+    @objc private func connectVolumeChanged() {
+        let percent = connectVolumeSlider.integerValue
+        connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
+        settings.connectVolume = percent
     }
 
     // MARK: Wake restore (B6b)
@@ -598,6 +675,35 @@ public final class AudioSettingsViewController: NSViewController {
     public func test_removeExcluded(bundleID: String) {
         _ = view
         remove(bundleID: bundleID)
+    }
+
+    // MARK: Test-support hooks (Connect volume — G1-N1)
+
+    /// The connect-volume slider's current percent (mirrors the persisted value).
+    public var test_connectVolumePercent: Int {
+        _ = view
+        return connectVolumeSlider.integerValue
+    }
+
+    /// The trailing "NN%" label text.
+    public var test_connectVolumeValueLabel: String {
+        _ = view
+        return connectVolumeValueLabel.stringValue
+    }
+
+    /// The slider's `[min, max]` bounds — the UI can never select outside these.
+    public var test_connectVolumeBounds: (min: Int, max: Int) {
+        _ = view
+        return (Int(connectVolumeSlider.minValue), Int(connectVolumeSlider.maxValue))
+    }
+
+    /// Simulate the user dragging the slider to `percent` (persists immediately).
+    /// Values outside the slider bounds are clamped by `NSSlider` itself, exactly
+    /// as a real drag would be.
+    public func test_setConnectVolume(percent: Int) {
+        _ = view
+        connectVolumeSlider.integerValue = percent
+        connectVolumeChanged()
     }
 
     // MARK: Test-support hooks (Wake restore — B6b)

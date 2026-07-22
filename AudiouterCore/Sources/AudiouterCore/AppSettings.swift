@@ -54,6 +54,7 @@ public struct AppSettings {
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
+        static let connectVolume = "audio.connectVolume"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -131,5 +132,45 @@ public struct AppSettings {
             return Self.wakeRestoreMinuteOptions.contains(stored) ? stored : Self.defaultWakeRestoreMinutes
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.wakeRestoreMinutes) }
+    }
+
+    /// The default starting volume (percent) a speaker gets the moment it joins
+    /// the output set (Settings › Audio "Volume when connecting a speaker"). A
+    /// MODERATE 35% by deliberate product decision (G1-N1): the seed used to be
+    /// inherited from the Mac's current system level, but Mac speakers often run
+    /// loud, so a real AirPlay speaker could BLAST the user on first connect — a
+    /// jarring, arguably unsafe first impression. A fixed moderate default is
+    /// predictable and safe; the per-device slider still takes over immediately
+    /// afterward.
+    public static let defaultConnectVolume = 35
+
+    /// The lowest connect volume the setting can hold. NOT 0 on purpose: the
+    /// AirPlay volume model maps 0% to ≈ −30 dB, the quietest non-muted level —
+    /// effectively silent on the receiver. Seeding a connect at 0 is the −30 dB
+    /// "silent connect" trap (see `NativeBackend.connectVolumeSeed`); clamping the
+    /// floor above 0 here makes that unreachable through this setting. A low but
+    /// audible floor so a user who wants a quiet connect still gets one.
+    public static let minConnectVolume = 5
+
+    /// The highest connect volume the setting can hold.
+    public static let maxConnectVolume = 100
+
+    /// The persisted connect-time seed volume (percent), clamped to
+    /// ``minConnectVolume``…``maxConnectVolume`` on both read and write so no
+    /// stored value — unset (0), a newer build's out-of-range value, or a hand-
+    /// edited default — can ever reintroduce the silent-connect floor. Unset
+    /// resolves to ``defaultConnectVolume`` (distinguished from a stored 0 via
+    /// `object(forKey:)`, then clamped regardless).
+    public var connectVolume: Int {
+        get {
+            guard defaults.object(forKey: Keys.connectVolume) != nil else {
+                return Self.defaultConnectVolume
+            }
+            let stored = defaults.integer(forKey: Keys.connectVolume)
+            return min(max(stored, Self.minConnectVolume), Self.maxConnectVolume)
+        }
+        nonmutating set {
+            defaults.set(min(max(newValue, Self.minConnectVolume), Self.maxConnectVolume), forKey: Keys.connectVolume)
+        }
     }
 }

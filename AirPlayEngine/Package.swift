@@ -80,11 +80,58 @@ let brewFormulae = [
     "libgcrypt",      // airplay.c/rtp_common.c + pair_ap (CONFIG_GCRYPT)
     "libgpg-error",   // libgcrypt's own dependency
     "libplist",       // AirPlay plist RTSP payloads
-    "ffmpeg",         // libavcodec ALAC encoder (T-SHIM-1; harmless to have -I now)
+    // ffmpeg is resolved SEPARATELY (resolveFfmpeg below), not from this list,
+    // so a minimal audio-only static build can replace Homebrew's fat ffmpeg.
 ]
 
 let brewIncludeFlags: [String] = brewFormulae.map { "-I\(brewPrefix)/opt/\($0)/include" }
 let brewLibFlags: [String]     = brewFormulae.map { "-L\(brewPrefix)/opt/\($0)/lib" }
+
+// --- ffmpeg (ALAC encoder + swresample) — minimal-static OR Homebrew-fat ----
+// AirPlayEngine only ever asks ffmpeg to ENCODE captured PCM to Apple Lossless
+// (shims/transcode.c: avcodec_find_encoder(AV_CODEC_ID_ALAC) + libswresample's
+// interleaved-S16 -> planar-S16P conversion). It never decodes video or any
+// media file — the source app already did that; we capture already-decoded PCM.
+// So the video codecs Homebrew's fat ffmpeg drags in (x264/x265/vpx/dav1d/av1,
+// ~24 MB — performance.md M1) are pure dead weight. Two auto-selected modes:
+//
+//  * MINIMAL (preferred): scripts/build-min-ffmpeg.sh has installed a STATIC,
+//    audio-only ffmpeg (ALAC encoder + swresample ONLY) under
+//    AirPlayEngine/vendor/ffmpeg-min/. We link its .a archives directly, so the
+//    shipped app carries only the one codec it uses and ZERO video-codec code,
+//    and no ffmpeg dylib either. It is the SAME libavcodec ALAC encoder as the
+//    fat build (alacenc.c), merely compiled without the rest — the ALAC bytes
+//    on the wire are bit-identical.
+//
+//  * FALLBACK: no vendored build present -> link Homebrew's fat ffmpeg dylibs
+//    exactly as before, so a plain `swift build` still works on any dev machine.
+//
+// The vendor/ dir is a .gitignored generated artifact (arch/version-specific);
+// regenerate it with scripts/build-min-ffmpeg.sh on the build machine before a
+// release build. See docs/ffmpeg-minimal-build.md.
+let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let ffmpegMinPrefix = "\(packageDir)/vendor/ffmpeg-min"
+let useMinimalFfmpeg = FileManager.default.fileExists(atPath: "\(ffmpegMinPrefix)/lib/libavcodec.a")
+
+let ffmpegIncludeFlags: [String] =
+    useMinimalFfmpeg
+    ? ["-I\(ffmpegMinPrefix)/include"]
+    : ["-I\(brewPrefix)/opt/ffmpeg/include"]
+
+// Flags for the C target's linkerSettings.unsafeFlags. Minimal mode passes the
+// static .a paths directly (the same technique ptp-helper uses for its static
+// libevent below); fallback mode adds ffmpeg's -L plus -l<lib> for each dylib.
+let ffmpegLinkerUnsafeFlags: [String] =
+    useMinimalFfmpeg
+    ? [
+        "\(ffmpegMinPrefix)/lib/libavcodec.a",
+        "\(ffmpegMinPrefix)/lib/libswresample.a",
+        "\(ffmpegMinPrefix)/lib/libavutil.a",
+      ]
+    : [
+        "-L\(brewPrefix)/opt/ffmpeg/lib",
+        "-lavcodec", "-lavutil", "-lswresample",
+      ]
 
 // The same include flags handed to the Swift target's clang importer via -Xcc,
 // so `import CAirPlayEngine` can parse the umbrella header (which pulls in shim
@@ -92,6 +139,7 @@ let brewLibFlags: [String]     = brewFormulae.map { "-L\(brewPrefix)/opt/\($0)/l
 // the module builds for the C target but not for Swift consumers (T-API-1).
 let swiftClangImporterFlags: [String] =
     brewIncludeFlags.flatMap { ["-Xcc", $0] }
+    + ffmpegIncludeFlags.flatMap { ["-Xcc", $0] }
     + ["-Xcc", "-I\(brewPrefix)/opt/libgpg-error/include"]
 
 let package = Package(
@@ -259,11 +307,14 @@ let package = Package(
 
                 // --- Brew include paths for the deps the cluster needs
                 // (seam-map §7 + Appendix A): libevent, libsodium, libgcrypt
-                // (+ its libgpg-error dep), libplist, and ffmpeg headers (for
-                // the T-SHIM-1 ALAC encoder; harmless to include now). Prefix
-                // is resolved portably (Apple Silicon /opt/homebrew OR Intel
-                // /usr/local) at the top of this file. ---
+                // (+ its libgpg-error dep), libplist. Prefix is resolved
+                // portably (Apple Silicon /opt/homebrew OR Intel /usr/local) at
+                // the top of this file. ---
                 .unsafeFlags(brewIncludeFlags),
+                // ffmpeg headers for shims/transcode.c's ALAC encoder — points
+                // at the minimal vendored build if present, else Homebrew
+                // (resolveFfmpeg at the top of this file).
+                .unsafeFlags(ffmpegIncludeFlags),
             ],
             linkerSettings: [
                 // Brew lib search paths (portable prefix). T-BUILD-1 resolved
@@ -286,15 +337,14 @@ let package = Package(
                 // libplist ships its dylib/pc as "plist-2.0" (confirmed via
                 // `pkg-config --libs libplist-2.0` at T-BUILD-1).
                 .linkedLibrary("plist-2.0"),
-                // ffmpeg — the T-SHIM-2 ALAC encoder (Q2a "first light",
-                // shims/transcode.c) links libavcodec (AV_CODEC_ID_ALAC),
-                // libavutil (AVFrame / channel layout / sample fmt), and
-                // libswresample (interleaved S16 -> planar S16P). TODO(seam-map
-                // §5.3, R-C): drop these three once the uncompressed-ALAC swap
-                // sheds ffmpeg.
-                .linkedLibrary("avcodec"),
-                .linkedLibrary("avutil"),
-                .linkedLibrary("swresample"),
+                // ffmpeg — the ALAC encoder (shims/transcode.c) links
+                // libavcodec (AV_CODEC_ID_ALAC), libavutil (AVFrame / channel
+                // layout / sample fmt), and libswresample (interleaved S16 ->
+                // planar S16P). Minimal-static (audio-only, no video codecs) if
+                // AirPlayEngine/vendor/ffmpeg-min/ was built, else Homebrew's
+                // fat dylibs — see resolveFfmpeg at the top of this file and
+                // scripts/build-min-ffmpeg.sh.
+                .unsafeFlags(ffmpegLinkerUnsafeFlags),
             ]
         ),
 

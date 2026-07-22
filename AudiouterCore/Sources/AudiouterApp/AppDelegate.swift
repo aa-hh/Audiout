@@ -54,7 +54,7 @@ private let resolveRunningAppPID: @Sendable (String) -> pid_t? = { bundleID in
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The one place that talks to a concrete backend type. Resolved via
-    /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.mock`.
+    /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
     /// Everything downstream holds an `OutputBackend`, never a concrete type.
     /// `resolvePID` threads the real `NSRunningApplication`-backed resolver into
     /// the native backend's per-app capture path (T7).

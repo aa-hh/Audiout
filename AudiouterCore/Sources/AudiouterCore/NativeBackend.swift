@@ -67,6 +67,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the same discipline `discovery.onEvent` / `captureCoordinator.onLevel` keep.
     private var systemVolume: SystemVolumeControlling
 
+    /// Supplies the connect-time seed volume (percent) each time a device joins
+    /// the output set — read live so a Settings change takes effect on the next
+    /// connect with no re-wiring. Production reads ``AppSettings/connectVolume``
+    /// (already clamped above 0); ``connectVolumeSeed`` clamps it AGAIN to
+    /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume`` so an
+    /// injected test provider can never smuggle 0/silent onto the wire. `@Sendable`
+    /// and constructs its own `AppSettings` per call (captures nothing non-Sendable)
+    /// so it is safe to invoke from `stateQueue`. See ``connectVolumeSeed``.
+    private let connectVolumeProvider: @Sendable () -> Int
+
     /// The in-process capture pipeline (T-NB-CAPTURE-1). When present (the real
     /// path wired by ``makeBackend(_:)``), the backend GATES it on selection
     /// (``reconcileCaptureGate()``) and plumbs its per-buffer RMS into
@@ -280,7 +290,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// user's in-session volume must survive it (``applyStartBuffer`` re-pushes that
     /// exact level itself). This set is how the shared add path tells the two apart:
     /// while an id is in it, ``connectVolumeSeed(_:outputID:)`` is suppressed, so a
-    /// plain buffer change never slams the level back to the system volume. See
+    /// plain buffer change never slams the level back to the connect default. See
     /// ``connectVolumeSeed(_:outputID:)`` for the −30 dB trap the whole seed exists
     /// to avoid.
     private var bufferReAdding: Set<String> = []
@@ -531,6 +541,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
+        connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
@@ -542,6 +553,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.engine = engineControl
         self.discovery = discoverySource
         self.systemVolume = systemVolume
+        self.connectVolumeProvider = connectVolume
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
         // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
         // built `.unmuted` and with a distinct aggregate-device name so it never
@@ -1807,11 +1819,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
                     try await engine.addOutput(outputID)
-                    // Snapshot the Mac's output volume OFF `stateQueue` (B3) for the
-                    // seed below: the blocking HAL read must not run inside the
-                    // critical section. Read here (converge loop's own thread), pass
-                    // the value into `connectVolumeSeed`.
-                    let systemLevelSnapshot = systemVolume.currentVolume()
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
@@ -1822,9 +1829,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // don't re-add — the failure the engine just reported wins.
                         guard !self.failedGate.contains(id) else { return }
                         // Seed a real starting volume onto the fresh session so it is
-                        // AUDIBLE immediately: the engine's volume field is 0 until an
-                        // explicit setVolume, and 0 maps to ≈ −30 dB (silent) — the
-                        // −30 dB trap, see `connectVolumeSeed`. Suppressed for an
+                        // AUDIBLE immediately AND at a safe, moderate level (not the
+                        // Mac's possibly-loud system volume — G1-N1): the engine's
+                        // volume field is 0 until an explicit setVolume, and 0 maps to
+                        // ≈ −30 dB (silent) — the −30 dB trap, see `connectVolumeSeed`.
+                        // Suppressed for an
                         // `applyStartBuffer` re-add (which restores the in-session
                         // level itself), so a plain buffer change never resets volume.
                         //
@@ -1841,7 +1850,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
-                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot)
+                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
                             if let seededVolume { $0.volume = seededVolume }
@@ -2071,11 +2080,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             // Mark these ids as an internal buffer re-add for the WHOLE apply, so the
             // shared converge add path (and any engine state-stream event that races
-            // it) does NOT reseed their volume from the current system level. This is
+            // it) does NOT reseed their volume from the connect default. This is
             // a buffer-size change, not a user reconnect: each device's in-session
             // level must survive, and the explicit re-push at the end of this method
             // restores it. Without this guard, `connectVolumeSeed` would slam every
-            // running device back to the system volume on a plain buffer change.
+            // running device back to the connect default on a plain buffer change.
             // Cleared once the apply has fully settled (below).
             for item in items { self.bufferReAdding.insert(item.id) }
             return items
@@ -2126,7 +2135,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // The apply has fully settled — teardown, buffer set, re-add, and the
         // in-session volume re-push above have all run. Lift the seed suppression so
-        // any subsequent REAL (re)connect reseeds from the system volume as usual.
+        // any subsequent REAL (re)connect reseeds from the connect default as usual.
         stateQueue.sync {
             for item in streaming { self.bufferReAdding.remove(item.id) }
         }
@@ -2504,13 +2513,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// contract), so we diff against the last-known device before emitting to
     /// de-dupe. On `stateQueue`.
     private func applyEngineState(outputID: OutputID, state: OutputState) {
-        // Snapshot the Mac's output volume OFF `stateQueue` (B3): the
-        // `.connected`/`.streaming` branch below reseeds an out-of-band reconnect from
-        // it, and the blocking HAL read must not run inside the critical section the
-        // main-thread `devices` getter waits on. This runs on the state-stream
-        // consumer's own task thread, ahead of the queue hop. Read unconditionally —
-        // cheap, and the good-transition branch that consumes it is the common path.
-        let systemLevelSnapshot = systemVolume.currentVolume()
         // A good transition (.streaming/.connected) for a device the user has since
         // turned OFF must NOT re-wedge it ON — instead re-kick converge to tear the
         // stale session down. We compute any needed re-kick under the lock and fire
@@ -2557,11 +2559,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // A (re)connect the engine reported out-of-band — e.g. an
                 // auto-recovery it drove itself — never went through convergeDevice's
                 // add path, so it too lands at engine volume 0 = ≈ −30 dB (silent).
-                // Seed its starting volume here on a genuine new-add (`!wasAdded`).
+                // Seed its starting volume here on a genuine new-add (`!wasAdded`)
+                // from the configured connect default (G1-N1), not the system level.
                 // Suppressed during an `applyStartBuffer` re-add so a buffer change
                 // whose good-state event races this branch can't reset the level —
                 // see `connectVolumeSeed`.
-                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot) {
+                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
             case .failed, .passwordRequired:
@@ -2856,10 +2859,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
-    /// Seed a just-(re)connected engine output's starting volume from the Mac's
-    /// CURRENT system output level. Pushes the level to the engine and returns the
-    /// value to display on the model, or `nil` when the seed is suppressed (leave
-    /// the model volume untouched). On `stateQueue`.
+    /// Seed a just-(re)connected engine output's starting volume from the
+    /// configured connect-volume default. Pushes the level to the engine and
+    /// returns the value to display on the model, or `nil` when the seed is
+    /// suppressed (leave the model volume untouched). On `stateQueue`.
     ///
     /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
     /// The engine's per-output volume field is zero-initialized and is only ever set
@@ -2870,9 +2873,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// push a real starting volume; this is that push, called from BOTH add-success
     /// sites (`convergeDevice` and `applyEngineState`).
     ///
-    /// Source of the level: ``SystemVolumeControlling/currentVolume()`` — wherever
-    /// the Mac's own volume sits right now. When that is unreadable (`nil`), seed 0%:
-    /// deliberate silence over a guessed level (product decision), NOT a 65% guess.
+    /// Source of the level (G1-N1): ``connectVolumeProvider`` — the user's
+    /// configured connect volume (``AppSettings/connectVolume``, default 35%), NOT
+    /// the Mac's current system level. An earlier design inherited the system level,
+    /// but Mac speakers often run loud, so connecting a real AirPlay speaker could
+    /// BLAST the user on first connect. A fixed moderate default is predictable and
+    /// safe. The value is clamped to ``AppSettings/minConnectVolume``… so the seed
+    /// can NEVER be 0/silent — closing the −30 dB trap from the other direction (a
+    /// bad/injected provider value can't reach silence either).
     ///
     /// Mute carve-out: a device the user explicitly muted stays effective-0. Seed the
     /// INTENDED level into `stashedVolume` (so a later unmute restores the system
@@ -2881,7 +2889,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Suppression: returns `nil` and pushes nothing while `id` is in
     /// ``bufferReAdding``, so ``applyStartBuffer(ms:)``'s internal teardown/re-add —
     /// a buffer-size change, NOT a user reconnect — preserves the device's existing
-    /// in-session level instead of resetting it to the system volume.
+    /// in-session level instead of resetting it to the connect default.
     ///
     /// ## De-dup rides on the `added` false→true edge, NOT a separate set
     /// This method is reachable from BOTH add-success sites (`convergeDevice` and
@@ -2903,15 +2911,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// there is no second set that can be stuck-set while `added` is clear, so every
     /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
     ///
-    /// The system-volume HAL read is NOT done here: `systemLevel` is snapshotted by
-    /// each caller BEFORE it takes `stateQueue` (B3), so the blocking Core Audio read
-    /// never runs inside the critical section that the main-thread `devices` getter
-    /// waits on. The value being a few µs staler than the `added` edge is immaterial —
-    /// only WHERE the read happens moved, not WHEN the seed fires. `nil` still means
-    /// "unreadable" and maps to 0% (deliberate silence, not a guessed level).
-    private func connectVolumeSeed(_ id: String, outputID: OutputID, systemLevel: Int?) -> Int? {   // on stateQueue
+    /// The seed reads ``connectVolumeProvider`` (a `UserDefaults`-backed
+    /// `AppSettings` read — cheap, non-blocking, unlike the old system-volume HAL
+    /// read) and clamps it to ``AppSettings/minConnectVolume``…
+    /// ``AppSettings/maxConnectVolume``. The clamp is the load-bearing safety net:
+    /// even if the setting or an injected test provider returns 0 or something out
+    /// of range, the value that reaches the wire is always audible — 0/silent is
+    /// unreachable.
+    private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
         guard !bufferReAdding.contains(id) else { return nil }
-        let seed = systemLevel ?? 0
+        let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
             stashedVolume[id] = seed

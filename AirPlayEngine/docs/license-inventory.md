@@ -363,6 +363,58 @@ for the authoritative list.
 
 ---
 
+## Addendum: minimal audio-only ffmpeg (ffmpeg build change)
+
+**Updated:** 2026-07-22
+
+AirPlayEngine uses ffmpeg for exactly one thing: ENCODING captured PCM to
+Apple Lossless (ALAC). It captures already-decoded system audio via Core
+Audio process taps and never decodes video or any media file (see
+`shims/transcode.c` — the only ffmpeg symbol referenced is
+`avcodec_find_encoder(AV_CODEC_ID_ALAC)` plus libswresample for an
+interleaved-S16 → planar-S16P conversion). Homebrew's `ffmpeg`, however,
+is a full build whose `libavcodec` hard-links x264, x265, libvpx, dav1d,
+SvtAv1Enc, lame, opus and (for TLS) OpenSSL — ~31 MB of code an audio-only
+app never calls, roughly 60% of the shipped download (see
+`docs/plans/phase-3-findings/performance.md` M1).
+
+`scripts/build-min-ffmpeg.sh` builds a MINIMAL, audio-only ffmpeg from
+pinned upstream source (`--disable-everything --enable-encoder=alac
+--enable-swresample`, plus `--disable-network`/`--disable-protocols`
+etc.), installs it as STATIC libraries under
+`AirPlayEngine/vendor/ffmpeg-min/`, and `AirPlayEngine/Package.swift`
+auto-detects and statically links it in preference to Homebrew's fat
+ffmpeg. When the minimal build is absent, Package.swift falls back to the
+Homebrew ffmpeg dylibs unchanged, so a plain `swift build` still works on
+any dev machine. See `docs/ffmpeg-minimal-build.md` for the full design,
+size measurements, and release-integration steps.
+
+License implications of the change:
+
+- **No GPL-only components are enabled** (no `--enable-gpl`, no x264 etc.),
+  so the minimal ffmpeg is **LGPL-2.1-or-later**, same as (or narrower
+  than) Homebrew's.
+- The **video codecs and OpenSSL are no longer present in the shipped app
+  at all** under the minimal build — nothing to attribute or redistribute
+  for x264/x265/libvpx/dav1d/SvtAv1Enc/lame/opus/OpenSSL.
+- The minimal ffmpeg is **statically linked** rather than shipped as a
+  separate replaceable `.dylib`, so it does not use the "replaceable
+  dylib" LGPL §6 mechanism the other LGPL libraries
+  (libgcrypt/libgpg-error/libplist) rely on. Instead, LGPL §6 is satisfied
+  on the source-availability basis: the whole app is GPL-2.0-or-later with
+  complete corresponding source available, including the pinned,
+  reproducible `scripts/build-min-ffmpeg.sh`, so a user can rebuild and
+  re-link the entire work. LGPL-2.1-or-later is GPL-2.0-or-later
+  compatible, so the combined work remains GPL-2.0-or-later. As elsewhere
+  in this document, this is the mechanism the project relies on, not a
+  legal determination.
+- **No vendored C source changed** for this: `shims/transcode.c` and the
+  GPL sender cluster are untouched. The change is confined to the build
+  (`scripts/build-min-ffmpeg.sh`, `Package.swift` link flags), so
+  `docs/VENDORED-DIFFS.md` needs no new entry.
+
+---
+
 ## Conclusion
 
 **No showstoppers found.** All assumptions in PLAN-PHASE-2.md Q4 are confirmed:

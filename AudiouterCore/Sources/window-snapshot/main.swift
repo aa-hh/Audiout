@@ -79,13 +79,23 @@ func renderPNG(view: NSView, to url: URL) {
     // drain is only accidentally long enough. Instead, re-capture with short
     // drains until two consecutive captures are byte-identical; that settled
     // state is deterministic, so the goldens are too.
+    // Re-hide titlebar separators before EVERY capture: AppKit creates the
+    // separator view lazily/asynchronously, so a single pre-capture hide pass
+    // can run before the view exists (it then appears mid-loop in some runs).
+    // Hiding inside the loop guarantees the only stable end state is
+    // separator-free.
+    hideTitlebarSeparators(in: view)
     var data = captureOnce(view: view, bounds: bounds)
     var stable = false
     for _ in 0..<40 {
         drain(0.05)
+        hideTitlebarSeparators(in: view)
         let next = captureOnce(view: view, bounds: bounds)
         if next != nil && next == data { stable = true; break }
         data = next
+    }
+    if ProcessInfo.processInfo.environment["SNAPSHOT_DEBUG_STRIP"] != nil {
+        dumpStrip(in: view)
     }
     guard let data else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
@@ -128,16 +138,33 @@ func drain(_ interval: TimeInterval = 0.15) {
 func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
     let appearance = NSAppearance(named: appearanceName)
     window.appearance = appearance
-    // Pin the titlebar separator: AppKit decides it dynamically from the
-    // content's perceived scroll-under state, and that decision settles
-    // differently run-to-run (a 1pt full-width line at the titlebar's bottom
-    // edge flickered in and out of dark captures). Either style is fine for
-    // goldens; it just must be the SAME every run.
-    window.titlebarSeparatorStyle = .line
+    // Pin the titlebar separator OFF: AppKit decides it dynamically from the
+    // content's perceived scroll-under state, and even with `.line` it FADES
+    // the separator view in/out, settling differently run-to-run (a 1pt
+    // full-width line at the titlebar's bottom edge flickered in and out of
+    // dark captures). `.none` removes the separator view entirely — the only
+    // end state that can't race. NSSplitViewItem carries a per-pane override,
+    // so pin those too.
+    window.titlebarSeparatorStyle = .none
+    if let split = window.contentViewController as? NSSplitViewController {
+        for item in split.splitViewItems { item.titlebarSeparatorStyle = .none }
+    }
+    // Order the window in, invisibly (alpha 0). A window that is never
+    // ordered in leaves the titlebar machinery half-initialized, and its
+    // separator decision latches mid-flight — differently run-to-run. A full
+    // order-in lets AppKit finish the titlebar lifecycle so the pinned
+    // `.none` above is actually applied; alpha 0 keeps the run headless-quiet
+    // and `cacheDisplay` reads model values, unaffected by window alpha.
+    if !window.isVisible {
+        window.alphaValue = 0
+        window.orderFront(nil)
+        drain(0.1)
+    }
     window.layoutIfNeeded()
     window.contentView?.layoutSubtreeIfNeeded()
     let frameView = window.contentView?.superview ?? window.contentView!
     pinMaterialsWithinWindow(in: frameView)
+    hideTitlebarSeparators(in: frameView)
     drain(0.1)
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
@@ -175,6 +202,41 @@ func pinMaterialsWithinWindow(in view: NSView) {
     }
     for subview in view.subviews { pinMaterialsWithinWindow(in: subview) }
 }
+
+/// Hide AppKit's private titlebar-separator view(s) in a captured window's
+/// frame-view subtree. `titlebarSeparatorStyle = .none` (on the window AND the
+/// split-view items) is NOT reliably honored for a window that was already
+/// built — whether the separator view exists is decided once at window
+/// creation and post-hoc style changes race it, so a 1pt hairline at the
+/// titlebar's bottom edge flickered run-to-run in captures. Hiding the view
+/// itself is deterministic. Generator-only; never ships in the app.
+func hideTitlebarSeparators(in view: NSView) {
+    if NSStringFromClass(type(of: view)).contains("TitlebarSeparator") {
+        view.isHidden = true
+    }
+    for subview in view.subviews { hideTitlebarSeparators(in: subview) }
+}
+
+/// DEBUG (SNAPSHOT_DEBUG_STRIP=1): print every view whose frame intersects
+/// the 3pt strip at the titlebar's bottom edge, with visibility state — used
+/// to identify which view draws the flickering 1pt hairline.
+func dumpStrip(in root: NSView) {
+    let stripTopFromTop: CGFloat = 26, stripHeight: CGFloat = 4
+    let rootH = root.bounds.height
+    let strip = NSRect(x: 0, y: rootH - stripTopFromTop - stripHeight,
+                       width: root.bounds.width, height: stripHeight)
+    func walk(_ v: NSView, depth: Int) {
+        let f = v.convert(v.bounds, to: root)
+        if f.intersects(strip) && f.height <= 6 {
+            let cls = NSStringFromClass(type(of: v))
+            print("  STRIP \(String(repeating: " ", count: depth))\(cls) frame=\(f) hidden=\(v.isHidden) alpha=\(v.alphaValue) layerBG=\(v.layer?.backgroundColor != nil)")
+        }
+        for s in v.subviews { walk(s, depth: depth + 1) }
+    }
+    print("STRIP-DUMP rootH=\(rootH)")
+    walk(root, depth: 0)
+}
+
 
 @MainActor
 func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSAppearance.Name, outDir: URL) {

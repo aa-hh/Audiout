@@ -96,6 +96,12 @@ public final class MainOutRowView: NSView {
     /// device/group rows below.
     private let nameLabel = NSTextField(labelWithString: "Audio Out")
     private let slider = NSSlider()
+    /// The Warm Signal fader skin over the master slider (drawing-only
+    /// `NSSliderCell` swap — behavior/keyboard/VoiceOver stay stock): recessed
+    /// `well` trough, gold `ember → gold` fill iff the Main Out route is armed
+    /// (the same `connected ∧ !muted` predicate the corner dot renders),
+    /// rounded-rect `raised` thumb. See ``WarmFaderCell``.
+    private let faderCell = WarmFaderCell()
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()
@@ -165,6 +171,9 @@ public final class MainOutRowView: NSView {
         let isConnected: Bool
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         armedDotView.apply(armed: isConnected && !isMuted)
+        // The master fader's engaged (gold) fill reuses the EXACT same armed
+        // predicate the dot renders — one armed truth, two instruments.
+        faderCell.isRouteArmed = isConnected && !isMuted
 
         // Master mute drains the master meter through the existing decay
         // ballistics (S3 — no new animation machinery; Reduce Motion snaps
@@ -293,6 +302,11 @@ public final class MainOutRowView: NSView {
         armedDotView.translatesAutoresizingMaskIntoConstraints = false
 
         slider.translatesAutoresizingMaskIntoConstraints = false
+        // Warm fader skin: install the drawing-only cell BEFORE the value/
+        // target configuration below (a cell swap resets cell-held state, so
+        // everything after re-lands on the new cell). Tracking, keyboard,
+        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
+        slider.cell = faderCell
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true
@@ -573,6 +587,14 @@ public final class MainOutRowView: NSView {
     /// target has a connected member ∧ master unmuted) — reads the dot view's
     /// rendered state, so it can't drift from the pixels.
     public var test_routeArmed: Bool { armedDotView.test_isLit }
+
+    /// Whether the master fader would render its ENGAGED (gold-gradient) fill
+    /// — the cell's own gate, so the test can't drift from the pixels. Must
+    /// track `test_routeArmed` (one armed truth, two instruments).
+    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+
+    /// Whether the master slider is wearing the Warm fader skin (structural).
+    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
     /// The dot's current fill color (resolved) — gold armed / socket dark.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED pill (S3).

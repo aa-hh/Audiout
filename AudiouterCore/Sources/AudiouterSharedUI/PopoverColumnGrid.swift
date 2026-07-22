@@ -268,6 +268,27 @@ public enum PopoverColumnGrid {
     /// Height of the ± segmented control.
     public static let applicationsFooterControlHeight: CGFloat = 20
 
+    // MARK: Warm fader skin (spec §5 slider track/knob look)
+    //
+    // Geometry for `WarmFaderCell`, the drawing-only skin over the row volume
+    // sliders (`DeviceRowView` / `MainOutRowView` / `AppRowView`). Named here
+    // per house rule (and the future density setting) even though only the
+    // cell reads them.
+
+    /// Height of the recessed fader trough (the flat `well` track).
+    public static let faderTrackHeight: CGFloat = 4
+    /// Corner radius of the fader trough (fully rounds the 4 pt track ends).
+    public static let faderTrackCornerRadius: CGFloat = 2
+    /// Width of the rounded-rect fader thumb (replaces the stock circle).
+    public static let faderThumbWidth: CGFloat = 9
+    /// Height of the rounded-rect fader thumb.
+    public static let faderThumbHeight: CGFloat = 15
+    /// Corner radius of the fader thumb.
+    public static let faderThumbCornerRadius: CGFloat = 3.5
+    /// Alpha the fader's interior drawing (fill/rim/thumb) dims to while the
+    /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
+    public static let faderDisabledAlpha: CGFloat = 0.4
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

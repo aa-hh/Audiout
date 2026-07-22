@@ -178,6 +178,14 @@ public final class AppRowView: NSView {
     private var lastMeterLevel: Float = 0
     private let nameLabel = NSTextField(labelWithString: "")
     private let slider = NSSlider()
+    /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
+    /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
+    /// gold `ember → gold` fill iff this app's redirect route is armed — the
+    /// app-row armed predicate, routed (destination ≠ standalone) ∧ running
+    /// (spec §5.1's app-row gold-dot predicate; this row hosts no corner dot,
+    /// so the fader is where the armed state renders) — rounded-rect `raised`
+    /// thumb. See ``WarmFaderCell``.
+    private let faderCell = WarmFaderCell()
     private let readoutLabel = NSTextField(labelWithString: "")
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
 
@@ -244,6 +252,11 @@ public final class AppRowView: NSView {
         // slider is live for them.
         slider.isEnabled = !isNoRedirect
         readoutLabel.textColor = isNoRedirect ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        // Fader armed state (the app-row equivalent of the device rows' §3.3
+        // predicate — spec §5.1: routed ∧ running, pure model): the gold fill
+        // renders only while the redirect route is live; an unrouted or idle
+        // row keeps the neutral warm fill.
+        faderCell.isRouteArmed = !isNoRedirect && configuration.isRunning
 
         // Name treatment (Warm Signal spec §2/§3.5, S6): the name color follows
         // LIVENESS, not mere list presence — a live exception route is the
@@ -470,6 +483,11 @@ public final class AppRowView: NSView {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false
+        // Warm fader skin: install the drawing-only cell BEFORE the value/
+        // target configuration below (a cell swap resets cell-held state, so
+        // everything after re-lands on the new cell). Tracking, keyboard,
+        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
+        slider.cell = faderCell
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true
@@ -992,6 +1010,12 @@ public final class AppRowView: NSView {
     /// T2) and AirPlay routes each have an independent stream, so their slider is
     /// live (not dimmed).
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
+    /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
+    /// the app-row armed predicate (routed ∧ running) ∧ slider enabled, read
+    /// from the cell's own gate so the test can't drift from the pixels.
+    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+    /// Whether the slider is wearing the Warm fader skin (structural).
+    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
     /// Whether the offline badge (T4) is currently visible — true when the
     /// routed app's process is not running.
     public var test_isOfflineBadgeVisible: Bool { !offlineBadge.isHidden }

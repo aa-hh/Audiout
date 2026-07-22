@@ -183,6 +183,12 @@ public final class DeviceRowView: NSView {
     /// single-line, name centered). All three sublabel kinds reuse this one label.
     private let statusLabel = NSTextField(labelWithString: "")
     private let slider = NSSlider()
+    /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
+    /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
+    /// gold `ember → gold` fill iff the row is route-armed (the same §3.3
+    /// predicate the corner dot renders), rounded-rect `raised` thumb. See
+    /// ``WarmFaderCell``.
+    private let faderCell = WarmFaderCell()
     /// Small right-aligned `%` readout sitting immediately right of the slider
     /// (change 4 — a device row now shows its volume number too, tight against
     /// the slider like the Main Out row, on the same shared column).
@@ -395,6 +401,9 @@ public final class DeviceRowView: NSView {
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
         isRouteArmed = mainMixArmed || hasLiveFeeds
         armedDotView.apply(armed: isRouteArmed)
+        // The fader's engaged (gold) fill reuses the EXACT same predicate the
+        // dot renders — one armed truth, two instruments (spec §3.3 / §5).
+        faderCell.isRouteArmed = isRouteArmed
 
         // Single sublabel precedence ladder (failed → unavailable → routing →
         // none), evaluated here after `device`/`isSelectedInSet`/`isMasterMuted`
@@ -741,6 +750,11 @@ public final class DeviceRowView: NSView {
         statusLabel.isHidden = true   // single-line by default until the first `apply`
 
         slider.translatesAutoresizingMaskIntoConstraints = false
+        // Warm fader skin: install the drawing-only cell BEFORE the value/
+        // target configuration below (a cell swap resets cell-held state, so
+        // everything after re-lands on the new cell). Tracking, keyboard,
+        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
+        slider.cell = faderCell
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true            // fire throughout the drag (brief §2)
@@ -1014,6 +1028,26 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didSetVolume: volume, for: device.id)
     }
 
+    /// Fire the volume slider's OWN `target`/`action` with the slider as
+    /// sender — the exact dispatch AppKit performs during a drag — after
+    /// setting its value. Unlike ``test_setVolume(_:)`` (the delegate
+    /// shortcut), this proves the control's wiring end-to-end, which matters
+    /// since the Warm fader skin swaps the slider's CELL (drawing-only; the
+    /// wiring must survive). Mirrors `test_fireCheckboxAction`'s house style.
+    public func test_fireSliderAction(settingValueTo value: Int) {
+        slider.integerValue = value
+        guard let action = slider.action,
+              let target = slider.target as? NSObject else { return }
+        _ = target.perform(action, with: slider)
+    }
+
+    /// The slider's live behavior configuration (continuous / range / type) —
+    /// asserts the WarmFaderCell swap left NSSlider behavior stock.
+    public var test_sliderConfiguration:
+        (isContinuous: Bool, min: Double, max: Double, type: NSSlider.SliderType) {
+        (slider.isContinuous, slider.minValue, slider.maxValue, slider.sliderType)
+    }
+
     /// Simulate the user toggling this row's mute button — flips
     /// `muteButton.state` and lands the V1 tint via `updateMuteTint()` exactly
     /// as a real click does (AppKit flips the `pushOnPushOff` state before
@@ -1188,6 +1222,16 @@ public final class DeviceRowView: NSView {
     /// in lockstep with the slider's disabled state, `.secondaryLabelColor`
     /// otherwise.
     public var test_readoutColor: NSColor? { readoutLabel.textColor }
+
+    /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
+    /// route-armed ∧ slider enabled, read from the cell's own gate so the test
+    /// can't drift from the pixels. Must track `test_routeArmed` whenever the
+    /// slider is enabled (one armed truth, two instruments).
+    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+
+    /// Whether the slider is wearing the Warm fader skin (the drawing-only
+    /// `WarmFaderCell` swap) — structural assertion that the skin is installed.
+    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
 
     /// Whether the volume slider is currently enabled (A5) — stays enabled while
     /// the device is muted (mute ≠ frozen volume); only availability/

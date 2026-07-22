@@ -190,6 +190,47 @@ final class AppTetherColorTests: IsolatedTestCase {
         XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(nudged))
     }
 
+    // MARK: (g) No derived tint ever renders as (near-)black
+
+    /// Regression for the "solid black Firefox chip": the real Firefox icon's
+    /// dominant *saturated* hue is the violet globe (~265°, a cool-family hue),
+    /// not the orange fox — and a cool hue dropped for warm paper (0.66 − 0.28 =
+    /// 0.38), or a gold-steered orange likewise dropped and Increase-Contrast-
+    /// darkened (~0.33), used to bottom out dark enough to read as black against
+    /// the near-black canvas at the 5pt chip. The legibility floor now caps that.
+    func test_derivedTint_neverDarkerThanLegibilityFloor() {
+        // Darkest inputs: a gold-steered orange (warm, steered) and a cool green.
+        let orange = AppTetherColor.deriveTone(from: solidIcon(0xFFA500))
+        let green  = AppTetherColor.deriveTone(from: solidIcon(0x1DB954))
+        for tone in [orange, green] {
+            guard case .tinted(let t) = tone else { return XCTFail("expected a tint") }
+            for dark in [true, false] {
+                for ic in [true, false] {
+                    let c = AppTetherColor.components(for: t, dark: dark, increaseContrast: ic)
+                    XCTAssertGreaterThanOrEqual(
+                        c.brightness, AppTetherColor.minimumLegibleBrightness,
+                        "tone \(t) below the legibility floor (dark=\(dark), ic=\(ic))")
+                }
+            }
+        }
+    }
+
+    /// The floor caps darkness WITHOUT inverting the reserved-band steering it
+    /// exists to guarantee: a gold-steered orange stays in the terracotta
+    /// corridor and clears both reserved bands even after the brightness cap.
+    func test_legibilityFloor_preservesReservedBandSteering() {
+        guard case .tinted(let t) = AppTetherColor.deriveTone(from: solidIcon(0xFFA500)) else {
+            return XCTFail("orange should derive a tint")
+        }
+        XCTAssertTrue(t.goldSteered, "0xFFA500 should have gold-steered")
+        XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(t.hue))
+        XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(t.hue))
+        // Floor binds on the warm-paper variant but leaves the hue untouched.
+        let light = AppTetherColor.components(for: t, dark: false, increaseContrast: false)
+        XCTAssertEqual(light.brightness, AppTetherColor.minimumLegibleBrightness, accuracy: 0.0001)
+        XCTAssertEqual(light.hue, t.hue, accuracy: 0.001)
+    }
+
     // MARK: Appearance variants (light + dark + Increase Contrast)
 
     func test_toneHasDistinctLightDarkAndIncreaseContrastVariants() {

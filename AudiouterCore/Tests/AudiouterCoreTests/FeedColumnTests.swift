@@ -64,11 +64,20 @@ final class FeedColumnTests: IsolatedTestCase {
     }
 
     func testManualMemberPlusTwoApps() {
+        // Pre-pill this fit at the same `feedColumnWidth` as one packed
+        // string; each value now carries its own bordered-pill chrome
+        // (padding + border + inter-pill gap), so three short values plus
+        // two chips no longer fit in the same reserved width and the
+        // STATIC "+N" overflow correctly kicks in one segment sooner. The
+        // "never collapses to one reason" behavior is unchanged — it just
+        // shows 2 pills + "+1" instead of 3 pills at this exact width; see
+        // `testManualMemberPlusOneApp`/`testGroupMemberPlusOneApp` for the
+        // still-uncapped two-pill case.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"])
-        XCTAssertEqual(row.test_feedText, "System · Music · Safari",
-                       "never collapses — both redirects show alongside the main-mix segment")
+        XCTAssertEqual(row.test_feedText, "System · Music · +1")
+        XCTAssertTrue(row.test_feedHasOverflow)
     }
 
     func testNeitherMainMixNorAppsShowsNothing() {
@@ -199,13 +208,20 @@ final class FeedColumnTests: IsolatedTestCase {
     }
 
     func testAppRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
+        // Three pills' worth of bordered chrome (System + 2 app pills, 2 of
+        // them chipped) no longer fits `feedColumnWidth` at this exact width
+        // — see the note on `testManualMemberPlusTwoApps` — so Safari's pill
+        // overflows to the static "+1" here too. The chip-per-segment rule
+        // this test exists to pin is still exercised on the VISIBLE pills:
+        // "System" (no chip) and "Music" (chip); `testAppOnlyRedirectFeedStillWearsItsChip`
+        // separately covers a chip surviving as the SOLE visible app pill.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"],
                   appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
-        XCTAssertEqual(row.test_feedText, "System · Music · Safari")
-        XCTAssertEqual(row.test_feedChipCount, 2,
-                       "one chip per app segment; the neutral 'System' segment wears none")
+        XCTAssertEqual(row.test_feedText, "System · Music · +1")
+        XCTAssertEqual(row.test_feedChipCount, 1,
+                       "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
     }
 
     func testAppOnlyRedirectFeedStillWearsItsChip() {

@@ -219,6 +219,35 @@ public enum PopoverColumnGrid {
     /// compact size the FEED column's tight width budget forces it to.
     public static let feedChipCornerRadius: CGFloat = 1
 
+    // MARK: FEED pills (per-value bordered pills, replacing the packed
+    // " · "-joined composite string)
+    //
+    // The product owner reviewed an HTML mock and wants each FEED value in
+    // its own bordered pill — left-aligned, small gap between pills, a
+    // redirect's chip living INSIDE its pill beside the name — rather than
+    // one run of text joined by middle dots. `FeedPillView` draws one of
+    // these; `DeviceRowView.feedStack` lays a row of them out left-aligned in
+    // the SAME reserved trailing slot (`feedColumnWidth`, unchanged).
+
+    /// Horizontal padding inside a FEED pill, between its rounded-rect border
+    /// and the text/chip it hosts.
+    public static let feedPillHorizontalPadding: CGFloat = 4
+    /// Vertical padding inside a FEED pill, between its rounded-rect border
+    /// and the text/chip it hosts.
+    public static let feedPillVerticalPadding: CGFloat = 2
+    /// Corner radius of a FEED pill's rounded-rect border — soft, not a
+    /// capsule (deliberately distinct from the mute button's fuller-rounded
+    /// `mutePillCornerRadius`, which signals "engaged control," not "value").
+    public static let feedPillCornerRadius: CGFloat = 5
+    /// Stroke width of a FEED pill's border — subtle, not heavy (the mock's
+    /// "soft rounded-rect outline"), landing in the same 1–1.5 pt hairline
+    /// band as `statusDotBorderWidth`/`busNodeRimWidth`.
+    public static let feedPillBorderWidth: CGFloat = 1
+    /// Horizontal gap between adjacent FEED pills — the mock's "small gap
+    /// between pills," replacing the retired `feedSegmentSeparator` middle
+    /// dot as the thing that visually separates one feed value from the next.
+    public static let feedPillGap: CGFloat = 3
+
     // MARK: On-icon status badge (2026-07-17)
     //
     // The connection-status indicator is a small corner dot overlapping the

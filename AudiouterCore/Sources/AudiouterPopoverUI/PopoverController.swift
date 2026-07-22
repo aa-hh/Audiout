@@ -645,7 +645,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
-        // "Feed" (`DeviceRowView.updateFeedText`/`feedLabel`). The trailing
+        // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The trailing
         // accessory (F1) saves the current Selected Devices set as a group;
         // its enabled state tracks `canSaveCurrentSetup`, kept fresh via
         // `refreshDevicesAccessory()` on selection repaints.

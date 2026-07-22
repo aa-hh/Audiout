@@ -183,23 +183,26 @@ public final class DeviceRowView: NSView {
     /// The one remaining rung is the small-caps MUTED token, shown iff the
     /// device is row-muted (not master-muted) AND neither failed nor
     /// unavailable — see ``resolveSublabel()``. Failed/unavailable and the
-    /// routing/redirect composite all moved to ``feedLabel`` (the FEED column).
+    /// routing/redirect composite all moved to ``feedStack`` (the FEED column).
     private let statusLabel = NSTextField(labelWithString: "")
-    /// The trailing **FEED** column (Warm Signal v4.1 item 3): a right-aligned,
-    /// multi-source TEXT composite of what's feeding this device — the neutral
-    /// main-mix segment (``mainMixSourceName``, "System" or the active group's
-    /// name) plus one tinted segment per redirected app (``feedAppNames``),
-    /// joined by ``feedSegmentSeparator``. A `.failed`/unavailable device
-    /// OVERRIDES this with failure-red words instead ("Couldn't connect" /
-    /// "Unavailable"). Mounted and constrained ONLY on a bus row
+    /// The trailing **FEED** column: a LEFT-ALIGNED row of small bordered
+    /// pills (`FeedPillView`, one per visible feed value — the product
+    /// owner's ported-verbatim call against the old single packed-string
+    /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
+    /// The neutral main-mix segment (``mainMixSourceName``, "System" or the
+    /// active group's name) gets a plain pill; one tinted pill per redirected
+    /// app (``feedAppNames``) carries the derived-colour `FeedChip` square
+    /// INSIDE it, beside the name. A `.failed`/unavailable device OVERRIDES
+    /// this with a SINGLE failure-red pill instead ("Couldn't connect" /
+    /// "Unavailable"), no chip. Mounted and constrained ONLY on a bus row
     /// (``busActive``) — that's the one host where the trailing control column
     /// (`PopoverColumnGrid.trailingControlWidth`, centered at
     /// `trailingControlCenterFromTrailing`) is otherwise reserved-but-EMPTY
     /// (the membership control moved to the left rail gutter on a bus row), so
     /// there is a free slot to draw into; a non-bus host (mixer window) keeps
-    /// its real checkbox there and never mounts this label. See
+    /// its real checkbox there and never mounts this stack. See
     /// ``updateFeedText()``.
-    private let feedLabel = NSTextField(labelWithString: "")
+    private let feedStack = NSStackView()
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -903,41 +906,44 @@ public final class DeviceRowView: NSView {
         return tokens.joined(separator: Self.routingTokenSeparator)
     }
 
-    // MARK: FEED column (Warm Signal v4.1 item 3)
+    // MARK: FEED column — per-value bordered pills
 
-    /// Separator joining FEED composite segments: space, U+00B7 MIDDLE DOT,
-    /// space — visually identical to the retired sublabel's own separator but
-    /// kept as an independent constant so the two columns can evolve apart.
+    /// Separator used only to JOIN plain-text test reads across pills
+    /// (``test_feedText``) — visually the gap between pills is now
+    /// `PopoverColumnGrid.feedPillGap`, drawn as space between two bordered
+    /// views, not a printed middle-dot glyph. Kept as the same " · " a test
+    /// already expects between segment WORDS.
     private static let feedSegmentSeparator = " · "
 
     /// The one monochrome SF Mono uppercase micro-tag this column ever shows,
-    /// prefixed ahead of the composite for a true protocol exception. AP2 is
-    /// the default and is never badged (spec item 3 "attributes/flags").
+    /// prefixed ahead of the FIRST visible pill's own text for a true
+    /// protocol exception. AP2 is the default and is never badged (spec item
+    /// 3 "attributes/flags").
     private static let ap1FeedTag = "AP1"
 
-    /// Re-derive and push the FEED column's text from the current device/mix/
-    /// redirect state (``mainMixSourceName``/``feedAppNames``, set by
-    /// ``apply``). No-op — hides `feedLabel` — when this row hosts no FEED
+    /// Re-derive and push the FEED column's pills from the current device/
+    /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
+    /// ``apply``). No-op — hides `feedStack` — when this row hosts no FEED
     /// column (`busActive` false: a non-bus host's trailing column is the real
     /// checkbox, not a free slot).
     ///
     /// Precedence (highest first, mirrors ``resolveSublabel()``'s split ladder
     /// but for the FEED half):
-    /// 1. `.failed` connection → "Couldn't connect", failure-red (spec item 3
-    ///    "error overrides the feed" — pairs with the red halo ring).
-    /// 2. else device unavailable → "Unavailable", failure-red (the spec
-    ///    groups both under "failure-red words").
-    /// 3. else the MULTI-SOURCE COMPOSITE: `mainMixSourceName` (when non-nil)
-    ///    followed by one segment per `feedAppNames` entry, in order, joined
-    ///    by `feedSegmentSeparator` — NEVER collapsed to a single reason.
-    ///    Empty (nil main-mix AND no app names) renders nothing.
+    /// 1. `.failed` connection → a SINGLE "Couldn't connect" pill, failure-red
+    ///    (spec item 3 "error overrides the feed" — pairs with the red halo
+    ///    ring).
+    /// 2. else device unavailable → a single "Unavailable" pill, failure-red
+    ///    (the spec groups both under "failure-red words").
+    /// 3. else ONE PILL PER VALUE: `mainMixSourceName` (when non-nil) followed
+    ///    by one pill per `feedAppNames` entry, in order — NEVER collapsed to
+    ///    a single reason. Empty (nil main-mix AND no app names) renders no
+    ///    pills at all.
     /// Connecting/reconnecting/buffering and muted are DELIBERATELY absent
     /// here (spec item 3) — the halo ring and the mute control/MUTED sublabel
     /// token own those signals; duplicating them would be noise.
     private func updateFeedText() {
         guard busActive else {
-            feedLabel.isHidden = true
-            feedLabel.attributedStringValue = NSAttributedString()
+            clearFeedPills()
             return
         }
         if case .failed = device.connectionState {
@@ -973,9 +979,9 @@ public final class DeviceRowView: NSView {
     /// app↔device association still reads once the row brightens back.
     private static let feedMutedTintAlpha: CGFloat = 0.5
 
-    /// One FEED composite segment: its text, its resolved color, and whether
-    /// it wears the derived-colour chip (an app-redirect segment does; the
-    /// neutral main-mix segment never does).
+    /// One FEED value: its text, its resolved color, and whether it wears the
+    /// derived-colour chip (an app-redirect value does; the neutral main-mix
+    /// value never does) — each renders as its own `FeedPillView`.
     private struct FeedSegment {
         let text: String
         let color: NSColor
@@ -995,78 +1001,109 @@ public final class DeviceRowView: NSView {
         appTintColors[appName] ?? AppTetherColor.neutralFallback
     }
 
-    /// Render a single failure-red override string (no tag, no segments) into
-    /// `feedLabel` — the "Couldn't connect" / "Unavailable" rungs.
-    private func setFeedText(_ text: String, color: NSColor) {
-        feedLabel.attributedStringValue = NSAttributedString(
-            string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
-        feedLabel.isHidden = false
+    /// Empty `feedStack` and hide it — the "nothing to show at all" case
+    /// (non-bus host, or a bus row with no main-mix membership and no
+    /// redirects).
+    private func clearFeedPills() {
+        for view in feedStack.arrangedSubviews {
+            feedStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        feedStack.isHidden = true
     }
 
-    /// Compose `segments` (main-mix + app tokens, already colored) into
-    /// `feedLabel`, prefixing `tag` (the AP1 micro-tag) when present, with the
-    /// spec item 3 STATIC overflow rule: try the full composite first; if it
-    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop segments from the
-    /// TAIL one at a time (never cut a segment mid-string) and append a
-    /// trailing "+N" for the dropped count — no interactive reveal, locked.
-    /// Hides the label when there is nothing to show at all.
+    /// Render a SINGLE failure-red pill (no tag, no chip) — the "Couldn't
+    /// connect" / "Unavailable" rungs.
+    private func setFeedText(_ text: String, color: NSColor) {
+        let attr = NSAttributedString(
+            string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
+        renderFeedPills([(attributedText: attr, isError: true)])
+    }
+
+    /// Compose `segments` (main-mix + app tokens, already colored) into ONE
+    /// PILL EACH, prefixing `tag` (the AP1 micro-tag) onto the FIRST visible
+    /// pill's own text when present, with the spec item 3 STATIC overflow
+    /// rule: try showing every value's pill first; if the row of pills
+    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
+    /// TAIL one at a time (never cut a pill mid-string) and append a trailing
+    /// "+N" pill for the dropped count — no interactive reveal, locked.
+    /// Clears the pills when there is nothing to show at all.
     private func setFeedSegments(_ segments: [FeedSegment], tag: String?) {
         guard !segments.isEmpty else {
-            feedLabel.isHidden = true
-            feedLabel.attributedStringValue = NSAttributedString()
+            clearFeedPills()
             return
         }
         let font = Tokens.Font.caption
-        // Item 8: the separator dot and the AP1 micro-tag dim in lockstep
-        // with the segments they sit between — the same `controlsMuted`
+        // Item 8: the "+N" overflow pill and the AP1 micro-tag dim in
+        // lockstep with the pills they sit beside — the same `controlsMuted`
         // gate ``updateFeedText()`` used to build `segments`.
         let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
-        let separatorAttrs: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: chromeColor,
-        ]
-        func attributed(_ segment: FeedSegment) -> NSAttributedString {
+
+        func attributed(_ segment: FeedSegment, prefixTag: Bool) -> NSAttributedString {
             let result = NSMutableAttributedString()
-            // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music") — an app
-            // segment only, never the neutral main-mix segment.
+            if prefixTag, let tag {
+                result.append(NSAttributedString(string: tag + " ", attributes: [
+                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .foregroundColor: chromeColor,
+                ]))
+            }
+            // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music," now
+            // living INSIDE the pill beside the name) — an app segment only,
+            // never the neutral main-mix segment.
             if segment.hasChip {
                 result.append(FeedChip.attachmentString(color: segment.color, font: font))
             }
             result.append(NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: segment.color]))
             return result
         }
-        let tagPrefix: NSAttributedString? = tag.map {
-            NSAttributedString(string: $0 + " ", attributes: [
-                .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
-                .foregroundColor: chromeColor,
-            ])
+
+        /// A pill's own outer width — the label's ink plus the pill's own
+        /// padding — so the STATIC overflow measurement accounts for the
+        /// bordered chrome around each value, not just its bare text.
+        func pillWidth(_ attr: NSAttributedString) -> CGFloat {
+            attr.size().width + PopoverColumnGrid.feedPillHorizontalPadding * 2
         }
+
         let available = PopoverColumnGrid.feedColumnWidth
 
         var visibleCount = segments.count
-        var committed = NSAttributedString()
+        var committed: [NSAttributedString] = []
         while visibleCount > 0 {
-            let trial = NSMutableAttributedString()
-            if let tagPrefix { trial.append(tagPrefix) }
-            for (index, segment) in segments.prefix(visibleCount).enumerated() {
-                if index > 0 {
-                    trial.append(NSAttributedString(string: Self.feedSegmentSeparator, attributes: separatorAttrs))
-                }
-                trial.append(attributed(segment))
+            var trial: [NSAttributedString] = segments.prefix(visibleCount).enumerated().map { index, segment in
+                attributed(segment, prefixTag: index == 0)
             }
             let overflowCount = segments.count - visibleCount
             if overflowCount > 0 {
-                trial.append(NSAttributedString(string: " +\(overflowCount)", attributes: separatorAttrs))
+                trial.append(NSAttributedString(
+                    string: "+\(overflowCount)", attributes: [.font: font, .foregroundColor: chromeColor]))
             }
+            let totalWidth = trial.map(pillWidth).reduce(0, +)
+                + CGFloat(max(0, trial.count - 1)) * PopoverColumnGrid.feedPillGap
             // Always accept the last candidate (`visibleCount == 1`) even if it
-            // still overflows — a clipped single segment beats showing nothing.
-            if trial.size().width <= available || visibleCount == 1 {
+            // still overflows — a clipped single pill beats showing nothing.
+            if totalWidth <= available || visibleCount == 1 {
                 committed = trial
                 break
             }
             visibleCount -= 1
         }
-        feedLabel.attributedStringValue = committed
-        feedLabel.isHidden = false
+        renderFeedPills(committed.map { (attributedText: $0, isError: false) })
+    }
+
+    /// Rebuild `feedStack`'s arranged subviews from `pills` — one
+    /// `FeedPillView` per entry, in order. Rebuilding on every `apply` (rather
+    /// than diffing/reusing views) keeps this in step with the rest of the
+    /// row's "re-derive from model state" discipline and is cheap: a device
+    /// row's FEED column holds at most a handful of pills.
+    private func renderFeedPills(_ pills: [(attributedText: NSAttributedString, isError: Bool)]) {
+        clearFeedPills()
+        guard !pills.isEmpty else { return }
+        for pill in pills {
+            let view = FeedPillView()
+            view.configure(attributedText: pill.attributedText, isError: pill.isError)
+            feedStack.addArrangedSubview(view)
+        }
+        feedStack.isHidden = false
     }
 
     /// Show `statusLabel` with `text`/`color` and raise the name so the name +
@@ -1186,18 +1223,27 @@ public final class DeviceRowView: NSView {
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.isHidden = true   // single-line by default until the first `apply`
 
-        // FEED column (v4.1 item 3): right-aligned text, clipped rather than
-        // ellipsized — `setFeedSegments` pre-measures and drops WHOLE segments
-        // (STATIC "+N" overflow) so a real mid-run ellipsis should never fire;
-        // clipping is the honest fallback if a single unsplittable segment
-        // still overflows. Only mounted/constrained on a bus row (`busActive`)
-        // — the one host where this trailing slot is reserved-but-empty.
-        feedLabel.translatesAutoresizingMaskIntoConstraints = false
-        feedLabel.font = Tokens.Font.caption
-        feedLabel.alignment = .right
-        feedLabel.lineBreakMode = .byClipping
-        feedLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        feedLabel.isHidden = true
+        // FEED column: a LEFT-ALIGNED row of bordered `FeedPillView`s, one per
+        // visible feed value — `setFeedSegments` pre-measures and drops WHOLE
+        // pills from the tail (STATIC "+N" overflow). Unlike the retired
+        // plain-text `feedLabel` (which clipped excess CHARACTERS via
+        // `.byClipping` when even its single most-important segment still
+        // overflowed), a pill's own border/padding chrome isn't
+        // compressible, so that same "accept the last candidate even if it
+        // still overflows" rung would otherwise let a pill's frame extend
+        // PAST this reserved slot — visibly spilling into the row's margin
+        // rather than clipping cleanly. `masksToBounds` on the stack's own
+        // layer reproduces the old "honest clipping fallback" at the PILL
+        // level: an overflowing pill is cut off at the slot's edge instead of
+        // drawn past it.
+        feedStack.translatesAutoresizingMaskIntoConstraints = false
+        feedStack.orientation = .horizontal
+        feedStack.alignment = .centerY
+        feedStack.distribution = .fill
+        feedStack.spacing = PopoverColumnGrid.feedPillGap
+        feedStack.isHidden = true
+        feedStack.wantsLayer = true
+        feedStack.layer?.masksToBounds = true
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
@@ -1261,7 +1307,7 @@ public final class DeviceRowView: NSView {
         addSubview(readoutLabel)
         addSubview(muteButton)
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
-        if busActive { addSubview(feedLabel) }
+        if busActive { addSubview(feedStack) }
 
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
@@ -1352,17 +1398,22 @@ public final class DeviceRowView: NSView {
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
                 enableCheckbox.heightAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
-                // FEED column (v4.1 item 3): the trailing control column is
-                // otherwise empty on a bus row (the membership control moved to
-                // the left rail gutter above) — draw the composite text there,
-                // right-aligned, trailing-anchored + centered exactly like the
-                // header's own trailing column label (`beginCard`'s
-                // `trailingTitle`), so the two line up.
-                feedLabel.trailingAnchor.constraint(
-                    equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-                feedLabel.widthAnchor.constraint(
+                // FEED column: the trailing control column is otherwise empty
+                // on a bus row (the membership control moved to the left rail
+                // gutter above) — draw the pill row there. LEFT-ALIGNED
+                // (product owner's call, reverting the old composite's
+                // right-alignment): the stack's LEADING edge is pinned to the
+                // slot's own leading edge (the same physical slot the header's
+                // trailing column label centers over — `trailingControlCenterFromTrailing`
+                // — just anchored from its other end), so pills start flush
+                // left within the reserved column instead of hugging its
+                // trailing edge.
+                feedStack.leadingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -(PopoverColumnGrid.trailingControlTrailing + PopoverColumnGrid.trailingControlWidth)),
+                feedStack.widthAnchor.constraint(
                     lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
-                feedLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+                feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         } else {
             constraints.append(contentsOf: [
@@ -1605,66 +1656,54 @@ public final class DeviceRowView: NSView {
         routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames)
     }
 
-    // MARK: FEED column (v4.1 item 3) test hooks
+    // MARK: FEED column test hooks
+
+    /// Every `FeedPillView` CURRENTLY arranged in `feedStack`, in left-to-
+    /// right order, or `[]` when there's nothing to show / this row hosts no
+    /// FEED column at all (a non-bus host).
+    private var feedPills: [FeedPillView] {
+        guard busActive, !feedStack.isHidden else { return [] }
+        return feedStack.arrangedSubviews.compactMap { $0 as? FeedPillView }
+    }
 
     /// The FEED column's current plain-text content, or `nil` when it has
-    /// nothing to show (no main-mix membership + no redirects) or this row
-    /// hosts no FEED column at all (a non-bus host). Concatenates the composed
-    /// attributed string's characters — including a static "AP1 " prefix or a
-    /// trailing "+N" when present — so a test can assert the rendered words
-    /// without parsing per-segment color runs itself. Strips the chip
-    /// attachments' object-replacement characters (Warm Signal v4.1
-    /// CORRECTIONS) so a test reading WORDS never has to know chips exist —
-    /// the chip bakes its own trailing gap into its attachment width (no
-    /// following space glyph), so stripping leaves no stray space either.
+    /// nothing to show. Joins each pill's own text (chip object-replacement
+    /// characters already stripped by `FeedPillView.test_text`) with the same
+    /// " · " a test already reads between values — including a static
+    /// "AP1 " prefix on the first pill, or a trailing "+N" pill, when
+    /// present — so a test can assert the rendered WORDS across the whole
+    /// pill row without parsing per-pill color runs itself.
     public var test_feedText: String? {
-        guard busActive, !feedLabel.isHidden else { return nil }
-        let text = feedLabel.attributedStringValue.string
-            .replacingOccurrences(of: FeedChip.objectReplacementCharacter, with: "")
+        let pills = feedPills
+        guard !pills.isEmpty else { return nil }
+        let text = pills.map(\.test_text).joined(separator: Self.feedSegmentSeparator)
         return text.isEmpty ? nil : text
     }
 
-    /// The number of derived-colour chips CURRENTLY rendered in the FEED
-    /// composite (Warm Signal v4.1 CORRECTIONS) — one per app-redirect
-    /// segment, never for the neutral main-mix segment or an error override.
-    /// Counts `NSTextAttachment` runs directly rather than re-deriving from
-    /// `feedAppNames`, so a test asserts what's actually painted.
+    /// The number of derived-colour chips CURRENTLY rendered across the FEED
+    /// column's pills (Warm Signal — chip now lives INSIDE its pill) — one
+    /// per app-redirect pill, never for the neutral main-mix pill or an error
+    /// override. Reads each pill's own painted attachment run, so a test
+    /// asserts what's actually painted.
     public var test_feedChipCount: Int {
-        guard busActive, !feedLabel.isHidden else { return 0 }
-        let attr = feedLabel.attributedStringValue
-        var count = 0
-        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, _, _ in
-            if value != nil { count += 1 }
-        }
-        return count
+        feedPills.filter(\.test_hasChip).count
     }
 
-    /// Whether the FEED text is CURRENTLY rendering in the failure-red override
-    /// (`Couldn't connect` / `Unavailable`, spec item 3) — reads the first run's
-    /// resolved color (an error message is never mixed with normal segments),
-    /// so a test can't drift from what's actually painted.
+    /// Whether the FEED column is CURRENTLY rendering the failure-red override
+    /// (`Couldn't connect` / `Unavailable`, spec item 3) — reads the (single)
+    /// pill's resolved color (an error message is never mixed with normal
+    /// pills), so a test can't drift from what's actually painted.
     public var test_feedIsErrorColored: Bool {
-        guard busActive, !feedLabel.isHidden else { return false }
-        let attr = feedLabel.attributedStringValue
-        guard attr.length > 0,
-              let color = attr.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
-              let resolved = color.usingColorSpace(.sRGB),
-              let failure = Tokens.Color.failure.usingColorSpace(.sRGB) else { return false }
-        return abs(resolved.redComponent - failure.redComponent) < 0.01
-            && abs(resolved.greenComponent - failure.greenComponent) < 0.01
-            && abs(resolved.blueComponent - failure.blueComponent) < 0.01
+        feedPills.first?.test_isErrorColored ?? false
     }
 
-    /// The FEED composite's leading run's CURRENTLY-painted foreground color
-    /// (the neutral main-mix segment when not an error override) — item 8's
+    /// The FEED column's leading pill's CURRENTLY-painted foreground color
+    /// (the neutral main-mix pill when not an error override) — item 8's
     /// "muted feed text" dims this from `secondaryLabel` to `tertiaryLabel`
     /// while ``controlsMuted``. Reads what's actually painted, like
     /// ``test_feedIsErrorColored``.
     public var test_feedNeutralColor: NSColor? {
-        guard busActive, !feedLabel.isHidden else { return nil }
-        let attr = feedLabel.attributedStringValue
-        guard attr.length > 0 else { return nil }
-        return attr.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        feedPills.first?.test_leadingRunColor
     }
 
     /// Whether the row is CURRENTLY rendering the muted-unconnected treatment

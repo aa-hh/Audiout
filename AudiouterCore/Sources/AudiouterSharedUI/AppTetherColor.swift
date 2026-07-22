@@ -293,6 +293,16 @@ public enum AppTetherColor {
             if dark { bright += icBrightnessStep; sat += icSaturationStep }
             else { bright -= icBrightnessStep; sat += icSaturationStep }
         }
+
+        // Legibility floor: after every darkening step (warm-paper drop,
+        // gold-steer, Increase-Contrast) a tint must still read as a coloured
+        // dot, never as black. The darkest stack-ups — a cool-family hue on
+        // warm paper (0.66 − 0.28 = 0.38), or a gold-steered warm tone likewise
+        // dropped and IC-darkened (~0.33) — would otherwise fall dark enough to
+        // vanish into the near-black canvas at the 5pt chip size (see
+        // ``minimumLegibleBrightness``). Applied last so it caps the whole chain.
+        bright = max(bright, minimumLegibleBrightness)
+
         return (tone.hue, clamp01(sat), clamp01(bright))
     }
 
@@ -433,6 +443,20 @@ public enum AppTetherColor {
     private static let lightSaturationCap: CGFloat = 0.58
     private static let lightBrightnessDrop: CGFloat = 0.28
     private static let goldSteeredBrightnessScale: CGFloat = 0.88
+
+    /// Floor on the emitted brightness so no derived tint can render dark enough
+    /// to merge into the near-black warm-dark canvas (`Tokens.Color.canvas`
+    /// ≈ `#16130F`, brightness ≈ 0.09) at the 5pt FEED chip size — the "solid
+    /// black chip" a real multi-hue icon can otherwise produce (e.g. a cool
+    /// purple/green icon resolved onto warm paper, or a gold-steered orange
+    /// dropped + Increase-Contrast-darkened, both bottoming out near 0.30–0.38).
+    /// Binds only on those darkest stack-ups; on the dark canvas the family
+    /// base brightnesses (0.66–0.75) already sit well above it. Kept strictly
+    /// below the lowest DARK-canvas brightness (cool / gold-steered = 0.66) so
+    /// the "warm-paper text is darker than dark-canvas text" ordering the
+    /// appearance variants rely on still holds, yet high enough that the dimmest
+    /// tint is a distinguishable coloured dot rather than a black one.
+    static let minimumLegibleBrightness: CGFloat = 0.45
     private static let icBrightnessStep: CGFloat = 0.08
     private static let icSaturationStep: CGFloat = 0.05
 

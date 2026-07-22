@@ -802,6 +802,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     // MARK: Tap creation + ASBD read
 
     private func createTapAndReadFormat(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws {
+        // COLD-PROMPT GUARD (see ``SystemAudioCaptureTCC``): creating the tap is
+        // what surfaces the macOS audio-capture prompt. Never do that
+        // automatically — only the Setup screen's explicit "Allow…" may. If the
+        // grant isn't already in place, refuse so a launch-time capture attempt
+        // (a restored AirPlay selection) can't prompt cold.
+        guard SystemAudioCaptureTCC.isGranted() else {
+            throw NativeCaptureError.tapCreationFailed(
+                reason: "audio capture not authorized — awaiting the Setup grant")
+        }
         // Whole-system stereo mixdown, excluding apps that are individually
         // routed elsewhere or user-excluded (T4 — avoids the double-send bug:
         // a routed app's audio going to its own destination AND leaking into

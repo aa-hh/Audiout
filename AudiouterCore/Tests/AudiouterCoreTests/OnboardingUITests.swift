@@ -224,6 +224,22 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(text.contains("PTP helper"), text)
     }
 
+    func testPermissionLostBannerClearsOnceItsFlaggedPermissionIsGranted() async {
+        let vc = OnboardingViewController(model: makeModel(audio: .granted),
+                                          reason: .permissionLost([.audioCapture]),
+                                          onOpenSettings: { _ in }, onDone: {})
+        _ = vc.test_rootView
+        XCTAssertTrue(vc.test_permissionLostBannerIsVisible,
+                      "banner shows while the flagged permission is still ungranted")
+
+        await vc.test_allowAudio()   // a successful probe flips model.audioStatus to .granted
+
+        XCTAssertFalse(vc.test_permissionLostBannerIsVisible,
+                       "the banner must clear once the permission it warned about is granted")
+        XCTAssertTrue(vc.test_showsPermissionLostBanner,
+                      "it's hidden, not never-built")
+    }
+
     func testWindowControllerThreadsReasonThroughToTheContentViewController() {
         let wc = OnboardingWindowController(model: makeModel(audio: .denied),
                                             reason: .permissionLost([.localNetwork]),

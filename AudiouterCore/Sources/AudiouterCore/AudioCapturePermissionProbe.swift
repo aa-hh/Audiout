@@ -58,17 +58,29 @@ public struct UnsupportedAudioCaptureProbe: AudioCapturePermissionProbing {
 /// beep beats a mystery one. Keep that row copy and this behavior in sync.
 ///
 /// ## How it works
-/// 1. Play a quiet sine **in this process**, rendered to the default output
-///    (audible — see above).
-/// 2. Tap **only this process** (`CATapDescription(stereoMixdownOfProcesses:)`),
-///    `muteBehavior = .muted`. Tapping only ourselves keeps it off everyone else's
-///    audio (a global tap would capture ambient audio, risking a false "granted"
-///    and contradicting the app's whole privacy promise).
-/// 3. Read the tap for ~300 ms and take the peak sample level.
-///    - peak clearly above zero → the tap delivered our tone → **granted**.
-///    - peak ~zero → the tap delivered the denied-tap zeros → **denied**.
-/// 4. Tear everything down promptly (the tap lives < 0.5 s), so no lingering
-///    system tap or muted state.
+/// 1. Read the live TCC decision first (the private `TCCAccessPreflight` behind
+///    ``SystemAudioCaptureTCC/preflight()``, macOS 14.4+). Already **granted** or
+///    **denied** → report it immediately — nothing to prove, and no surprise beep
+///    when the user re-confirms an existing grant.
+/// 2. **Undetermined** (or pre-14.4, where TCC has no readable audio-capture
+///    bucket) → play a quiet sine **in this process** and open a muted tap of
+///    **only this process** (`CATapDescription(stereoMixdownOfProcesses:)`,
+///    `muteBehavior = .muted`). Creating that tap surfaces the system prompt.
+///    Tapping only ourselves keeps it off everyone else's audio (a global tap
+///    would capture ambient audio, risking a false "granted" and contradicting
+///    the app's whole privacy promise).
+/// 3. Keep the tap OPEN and WATCH for our tone to come through it. A denied tap
+///    delivers exact zeros; a granted one delivers our sine — so a peak above the
+///    floor is a FUNCTIONAL read of the LIVE grant that flips true the instant the
+///    user allows. This is deliberately NOT a poll of `TCCAccessPreflight`: that
+///    read serves a stale in-process cache, so after the user granted it kept
+///    saying "undetermined" and the probe hung the whole timeout then reported
+///    **denied** (and an earlier version that judged from a fixed ~300 ms window
+///    raced the user the other way). The tone stops the moment the grant is
+///    detected; an ignored prompt (or an explicit TCC `denied`, which
+///    short-circuits) ends in **denied** at ``promptAnswerTimeout``.
+/// 4. Tear the tone + tap down on exit, so no lingering system tap, no lingering
+///    beep, no muted state.
 ///
 /// ## ⚠️ GATED — needs ahh's live verification
 /// Every other part of the setup flow is unit-tested, but this file drives real
@@ -96,6 +108,14 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// Peak above this ⇒ real audio; a denied tap delivers exact zeros, so this
     /// only has to clear numerical dither.
     private let grantedPeakThreshold: Float = 0.005
+    /// How long to wait for the user to answer the system prompt (14.4+ path)
+    /// before giving up and reporting not-granted. The prompt is modal and
+    /// usually answered in seconds; this only bounds the "walked away" case so
+    /// the probe — and the row's spinner — can't hang forever.
+    private let promptAnswerTimeout: TimeInterval = 60
+    /// How often to re-check the tap for our tone (and for an explicit TCC
+    /// denial) while the prompt is up.
+    private let pollInterval: TimeInterval = 0.15
 
     public init() {}
 
@@ -108,9 +128,39 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
         }
     }
 
-    /// The whole synchronous probe: play tone → tap self → observe → decide →
-    /// tear down. Runs on a background queue.
+    /// Report the REAL outcome, triggering the prompt first if the grant is
+    /// undecided. Runs on a background queue. An already-decided grant is read
+    /// straight from TCC (fast, no tone); an undecided one (or pre-14.4, where
+    /// TCC has no readable audio-capture bucket) goes through the functional
+    /// tone probe below.
     private func runProbe() -> PermissionStatus {
+        switch SystemAudioCaptureTCC.preflight() {
+        case .granted?:
+            return .granted
+        case .denied?:
+            return .denied
+        case .undetermined?, nil:
+            return functionalGrantProbe()
+        }
+    }
+
+    /// Fire the prompt (creating the tap does that) and then WATCH for our known
+    /// tone to actually come through the tap.
+    ///
+    /// This is the fix for BOTH the original race (a fixed ~300 ms window elapsed
+    /// before the user answered, so a fresh grant read `.denied`) AND the failure
+    /// that replaced it (polling `TCCAccessPreflight` never flipped to granted —
+    /// it serves a stale in-process cache, so the spinner hung the full timeout
+    /// and then said Denied). A denied tap delivers exact zeros and a granted one
+    /// delivers our sine, so a peak above the floor is a FUNCTIONAL read of the
+    /// LIVE grant: it goes true the instant the user allows, cache or no cache.
+    ///
+    /// The tap is kept OPEN across the whole wait (not torn down after a beat) so
+    /// the system prompt stays up until the user answers; the tone stops the
+    /// moment we detect the grant. Bounded by ``promptAnswerTimeout`` — an ignored
+    /// prompt, or an explicit TCC `denied` (14.4+, which short-circuits), ends in
+    /// `.denied`.
+    private func functionalGrantProbe() -> PermissionStatus {
         let tone = TonePlayer(amplitude: toneAmplitude, hz: toneHz)
         guard tone.start() else {
             // We couldn't even produce our own audio — can't verify. Treat as
@@ -129,16 +179,24 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
             return .denied
         }
 
+        // Creating the tap surfaces the prompt on an undecided grant. Keep it
+        // OPEN for the whole wait so the prompt stays up and, once the user
+        // allows, our tone starts flowing through it.
         let tap = SelfProcessTap(processObject: processObject)
         guard tap.start() else { return .denied }
         defer { tap.teardown() }
 
-        // Observe the tap. If capture is denied every sample is zero; if granted
-        // we see our sine.
-        Thread.sleep(forTimeInterval: observeSeconds)
-
-        let peak = tap.peak()
-        return peak > grantedPeakThreshold ? .granted : .denied
+        let deadline = Date().addingTimeInterval(promptAnswerTimeout)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: pollInterval)
+            // Our tone came through ⇒ capture is live ⇒ granted. The peak is a
+            // running max, so once the user allows it stays above the floor.
+            if tap.peak() > grantedPeakThreshold { return .granted }
+            // An explicit TCC denial (14.4+) ends the wait early; a stale
+            // "undetermined"/unavailable read just keeps us watching the tone.
+            if case .denied? = SystemAudioCaptureTCC.preflight() { return .denied }
+        }
+        return .denied
     }
 
     /// Silent revocation-detection path, used by BOTH
@@ -155,37 +213,13 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// which reports the wrong permission on macOS 14.4+ (see the detailed note on
     /// `currentStatusSilently()` below).
     public func currentStatusSilently() -> PermissionStatus? {
-        switch Self.systemAudioCaptureAuthorization() {
+        switch SystemAudioCaptureTCC.preflight() {
         case .granted: return .granted
         case .denied:  return .denied
         case .undetermined, .none:
             // Not yet decided, or the private symbol/service is unavailable
             // (pre-14.4, where the tap grant still lived under Screen Recording).
             return CGPreflightScreenCaptureAccess() ? .granted : .denied
-        }
-    }
-
-    /// tccd's authorization values for `TCCAccessPreflight` (private TCC API).
-    private enum TCCPreflightResult { case granted, denied, undetermined }
-
-    /// Live authorization for the "System Audio Recording Only" bucket
-    /// (`kTCCServiceAudioCapture`), read through the private `TCCAccessPreflight`
-    /// symbol. Returns `nil` when the TCC framework or symbol can't be resolved.
-    /// See `currentStatusSilently()` for why this private read is necessary.
-    private static func systemAudioCaptureAuthorization() -> TCCPreflightResult? {
-        typealias PreflightFn = @convention(c) (CFString, CFDictionary?) -> Int32
-        // dyld resolves this from the shared cache even though the file isn't on
-        // disk. Intentionally NOT dlclose'd: the framework stays resident (AppKit
-        // uses it too) and the handle lives for the process's lifetime.
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW),
-              let symbol = dlsym(handle, "TCCAccessPreflight") else {
-            return nil
-        }
-        let preflight = unsafeBitCast(symbol, to: PreflightFn.self)
-        switch preflight("kTCCServiceAudioCapture" as CFString, nil) {
-        case 0:  return .granted        // kTCCAccessPreflightGranted
-        case 1:  return .denied         // kTCCAccessPreflightDenied
-        default: return .undetermined   // kTCCAccessPreflightUnknown (2)
         }
     }
 

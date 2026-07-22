@@ -106,13 +106,66 @@ now fixed in code; a third is a thing to WATCH on the next run.
    that `?Privacy_LocalNetwork` actually lands on the pane once it exists, and that
    the `NWBrowser` prime reliably fires the prompt for an ad-hoc-signed build.
 
-3. **WATCH: the audio probe may race the first-run TCC prompt.** If
-   `AudioHardwareCreateProcessTap` does NOT block until the user answers the prompt,
-   the probe reads zeros and reports `.denied` BEFORE the user clicks Allow — so the
-   row would flash "Denied" even on a grant (a second **Allow…** re-probes correctly).
-   Now that the window stays put (fix #1), you can finally SEE the row's result after
-   answering the prompt. If it shows Denied right after you granted, that's this race
-   — fix is to re-probe once after the prompt resolves (or block on the decision).
+3. **FIXED: the audio probe raced the first-run TCC prompt.** It used to create
+   the tap and then judge from a fixed ~300 ms tone window — but
+   `AudioHardwareCreateProcessTap` does NOT block until the user answers, so on a
+   fresh grant the window elapsed while the prompt was still up, the tap delivered
+   zeros, and the row flashed **Denied** even though the user had just clicked
+   Allow. `CoreAudioTonePermissionProbe.runProbe()` reads the live TCC decision up
+   front (`TCCAccessPreflight` on `kTCCServiceAudioCapture`, 14.4+) — already-decided
+   → reported immediately (no tone, no beep on a re-confirm). For an undecided grant
+   it surfaces the prompt (creating the tap) and then **watches for our tone to come
+   through the still-open tap**: a granted tap delivers the sine, a denied one zeros,
+   so the peak flips true the instant the user allows. NOTE: an intermediate version
+   *polled* `TCCAccessPreflight` in a loop and HUNG — that read serves a **stale
+   in-process cache**, so after the grant it kept returning "undetermined", the
+   spinner ran the full `promptAnswerTimeout`, and it reported Denied. The functional
+   tone read has no such cache dependency. An explicit TCC `denied` short-circuits;
+   an ignored prompt ends in `.denied` at the timeout. **Still wants a signed-build
+   live-verify** (drives real Core Audio / the prompt), but the grant should now
+   register the moment you click Allow.
+
+## Live-test findings — 2026-07-22 (cold prompt before Setup)
+
+**The audio-capture prompt fired at LAUNCH, before Setup ever showed.** Root
+cause was NOT the onboarding flow (which correctly defers discovery and only
+probes on the explicit "Allow…"): it was a **restored per-app route**. With
+`setup.hasCompleted = 1`, launch skips Setup and runs the normal path, and
+`AppDelegate.applicationDidFinishLaunching` calls `pushAppRoutesToBackend()`
+unconditionally (before the setup gate). A persisted route (Firefox → an AirPlay
+device) pushed into the per-app capture coordinator, which created a process tap
+on the running routed app → `AudioHardwareCreateProcessTap` → the TCC prompt,
+cold, with no Setup screen. (The whole-system gate was NOT the trigger here — the
+persisted whole-system selection was just `local-mac`, so `reconcileCaptureGate`
+kept it closed.)
+
+**Fix — a cold-prompt guard at every capture-tap site.** New `SystemAudioCaptureTCC`
+exposes a silent, prompt-free `isGranted()` (private `TCCAccessPreflight` on
+`kTCCServiceAudioCapture`, 14.4+; `CGPreflightScreenCaptureAccess` on 14.2–14.3;
+**undetermined counts as not-granted**). Both real tap classes —
+`NativeCaptureCoordinator` (whole-system) and `PerAppCaptureCoordinator` (per-app
+routing AND the `.unmuted` metering tap, which reuses it) — now `guard
+SystemAudioCaptureTCC.isGranted()` before creating the tap and throw
+`tapCreationFailed` otherwise. The ONLY tap allowed to prompt is the Setup
+probe's own `SelfProcessTap`, a separate class that is deliberately not gated.
+After the user grants and closes Setup, `onFinished` re-pushes routes so the
+now-permitted taps start.
+
+**Also done (ahh's follow-up): per-app routes now RESET when the routed app quits.**
+Previously a `.device` redirect persisted across the routed app's own quit/relaunch
+(the thing that let a stale Firefox→speaker route re-tap at launch). Now the
+`didTerminateApplicationNotification` observer calls
+`AppRoutingController.resetDeviceRoute(bundleID:)` — reverts a `.device` redirect to
+`.noRedirect` (no-op for `.currentDevice`/`.noRedirect`/unrouted), reusing the same
+un-route path a manual change takes, so the per-app tap is torn down and a relaunch
+never auto-resumes streaming. `NativeBackend.handleAppTerminated` is now UNUSED
+(dead) — left in place for a later tidy-up rather than widening this diff into the
+`AppRouteConfiguring` protocol + conformances.
+
+**Open follow-up:** whole-system capture resume on the `.permissionLost` path
+(backend already started, so no re-`reconcile`) — minor, happens on the next
+selection change. And the dead `handleAppTerminated`/`handleAppLaunched` T4
+machinery could be removed.
 
 ## ⚠️ Gated live-verify recipe (ahh, signed build)
 

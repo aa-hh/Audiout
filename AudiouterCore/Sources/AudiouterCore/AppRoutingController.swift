@@ -88,6 +88,22 @@ public final class AppRoutingController {
         persist()
     }
 
+    /// Revert a route that currently redirects to a specific AirPlay DEVICE back
+    /// to `.noRedirect` — used when the routed app QUITS, so a redirect no longer
+    /// silently persists across the app's own quit/relaunch (product decision
+    /// 2026-07-22): relaunching the app won't auto-resume streaming to a speaker;
+    /// the user re-picks it deliberately. No-op for a `.noRedirect`/`.currentDevice`
+    /// route (only an involuntary device redirect is reset — a "play on this Mac"
+    /// pick is left alone) or a bundle with no route, so it's safe to call on
+    /// every app termination. Mirrors ``handleDeviceUnavailable(id:)``'s
+    /// involuntary reset-to-`.noRedirect`, and reuses the same un-route path a
+    /// manual change takes (persist → `onRoutesDidChange`).
+    public func resetDeviceRoute(bundleID: String) {
+        guard let i = index(of: bundleID), appRoutes[i].destination.isDeviceRoute else { return }
+        appRoutes[i].destination = .noRedirect
+        persist()
+    }
+
     // MARK: Derived state
 
     /// Count of routes redirected away to a specific AirPlay device (PLAN §B —

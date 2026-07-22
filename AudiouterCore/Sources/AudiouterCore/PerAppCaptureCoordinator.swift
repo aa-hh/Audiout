@@ -722,6 +722,16 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     // MARK: Tap creation + ASBD read
 
     private func createTapAndReadFormat(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws {
+        // COLD-PROMPT GUARD (see ``SystemAudioCaptureTCC``): creating a process
+        // tap is what surfaces the macOS audio-capture prompt. A per-app route
+        // restored at launch must NOT trigger that prompt cold — only the Setup
+        // screen's explicit "Allow…" may. Refuse until the grant is already in
+        // place; the coordinator lands this as a retryable failure and re-attempts
+        // once the route is re-applied after the user grants in Setup.
+        guard SystemAudioCaptureTCC.isGranted() else {
+            throw PerAppCaptureError.tapCreationFailed(
+                reason: "audio capture not authorized — awaiting the Setup grant")
+        }
         let processObjectID = try Self.translateProcessObject(pid: pid, bundleID: bundleID)
 
         // Stereo mixdown of just this one process (dev/audiocap TapEngine

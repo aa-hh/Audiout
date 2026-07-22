@@ -111,6 +111,42 @@ final class AppRoutingControllerTests: XCTestCase {
         XCTAssertEqual(before, after, "a no-op fallback must not rewrite the store")
     }
 
+    // MARK: resetDeviceRoute — a per-app redirect resets when the routed app quits
+
+    func testResetDeviceRouteRevertsDeviceRedirectToNoRedirectAndPersists() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "org.mozilla.firefox" }?.destination, .noRedirect,
+                       "a device redirect must revert to No Redirect when the routed app quits")
+        let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
+        XCTAssertEqual(reloaded.appRoutes.first { $0.bundleID == "org.mozilla.firefox" }?.destination, .noRedirect,
+                       "the reset must persist so a relaunch never auto-resumes streaming to the speaker")
+    }
+
+    func testResetDeviceRouteLeavesNonDeviceRoutesAndMissingBundlesUntouched() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")     // stays .noRedirect (default)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+        let fileURL = fileURL(in: dir)
+        let before = try Data(contentsOf: fileURL)
+
+        controller.resetDeviceRoute(bundleID: "com.apple.Music")    // already .noRedirect → no-op
+        controller.resetDeviceRoute(bundleID: "com.apple.Safari")   // .currentDevice is a deliberate pick → no-op
+        controller.resetDeviceRoute(bundleID: "com.unknown.app")    // no route → no-op
+
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination, .currentDevice,
+                       "a 'play on this Mac' pick is deliberate — it must survive the app quitting")
+        let after = try Data(contentsOf: fileURL)
+        XCTAssertEqual(before, after, "no-op resets must not rewrite the store")
+    }
+
     // MARK: Duplicate addRoute is a no-op
 
     func testDuplicateAddRouteIsNoOp() {

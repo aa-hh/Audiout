@@ -98,6 +98,9 @@ final class NativeBackendTests: XCTestCase {
         private(set) var maxConcurrentPerDevice = 0
 
         private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
+        private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
+
+        var dacpID: UInt64 { 0x1122334455667788 }
 
         func start() async throws { lock.withLock { started = true } }
         func stop() async { lock.withLock { stopped = true } }
@@ -182,10 +185,21 @@ final class NativeBackendTests: XCTestCase {
                 lock.withLock { self.continuation = continuation }
             }
         }
+        func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
+            AsyncStream { continuation in
+                lock.withLock { self.remoteContinuation = continuation }
+            }
+        }
         /// Push a synthetic out-of-band transition through the state stream.
         func pushState(_ id: OutputID, _ state: OutputState) {
             let c = lock.withLock { continuation }
             c?.yield((id, state))
+        }
+        /// Push a synthetic remote-control event (a speaker transport key or a
+        /// change to the speaker's own volume) through the remote-event stream.
+        func pushRemoteEvent(_ event: RemoteEvent) {
+            let c = lock.withLock { remoteContinuation }
+            c?.yield(event)
         }
 
         // Thread-safe snapshots for assertions.
@@ -259,6 +273,17 @@ final class NativeBackendTests: XCTestCase {
     /// the app (media keys, the Sound menu, a default-output-device switch).
     /// Mutable state is guarded by `lock`, matching `SpyEngine`/`FakeCapture`'s
     /// discipline.
+    /// A minimal thread-safe `Int` box, so a test can script the injected
+    /// `connectVolume` provider across reconnect episodes (the seed reads it on
+    /// `stateQueue`, off the test's thread).
+    private final class LockedInt: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int
+        init(_ v: Int) { value = v }
+        func get() -> Int { lock.withLock { value } }
+        func set(_ v: Int) { lock.withLock { value = v } }
+    }
+
     private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _volume: Int?
@@ -350,6 +375,7 @@ final class NativeBackendTests: XCTestCase {
     /// explicitly to get a handle on it.
     private func makeBackend(
         systemVolume: SystemVolumeControlling = FakeSystemVolume(),
+        connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil
@@ -358,7 +384,7 @@ final class NativeBackendTests: XCTestCase {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery,
-            systemVolume: systemVolume, resolvePID: resolvePID,
+            systemVolume: systemVolume, connectVolume: connectVolume, resolvePID: resolvePID,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture)
         return (backend, engine, discovery)
@@ -1316,12 +1342,16 @@ final class NativeBackendTests: XCTestCase {
     }
 
     /// Connecting a device with NO prior slider touch must push a real starting
-    /// volume to the engine, sourced from the Mac's CURRENT system output level.
-    /// Without it the engine's zero-initialized volume field leaves the session at
-    /// ≈ −30 dB (silent) until the first manual slider drag — the −30 dB trap.
-    func testConnectSeedsEngineVolumeFromSystemLevel() async {
-        let systemVolume = FakeSystemVolume(volume: 42)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+    /// volume to the engine, sourced from the CONFIGURED connect-volume default —
+    /// NOT the Mac's current system level (G1-N1: Mac speakers often run loud, so
+    /// inheriting the system level could BLAST a real AirPlay speaker on connect).
+    /// Without the seed at all, the engine's zero-initialized volume field leaves
+    /// the session at ≈ −30 dB (silent) until the first slider drag — the −30 dB
+    /// trap. The system level here is set deliberately LOUD (90) to prove the seed
+    /// ignores it.
+    func testConnectSeedsEngineVolumeFromConfiguredDefault() async {
+        let systemVolume = FakeSystemVolume(volume: 90)   // loud — must NOT be inherited
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume, connectVolume: { 35 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1334,17 +1364,21 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
-        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.42) < 0.001 },
-                      "connect must seed the engine volume from the system level (42% → 0.42)")
-        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 42,
-                       "the model row must reflect the seeded level")
+        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 },
+                      "connect must seed the engine volume from the configured connect default (35% → 0.35), not the loud system level")
+        XCTAssertFalse(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.90) < 0.001 },
+                       "the loud system level (90%) must NEVER reach the wire on connect")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 35,
+                       "the model row must reflect the seeded connect default")
     }
 
-    /// When the system output volume is unreadable (`currentVolume()` == nil), the
-    /// connect seed is 0% — deliberate silence, NOT a guessed non-zero level.
-    func testConnectSeedsZeroWhenSystemVolumeUnreadable() async {
+    /// The seed must NEVER be 0/silent — the −30 dB trap — even when the configured
+    /// connect volume is 0 (a bad/out-of-range provider value) AND the system
+    /// volume is unreadable. The seed clamps to `AppSettings.minConnectVolume`, so
+    /// what reaches the wire is always audible (> 0).
+    func testConnectSeedIsNeverSilentEvenWhenConfiguredZero() async {
         let systemVolume = FakeSystemVolume(volume: nil)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume, connectVolume: { 0 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1357,18 +1391,20 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
-        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 },
-                      "an unreadable system volume must seed 0%, not a guess")
-        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 0)
+        XCTAssertTrue(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 > 0.0 },
+                      "the connect seed must be audible (> 0) — never the 0/silent −30 dB trap")
+        XCTAssertFalse(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 },
+                       "a 0 configured value must be clamped up to the audible floor, never pushed as silence")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, AppSettings.minConnectVolume,
+                       "the model must reflect the clamped audible floor, not 0")
     }
 
     /// The carve-out: a buffer-size change tears every streaming device down and
     /// re-adds it through the SAME add-success branch a reconnect uses — but it is
-    /// NOT a reconnect. The user's in-session level (80%) must survive; the system
-    /// level (30%) must NOT leak onto the re-added session.
-    func testApplyStartBufferPreservesInSessionVolumeNotSystemLevel() async {
-        let systemVolume = FakeSystemVolume(volume: 30)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+    /// NOT a reconnect. The user's in-session level (80%) must survive; the connect
+    /// default (30%) must NOT leak onto the re-added session.
+    func testApplyStartBufferPreservesInSessionVolumeNotConnectDefault() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 30 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1380,15 +1416,15 @@ final class NativeBackendTests: XCTestCase {
         backend.setOutputSet([device.id])
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
-        // User dials in an in-session level distinct from the system level.
+        // User dials in an in-session level distinct from the connect default.
         backend.setVolume(80, for: device.id)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
 
         await backend.applyStartBuffer(ms: 1500)
 
-        // If the re-add had reseeded from the system level, the model would read 30.
+        // If the re-add had reseeded from the connect default, the model would read 30.
         XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 80,
-                       "a buffer change must preserve the in-session level, not reset to the system level")
+                       "a buffer change must preserve the in-session level, not reset to the connect default")
         XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.80) < 0.001 } ?? false,
                       "the re-push after the buffer set must restore the in-session level (0.80)")
     }
@@ -1401,10 +1437,9 @@ final class NativeBackendTests: XCTestCase {
     /// The device had a distinct in-session level (75) before it dropped; if the
     /// auto-recovery seed were (wrongly) suppressed like the buffer carve-out,
     /// the model/engine would still read 75 after the reconnect instead of the
-    /// current system level (42).
+    /// connect default (35).
     func testAutoRecoveryReconnectReseedsEngineVolume() async {
-        let systemVolume = FakeSystemVolume(volume: 42)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1417,7 +1452,7 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
 
-        // User dials in an in-session level distinct from the system level.
+        // User dials in an in-session level distinct from the connect default.
         backend.setVolume(75, for: device.id)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 75 }
 
@@ -1431,10 +1466,10 @@ final class NativeBackendTests: XCTestCase {
         engine.pushState(device.outputID, .connected)
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
 
-        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 42,
-                       "an auto-recovery reconnect must reseed from the system level (42), not preserve the pre-drop in-session level (75)")
-        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.42) < 0.001 } ?? false,
-                      "the auto-recovery reconnect must push the system volume to the engine, not skip the seed")
+        XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 35,
+                       "an auto-recovery reconnect must reseed from the connect default (35), not preserve the pre-drop in-session level (75)")
+        XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 } ?? false,
+                      "the auto-recovery reconnect must push the connect default to the engine, not skip the seed")
     }
 
     /// Regression (live Sonos Move test, 2026-07-17): the vendored C dispatcher
@@ -1458,8 +1493,7 @@ final class NativeBackendTests: XCTestCase {
     /// asserts the engine sees at most ONE `setVolume` call for the device, not
     /// two, no matter which of the two add-success sites gets there first.
     func testNormalConnectDoesNotDoubleSeedEngineVolumeAcrossBothSites() async {
-        let systemVolume = FakeSystemVolume(volume: 55)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 55 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1497,7 +1531,7 @@ final class NativeBackendTests: XCTestCase {
 
     /// Regression (live Move 2 test, 2026-07-17): a device connected, disconnected,
     /// and reconnected MULTIPLE times in one running session must reseed from the
-    /// CURRENT system volume on EVERY reconnect — not just the first. The original
+    /// CURRENT connect volume on EVERY reconnect — not just the first. The original
     /// bug: the connect-time seed was de-duped via a hand-maintained `volumeSeeded`
     /// set that had to be cleared at every teardown path; the FIRST reconnect
     /// reseeded, but a SECOND disconnect→reconnect cycle kept the first reconnect's
@@ -1506,14 +1540,18 @@ final class NativeBackendTests: XCTestCase {
     /// true edge — the connection ground truth already cleared at every teardown —
     /// so a missed/reordered clear can't silently skip a reseed.
     ///
-    /// This drives TWO full disconnect / volume-change / reconnect cycles with the
+    /// This drives TWO full disconnect / setting-change / reconnect cycles with the
     /// dispatcher's state-stream mirror ACTIVE (every `addOutput` also yields a
     /// `.connected` on the state stream, exactly as the vendored dispatcher does —
     /// so BOTH add-success seed sites are exercised on every connect), and asserts
-    /// each reconnect reflects the new system level, on both the model and the wire.
-    func testSecondReconnectReseedsFromCurrentSystemVolume() async {
-        let systemVolume = FakeSystemVolume(volume: 50)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+    /// each reconnect reflects the CURRENT configured connect volume (scripted via a
+    /// mutable box between episodes), on both the model and the wire. It is the
+    /// `added`-edge de-dup — not the seed source — that this guards, so it now
+    /// drives the connect-volume setting rather than the (no-longer-inherited)
+    /// system level.
+    func testSecondReconnectReseedsFromCurrentConnectVolume() async {
+        let connectVolume = LockedInt(50)
+        let (backend, engine, discovery) = makeBackend(connectVolume: { connectVolume.get() })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -1527,10 +1565,10 @@ final class NativeBackendTests: XCTestCase {
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: { discovery.fire(.appeared(device)) }
 
-        // Drives one connect (setOutputSet ON) at a scripted system level and
+        // Drives one connect (setOutputSet ON) at a scripted connect volume and
         // returns once the seed for THIS episode has landed on model + engine.
         func connect(at level: Int) async {
-            systemVolume.scriptVolume(level)
+            connectVolume.set(level)
             let baselineVolumeCalls = engine.volumeCalls.count
             backend.setOutputSet([device.id])
             await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
@@ -1548,17 +1586,17 @@ final class NativeBackendTests: XCTestCase {
         // Initial connect at 50.
         await connect(at: 50)
         XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 50,
-                       "initial connect must seed the current system level (50)")
+                       "initial connect must seed the current connect volume (50)")
 
-        // Cycle 1: disconnect, raise system volume to 75, reconnect.
+        // Cycle 1: disconnect, raise the connect volume to 75, reconnect.
         await disconnect()
         await connect(at: 75)
         XCTAssertEqual(backend.devices.first { $0.id == device.id }?.volume, 75,
-                       "the FIRST reconnect must reseed from the new system level (75)")
+                       "the FIRST reconnect must reseed from the new connect volume (75)")
         XCTAssertTrue(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.75) < 0.001 } ?? false,
                       "the first reconnect must push 0.75 to the engine")
 
-        // Cycle 2: disconnect, DROP system volume to 25, reconnect. THIS is the
+        // Cycle 2: disconnect, DROP the connect volume to 25, reconnect. THIS is the
         // exact step that regressed live — the second reconnect kept 75.
         await disconnect()
         await connect(at: 25)
@@ -1570,12 +1608,11 @@ final class NativeBackendTests: XCTestCase {
 
     /// Requirement: a device muted BEFORE it (re)connects must stay effective-0
     /// on the wire — the connect-time seed must never audibly un-mute it — while
-    /// its stashed/intended level is updated to track the CURRENT system volume,
+    /// its stashed/intended level is updated to track the CURRENT connect volume,
     /// so a later unmute restores to that level rather than whatever the device
     /// happened to hold before it was muted.
     func testMutedDeviceStaysEffectiveZeroAfterConnectTimeSeed() async {
-        let systemVolume = FakeSystemVolume(volume: 60)
-        let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 60 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4063,6 +4100,225 @@ final class NativeBackendTests: XCTestCase {
             if condition() { return }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+    }
+
+    // MARK: Remote-control stream (speaker transport keys + the speaker's own volume)
+
+    /// The speaker changing its OWN volume moves that one device's slider: a
+    /// `RemoteEvent.volume(level: 0.5)` becomes a `deviceUpdated` with volume 50
+    /// for that id (0.0…1.0 → 0…100).
+    func testSpeakerVolumeMovesThatDeviceSlider() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Discover the device first so the id↔OutputID mapping exists.
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // 0.8 → 80, deliberately different from a discovered device's default 50
+        // (mapDiscovered) so the change actually emits rather than being de-duped.
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
+        } after: { engine.pushRemoteEvent(.volume(device.outputID, level: 0.8)) }
+
+        let updated = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
+        }
+        XCTAssertEqual(updated.last?.volume, 80, "the speaker's knob should move its slider to 80")
+    }
+
+    /// A volume report for an OutputID the backend never mapped is dropped — it
+    /// must not fabricate a device or crash. We prove it by confirming a LATER
+    /// event for a real device still flows (the stream wasn't wedged) and no
+    /// deviceUpdated arrived for the bogus id.
+    func testSpeakerVolumeForUnknownOutputIsIgnored() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        let bogus = OutputID(rawValue: 0xDEADBEEF)
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            engine.pushRemoteEvent(.volume(bogus, level: 0.9)) // dropped
+            discovery.fire(.appeared(device))                  // still flows
+        }
+
+        XCTAssertFalse(
+            events.contains { if case .deviceUpdated = $0 { return true } else { return false } },
+            "an unknown-output volume must not produce any deviceUpdated"
+        )
+    }
+
+    /// Each transport key pressed on the speaker surfaces the matching
+    /// device-agnostic `remoteTransport` backend event (play/pause/next/previous).
+    func testSpeakerTransportKeysEmitRemoteTransport() async {
+        let (backend, engine, _) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        @Sendable func sawTransport(_ events: [BackendEvent], _ command: RemoteTransportCommand) -> Bool {
+            events.contains { if case .remoteTransport(let c) = $0 { return c == command } else { return false } }
+        }
+
+        let events = await collect(from: backend) { events in
+            sawTransport(events, .playPause) && sawTransport(events, .next) && sawTransport(events, .previous)
+        } after: {
+            engine.pushRemoteEvent(.transport(.playPause))
+            engine.pushRemoteEvent(.transport(.next))
+            engine.pushRemoteEvent(.transport(.previous))
+        }
+
+        XCTAssertTrue(sawTransport(events, .playPause))
+        XCTAssertTrue(sawTransport(events, .next))
+        XCTAssertTrue(sawTransport(events, .previous))
+    }
+
+    // MARK: DACP volume routing (a volume change made ON THE SPEAKER)
+
+    /// A DACP volume report whose Active-Remote token matches a device's id (low
+    /// 32 bits) moves that device's slider.
+    func testDacpVolumeMovesMatchingDeviceSlider() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Active-Remote is the low 32 bits of the device id (airplay.c). 0.8 → 80,
+        // deliberately != the discovered default of 50 so the change actually emits.
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
+        } after: { backend.applyDacpVolume(activeRemote: token, level: 0.8) }
+
+        let updated = events.compactMap { event -> Device? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
+        }
+        XCTAssertEqual(updated.last?.volume, 80, "a DACP volume for this speaker's token moves its slider")
+    }
+
+    /// A DACP volume for a token that matches no known device is dropped (no
+    /// deviceUpdated), while a real device still flows — the stream isn't wedged.
+    func testDacpVolumeForUnknownTokenIsIgnored() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            backend.applyDacpVolume(activeRemote: 0xDEADBEEF, level: 0.9) // no such token
+            discovery.fire(.appeared(device))
+        }
+        XCTAssertFalse(
+            events.contains { if case .deviceUpdated = $0 { return true } else { return false } },
+            "an unknown DACP token must not move any slider"
+        )
+    }
+
+    /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
+    /// fire-and-forget through a Task, so it's not synchronous with the apply).
+    private func waitForVolumePush(
+        _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 3
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if engine.volumeCalls.contains(where: { $0.0 == outputID && abs($0.1 - value) < 0.001 }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
+    }
+
+    /// Closing the loop: a speaker-requested volume must be written BACK out to
+    /// the engine (→ SET_PARAMETER to the receiver), not just move our slider.
+    /// The sender owns AirPlay volume — without the write-back the speaker's own
+    /// baseline never advances, which is exactly the first-live-test bug (a full
+    /// swipe moved a few points and every new swipe re-based on the stale level).
+    func testDacpVolumeIsPushedBackToTheEngine() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+
+        let pushed = await waitForVolumePush(engine, device.outputID, 0.8)
+        XCTAssertTrue(pushed, "a speaker-requested volume must be pushed back to the engine so the speaker actually changes level")
+    }
+
+    /// A receiver reflecting our own write back (a value equal to what the slider
+    /// already holds) must NOT trigger another push — that would ping-pong
+    /// forever. The same-value guard in `setSpeakerVolume` breaks the cycle.
+    func testDacpVolumeEchoOfCurrentValueDoesNotRePush() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        _ = await waitForVolumePush(engine, device.outputID, 0.8)
+        let countAfterFirst = engine.volumeCalls.count
+
+        // The "echo": same level again. Give any (wrong) push time to land.
+        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(engine.volumeCalls.count, countAfterFirst,
+                       "an echo of the current value must not push again (feedback loop)")
+    }
+
+    /// Relative `volumeup`/`volumedown` verbs step from the level the app
+    /// CURRENTLY holds, so consecutive presses accumulate instead of re-basing:
+    /// 50 → 52 → 54 → 52 with the ±2-point step.
+    func testDacpVolumeStepsAccumulate() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let step = NativeBackend.speakerVolumeStep
+        let deviceID = device.id
+        let volumesOf: @Sendable ([BackendEvent]) -> [Int] = { events in
+            events.compactMap { event -> Int? in
+                if case .deviceUpdated(let d) = event, d.id == deviceID { return d.volume } else { return nil }
+            }
+        }
+        let events = await collect(from: backend) { events in
+            volumesOf(events).count >= 3
+        } after: {
+            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(activeRemote: token, direction: -1)
+        }
+
+        let volumes = volumesOf(events)
+        XCTAssertEqual(volumes, [50 + step, 50 + 2 * step, 50 + step],
+                       "steps must accumulate from the current level, up then back down")
     }
 }
 

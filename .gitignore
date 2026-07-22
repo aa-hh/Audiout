@@ -14,6 +14,12 @@ dev/owntone-src/
 AirPlayEngine/.build/
 AirPlayEngine/.swiftpm/
 
+# Minimal audio-only ffmpeg (ALAC encoder + swresample), a GENERATED build
+# artifact produced by scripts/build-min-ffmpeg.sh — arch/version-specific and
+# multi-MB, so it is rebuilt on the build machine rather than committed. When
+# absent, AirPlayEngine/Package.swift falls back to Homebrew's fat ffmpeg.
+AirPlayEngine/vendor/
+
 # SwiftPM build artifacts for the other local packages (same reasoning).
 AudiouterCore/.build/
 AudiouterCore/.swiftpm/

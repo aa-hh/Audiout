@@ -46,8 +46,10 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
-  `.app` with a stable bundle id and ad-hoc signature. Required for the `native`
-  backend's TCC-gated process tap; a bare `swift run` loses the grant.
+  `.app` with a stable bundle id, signed with a Developer ID identity when one
+  is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),
+  else ad-hoc. Required for the `native` backend's TCC-gated process tap; a
+  bare `swift run` loses the grant.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
 
@@ -74,6 +76,8 @@ symbol you cannot find in source, believe the source and fix the doc.
   look as though it had never existed. Also check `git fsck --unreachable`,
   `git stash list`, the reflog, and the other worktrees. Quote every path: this
   repo's own path contains a space, which silently breaks unquoted loops.
+- **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
+  guidance on scoping tests with `--filter`.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 

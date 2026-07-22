@@ -1,5 +1,19 @@
 import Foundation
 
+/// A transport command the user pressed on a connected speaker's OWN playback
+/// controls (or its companion app), surfaced so the app can drive the Mac's
+/// media playback in response. Backend-neutral by design — the native backend
+/// maps the engine's own command type onto this so the base ``OutputBackend``
+/// seam stays free of engine types (only ``NativeBackend`` emits it).
+///
+/// macOS exposes a single Play/Pause *toggle* media key, so play and pause both
+/// arrive as ``playPause``.
+public enum RemoteTransportCommand: Sendable, Equatable {
+    case playPause
+    case next
+    case previous
+}
+
 /// Something that happened in the backend that the UI should react to.
 ///
 /// The backend is the source of truth; it pushes these and the UI updates. This
@@ -94,6 +108,14 @@ public enum BackendEvent: Sendable, Equatable {
     /// but exposes `test_emitRoutedApps(deviceID:appNames:)` so offline
     /// demos/tests can exercise the UI without a real per-app-routing backend.
     case routedApps(deviceID: String, appNames: [String])
+
+    /// The user pressed a transport key (play/pause/next/previous) on a connected
+    /// **speaker itself** — the AirPlay reverse event channel reported it. Like
+    /// ``systemVolumeChanged(volume:)`` this isn't about a `Device`: transport
+    /// targets the Mac's single media session, so `AppDelegate` turns it into a
+    /// Mac media key and the frontmost player (Music, Spotify, a browser, …)
+    /// responds. Only ``NativeBackend`` emits it.
+    case remoteTransport(RemoteTransportCommand)
 }
 
 /// The seam between the app and wherever audio actually goes.

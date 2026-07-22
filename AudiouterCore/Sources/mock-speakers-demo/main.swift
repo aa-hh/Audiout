@@ -7,14 +7,15 @@ import Foundation
 //
 //     swift run mock-speakers-demo
 //
-// Talks only to `OutputBackend`, resolved via `makeBackend()`: an explicit
-// arg (none here) → the AIRPLAY_BACKEND env var (mock|owntone) → default
-// mock. See dev/README.md. `AIRPLAY_BACKEND=owntone` currently traps —
-// `OwnToneBackend` is a stub whose methods `assertionFailure` until 0f/Phase 1.
+// Talks only to `OutputBackend`. This is the *mock*-speakers demo, so it pins
+// `.mock` explicitly rather than resolving from the environment: the app-wide
+// default is now `.native` (real speakers), and a demo whose whole point is
+// fabricated devices must not silently spin up the native backend. See
+// dev/README.md.
 //
 // Ctrl-C to quit (it also auto-exits after ~8s).
 
-let backend = makeBackend()
+let backend = makeBackend(.mock)
 
 func stamp() -> String {
     let ms = Int(Date().timeIntervalSince1970 * 1000) % 100000
@@ -51,6 +52,9 @@ func describe(_ event: BackendEvent) -> String? {
         // Only `NativeBackend` emits this (T4 relaunch fix); under `mock` it
         // never fires. Handled so the switch stays exhaustive.
         return "♪ app running  \(bundleID) isRunning:\(isRunning)"
+    case .remoteTransport(let command):
+        // Also native-only (a key pressed on the speaker itself); never under mock.
+        return "▶ remote key  \(command) (from a speaker)"
     }
 }
 

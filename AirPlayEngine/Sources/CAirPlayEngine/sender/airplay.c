@@ -3315,8 +3315,10 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
       goto error;
     }
 
-  // Reverse connection, used to receive playback events from device
-  ret = airplay_events_listen(session->devname, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
+  // Reverse connection, used to receive playback events from device (transport
+  // keys + the speaker's own volume). device_id is threaded through so an inbound
+  // volume change routes to the right speaker (engine-added, speaker-input task).
+  ret = airplay_events_listen(session->devname, session->device_id, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
   if (ret < 0)
     {
       DPRINTF(E_WARN, L_AIRPLAY, "Could not connect to '%s' events port %u, proceeding anyway\n", session->devname, session->events_port);

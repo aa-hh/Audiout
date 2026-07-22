@@ -62,8 +62,86 @@ fi
 # Missing checker or no python3 => silently skip. A hook that errors out on an
 # unrelated machine is worse than a hook that isn't there.
 checker="$hook_dir/agents-md-symbol-check.py"
-[ -f "$checker" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-python3 "$checker" || true
+if [ -f "$checker" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$checker" || true
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 3 (WARN-ONLY): new test code must not reach cross-process shared state.
+#
+# `swift test --parallel` (the default full-run command — see
+# AudiouterCore/AGENTS.md) runs each test CLASS in its own process. Processes
+# share nothing in memory, but they DO share `UserDefaults.standard` (one
+# on-disk plist) and a fixed `FileManager.default.temporaryDirectory` path. Two
+# suites writing the same defaults key or temp filename race and flake. The
+# blessed fix is to subclass `IsolatedTestCase` (Tests/AudiouterCoreTests/
+# IsolatedTestCase.swift) and use `scratchDir` / `isolatedDefaults` /
+# `uniqueName(_:)` instead of the shared globals.
+#
+# This scans only the ADDED lines of staged test files, so it never nags about
+# pre-existing code — only newly introduced reaches. A line that genuinely must
+# touch a global (e.g. AppKit's `setFrameAutosaveName`, which always writes
+# `.standard`) is exempted with a trailing `isolation-ok` comment.
+staged_tests=$(git diff --cached --name-only --diff-filter=AM -- '*Tests*.swift' 2>/dev/null)
+iso_hits=""
+for f in $staged_tests; do
+    case "$f" in */IsolatedTestCase.swift) continue ;; esac
+    added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
+    bad=$(printf '%s\n' "$added" \
+        | grep -Ei 'UserDefaults\.standard|FileManager\.default\.temporaryDirectory' \
+        | grep -vi 'isolation-ok')
+    if [ -n "$bad" ]; then
+        iso_hits="$iso_hits\n  $f:\n$(printf '%s\n' "$bad" | sed 's/^+/    /')"
+    fi
+done
+if [ -n "$iso_hits" ]; then
+    echo "" >&2
+    echo "  NOTE (non-blocking): new test lines reach cross-process shared state." >&2
+    echo "  Under 'swift test --parallel' these can flake. Prefer subclassing" >&2
+    echo "  IsolatedTestCase and using scratchDir / isolatedDefaults / uniqueName()." >&2
+    printf "%b\n" "$iso_hits" >&2
+    echo "" >&2
+    echo "  If a line truly must touch a global (e.g. AppKit setFrameAutosaveName)," >&2
+    echo "  append a trailing 'isolation-ok' comment to silence this." >&2
+    echo "" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 4 (BLOCKING): the full test suite must pass before Swift code is
+# committed. THE coverage guarantee — nothing broken gets committed, and since
+# everything that reaches main was committed here first, main stays green.
+#
+# Agents may run `swift test --filter <Suite>` while iterating (fast); a
+# too-narrow filter can miss a suite the change broke, but that risk is absorbed
+# HERE — no commit touching AudiouterCore Swift sources/tests lands until the
+# WHOLE suite (parallelised) passes. So filtering can only ever cost one extra
+# fix cycle at commit time.
+#
+# Scope: only runs when staged files include AudiouterCore Swift source/test
+# files. Docs/config/other commits skip it (no code changed → nothing to gate).
+#
+# Pathspec note: a bare directory pathspec + `grep '\.swift$'` — NOT
+# `Sources/**/*.swift`, whose `**` must span ≥1 directory and so silently
+# misses a file sitting directly in Sources/ or Tests/ (verified empirically).
+#
+# Escape hatch: `git commit --no-verify` for a deliberate emergency, same as
+# the other guards. Missing `swift` toolchain => skip (don't wedge a machine
+# that can't build).
+staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
+    'AudiouterCore/Sources/' 'AudiouterCore/Tests/' 2>/dev/null | grep '\.swift$')
+if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    echo "" >&2
+    echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
+    echo "  (swift test --parallel) before commit. ~70s warm; --no-verify to skip." >&2
+    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel >&2 ); then
+        echo "" >&2
+        echo "  REFUSED: full test suite failed. Fix the failures" >&2
+        echo "  (or 'git commit --no-verify' for a real emergency)." >&2
+        echo "" >&2
+        exit 1
+    fi
+    echo "  Guard 4: full suite passed." >&2
+fi
 
 exit 0

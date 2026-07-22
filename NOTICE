@@ -60,17 +60,38 @@ libraries into the app does trigger LGPL redistribution obligations
 that did not apply when they were only dynamically loaded from a
 user-managed Homebrew install.
 
-The compliance mechanism used: each library ships as its own separate,
-individually replaceable `.dylib` file inside `Contents/Frameworks/` —
-never statically merged into AirPlayEngine's or Audiouter's own binary.
-This is intended to satisfy LGPL §6's requirement that a user be able to
-relink or substitute a compatible version of the library. This is not a
-legal guarantee; it is the mechanism this project relies on for
-compliance.
+The compliance mechanism used for the dynamically-linked libraries:
+each library ships as its own separate, individually replaceable
+`.dylib` file inside `Contents/Frameworks/` — never statically merged
+into AirPlayEngine's or Audiouter's own binary. This is intended to
+satisfy LGPL §6's requirement that a user be able to relink or
+substitute a compatible version of the library. This is not a legal
+guarantee; it is the mechanism this project relies on for compliance.
 
-Separately, the whole app is already GPL-2.0-or-later (per the GPL
-sender cluster above), so a GPL-built ffmpeg is license-compatible
-either way — bundling ffmpeg does not introduce any GPL/LGPL conflict.
+ffmpeg — minimal, audio-only, and (in a release build) statically
+linked. AirPlayEngine only ever asks ffmpeg to ENCODE captured PCM to
+Apple Lossless (ALAC); it never decodes video or any media file. A
+release build therefore replaces Homebrew's full ffmpeg with a minimal
+audio-only build produced by `scripts/build-min-ffmpeg.sh` (configured
+`--disable-everything --enable-encoder=alac --enable-swresample`, no
+`--enable-gpl` and no GPL-only components — so it is LGPL-2.1-or-later).
+This minimal ffmpeg is linked STATICALLY into AirPlayEngine, which means
+its transitive video-codec dependencies (x264, x265, libvpx, dav1d,
+SvtAv1Enc) and unused audio codecs (lame, opus) — and the OpenSSL
+(libcrypto/libssl) that Homebrew's network-enabled ffmpeg pulls in — are
+NO LONGER present in the shipped app at all. Because ffmpeg is
+statically linked here rather than shipped as a replaceable `.dylib`,
+the LGPL §6 relink obligation is satisfied on a different basis: the
+whole app is GPL-2.0-or-later with complete corresponding source
+available (including `scripts/build-min-ffmpeg.sh`, which reproducibly
+builds the exact ffmpeg from pinned upstream source), so a user can
+rebuild and re-link the entire work — which meets and exceeds LGPL §6's
+source-availability alternative to the shared-library mechanism. A GPL
+build of ffmpeg would be license-compatible too, since the whole app is
+already GPL-2.0-or-later; bundling ffmpeg introduces no GPL/LGPL
+conflict either way. If the minimal build is absent, AirPlayEngine falls
+back to linking Homebrew's ffmpeg dylibs, which are then bundled by the
+`otool -L` walk (the fat behaviour described below).
 
 Libraries, listed for attribution and so contributors know what to
 `brew install` for a dev build:
@@ -79,15 +100,15 @@ Libraries, listed for attribution and so contributors know what to
 - libsodium (ISC)
 - libgcrypt, libgpg-error (LGPL-2.1-or-later)
 - libplist (LGPL-2.1-or-later)
-- ffmpeg (LGPL-2.1-or-later / GPL-2.0-or-later depending on build
-  configuration) — libavcodec, libavutil, libswresample
+- ffmpeg (LGPL-2.1-or-later; minimal audio-only build) — libavcodec
+  (ALAC encoder only), libavutil, libswresample
 
-Note: the exact set of files that land in `Contents/Frameworks/` —
-especially ffmpeg's transitive dependencies (libraries such as x264,
-aom, dav1d, or others depending on how ffmpeg was built) — is
-determined by an `otool -L` dependency walk performed at build time by
-`scripts/make-app.sh`, and can vary with the Homebrew version used to
-build. This NOTICE describes the top-level libraries and the bundling
-mechanism; the authoritative exact file list for any given build is
-whatever is actually present in that build's `Contents/Frameworks/`,
-not a list frozen here.
+Note: when the fat Homebrew ffmpeg fallback is used, the exact set of
+files that land in `Contents/Frameworks/` — especially ffmpeg's
+transitive dependencies (libraries such as x264, aom, dav1d, or others
+depending on how ffmpeg was built) — is determined by an `otool -L`
+dependency walk performed at build time by `scripts/make-app.sh`, and
+can vary with the Homebrew version used to build. This NOTICE describes
+the top-level libraries and the bundling mechanism; the authoritative
+exact file list for any given build is whatever is actually present in
+that build's `Contents/Frameworks/`, not a list frozen here.

@@ -121,6 +121,30 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudiouterSharedUI.DeviceIcon`, not here.
+- **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
+  not the full suite (874 tests). Scope to the test suite(s) touched by your
+  change, e.g. `swift test --filter PopoverControllerTests`.
+- **The full pre-commit run is `swift test --parallel`** (~70s vs ~124s for a
+  bare serial `swift test`). It parallelizes at the test-CLASS level: each
+  suite runs in its own process, so tests must not race on cross-process shared
+  state.
+- **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
+  Guard 4 runs the full `swift test --parallel` whenever a commit's staged
+  files touch AudiouterCore Swift sources/tests, and blocks the commit if it
+  fails. So a too-narrow filter in the loop can never ship a regression — it
+  only costs one extra fix cycle at commit. Everything that reaches `main` was
+  committed through this gate, so `main` stays green. Filtering in the loop is
+  a convention (this doc), not machine-enforced; `--no-verify` skips the gate
+  for a deliberate emergency.
+- **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
+  each suite its own process, two suites that both write `UserDefaults.standard`
+  or the same `FileManager.default.temporaryDirectory` path race and flake.
+  Subclass `IsolatedTestCase` (`Tests/AudiouterCoreTests/IsolatedTestCase.swift`)
+  and use `scratchDir` (per-test temp dir), `isolatedDefaults` (per-test suite),
+  or `uniqueName(_:)` (for APIs like `NSWindow.setFrameAutosaveName` that always
+  write `.standard`) instead of the shared globals. `.githooks/pre-commit`
+  Guard 3 warns when a newly added test line reaches those globals; a line that
+  genuinely must touch one takes a trailing `isolation-ok` comment.
 
 ## Map
 
@@ -148,6 +172,6 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SetupModel` | Brain of the first-run permission-priming flow (AppKit-free): per-permission `PermissionStatus`, PTP helper `PTPHelperStatus`, runs the injected probes, persists `AppSettings.hasCompletedSetup`, gates auto-present via `shouldPresentOnLaunch(settings:backendKind:)` (native only). UI = `AudiouterOnboardingUI`. |
 | `AudioCapturePermissionProbing` / `CoreAudioTonePermissionProbe` | Seam + impl that BOTH triggers and verifies the system-audio grant — a denied tap returns `noErr`+zeros, so it plays a muted in-process tone, taps our OWN process, and reads RMS. **Gated on live TCC verify** (`dev/notes/onboarding-setup-brief.md`). |
 | `LocalNetworkPriming` / `LocalNetworkPrimer` | Seam + impl: a brief `NWBrowser` for `_airplay._tcp` that fires the Local Network prompt (no verify API exists — TN3179). |
-| `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged, see `claude/speaker-input-responsiveness-b8123f`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
+| `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |

@@ -89,7 +89,8 @@ public final class MixerWindowController: NSWindowController {
 
     public init(groupController: GroupController,
                appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
-               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
+               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
+               frameAutosaveName: NSWindow.FrameAutosaveName = "MixerWindow") {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
@@ -121,7 +122,7 @@ public final class MixerWindowController: NSWindowController {
         // left with the mixer pane — live-test feedback 2026-07-18). The split
         // view IS the window's content controller now — the sidebar item runs
         // the full window height; only the content item hosts the footer.
-        let (window, hasSavedFrame) = Self.makeContainer()
+        let (window, hasSavedFrame) = Self.makeContainer(autosaveName: frameAutosaveName)
         // `setFrameAutosaveName` (inside `makeContainer()`) already restored the
         // user's last frame into `window.frame` SYNCHRONOUSLY if one was saved —
         // capture it now, before `contentViewController` is assigned, because
@@ -194,7 +195,7 @@ public final class MixerWindowController: NSWindowController {
     /// type that hosts `contentViewController`; this controller only ever builds
     /// the window.
     ///
-    /// Returns whether a previously-saved frame under the "MixerWindow" autosave
+    /// Returns whether a previously-saved frame under the given autosave
     /// name was found and synchronously applied, so the caller knows whether
     /// it's safe to fall back to the default size + `center()` — a caller that
     /// unconditionally re-sizes/re-centers afterward silently throws the
@@ -209,7 +210,7 @@ public final class MixerWindowController: NSWindowController {
     /// reliably reports whether it found one. `setFrameAutosaveName` is called
     /// afterward purely to ARM ongoing autosave-on-move/resize for this window
     /// going forward; re-applying an already-restored frame is a harmless no-op.
-    private static func makeContainer() -> (window: NSWindow, hasSavedFrame: Bool) {
+    private static func makeContainer(autosaveName: NSWindow.FrameAutosaveName) -> (window: NSWindow, hasSavedFrame: Bool) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -217,8 +218,8 @@ public final class MixerWindowController: NSWindowController {
             defer: false
         )
         window.title = "Groups"
-        let hasSavedFrame = window.setFrameUsingName("MixerWindow")
-        window.setFrameAutosaveName("MixerWindow")
+        let hasSavedFrame = window.setFrameUsingName(autosaveName)
+        window.setFrameAutosaveName(autosaveName)
         // Summon onto the CURRENT Space (and over a fullscreen app) instead of
         // switching Spaces to the window's home — reopening a config window must
         // not yank the user out of what they're doing (window-panel.md M1).

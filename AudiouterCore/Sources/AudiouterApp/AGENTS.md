@@ -16,9 +16,10 @@ package layout, backends, and core types, see
   app needs must be wired explicitly; any action with no keyboard path needs
   a visible on-screen affordance.
 - **Backend is chosen once, from the environment.** `makeBackend()` reads
-  `AIRPLAY_BACKEND` (default `.mock`); the mock also reads
-  `AIRPLAY_MOCK_SCENARIO`. Everything downstream holds `OutputBackend`, never
-  a concrete type — run offline with `AIRPLAY_BACKEND=mock`.
+  `AIRPLAY_BACKEND` (default `.native`; the mock is opt-in only, via
+  `AIRPLAY_BACKEND=mock`, which also reads `AIRPLAY_MOCK_SCENARIO`).
+  Everything downstream holds `OutputBackend`, never a concrete type — run
+  offline with `AIRPLAY_BACKEND=mock`.
 - **Subscribe before `start()`, and start exactly once.** All backend startup
   goes through `startBackendIfNeeded()`, which attaches
   `subscribeToBackendEvents()` before `backend.start()` (or the initial
@@ -99,8 +100,9 @@ differ, on purpose:
 - **Remote Control** DOES have a real, silent status API (`AXIsProcessTrusted()`),
   so it reports a genuine `.granted`, updated the moment the user toggles it in
   System Settings and returns. Primed AHEAD of the feature that consumes it —
-  speaker-side transport controls simulating Mac media keys, not yet merged (see
-  `claude/speaker-input-responsiveness-b8123f`).
+  speaker-side transport controls simulating Mac media keys, not yet merged (the
+  branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does
+  NOT hold this work — see `docs/plans/phase-3-findings/branch-inventory.md`).
 
 The window is a NORMAL (not floating, no Dock icon) window — an earlier version
 made it `.floating` for recoverability, but that pins it above every other app,

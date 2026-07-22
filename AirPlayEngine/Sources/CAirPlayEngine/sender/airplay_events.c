@@ -39,6 +39,7 @@
 #include "logger.h"
 #include "player.h"
 #include "pair_ap/pair.h"
+#include "engine_bridge.h" /* airplayengine_remote_fire — inbound device volume */
 
 #define RTSP_VERSION "RTSP/1.0"
 
@@ -54,6 +55,8 @@ enum airplay_events
 struct airplay_events_client
 {
   char *name;
+  uint64_t device_id; /* engine-added: which output_device this channel belongs
+                       * to, so an inbound volume change routes to that speaker. */
   int fd;
   struct event *listener;
   struct pair_cipher_context *cipher_ctx;
@@ -129,7 +132,7 @@ client_remove(struct airplay_events_client *client)
 }
 
 static int
-client_add(const char *name, int fd, const uint8_t *key, size_t key_len)
+client_add(const char *name, uint64_t device_id, int fd, const uint8_t *key, size_t key_len)
 {
   struct airplay_events_client *client;
 
@@ -138,6 +141,7 @@ client_add(const char *name, int fd, const uint8_t *key, size_t key_len)
   CHECK_NULL(L_AIRPLAY, client->incoming = evbuffer_new());
   CHECK_NULL(L_AIRPLAY, client->pending = evbuffer_new());
 
+  client->device_id = device_id;
   client->fd = fd;
 
   client->listener = event_new(evbase, fd, EV_READ | EV_PERSIST, incoming_cb, client);
@@ -326,6 +330,236 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
 }
 
 
+/* Some receivers report a change to their OWN volume back to the sender on this
+ * event channel as an RTSP SET_PARAMETER carrying a `volume: <dB>` line — the
+ * same text/parameters shape the sender sends outbound (airplay.c
+ * payload_make_set_volume). OwnTone fed the inbound value through
+ * device_volume_to_pct; an audio-only sender never parsed it, so a knob turn on
+ * the speaker was silently dropped here.
+ *
+ * Scan for a `volume:` header line and map its dB to a normalized 0..1 level.
+ * The dB<->level map mirrors the outbound path for the default max_volume
+ * (airplay_volume_from_pct: -30..0 dB <-> 0..1), and <= -30 dB (including the
+ * -144 mute sentinel) clamps to 0. Returns 0 and sets *out on a match, -1 if no
+ * valid volume line is present (the caller then tries the transport path). */
+static int
+volume_parse(const uint8_t *in, size_t in_len, double *out)
+{
+  static const char key[] = "volume:";
+  const size_t keylen = sizeof(key) - 1;
+  const uint8_t *p;
+  const uint8_t *end = in + in_len;
+
+  for (p = in; p + keylen <= end; p++)
+    {
+      // Only match at the very start or at the start of a header line, so we
+      // don't false-match "volume:" bytes buried inside a binary plist body.
+      if (p != in && p[-1] != '\n')
+	continue;
+      if (memcmp(p, key, keylen) != 0)
+	continue;
+
+      p += keylen;
+      while (p < end && (*p == ' ' || *p == '\t'))
+	p++;
+
+      // strtod needs a NUL-terminated token; copy up to the line end.
+      char buf[32];
+      size_t n = 0;
+      while (p < end && n < sizeof(buf) - 1 && *p != '\r' && *p != '\n')
+	buf[n++] = (char)*p++;
+      buf[n] = '\0';
+
+      char *endp = NULL;
+      double db = strtod(buf, &endp);
+      if (endp == buf) // not a number after "volume:" — keep scanning
+	continue;
+
+      if (db <= -30.0)
+	*out = 0.0;
+      else if (db >= 0.0)
+	*out = 1.0;
+      else
+	*out = (db + 30.0) / 30.0;
+      return 0;
+    }
+
+  return -1;
+}
+
+/* Interpret a raw receiver-reported volume figure as a normalized 0..1 level.
+ * AirPlay/RAOP volume is dB (-30..0, -144 = mute), but a receiver might report a
+ * 0..1 fraction or a 0..100 percent — disambiguate by range. (0.0 is read as a
+ * fraction/mute; a true 0 dB "max" is the one ambiguous case, rare for a knob.) */
+static double
+volume_normalize(double v)
+{
+  if (v < 0.0)    return v <= -30.0 ? 0.0 : (v + 30.0) / 30.0; /* dB */
+  if (v <= 1.0)   return v;                                    /* fraction */
+  if (v <= 100.0) return v / 100.0;                            /* percent */
+  return 1.0;
+}
+
+/* Case-insensitive "does this dict key contain 'volume'". Portable (no
+ * strcasestr) and bounds-safe. */
+static int
+key_is_volume(const char *key)
+{
+  static const char needle[] = "volume";
+  size_t klen, nlen = sizeof(needle) - 1;
+  size_t i, j;
+
+  if (!key)
+    return 0;
+  klen = strlen(key);
+  for (i = 0; i + nlen <= klen; i++)
+    {
+      for (j = 0; j < nlen; j++)
+	{
+	  char c = key[i + j];
+	  if (c >= 'A' && c <= 'Z')
+	    c += 32;
+	  if (c != needle[j])
+	    break;
+	}
+      if (j == nlen)
+	return 1;
+    }
+  return 0;
+}
+
+/* Read a numeric value out of a plist node (real, unsigned int, or a numeric
+ * string). Returns 0 and sets *out on success. */
+static int
+plist_number_val(plist_t node, double *out)
+{
+  plist_type t;
+
+  if (!node)
+    return -1;
+  t = plist_get_node_type(node);
+  if (t == PLIST_REAL)
+    {
+      plist_get_real_val(node, out);
+      return 0;
+    }
+  if (t == PLIST_UINT)
+    {
+      uint64_t u = 0;
+      plist_get_uint_val(node, &u);
+      *out = (double)u;
+      return 0;
+    }
+  if (t == PLIST_STRING)
+    {
+      char *s = NULL;
+      char *end = NULL;
+      double v;
+      plist_get_string_val(node, &s);
+      if (!s)
+	return -1;
+      v = strtod(s, &end);
+      if (end == s)
+	{
+	  free(s);
+	  return -1;
+	}
+      free(s);
+      *out = v;
+      return 0;
+    }
+  return -1;
+}
+
+/* Recursively search a plist for a "volume"-named key with a numeric value.
+ * Returns 0 and sets *out to the RAW figure (not yet normalized) on success. */
+static int
+plist_find_volume(plist_t node, double *out)
+{
+  plist_type t;
+
+  if (!node)
+    return -1;
+  t = plist_get_node_type(node);
+  if (t == PLIST_DICT)
+    {
+      plist_dict_iter it = NULL;
+      char *key = NULL;
+      plist_t val = NULL;
+      int found = -1;
+
+      plist_dict_new_iter(node, &it);
+      if (!it)
+	return -1;
+      for (;;)
+	{
+	  plist_dict_next_item(node, it, &key, &val);
+	  if (!val)
+	    break;
+	  if (key_is_volume(key) && plist_number_val(val, out) == 0)
+	    {
+	      free(key);
+	      found = 0;
+	      break;
+	    }
+	  free(key);
+	  key = NULL;
+	  if (plist_find_volume(val, out) == 0)
+	    {
+	      found = 0;
+	      break;
+	    }
+	}
+      free(it);
+      return found;
+    }
+  if (t == PLIST_ARRAY)
+    {
+      uint32_t n = plist_array_get_size(node);
+      uint32_t i;
+      for (i = 0; i < n; i++)
+	if (plist_find_volume(plist_array_get_item(node, i), out) == 0)
+	  return 0;
+    }
+  return -1;
+}
+
+/* For an event that is neither a text volume line nor a known transport command:
+ * if it carries a bplist, return its human-readable XML in *xml_out (caller
+ * frees) so a live test reveals the exact format, and — best effort — pull a
+ * normalized 0..1 volume out of it. Returns 0 if a volume was found. */
+static int
+event_bplist_volume(const uint8_t *in, size_t in_len, double *out, char **xml_out)
+{
+  uint8_t *body;
+  size_t body_len;
+  plist_t root = NULL;
+  int ret = -1;
+
+  if (xml_out)
+    *xml_out = NULL;
+  if (body_find(&body, &body_len, (uint8_t *)in, in_len) < 0)
+    return -1;
+  plist_from_bin((char *)body, (uint32_t)body_len, &root);
+  if (!root)
+    return -1;
+
+  if (xml_out)
+    {
+      uint32_t xlen = 0;
+      plist_to_xml(root, xml_out, &xlen);
+    }
+  if (plist_find_volume(root, out) == 0)
+    {
+      *out = volume_normalize(*out);
+      ret = 0;
+    }
+
+  plist_free(root);
+  return ret;
+}
+
+
 /* --------------------------- Message handling ----------------------------- */
 
 static void
@@ -401,6 +635,7 @@ incoming_cb(int fd, short what, void *arg)
 {
   struct airplay_events_client *client = arg;
   enum airplay_events event;
+  double volume;
   uint8_t *plain;
   size_t plain_len;
   int ret;
@@ -429,9 +664,57 @@ incoming_cb(int fd, short what, void *arg)
   plain = evbuffer_pullup(client->pending, -1);
   plain_len = evbuffer_get_length(client->pending);
 
-  ret = rtsp_parse(&event, plain, plain_len);
-  if (ret < 0) // A message type we don't know about, so ignore
+  // 1) The receiver reporting a change to its OWN volume (SET_PARAMETER
+  //    volume: <dB>). Route it to the app so that speaker's slider follows the
+  //    knob, acknowledge, and we're done with this message.
+  if (volume_parse(plain, plain_len, &volume) == 0)
     {
+      DPRINTF(E_INFO, L_AIRPLAY, "'%s' set its own volume to %.3f (0..1)\n", client->name, volume);
+      airplayengine_remote_fire(client->device_id, AIRPLAYENGINE_REMOTE_VOLUME, volume);
+      evbuffer_drain(client->pending, -1);
+
+      ret = respond(client);
+      if (ret < 0)
+	{
+	  DPRINTF(E_WARN, L_AIRPLAY, "Could not send AirPlay event response\n");
+	  goto disconnect;
+	}
+      return;
+    }
+
+  // 2) A transport command (bplist sendMediaRemoteCommand: play/pause/next/prev).
+  ret = rtsp_parse(&event, plain, plain_len);
+  if (ret < 0) // Neither a text volume line nor a known transport command.
+    {
+      // Best effort: many receivers report their own volume as a bplist rather
+      // than a text `volume:` line. Pull a volume out of it if we can, and ALWAYS
+      // log the plist's structure (readable XML at the always-on level) so a live
+      // test reveals the exact format of anything we don't yet handle.
+      double vol;
+      char *xml = NULL;
+      int vret = event_bplist_volume(plain, plain_len, &vol, &xml);
+
+      if (xml)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Unhandled AirPlay event from '%s' (%zu bytes), plist:\n%s\n", client->name, plain_len, xml);
+	  free(xml);
+	}
+      else
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Unhandled AirPlay event from '%s' (%zu bytes, no plist body)\n", client->name, plain_len);
+	}
+      DHEXDUMP(E_DBG, L_AIRPLAY, plain, plain_len, "Unhandled AirPlay event\n");
+
+      if (vret == 0)
+	{
+	  DPRINTF(E_INFO, L_AIRPLAY, "Best-effort: '%s' volume -> %.3f (0..1)\n", client->name, vol);
+	  airplayengine_remote_fire(client->device_id, AIRPLAYENGINE_REMOTE_VOLUME, vol);
+	  evbuffer_drain(client->pending, -1);
+	  if (respond(client) < 0)
+	    goto disconnect;
+	  return;
+	}
+
       evbuffer_drain(client->pending, -1);
       return;
     }
@@ -476,7 +759,7 @@ airplay_events(void *arg)
 /* ------------------------------- Interface -------------------------------- */
 
 int
-airplay_events_listen(const char *name, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
 {
   int fd;
   int ret;
@@ -487,7 +770,7 @@ airplay_events_listen(const char *name, const char *address, unsigned short port
       return -1;
     }
 
-  ret = client_add(name, fd, key, key_len);
+  ret = client_add(name, device_id, fd, key, key_len);
   if (ret < 0)
     {
       close(fd);

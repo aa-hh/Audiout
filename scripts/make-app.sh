@@ -1,13 +1,15 @@
 #!/bin/bash
 # make-app.sh — wrap the AudiouterApp SwiftPM binary into a real,
-# double-clickable macOS .app bundle and ad-hoc codesign it.
+# double-clickable macOS .app bundle and codesign it (Developer ID when the
+# keychain has one, else ad-hoc).
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
 # Xcode project). This produces "Audiouter.app" with an Info.plist
-# (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and an
-# ad-hoc signature so Gatekeeper lets it launch locally.
+# (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and a
+# code signature (Developer ID when the keychain has one, else ad-hoc) so
+# Gatekeeper lets it launch.
 #
 # Usage: scripts/make-app.sh [output-dir]   (default output dir: ./build)
 # Every command below is a paste-proof one-liner — no backslash continuations.
@@ -22,10 +24,20 @@ set -euo pipefail
 APP_NAME="${APP_NAME:-Audiouter}"
 EXECUTABLE="AudiouterApp"
 BUNDLE_ID="${BUNDLE_ID:-com.audiouter.Audiouter}"
-MIN_MACOS="13.0"
-# Human-readable marketing version and monotonic build number.
-APP_VERSION="0.1.0"
-BUILD_NUMBER="1"
+# The oldest macOS the app supports. 14.2, NOT 13.x: the native backend's
+# whole-system audio capture uses Core Audio process taps
+# (AudioHardwareCreateProcessTap / CATapDescription), a macOS 14.2 API — on 13.x
+# the app launches and then crashes/misbehaves the moment it tries to capture.
+# Advertising 14.2 here stops a 13.x user installing a build that can't work
+# (crash-hang.md M2). Feeds BOTH LSMinimumSystemVersion and actool's
+# --minimum-deployment-target below. Env-overridable, but don't drop below 14.2.
+MIN_MACOS="${MIN_MACOS:-14.2}"
+# Human-readable marketing version (CFBundleShortVersionString) and monotonic
+# build number (CFBundleVersion). Env-overridable so a release can bump them
+# without editing this script:
+#   APP_VERSION=0.2.0 BUILD_NUMBER=7 scripts/make-app.sh
+APP_VERSION="${APP_VERSION:-0.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 # Shown verbatim inside the macOS system-audio permission dialog. Written in the
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
@@ -42,14 +54,42 @@ LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network 
 HELPER_EXECUTABLE="ptp-helper"
 HELPER_LABEL="com.audiouter.Audiouter.ptphelper"
 
-# Codesigning identity. Default "-" = ad-hoc (fine for local launch + the
-# unprivileged test paths). Set CODESIGN_IDENTITY to a Developer ID Application
-# identity (e.g. "Developer ID Application: Name (TEAMID)") to produce a build
-# whose bundled SMAppService LaunchDaemon can actually register() — ad-hoc
-# signatures have no Team ID, so the OS won't associate the daemon with the app
-# or let it bind privileged ports under launchd. Both the app and the nested
-# ptp-helper are signed with THIS identity so their Team IDs match.
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+# Codesigning identity, resolved in priority order:
+#   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
+#      "-" to force ad-hoc, or to a full identity string to pin a specific one.
+#   2. Auto-detected "Developer ID Application" identity from the keychain — the
+#      normal release path. A real Team ID is what lets the bundled SMAppService
+#      LaunchDaemon actually register() and bind privileged PTP ports (ad-hoc
+#      signatures have no Team ID, so the OS won't associate the daemon with the
+#      app), AND produces a Gatekeeper-acceptable, notarization-ready build. The
+#      identity is resolved BY NAME from the keychain, never a hardcoded hash, so
+#      this works on any developer's machine that holds the cert.
+#   3. Ad-hoc ("-") when no Developer ID identity is present (headless CI, a
+#      machine without the cert) — still launches locally + covers the
+#      unprivileged test paths; it just can't register the daemon.
+# Both the app and the nested ptp-helper are signed with THIS identity so their
+# Team IDs match.
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  echo "==> Codesign identity from environment: $CODESIGN_IDENTITY"
+else
+  # `|| true`: grep exits 1 when the keychain has no Developer ID identity, and
+  # under `set -euo pipefail` a failing command substitution would abort the
+  # build — we want the ad-hoc fallback instead. Prints the identity NAME (codesign
+  # accepts it), picking the first if several are installed.
+  CODESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application:[^"]*"' | head -1 | tr -d '"' || true)"
+  if [ -n "$CODESIGN_IDENTITY" ]; then
+    echo "==> Auto-detected Developer ID signing identity: $CODESIGN_IDENTITY"
+  else
+    CODESIGN_IDENTITY="-"
+    echo "==> No Developer ID Application identity in keychain — falling back to ad-hoc signing"
+  fi
+fi
+# Secure timestamp only with a real identity: Apple's timestamp service needs a
+# trusted identity (and network), and ad-hoc signatures can't carry one. Empty
+# for ad-hoc so the UNQUOTED expansion in each codesign call below adds no
+# argument — a plain string, not a bash array, so it stays macOS bash-3.2 safe
+# under `set -u` (an empty "${arr[@]}" would be an unbound-variable error there).
+if [ "$CODESIGN_IDENTITY" = "-" ]; then TIMESTAMP_FLAG=""; else TIMESTAMP_FLAG="--timestamp"; fi
 
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
@@ -71,12 +111,24 @@ HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
-ICON_SOURCE="$SCRIPT_DIR/AudioOuter-MacOS-Default-1024x1024@1x.png"
+ICON_SOURCE="$SCRIPT_DIR/Audiouter-MacOS-Default-1024x1024@1x.png"
 # Flattened 1024 "Dark" render from Icon Composer, paired with ICON_SOURCE to
 # build a light/dark appearance-aware icon (see the app-icon step below).
-ICON_SOURCE_DARK="$SCRIPT_DIR/AudioOuter-MacOS-Dark-1024x1024@1x.png"
+ICON_SOURCE_DARK="$SCRIPT_DIR/Audiouter-MacOS-Dark-1024x1024@1x.png"
 
 # --- Build (release) ------------------------------------------------------
+# For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST
+# (idempotent — skips if already built; set FFMPEG_MIN_FORCE=1 to rebuild), so the
+# app links ONLY the ALAC encoder statically and bundle-dylibs.sh finds zero
+# video-codec dylibs — a ~30 MB smaller download. Package.swift auto-detects
+# AirPlayEngine/vendor/ffmpeg-min/ and prefers it; absent, it falls back to
+# Homebrew's fat ffmpeg unchanged. Gated to the bundling path only, since the trim
+# is invisible when dylibs aren't bundled. See AirPlayEngine/docs/ffmpeg-minimal-build.md.
+if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
+  echo "==> Building minimal audio-only ffmpeg for the release bundle (first run compiles from source; then cached)"
+  "$SCRIPT_DIR/build-min-ffmpeg.sh"
+fi
+
 echo "==> Building $EXECUTABLE (release)"
 swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
 BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
@@ -157,21 +209,28 @@ else
 fi
 
 # --- App icon --------------------------------------------------------------
-# The official icon is authored in Icon Composer (scripts/AudioOuter.icon) as a
-# Liquid Glass icon. Compiling that bundle standalone (outside an .xcodeproj)
-# requires Xcode 26's actool, and Liquid Glass only renders on macOS 26 anyway.
-# actool's CLI contract for a bare .icon bundle isn't Apple-documented yet (this
-# is a brand-new Xcode 26 feature), so we ATTEMPT it opportunistically and fall
-# back automatically to a classic .icns baked from Icon Composer's flattened
-# 1024 "Default" render — this keeps the script working unmodified on an
-# Xcode-15 machine (falls back every time) and an Xcode-26 machine (uses the
-# real Liquid Glass icon whenever the actool invocation below is accepted).
+# The official icon is authored in Icon Composer (scripts/Audiouter.icon) as a
+# Liquid Glass icon. Compiling that bundle into the real Liquid Glass asset
+# (Assets.car) requires Xcode 26's actool, and Liquid Glass only renders on
+# macOS 26 anyway. IMPORTANT: the .icon must be authored in an Icon Composer
+# whose format GENERATION matches the actool doing the compile — a mismatch
+# makes actool crash with an unhelpful "insert nil object" backtrace (it's
+# really "wrong format", surfaced as a crash rather than a clean error). This
+# bundle is authored in Icon Composer 1.4 (the generation that ships inside
+# Xcode 26.4.x), so Xcode 26.4.x's actool compiles it cleanly. (An earlier
+# revision authored in the newer standalone Icon Composer 2.0 crashed 26.4.x's
+# 1.4-generation actool for exactly this reason — see also the separate
+# post-26.4.1 actool regression FB20183399 / github.com/expo/expo/issues/46121.)
+# We ATTEMPT the compile opportunistically and fall back automatically to a
+# classic .icns baked from Icon Composer's flattened 1024 "Default" render,
+# which keeps the script working unmodified on an Xcode-15 machine (falls back
+# every time) while an Xcode-26 machine gets the real Liquid Glass icon.
 # NOTE: this is a menu-bar app (LSUIElement) so it has no Dock icon; this icon
 # is what Finder, Get Info, the About box, notifications, and any
 # Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
 ICON_MODE="icns"
-ICON_BUNDLE_SRC="$SCRIPT_DIR/AudioOuter.icon"
+ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiouter.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
 if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"
@@ -383,6 +442,52 @@ plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 
+# --- LSEnvironment: release runtime defaults --------------------------------
+# Environment variables LaunchServices injects when the app is launched by
+# double-click / `open` (a bundled build), so two release defaults live HERE
+# rather than baked into the Swift, keeping dev overrides intact: a developer who
+# runs the raw Mach-O directly does NOT go through LaunchServices, so LSEnvironment
+# is NOT applied and the shell's own env wins (and `swift run`/tests never read
+# Info.plist at all).
+#
+#   AIRPLAY_BACKEND=native — a double-clicked release MUST drive real speakers.
+#     BackendKind.resolved() already defaults to `.native` in code (mock is
+#     opt-in only), so this is belt-and-suspenders: it makes the release intent
+#     explicit AND is robust if the code default ever changes. (It also can't be
+#     relied on ALONE — a shared-bundle-id LaunchServices collision can launch
+#     this binary while resolving LSEnvironment from a different registration, so
+#     the native code default is what actually guarantees real audio.) Override
+#     in dev with `AIRPLAY_BACKEND=mock <binary>` (direct exec ignores
+#     LSEnvironment) or by running via SwiftPM.
+#   AIRPLAY_CONTROL_PANEL=1 — ship the control-panel window shell as the default
+#     chrome (AppDelegate reads `== "1"`). Off in dev/tests, where the env is
+#     unset; override a bundled build by launching the raw binary with the var
+#     unset or set to something other than "1".
+echo "==> Writing LSEnvironment (release backend + control-panel defaults)"
+plutil -insert LSEnvironment -dictionary "$PLIST"
+plutil -insert LSEnvironment.AIRPLAY_BACKEND -string "native" "$PLIST"
+plutil -insert LSEnvironment.AIRPLAY_CONTROL_PANEL -string "1" "$PLIST"
+plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
+plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_CONTROL_PANEL missing from Info.plist" >&2; exit 1; }
+
+# Opt-in dev diagnostics, baked into LSEnvironment so an `open`-launched bundle
+# still sees them: an `open`ed app does NOT inherit the shell env, and it MUST be
+# launched via `open` (not the raw binary) for a correct TCC identity — so these
+# can't be passed on the command line. Only written when set at build time, so a
+# normal release carries none of them.
+#   AUDIOUTER_STATUS_LABEL — tags the menu-bar item so side-by-side dev builds
+#     (which share the bundle id, hence collide in LaunchServices) are visually
+#     distinguishable; see the multiple-app-copies-collide hazard.
+#   AIRPLAYENGINE_LOG_FILE / _LEVEL — append engine + DACP diagnostics to a file
+#     an `open`-launched session (stderr/os_log swallowed) can still be read from.
+for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL; do
+  eval "val=\${$diag:-}"
+  if [ -n "$val" ]; then
+    plutil -insert "LSEnvironment.$diag" -string "$val" "$PLIST"
+    echo "==> LSEnvironment.$diag = $val (dev diagnostic)"
+  fi
+done
+
 # --- Strip extended attributes ---------------------------------------------
 # codesign refuses to sign anything carrying AppleDouble/resource-fork-style
 # metadata ("resource fork, Finder information, or similar detritus not
@@ -402,9 +507,13 @@ echo "==> Stripping extended attributes from bundle"
 xattr -cr "$APP_BUNDLE"
 find "$APP_BUNDLE" \( -name '._*' -o -name '.DS_Store' \) -delete
 
-# --- Codesign (ad-hoc, HARDENED RUNTIME) ----------------------------------
-# Ad-hoc ("-") signature: no Developer ID needed for local launch. Phase 2
-# swaps this for a real signing identity + notarization.
+# --- Codesign (Developer ID when available, else ad-hoc; HARDENED RUNTIME) --
+# Signs with $CODESIGN_IDENTITY, resolved up in Config: a Developer ID
+# Application identity when the keychain has one (the release path — a real Team
+# ID lets the SMAppService daemon register, and the build is Gatekeeper-
+# acceptable + notarization-ready), else ad-hoc ("-") for a local/CI build.
+# Notarization is a SEPARATE, later step (submit the signed .app to Apple's
+# notary service); this script signs only.
 #
 # `--options runtime` (hardened runtime) is a SECURITY REQUIREMENT, not just a
 # distribution one: this app holds the "System Audio Recording" TCC grant, and
@@ -439,7 +548,7 @@ if [ -d "$CONTENTS/Frameworks" ] && [ -n "$(ls -A "$CONTENTS/Frameworks" 2>/dev/
   # disable-library-validation entitlements.
   find "$CONTENTS/Frameworks" -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
     echo "    signing $(basename "$dylib")"
-    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$dylib"
+    codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$dylib"
   done
 fi
 # ptp-helper is a second Mach-O living directly in Contents/MacOS (not nested
@@ -459,13 +568,13 @@ fi
 # airptp_daemon_bind/airptp_daemon_start/airptp_end plus libc signal/socket
 # calls. Do not add entitlements to this binary speculatively.
 echo "==> Codesigning ptp-helper (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
-codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
+codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
 codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE"
 
 echo "==> Codesigning app (identity: $CODESIGN_IDENTITY, hardened runtime)"
 ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
-codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
+codesign --force $TIMESTAMP_FLAG --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --strict --verbose "$APP_BUNDLE"
 # Assert the hardened runtime actually got applied — a signature silently missing
 # the runtime flag would reopen the injection surface above. Capture first, then

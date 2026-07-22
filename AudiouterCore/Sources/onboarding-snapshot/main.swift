@@ -57,38 +57,35 @@ func makeViewController() -> OnboardingViewController {
                                     onDone: {})
 }
 
-/// Render `view` (already laid out, hosted in a window) to a PNG at `url` under
-/// `appearance`. Creates a deterministic @2x bitmap representation regardless of
-/// the host screen's backing scale factor.
+/// Fixed backing scale for every snapshot PNG (visual.md M1). Letting the OS
+/// pick the scale (`bitmapImageRepForCachingDisplay(in:)`) makes the pixel
+/// dimensions of the output drift by machine — 1x on a non-Retina/headless
+/// display, 2x on a Retina one — even though this window is never actually
+/// ordered onto a screen. Building the bitmap rep directly at a pinned scale
+/// makes the resolution deterministic regardless of what's driving the run.
+let snapshotBackingScale: CGFloat = 2
+
 @MainActor
 func renderPNG(view: NSView, to url: URL) {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
-    
-    // Create an explicit @2x bitmap rep (pixel dims = 2x point dims) so the
-    // PNG is deterministic regardless of the host screen's backingScaleFactor.
-    let pixelsWide = Int(bounds.width * 2)
-    let pixelsHigh = Int(bounds.height * 2)
-    guard let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: pixelsWide,
-        pixelsHigh: pixelsHigh,
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 32
-    ) else {
+    let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
+    let pixelsHigh = Int((bounds.height * snapshotBackingScale).rounded())
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide,
+                                      pixelsHigh: pixelsHigh, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                      colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
         return
     }
-    
-    // Set the size so the rep reports correct point dimensions (backing scale = 2).
     rep.size = bounds.size
-    
-    // Cache the view's display into the bitmap rep.
+    // `NSBitmapImageRep(bitmapDataPlanes:...)` doesn't guarantee a zeroed
+    // buffer (unlike `bitmapImageRepForCachingDisplay(in:)`) — zero it so any
+    // region `cacheDisplay` doesn't fully repaint has defined (transparent)
+    // content instead of stale heap bytes.
+    if let bitmapData = rep.bitmapData {
+        memset(bitmapData, 0, rep.bytesPerRow * pixelsHigh)
+    }
     view.cacheDisplay(in: bounds, to: rep)
     
     guard let data = rep.representation(using: .png, properties: [:]) else {

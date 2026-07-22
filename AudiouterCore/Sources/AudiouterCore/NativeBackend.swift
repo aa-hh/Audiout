@@ -67,6 +67,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the same discipline `discovery.onEvent` / `captureCoordinator.onLevel` keep.
     private var systemVolume: SystemVolumeControlling
 
+    /// Supplies the connect-time seed volume (percent) each time a device joins
+    /// the output set — read live so a Settings change takes effect on the next
+    /// connect with no re-wiring. Production reads ``AppSettings/connectVolume``
+    /// (already clamped above 0); ``connectVolumeSeed`` clamps it AGAIN to
+    /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume`` so an
+    /// injected test provider can never smuggle 0/silent onto the wire. `@Sendable`
+    /// and constructs its own `AppSettings` per call (captures nothing non-Sendable)
+    /// so it is safe to invoke from `stateQueue`. See ``connectVolumeSeed``.
+    private let connectVolumeProvider: @Sendable () -> Int
+
     /// The in-process capture pipeline (T-NB-CAPTURE-1). When present (the real
     /// path wired by ``makeBackend(_:)``), the backend GATES it on selection
     /// (``reconcileCaptureGate()``) and plumbs its per-buffer RMS into
@@ -280,12 +290,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// user's in-session volume must survive it (``applyStartBuffer`` re-pushes that
     /// exact level itself). This set is how the shared add path tells the two apart:
     /// while an id is in it, ``connectVolumeSeed(_:outputID:)`` is suppressed, so a
-    /// plain buffer change never slams the level back to the system volume. See
+    /// plain buffer change never slams the level back to the connect default. See
     /// ``connectVolumeSeed(_:outputID:)`` for the −30 dB trap the whole seed exists
     /// to avoid.
     private var bufferReAdding: Set<String> = []
 
     private var stateStreamTask: Task<Void, Never>?
+
+    /// Drains the engine's remote-control stream (speaker transport keys). Same
+    /// `stateQueue` confinement as ``stateStreamTask``.
+    private var remoteEventStreamTask: Task<Void, Never>?
+
+    /// The sender-side DACP endpoint: how a volume change made ON THE SPEAKER
+    /// reaches us (the receiver calls this back — see ``DACPServer``). Started in
+    /// `start()` with the engine's DACP-ID so its advertised `iTunes_Ctrl_<id>`
+    /// matches what the engine tells receivers. Volume travels here, not the RTSP
+    /// event channel — confirmed against the AirPlay spec + OwnTone's httpd_dacp.
+    private let dacpServer = DACPServer()
 
     /// The in-flight engine-teardown Task from the last `stop()` (C1). Stored so
     /// `stopAndWait(timeout:)` can await it on the app's terminate path. Confined to
@@ -531,6 +552,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
+        connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
@@ -542,6 +564,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.engine = engineControl
         self.discovery = discoverySource
         self.systemVolume = systemVolume
+        self.connectVolumeProvider = connectVolume
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
         // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
         // built `.unmuted` and with a distinct aggregate-device name so it never
@@ -785,6 +808,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    zombie detection — but push, not poll.
             self.subscribeStateStream()
 
+            // 3b. Subscribe the engine's remote-control stream: a user pressing a
+            //     transport key ON THE SPEAKER flows in here (→ a Mac media key).
+            self.subscribeRemoteEventStream()
+
+            // 3c. Start the DACP endpoint: a user changing the volume ON THE SPEAKER
+            //     reaches us here (the receiver calls back over DACP, not the event
+            //     channel). Advertise under the SAME id the engine sends receivers,
+            //     and route each report to that speaker's slider.
+            self.dacpServer.onVolume = { [weak self] token, level in
+                self?.applyDacpVolume(activeRemote: token, level: level)
+            }
+            self.dacpServer.onVolumeStep = { [weak self] token, direction in
+                self?.applyDacpVolumeStep(activeRemote: token, direction: direction)
+            }
+            self.dacpServer.start(dacpID: self.engine.dacpID)
+
             // 4. Now safe to browse: resolved AP2 descriptors will land on a running
             //    engine.
             self.discovery.start()
@@ -845,6 +884,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
+        // Stop advertising / listening for DACP (speaker-initiated volume).
+        dacpServer.onVolume = nil
+        dacpServer.onVolumeStep = nil
+        dacpServer.stop()
 
         // Engine teardown stays fire-and-forget so `stop()` never blocks its caller,
         // but the Task is now STORED (C1) so the app layer can await it via
@@ -862,6 +905,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // backend or interleaving the two writes.
             self.stateStreamTask?.cancel()
             self.stateStreamTask = nil
+            self.remoteEventStreamTask?.cancel()
+            self.remoteEventStreamTask = nil
             self.started = false
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
@@ -1807,11 +1852,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
                     try await engine.addOutput(outputID)
-                    // Snapshot the Mac's output volume OFF `stateQueue` (B3) for the
-                    // seed below: the blocking HAL read must not run inside the
-                    // critical section. Read here (converge loop's own thread), pass
-                    // the value into `connectVolumeSeed`.
-                    let systemLevelSnapshot = systemVolume.currentVolume()
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
@@ -1822,9 +1862,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // don't re-add — the failure the engine just reported wins.
                         guard !self.failedGate.contains(id) else { return }
                         // Seed a real starting volume onto the fresh session so it is
-                        // AUDIBLE immediately: the engine's volume field is 0 until an
-                        // explicit setVolume, and 0 maps to ≈ −30 dB (silent) — the
-                        // −30 dB trap, see `connectVolumeSeed`. Suppressed for an
+                        // AUDIBLE immediately AND at a safe, moderate level (not the
+                        // Mac's possibly-loud system volume — G1-N1): the engine's
+                        // volume field is 0 until an explicit setVolume, and 0 maps to
+                        // ≈ −30 dB (silent) — the −30 dB trap, see `connectVolumeSeed`.
+                        // Suppressed for an
                         // `applyStartBuffer` re-add (which restores the in-session
                         // level itself), so a plain buffer change never resets volume.
                         //
@@ -1841,7 +1883,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
-                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot)
+                        let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
                             if let seededVolume { $0.volume = seededVolume }
@@ -2071,11 +2113,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             // Mark these ids as an internal buffer re-add for the WHOLE apply, so the
             // shared converge add path (and any engine state-stream event that races
-            // it) does NOT reseed their volume from the current system level. This is
+            // it) does NOT reseed their volume from the connect default. This is
             // a buffer-size change, not a user reconnect: each device's in-session
             // level must survive, and the explicit re-push at the end of this method
             // restores it. Without this guard, `connectVolumeSeed` would slam every
-            // running device back to the system volume on a plain buffer change.
+            // running device back to the connect default on a plain buffer change.
             // Cleared once the apply has fully settled (below).
             for item in items { self.bufferReAdding.insert(item.id) }
             return items
@@ -2126,7 +2168,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // The apply has fully settled — teardown, buffer set, re-add, and the
         // in-session volume re-push above have all run. Lift the seed suppression so
-        // any subsequent REAL (re)connect reseeds from the system volume as usual.
+        // any subsequent REAL (re)connect reseeds from the connect default as usual.
         stateQueue.sync {
             for item in streaming { self.bufferReAdding.remove(item.id) }
         }
@@ -2504,13 +2546,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// contract), so we diff against the last-known device before emitting to
     /// de-dupe. On `stateQueue`.
     private func applyEngineState(outputID: OutputID, state: OutputState) {
-        // Snapshot the Mac's output volume OFF `stateQueue` (B3): the
-        // `.connected`/`.streaming` branch below reseeds an out-of-band reconnect from
-        // it, and the blocking HAL read must not run inside the critical section the
-        // main-thread `devices` getter waits on. This runs on the state-stream
-        // consumer's own task thread, ahead of the queue hop. Read unconditionally —
-        // cheap, and the good-transition branch that consumes it is the common path.
-        let systemLevelSnapshot = systemVolume.currentVolume()
         // A good transition (.streaming/.connected) for a device the user has since
         // turned OFF must NOT re-wedge it ON — instead re-kick converge to tear the
         // stale session down. We compute any needed re-kick under the lock and fire
@@ -2557,11 +2592,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // A (re)connect the engine reported out-of-band — e.g. an
                 // auto-recovery it drove itself — never went through convergeDevice's
                 // add path, so it too lands at engine volume 0 = ≈ −30 dB (silent).
-                // Seed its starting volume here on a genuine new-add (`!wasAdded`).
+                // Seed its starting volume here on a genuine new-add (`!wasAdded`)
+                // from the configured connect default (G1-N1), not the system level.
                 // Suppressed during an `applyStartBuffer` re-add so a buffer change
                 // whose good-state event races this branch can't reset the level —
                 // see `connectVolumeSeed`.
-                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID, systemLevel: systemLevelSnapshot) {
+                if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
             case .failed, .passwordRequired:
@@ -2601,6 +2637,124 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             Task { [weak self] in await self?.convergeDevice(id: rekick.id, outputID: rekick.outputID) }
         }
     }
+
+    // MARK: Engine remote-control stream → media keys + slider (push, no poll)
+
+    /// Subscribe the engine's remote-control stream (speaker transport keys + the
+    /// speaker's own volume). Same start/stop-race discipline as
+    /// ``subscribeStateStream()``: the task is stashed (or cancelled) on
+    /// `stateQueue` so a start()→stop() can't leak a consumer against a torn-down
+    /// backend.
+    private func subscribeRemoteEventStream() {
+        let stream = engine.makeRemoteEventStream()
+        let task = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.applyRemoteEvent(event)
+            }
+        }
+        stateQueue.async {
+            if self.started {
+                self.remoteEventStreamTask = task
+            } else {
+                task.cancel()
+            }
+        }
+    }
+
+    /// Fold one remote-control event from a speaker into the app.
+    private func applyRemoteEvent(_ event: RemoteEvent) {
+        switch event {
+        case .transport(let command):
+            // Transport is global (one Mac media session), so it isn't tied to a
+            // device: republish it as a backend event and let `AppDelegate` turn it
+            // into a Mac media key (the same layering `systemVolumeChanged` uses).
+            stateQueue.async { self.emit(.remoteTransport(command.backendCommand)) }
+        case .volume(let outputID, let level):
+            applyRemoteVolume(outputID: outputID, level: level)
+        }
+    }
+
+    /// The speaker changed its OWN volume, as reported over the RTSP event channel
+    /// (``RemoteEvent/volume(_:level:)``). Move that device's slider. On `stateQueue`.
+    ///
+    /// NOTE: in practice AirPlay 2 receivers report volume over DACP, not the event
+    /// channel (see ``applyDacpVolume(activeRemote:level:)``), so this path is rarely
+    /// exercised — kept so a receiver that DOES use the event channel still works.
+    private func applyRemoteVolume(outputID: OutputID, level: Double) {
+        stateQueue.async {
+            guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
+            self.setSpeakerVolume(id: id, outputID: outputID, level: level)
+        }
+    }
+
+    /// The speaker changed its OWN volume, reported over **DACP** (the receiver
+    /// called our ``DACPServer`` back — the real path for Sonos et al.). The
+    /// `Active-Remote` token is the low 32 bits of the device id (`airplay.c`), so
+    /// match it against the known outputs and move that one speaker's slider.
+    /// Internal (not private) so the routing is unit-testable without a live socket.
+    func applyDacpVolume(activeRemote: UInt32, level: Double) {
+        stateQueue.async {
+            guard let match = self.outputIDs.first(where: {
+                UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
+            }) else { return }
+            self.setSpeakerVolume(id: match.key, outputID: match.value, level: level)
+        }
+    }
+
+    /// Shared core for a speaker-initiated volume change (event channel or DACP).
+    /// On `stateQueue`.
+    ///
+    /// A speaker-side control is a REQUEST, not a report: the sender owns AirPlay
+    /// volume, so the speaker's audible level only actually moves once we write
+    /// the requested value back out (SET_PARAMETER, via ``pushVolume``). The
+    /// first live test proved the failure mode of NOT writing back: the Sonos's
+    /// own baseline never advanced, so a full swipe on the speaker moved our
+    /// slider a few points and every subsequent swipe restarted from the same
+    /// stale level. So: move the slider AND push the level to the engine.
+    ///
+    /// The same-value guard is what keeps this loop-safe: a receiver reflecting
+    /// our own write back arrives equal to `known` and dies here, and the
+    /// −30…0 dB ↔ 0…100 map is linear both ways so a round-trip is
+    /// rounding-stable. Swipe bursts are absorbed by ``pushVolume``'s
+    /// in-flight coalescing (latest wins), never dropped.
+    private func setSpeakerVolume(id: String, outputID: OutputID, level: Double) {   // on stateQueue
+        let pct = Int((level * 100).rounded()).clampedToVolume
+        if muted.contains(id) {
+            // Don't un-mute from a knob turn; record the intended level so a later
+            // unmute restores what the user dialed in on the speaker.
+            stashedVolume[id] = pct
+            return
+        }
+        guard pct != known[id]?.volume else { return }
+        applyLocal(id) { $0.volume = pct }
+        pushVolume(outputID, engineValue: Self.engineVolume(pct))
+    }
+
+    /// A relative `volumeup`/`volumedown` DACP verb from the speaker
+    /// (`direction` is ±1): step from the level the app currently holds — that
+    /// is what makes consecutive presses/swipe-ticks ACCUMULATE instead of
+    /// re-basing on a stale value. Step size is a guess pending live-test
+    /// calibration (Sonos observed sending absolute `setproperty` instead, so
+    /// this is a safety net for receivers that use the relative verbs).
+    /// Internal (not private) so the routing is unit-testable without a socket.
+    func applyDacpVolumeStep(activeRemote: UInt32, direction: Int) {
+        stateQueue.async {
+            guard let match = self.outputIDs.first(where: {
+                UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
+            }) else { return }
+            let id = match.key
+            let current = self.muted.contains(id)
+                ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
+                : (self.known[id]?.volume ?? 0)
+            let target = current + direction.signum() * Self.speakerVolumeStep
+            self.setSpeakerVolume(id: id, outputID: match.value,
+                                  level: Double(target.clampedToVolume) / 100.0)
+        }
+    }
+
+    /// UI points one relative `volumeup`/`volumedown` verb moves the slider.
+    static let speakerVolumeStep = 2
 
     // MARK: Mapping + merge
 
@@ -2856,10 +3010,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
-    /// Seed a just-(re)connected engine output's starting volume from the Mac's
-    /// CURRENT system output level. Pushes the level to the engine and returns the
-    /// value to display on the model, or `nil` when the seed is suppressed (leave
-    /// the model volume untouched). On `stateQueue`.
+    /// Seed a just-(re)connected engine output's starting volume from the
+    /// configured connect-volume default. Pushes the level to the engine and
+    /// returns the value to display on the model, or `nil` when the seed is
+    /// suppressed (leave the model volume untouched). On `stateQueue`.
     ///
     /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
     /// The engine's per-output volume field is zero-initialized and is only ever set
@@ -2870,9 +3024,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// push a real starting volume; this is that push, called from BOTH add-success
     /// sites (`convergeDevice` and `applyEngineState`).
     ///
-    /// Source of the level: ``SystemVolumeControlling/currentVolume()`` — wherever
-    /// the Mac's own volume sits right now. When that is unreadable (`nil`), seed 0%:
-    /// deliberate silence over a guessed level (product decision), NOT a 65% guess.
+    /// Source of the level (G1-N1): ``connectVolumeProvider`` — the user's
+    /// configured connect volume (``AppSettings/connectVolume``, default 35%), NOT
+    /// the Mac's current system level. An earlier design inherited the system level,
+    /// but Mac speakers often run loud, so connecting a real AirPlay speaker could
+    /// BLAST the user on first connect. A fixed moderate default is predictable and
+    /// safe. The value is clamped to ``AppSettings/minConnectVolume``… so the seed
+    /// can NEVER be 0/silent — closing the −30 dB trap from the other direction (a
+    /// bad/injected provider value can't reach silence either).
     ///
     /// Mute carve-out: a device the user explicitly muted stays effective-0. Seed the
     /// INTENDED level into `stashedVolume` (so a later unmute restores the system
@@ -2881,7 +3040,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Suppression: returns `nil` and pushes nothing while `id` is in
     /// ``bufferReAdding``, so ``applyStartBuffer(ms:)``'s internal teardown/re-add —
     /// a buffer-size change, NOT a user reconnect — preserves the device's existing
-    /// in-session level instead of resetting it to the system volume.
+    /// in-session level instead of resetting it to the connect default.
     ///
     /// ## De-dup rides on the `added` false→true edge, NOT a separate set
     /// This method is reachable from BOTH add-success sites (`convergeDevice` and
@@ -2903,15 +3062,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// there is no second set that can be stuck-set while `added` is clear, so every
     /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
     ///
-    /// The system-volume HAL read is NOT done here: `systemLevel` is snapshotted by
-    /// each caller BEFORE it takes `stateQueue` (B3), so the blocking Core Audio read
-    /// never runs inside the critical section that the main-thread `devices` getter
-    /// waits on. The value being a few µs staler than the `added` edge is immaterial —
-    /// only WHERE the read happens moved, not WHEN the seed fires. `nil` still means
-    /// "unreadable" and maps to 0% (deliberate silence, not a guessed level).
-    private func connectVolumeSeed(_ id: String, outputID: OutputID, systemLevel: Int?) -> Int? {   // on stateQueue
+    /// The seed reads ``connectVolumeProvider`` (a `UserDefaults`-backed
+    /// `AppSettings` read — cheap, non-blocking, unlike the old system-volume HAL
+    /// read) and clamps it to ``AppSettings/minConnectVolume``…
+    /// ``AppSettings/maxConnectVolume``. The clamp is the load-bearing safety net:
+    /// even if the setting or an injected test provider returns 0 or something out
+    /// of range, the value that reaches the wire is always audible — 0/silent is
+    /// unreachable.
+    private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
         guard !bufferReAdding.contains(id) else { return nil }
-        let seed = systemLevel ?? 0
+        let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
             stashedVolume[id] = seed
@@ -3134,6 +3294,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 }
 
+private extension TransportCommand {
+    /// Map the engine's transport command onto the backend-neutral one the base
+    /// ``OutputBackend`` seam publishes (``RemoteTransportCommand``).
+    var backendCommand: RemoteTransportCommand {
+        switch self {
+        case .playPause: return .playPause
+        case .next:      return .next
+        case .previous:  return .previous
+        }
+    }
+}
+
 /// One-shot resume guard for a `CheckedContinuation` raced between two Tasks
 /// (`stopAndWait`'s teardown-vs-timeout race). Whichever Task calls `resume()`
 /// first wins; every later call is a no-op, so the continuation is resumed exactly
@@ -3184,6 +3356,11 @@ protocol EngineControlling: Sendable {
     /// no-op so a conformer that doesn't route per-app streams compiles unchanged.
     func write(pcm: Data, streamId: UInt32, pts: timespec)
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)>
+    func makeRemoteEventStream() -> AsyncStream<RemoteEvent>
+
+    /// The DACP-ID the engine advertises to receivers (see ``AirPlayEngine/dacpID``),
+    /// so the backend's DACP server can advertise the matching `iTunes_Ctrl_<id>`.
+    var dacpID: UInt64 { get }
 
     /// Whether a PTP clock was available as of the engine's last `start()`
     /// (T4 — mirrors `AirPlayEngine/ptpClockAvailable`). `false` means no
@@ -3240,6 +3417,8 @@ struct EngineAdapter: EngineControlling {
         engine.write(pcm: pcm, streamId: streamId, pts: pts)
     }
     func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { engine.makeStateStream() }
+    func makeRemoteEventStream() -> AsyncStream<RemoteEvent> { engine.makeRemoteEventStream() }
+    var dacpID: UInt64 { engine.dacpID }
     var ptpClockAvailable: Bool {
         get async { await engine.ptpClockAvailable }
     }

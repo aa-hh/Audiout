@@ -115,7 +115,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+    // Generous ceiling, not an expected wait: returns as soon as `cond()` holds,
+    // so a higher bound only helps the slow/failure case. Raised from 2s for
+    // headroom under `swift test --parallel` core contention (see the sibling
+    // helper in PerAppCaptureCoordinatorTests for the full rationale).
+    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }

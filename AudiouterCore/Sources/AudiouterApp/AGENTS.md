@@ -99,8 +99,9 @@ differ, on purpose:
 - **Remote Control** DOES have a real, silent status API (`AXIsProcessTrusted()`),
   so it reports a genuine `.granted`, updated the moment the user toggles it in
   System Settings and returns. Primed AHEAD of the feature that consumes it —
-  speaker-side transport controls simulating Mac media keys, not yet merged (see
-  `claude/speaker-input-responsiveness-b8123f`).
+  speaker-side transport controls simulating Mac media keys, not yet merged (the
+  branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does
+  NOT hold this work — see `docs/plans/phase-3-findings/branch-inventory.md`).
 
 The window is a NORMAL (not floating, no Dock icon) window — an earlier version
 made it `.floating` for recoverability, but that pins it above every other app,

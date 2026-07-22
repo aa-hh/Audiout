@@ -4,19 +4,23 @@ import AppKit
 import AudiouterSharedUI
 import QuartzCore
 
-/// The **leading-column VU meter** (task T1): a thin vertical bar whose fill
-/// height tracks the live per-device RMS the backend emits via
-/// `BackendEvent.level(id:rms:)`.
+/// The **under-name VU meter** (Warm Signal v4 §Call-1, relocated from the
+/// leading column): a short HORIZONTAL bar (`meterUnderNameWidth` ×
+/// `meterUnderNameHeight` ≈ 74 × 3 pt) sitting under the device name, whose fill
+/// WIDTH tracks the live per-device RMS the backend emits via
+/// `BackendEvent.level(id:rms:)`. It grows LEFT → RIGHT. It is visually distinct
+/// from the fader (thin, thumb-less, in the identity cluster not the slider
+/// column) — killing the v3 "two gold bars, which is which?" confusion.
 ///
 /// **Warm meter gradient (Warm Signal v3 §1/§3.3, S2):** the fill is the
-/// position-fixed warm ramp `ember → gold` with the top zone at `caution` —
+/// position-fixed warm ramp `ember → gold` with the right zone at `caution` —
 /// the meter's CEILING hue. The old green/red vocabulary is retired, and
 /// FAILURE RED NEVER APPEARS IN A METER (house rule 8): a loud party can
 /// never impersonate a failure; `caution` is as hot as a meter gets. The
-/// gradient is anchored to the TRACK, not the bar — a full-height
-/// `CAGradientLayer` revealed through a bottom-anchored mask — so the hues
-/// live at fixed heights (bottom = ember, top = caution) and the bar
-/// "uncovers" them as it rises, like a hardware LED ladder.
+/// gradient is anchored to the TRACK, not the bar — a full-width
+/// `CAGradientLayer` revealed through a leading-anchored mask — so the hues
+/// live at fixed widths (left = ember, right = caution) and the bar
+/// "uncovers" them as it grows, like a hardware LED ladder.
 ///
 /// Three layers on one custom `CALayer`-backed view: a faint rounded "track"
 /// (the recess the bar sits in), the full-height warm gradient, and the
@@ -42,10 +46,10 @@ import QuartzCore
 /// Motion check that snaps instead of animating.
 public final class LevelMeterView: NSView {
 
-    /// Width of the meter column — matches `PopoverColumnGrid.meterWidth`
-    /// (duplicated here as a `public static let` per the shared symbol
-    /// contract; `AirPlayControllerSharedUI` does not import the grid type).
-    public static let columnWidth: CGFloat = 8
+    /// Thickness (height) of the under-name meter bar — matches
+    /// `PopoverColumnGrid.meterUnderNameHeight` (kept as a `public static let`
+    /// for the shared symbol contract). Drives the bar's rounded end caps.
+    public static let columnWidth: CGFloat = PopoverColumnGrid.meterUnderNameHeight
 
     /// Attack coefficient (rising level) — larger than `decay` so the bar
     /// jumps up quickly on a transient.
@@ -58,18 +62,18 @@ public final class LevelMeterView: NSView {
     private static let restEpsilon: CGFloat = 0.001
 
     /// Gradient stop for where `ember` has fully warmed to `gold` (fraction of
-    /// the track height). Below this the bar reads ember-dim; the healthy
+    /// the track width). Left of this the bar reads ember-dim; the healthy
     /// listening band reads gold.
     static let meterGoldStop: NSNumber = 0.7
-    /// The `caution` top-zone onset: gold blends toward the `caution` ceiling
+    /// The `caution` right-zone onset: gold blends toward the `caution` ceiling
     /// across the final stretch of the track (spec: "meters top out HERE").
     static let meterCautionStop: NSNumber = 1.0
 
     private let trackLayer = CALayer()
-    /// The full-height, position-fixed warm gradient (`ember → gold →
+    /// The full-width, position-fixed warm gradient (`ember → gold →
     /// caution`), revealed through ``fillMaskLayer``.
     private let fillLayer = CAGradientLayer()
-    /// Bottom-anchored mask over ``fillLayer`` — its height IS the displayed
+    /// Leading-anchored mask over ``fillLayer`` — its width IS the displayed
     /// level; the gradient itself never moves or rescales.
     private let fillMaskLayer = CALayer()
 
@@ -89,11 +93,10 @@ public final class LevelMeterView: NSView {
         // not the fixed gradient sheet it reveals.
         fillMaskLayer.cornerRadius = Self.columnWidth / 2
         fillMaskLayer.backgroundColor = NSColor.black.cgColor   // opaque = revealed
-        // Bottom-to-top ramp: startPoint is the bar's base (ember), endPoint
-        // the track's ceiling (caution). CAGradientLayer y grows downward, so
-        // the base is y=1.
-        fillLayer.startPoint = CGPoint(x: 0.5, y: 1)
-        fillLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        // Left-to-right ramp: startPoint is the bar's base (ember, leading),
+        // endPoint the track's ceiling (caution, trailing).
+        fillLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        fillLayer.endPoint = CGPoint(x: 1, y: 0.5)
         fillLayer.locations = [0, Self.meterGoldStop, Self.meterCautionStop]
         fillLayer.mask = fillMaskLayer
         layer?.addSublayer(trackLayer)
@@ -122,7 +125,8 @@ public final class LevelMeterView: NSView {
     }
 
     public override var intrinsicContentSize: NSSize {
-        NSSize(width: Self.columnWidth, height: 22)
+        NSSize(width: PopoverColumnGrid.meterUnderNameWidth,
+               height: PopoverColumnGrid.meterUnderNameHeight)
     }
 
     /// Non-interactive: the meter never intercepts clicks/hover meant for the
@@ -194,11 +198,11 @@ public final class LevelMeterView: NSView {
     private func redrawFill() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let height = bounds.height * Self.displayHeight(forLevel: displayed)
+        let width = bounds.width * Self.displayHeight(forLevel: displayed)
         // Mask coordinates are the gradient layer's own space (same bounds):
-        // a bottom-anchored reveal window. The gradient never moves (S2 —
-        // hues live at fixed track heights).
-        fillMaskLayer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
+        // a leading-anchored reveal window. The gradient never moves (S2 —
+        // hues live at fixed track widths).
+        fillMaskLayer.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
         CATransaction.commit()
     }
 

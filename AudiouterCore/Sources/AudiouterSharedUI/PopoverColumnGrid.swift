@@ -43,17 +43,50 @@ public enum PopoverColumnGrid {
     /// Trailing inset of the last column from the row's trailing edge.
     public static let trailingInset: CGFloat = 14
 
-    // MARK: Meter column (leading edge, task T-METER)
+    // MARK: Leading gutter reserve (Warm Signal v4 §Call-1 — the LEFT SPINE)
+    //
+    // Warm Signal v4 retires the leading VERTICAL meter column (the meter moves
+    // UNDER THE NAME, `meterUnderName*` below) and re-homes the leading gutter as
+    // the **membership rail's spine**. Per Alec's clearance refinement the gutter
+    // is WIDENED so every node has clear negative space to its right before the
+    // icon tile — the spine reads airy, not cramped. The reserve is DERIVED from
+    // the rail geometry (`railGutterCenterX` + node radius + `busNodeClearance`)
+    // so widening any of those reflows the leading columns consistently. Only the
+    // LEADING columns move; VOLUME (slider) and OUTPUT (trailing) columns are
+    // trailing-anchored, so their alignment across sections is untouched.
 
-    /// Width of the volume-meter column, the new leading column on every row.
-    public static let meterWidth: CGFloat = 8
-    /// Gap from the row's leading inset to the meter column.
-    public static let meterToLeading: CGFloat = 8
-    /// Leading edge of the first row element (accounting for indentation).
-    /// Computed as (indented ? indentedLeadingInset : leadingInset) + meterWidth + meterToLeading.
-    public static func firstElementLeading(indented: Bool) -> CGFloat {
-        (indented ? indentedLeadingInset : leadingInset) + meterWidth + meterToLeading
+    /// Horizontal negative space between a bus node's right edge and the icon
+    /// tile to its right (Alec's clearance refinement) — the node must not crowd
+    /// the icon. Also the single knob that widens the whole leading gutter.
+    public static let busNodeClearance: CGFloat = 12
+    /// The leading gutter reserve: from the plain `leadingInset` to the icon —
+    /// wide enough for the rail spine (node radius) plus clear padding to the
+    /// icon. Derived, so growing `railGutterCenterX` / `busNodeClearance` reflows
+    /// the icon/name columns in lockstep.
+    public static var busGutterWidth: CGFloat {
+        railGutterCenterX + busNodeDiameter / 2 + busNodeClearance - leadingInset
     }
+    /// Leading edge of the first row element (the icon), accounting for
+    /// indentation — now reserves the widened rail gutter (`busGutterWidth`), so
+    /// every meter/bus row's icon clears the spine with breathing room.
+    public static func firstElementLeading(indented: Bool) -> CGFloat {
+        (indented ? indentedLeadingInset : leadingInset) + busGutterWidth
+    }
+
+    // MARK: Under-name level meter (Warm Signal v4 §Call-1 — meter relocation)
+    //
+    // The live-level bar moves out of the leading column into the identity
+    // cluster, UNDER the device name: a SHORT horizontal bar (spec: "~74 pt
+    // wide, 3 pt tall"), left-aligned, row order name / meter / sublabel. It is
+    // shown only on armed + unmuted + connected rows (the row gates it). Killing
+    // the "two gold bars" confusion (§Call-1): the fader is the only OTHER gold
+    // bar, and it lives in the slider column with a thumb — the meter is thin,
+    // thumb-less, and in the name cluster.
+
+    /// Width of the under-name live-level meter bar (spec ~74 pt).
+    public static let meterUnderNameWidth: CGFloat = 74
+    /// Height of the under-name live-level meter bar (spec ~3 pt).
+    public static let meterUnderNameHeight: CGFloat = 3
 
     // MARK: Fixed column widths
 
@@ -171,40 +204,50 @@ public enum PopoverColumnGrid {
     /// contain the disc plus its glow halo without clipping.
     public static let routeArmedDotBoxSize: CGFloat = 14
 
-    // MARK: Membership bus (Warm Signal v3 §4, S-BUS)
+    // MARK: Membership bus — the LEFT SPINE (Warm Signal v4 §Call-1)
     //
-    // The "bus" replaces the membership CHECKBOX's DRAWING (spec §4): a continuous
-    // vertical line dropping down one fixed column past every device row, with a
-    // FILLED gold node on the line for a member and a HOLLOW node the line DETOURS
-    // around (a wire-hop arc) for a non-member. Only the drawing changes — the same
-    // real `NSButton` checkbox lives underneath (spec §4.8). Geometry is promoted
-    // here (spec §4.1 "constants promoted into PopoverColumnGrid") so a future
-    // density setting swaps node + column sizing in one place, exactly like the
-    // halo-ring block above.
+    // The "bus" is the membership CHECKBOX's DRAWING (spec §4.8: only the drawing
+    // moves, the real `NSButton` checkbox stays the control): a filled gold node
+    // for a member and a hollow node the line DETOURS around for a non-member.
+    // Warm Signal v4 relocates the whole spine from the TRAILING column to the
+    // **LEFT gutter** (`railGutterCenterX`, the leading spine), grows the detour
+    // arc (skipped nodes get generous berth), and terminates the rail at the
+    // LOWEST SELECTED node — rows below it get bare hollow nodes with no rail.
+    // Geometry lives here (a future density setting swaps it in one place).
     //
-    // COLUMN X: the node column reuses `trailingControlCenterFromTrailing` (the
-    // checkbox's real current center, §0.1 / §4.1) — the bus IS the trailing
-    // column. Every node sits at exactly that x; toggling changes only FILL and
-    // LINE PATH, never position (zero layout shift — R7 / §4.1). No new column.
+    // COLUMN X: every node sits at exactly `railGutterCenterX` from the row's
+    // LEADING edge; toggling changes only FILL and LINE PATH, never position
+    // (zero layout shift — R7). The checkbox is re-anchored to this same x so a
+    // left-gutter node click still toggles it.
 
-    /// Diameter of a bus node (spec §4.1 "~13 pt, matching the current `.switch`
-    /// checkbox visual box").
+    /// The rail's centreline, measured from the row's LEADING (left) content edge
+    /// (spec v4 §Call-1 "≈ 18–20 pt from the popover's left content edge"). Sits
+    /// inside the (now widened) leading gutter, LEFT of the icon column, so the
+    /// node clears the glyph with `busNodeClearance` of padding.
+    public static let railGutterCenterX: CGFloat = 20
+    /// Diameter of a bus node (spec §4.1 "~13 pt, matching the `.switch` box").
     public static let busNodeDiameter: CGFloat = 13
-    /// Stroke width of the bus line (spec §4.1 "~2 pt, `ember` token").
+    /// Stroke width of the bus line (spec §4.1 "~2 pt").
     public static let busLineWidth: CGFloat = 2
-    /// Stroke width of the ember rim ringing a filled node / edging a hollow one
-    /// (spec §4.2 "solid `gold` disc with `ember` rim" / "hollow … with an
-    /// `ember`/`hairline` rim").
+    /// Stroke width of the rim ringing a filled node / edging a hollow one.
     public static let busNodeRimWidth: CGFloat = 1.5
-    /// How far past the node radius the hop-arc bows outward when the line detours
-    /// a HOLLOW node (spec §4.2 "bows outward into a small semicircular hop arc").
-    /// The detour semicircle's radius is `busNodeDiameter/2 + busDetourBulge`.
-    public static let busDetourBulge: CGFloat = 4.5
+    /// The unstroked VERTICAL gap between a node's edge and where the rail line
+    /// stops/resumes above and below it (Alec's clearance refinement) — the rail
+    /// "meets" a node with breathing room instead of jamming into it, so
+    /// consecutive nodes read airy. Applied to the straight through-rail (member /
+    /// connecting / pending / failed nodes, which sit ON the spine).
+    public static let busNodeRailGap: CGFloat = 3
+    /// How far past the node radius the hop-arc bows when the line detours a
+    /// HOLLOW non-member node. Warm Signal v4 GREW this (4.5 → 6.5) so a skipped
+    /// node gets generous berth (spec §Call-1 "a wider, rounder bypass arc than
+    /// v3"). The detour semicircle's radius is `busNodeDiameter/2 + busDetourBulge`;
+    /// it bows to the LEADING (panel-edge) side, away from the icon column.
+    public static let busDetourBulge: CGFloat = 6.5
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
-    /// on the node column x. Wide enough to contain the leading-side hop-arc
-    /// (`busNodeDiameter/2 + busDetourBulge` from center) plus the line width,
-    /// without clipping. The overlay spans the full row height so stacked rows'
-    /// rail segments read as one continuous line.
+    /// on `railGutterCenterX`. Wide enough to contain the leading-side hop-arc
+    /// (`busNodeDiameter/2 + busDetourBulge` from centre) plus the line width,
+    /// without clipping. Spans the full row height so stacked rows' rail segments
+    /// read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
 
     // MARK: Unified row styling — body rows, hover, selection (2026-07-18)

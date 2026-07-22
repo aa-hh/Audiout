@@ -613,15 +613,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         devicesPlaceholderShown = false
-        // Combined header row (change 1): "Output Devices" title (Warm Signal
-        // §5.1 silkscreen vocabulary) on the left, "VOLUME" over the slider and
-        // "Selected" over the membership checkbox on the right. Collapsible
-        // (main merge) — the collapse key must equal the display header, since
-        // cards are looked up by header title. The trailing accessory (F1)
-        // saves the current Selected Devices set as a group; its enabled state
-        // tracks `canSaveCurrentSetup` and is kept fresh in place via
+        // Combined header row: "Output Devices" title on the left, "VOLUME" over
+        // the slider. The membership "Selected" column MOVED to the left spine
+        // (v4 §Call-1), so this card no longer heads a trailing column — its
+        // device rows reserve the trailing dropdown column but leave it empty
+        // (column alignment holds via the shared grid). The trailing accessory
+        // (F1) saves the current Selected Devices set as a group; its enabled
+        // state tracks `canSaveCurrentSetup`, kept fresh via
         // `refreshDevicesAccessory()` on selection repaints.
-        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Selected",
+        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: nil,
                         trailingAccessory: PopoverPanelViewController.HeaderAccessory(
                             symbol: "plus",
                             label: "Save Selected Devices as group",
@@ -653,13 +653,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 panel.addSubsectionHeader("AirPlay Devices")
                 for device in airplay { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
-            // Terminate the membership bus at the LAST rendered device node (spec
-            // §4.1 "runs to the last device row's node") so the line stops there
-            // rather than dangling below it. Rendered order is locals then airplay.
-            if let lastBusDevice = (locals + airplay).last {
-                deviceRowsByID[lastBusDevice.id]?.setBusTerminates(true)
-            }
         }
+        // Set each row's rail extent + feed the continuous rail overlay: the
+        // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
+        // BARE (no rail) — spec v4 §Call-1. Runs even with no devices (the overlay
+        // then draws just the Main Audio origin hook).
+        updateBusRailExtents()
 
         // 3. Applications card — rendered LAST (below Selected Devices), one
         // `AppRowView` per routed app in stable `appRoutes` order, then the ±
@@ -720,10 +719,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("MAIN AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; any uppercasing is
-    /// the panel's styling concern, the copy lives here). Named constants
-    /// because the title string IS the card's lookup/collapse key.
-    static let mainAudioCardTitle = "Main Audio"
+    /// ("SYSTEM AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; the panel uppercases
+    /// the displayed header, the title-case copy lives here). Named constants
+    /// because the title string IS the card's lookup/collapse key. The System
+    /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
+    /// "System Audio"; the ROW inside it is now titled "Main Audio").
+    static let mainAudioCardTitle = "System Audio"
     static let outputDevicesCardTitle = "Output Devices"
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
@@ -891,7 +892,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (spec §4.7: the note appears only under genuine divergence — the derived
     /// case posts none).
     private func devicesCardNoteText() -> String? {
-        devicesCardDivergence().map { "Inactive — Audio Out is using '\($0.groupName)'" }
+        devicesCardDivergence().map { "Inactive — Main Audio is using '\($0.groupName)'" }
     }
 
     /// The note text the LAST `rebuild()` actually rendered onto the Devices card
@@ -979,9 +980,44 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
         }
+        // The rail extent tracks the checked set, which a mid-open toggle can
+        // change (v4 §Call-1), so recompute it on every in-place repaint too.
+        updateBusRailExtents()
         // F1: keep the Devices "Save as group" accessory's enabled state fresh on
         // in-place repaints (a rebuild sets it from `canSaveCurrentSetup` too).
         refreshDevicesAccessory()
+    }
+
+    /// Set each mounted device row's membership-rail extent (Warm Signal v4
+    /// §Call-1): the spine runs Main Audio (the origin hook) → the LOWEST
+    /// SELECTED node. Rows within that span carry a through-rail (the terminus
+    /// draws none below it); rows BELOW the lowest selected node render BARE —
+    /// a hollow clickable node with no rail — so the rail's length reads as "how
+    /// far down the mix reaches." Render order is locals then AirPlay, matching
+    /// `rebuild()`.
+    private func updateBusRailExtents() {
+        let ordered = orderedDevices()
+        let renderOrder = ordered.filter(\.isLocalDevice) + ordered.filter { !$0.isLocalDevice }
+        let lastSelected = renderOrder.lastIndex {
+            groupController?.isSpeakerSelected($0.id) ?? false
+        }
+        var railRows: [DeviceRowView] = []
+        for (i, device) in renderOrder.enumerated() {
+            guard let row = deviceRowsByID[device.id] else { continue }
+            if let last = lastSelected {
+                // Within the span: rail above through the terminus; rail below
+                // only until it. Below the terminus: bare (no rail either side).
+                row.setBusRail(above: i <= last, below: i < last)
+            } else {
+                // Degenerate (no selected device — the floor should prevent this):
+                // every node bare, no spine.
+                row.setBusRail(above: false, below: false)
+            }
+            railRows.append(row)
+        }
+        // Feed the continuous rail overlay the Main Audio row + device rows in
+        // display order so it can draw the spine as one line through the gutter.
+        panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows)
     }
 
     /// Sync the Devices card's "Save Selected Devices as group" accessory enabled

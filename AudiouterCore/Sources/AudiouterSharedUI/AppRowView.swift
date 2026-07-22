@@ -170,13 +170,17 @@ public final class AppRowView: NSView {
     /// drives this automatically; a future per-stream metering seam calls
     /// ``setLevel(_:)`` directly.
     private let meterView = LevelMeterView()
-    /// Whether the leading VU meter column is shown. Defaults to `false` so
-    /// every existing caller (today, none pass `true`) sees no layout change.
+    /// Whether the under-name VU meter is shown. Defaults to `false` so every
+    /// existing caller (today, none pass `true`) sees no layout change.
     private let showsMeter: Bool
     /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
     /// when there's no meter or after a ``resetLevel()``.
     private var lastMeterLevel: Float = 0
     private let nameLabel = NSTextField(labelWithString: "")
+    /// The vertical identity cluster (Warm Signal v4 §Call-1): **name / meter**,
+    /// left-aligned — the under-name meter, same anatomy as the device rows so
+    /// the columns line up across sections.
+    private let identityStack = NSStackView()
     private let slider = NSSlider()
     /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
     /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
@@ -526,30 +530,35 @@ public final class AppRowView: NSView {
         // Non-interactive (`LevelMeterView.hitTest` returns nil).
         meterView.translatesAutoresizingMaskIntoConstraints = false
 
+        // Identity cluster (v4 §Call-1): name over the under-name meter, matching
+        // the device rows' anatomy so columns line up across sections.
+        identityStack.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.orientation = .vertical
+        identityStack.alignment = .leading
+        identityStack.spacing = 2
+        identityStack.distribution = .fill
+        identityStack.addArrangedSubview(nameLabel)
+        if showsMeter { identityStack.addArrangedSubview(meterView) }
+
         addSubview(iconView)
-        if showsMeter { addSubview(meterView) }
         addSubview(offlineBadge)
-        addSubview(nameLabel)
+        addSubview(identityStack)
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(destinationPopUp)
 
         // Laid out against the shared `PopoverColumnGrid` exactly like
-        // `DeviceRowView`: icon leads, slider/`%`/trailing popup are anchored off
-        // the row's TRAILING edge so they line up with every other row type.
-        // Removal is no longer a floating row control — it's the ± footer
-        // segmented control, the row's context menu, and Delete/Backspace, all
-        // routed through the same `didRemoveFor(appID:)` delegate call.
-        //
-        // The meter (when shown) sits at the row's leading edge; the icon then
-        // repoints its leading anchor off the meter's trailing edge instead of
-        // `firstElementLeading(indented:)` directly — together these land the
-        // icon at exactly the same x either way (`firstElementLeading` is
-        // defined as leading + meterWidth + meterToLeading), matching
-        // `DeviceRowView`'s contract so the icon column never shifts.
+        // `DeviceRowView`: the icon leads at `firstElementLeading` (reserving the
+        // left rail gutter so app icons align with device icons); slider / `%` /
+        // trailing popup anchor off the row's TRAILING edge. App rows carry no
+        // bus node — the gutter is reserved but empty, just as device rows leave
+        // the trailing dropdown column empty (column alignment holds).
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
+            iconView.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
@@ -560,10 +569,10 @@ public final class AppRowView: NSView {
             offlineBadge.widthAnchor.constraint(equalToConstant: 11),
             offlineBadge.heightAnchor.constraint(equalToConstant: 11),
 
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
-                                               constant: PopoverColumnGrid.iconToName),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameLabel.trailingAnchor.constraint(
+            identityStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                   constant: PopoverColumnGrid.iconToName),
+            identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            identityStack.trailingAnchor.constraint(
                 lessThanOrEqualTo: slider.leadingAnchor,
                 constant: -PopoverColumnGrid.nameToSlider),
 
@@ -586,19 +595,11 @@ public final class AppRowView: NSView {
 
         if showsMeter {
             constraints.append(contentsOf: [
-                meterView.leadingAnchor.constraint(
-                    equalTo: leadingAnchor, constant: PopoverColumnGrid.leadingInset),
-                meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
-                meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
-                meterView.heightAnchor.constraint(equalToConstant: 22),
-                iconView.leadingAnchor.constraint(
-                    equalTo: meterView.trailingAnchor, constant: PopoverColumnGrid.meterToLeading),
+                meterView.widthAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.meterUnderNameWidth),
+                meterView.heightAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.meterUnderNameHeight),
             ])
-        } else {
-            constraints.append(
-                iconView.leadingAnchor.constraint(
-                    equalTo: leadingAnchor,
-                    constant: PopoverColumnGrid.firstElementLeading(indented: false)))
         }
 
         NSLayoutConstraint.activate(constraints)

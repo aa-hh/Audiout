@@ -123,8 +123,16 @@ final class PopoverPanelViewController: NSViewController {
     /// replaces, this one was never translucent).
     private let background = WarmCanvasView()
 
+    /// The continuous membership-rail spine (Warm Signal v4 §Call-1): drawn once
+    /// for the whole panel, ON TOP of every card + divider, so the rail is one
+    /// uninterrupted line down a clear left gutter (section titles sit to its
+    /// right, at the icon column). Fed the Main Audio row + device rows by the
+    /// controller each rebuild; repainted on every layout by `RailHostView`.
+    let railOverlay = BusRailOverlayView()
+
     override func loadView() {
-        let container = NSView()
+        let container = RailHostView()
+        container.railOverlay = railOverlay
         container.translatesAutoresizingMaskIntoConstraints = false
 
         background.translatesAutoresizingMaskIntoConstraints = false
@@ -144,6 +152,11 @@ final class PopoverPanelViewController: NSViewController {
 
         container.addSubview(header)
         container.addSubview(stackView)
+        // The rail overlay is added LAST so it composites ON TOP of the cards +
+        // hairline dividers — the continuous spine reads unbroken where it would
+        // otherwise be crossed. Non-interactive (`hitTest` returns nil).
+        railOverlay.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(railOverlay)
 
         // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
         // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
@@ -178,9 +191,25 @@ final class PopoverPanelViewController: NSViewController {
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stackView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+
+            // The rail overlay spans the whole panel (it reads row frames in its
+            // own coordinate space and draws the spine in the left gutter).
+            railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
+            railOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         view = container
+    }
+
+    /// Point the continuous rail overlay at the current Main Audio row + device
+    /// rows (top-to-bottom display order), then repaint it. The controller calls
+    /// this at the end of every rebuild / in-place device repaint.
+    func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding]) {
+        railOverlay.mainOutRow = mainOut
+        railOverlay.deviceRows = deviceRows
+        railOverlay.needsDisplay = true
     }
 
     // MARK: Exact-fit sizing (T-3)
@@ -307,7 +336,10 @@ final class PopoverPanelViewController: NSViewController {
         // The combined header row is the FIRST element inside the tile: section
         // title on the left, column headers centered over their columns on the
         // right. Height ~28pt (change 1 — one row instead of title + header).
-        let label = NSTextField(labelWithString: header)
+        // The section title DISPLAYS uppercased (Warm Signal §5.1 silkscreen
+        // vocabulary / v4 §Call-1 "SYSTEM AUDIO"); the `header` argument stays the
+        // title-case lookup/collapse KEY.
+        let label = NSTextField(labelWithString: header.uppercased())
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 14, weight: .medium)
         label.textColor = Tokens.Color.label
@@ -315,11 +347,15 @@ final class PopoverPanelViewController: NSViewController {
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
 
-        // Leading disclosure chevron (decision 5). Placed LEFT of the title; the
-        // title's leading anchor shifts to sit after it. Follows GroupRowView's
-        // symbol convention (chevron.down expanded / chevron.right collapsed).
+        // Leading disclosure chevron (decision 5). Warm Signal v4 §Call-1 (Alec's
+        // continuity correction): the whole header group starts at the DEVICE
+        // ICON column (`firstElementLeading`), NOT the plain leading inset — so
+        // the section title sits to the RIGHT of the rail's left-gutter lane,
+        // leaving that lane entirely to the continuous spine. The chevron's left
+        // edge aligns with the icon tiles below it; the title follows.
+        let sectionLeadingInset = PopoverColumnGrid.firstElementLeading(indented: false)
         var titleLeadingAnchor = headerWrap.leadingAnchor
-        var titleLeadingConstant = PopoverColumnGrid.leadingInset
+        var titleLeadingConstant = sectionLeadingInset
         if collapsible {
             let chevron = NSButton()
             chevron.translatesAutoresizingMaskIntoConstraints = false
@@ -338,7 +374,7 @@ final class PopoverPanelViewController: NSViewController {
             headerWrap.addSubview(label)
             NSLayoutConstraint.activate([
                 chevron.leadingAnchor.constraint(equalTo: headerWrap.leadingAnchor,
-                                                 constant: PopoverColumnGrid.leadingInset),
+                                                 constant: sectionLeadingInset),
                 chevron.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
                 chevron.widthAnchor.constraint(equalToConstant: 16),
             ])
@@ -456,7 +492,11 @@ final class PopoverPanelViewController: NSViewController {
             stackView.addArrangedSubview(hairline)
             NSLayoutConstraint.activate([
                 hairline.heightAnchor.constraint(equalToConstant: 1),
-                hairline.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
+                // Start the divider at the icon column (Warm Signal v4 §Call-1) so
+                // the left rail gutter stays clear for the continuous spine.
+                hairline.leadingAnchor.constraint(
+                    equalTo: stackView.leadingAnchor,
+                    constant: PopoverColumnGrid.firstElementLeading(indented: false)),
                 hairline.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
             ])
         }
@@ -657,7 +697,11 @@ final class PopoverPanelViewController: NSViewController {
         wrapper.addSubview(label)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: 22),
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 14),
+            // Align to the icon column (Warm Signal v4 §Call-1) — out of the rail
+            // gutter, directly above the device icons.
+            label.leadingAnchor.constraint(
+                equalTo: wrapper.leadingAnchor,
+                constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
         ])
         addRow(wrapper)
@@ -681,8 +725,10 @@ final class PopoverPanelViewController: NSViewController {
         wrapper.addSubview(label)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: 18),
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor,
-                                           constant: PopoverColumnGrid.leadingInset),
+            // Align to the icon column (Warm Signal v4 §Call-1) — clear of the rail gutter.
+            label.leadingAnchor.constraint(
+                equalTo: wrapper.leadingAnchor,
+                constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
                                             constant: -PopoverColumnGrid.leadingInset),
             label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
@@ -787,6 +833,19 @@ final class PopoverPanelViewController: NSViewController {
     /// if none were added or `title` isn't a card.
     func test_cardNotes(title: String) -> [NSTextField] {
         notesByHeader[title] ?? []
+    }
+}
+
+/// The panel's top-level container (Warm Signal v4 §Call-1): a plain view that
+/// repaints the continuous rail overlay on every layout pass, so the spine
+/// always reflects the current row frames (collapse / expand / resize) with no
+/// cached geometry. The overlay draws from settled frames, so `cacheDisplay`
+/// snapshots stay deterministic.
+private final class RailHostView: NSView {
+    weak var railOverlay: BusRailOverlayView?
+    override func layout() {
+        super.layout()
+        railOverlay?.needsDisplay = true
     }
 }
 

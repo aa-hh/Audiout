@@ -55,6 +55,19 @@ public final class WarmFaderCell: NSSliderCell {
         }
     }
 
+    /// Whether the owning row's controls are **muted-unconnected** (Warm Signal
+    /// v4 §Call-1): a connecting/pending or unavailable/failed device renders its
+    /// fader desaturated + lower-contrast — "not adjustable right now" — while a
+    /// connected member is full-gold. The row re-stamps this on every `apply`;
+    /// it dims the interior exactly like the disabled state without disabling the
+    /// control (the neutral fill already applies, since a non-connected row is
+    /// never route-armed).
+    public var isMutedControl: Bool = false {
+        didSet {
+            if isMutedControl != oldValue { controlView?.needsDisplay = true }
+        }
+    }
+
     // MARK: Drawing
 
     public override func drawBar(inside rect: NSRect, flipped: Bool) {
@@ -182,11 +195,11 @@ public final class WarmFaderCell: NSSliderCell {
                height: PopoverColumnGrid.faderTrackHeight)
     }
 
-    /// A disabled fader dims its interior drawing (fill, rim, thumb) instead
-    /// of greying per-part — mirrors how the row already dims its `%` readout
-    /// in lockstep with `slider.isEnabled`.
+    /// A disabled OR muted-unconnected (v4 §Call-1) fader dims its interior
+    /// drawing (fill, rim, thumb) instead of greying per-part — mirrors how the
+    /// row already dims its `%` readout in lockstep with `slider.isEnabled`.
     private var interiorAlpha: CGFloat {
-        isEnabled ? 1.0 : PopoverColumnGrid.faderDisabledAlpha
+        (isEnabled && !isMutedControl) ? 1.0 : PopoverColumnGrid.faderDisabledAlpha
     }
 
     /// 1 px in points at 1x — hairline shading/highlight/outline width.

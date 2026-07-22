@@ -143,11 +143,13 @@ public final class DeviceRowView: NSView {
     /// member … showsToggle=false rows carry no membership control"), so the bus
     /// never claims a membership the row can't toggle.
     private var busActive: Bool { showsBus && showsToggle }
-    /// Whether this row is the LAST device node on the bus (spec §4.1 "runs to the
-    /// last device row's node") — set by the host via ``setBusTerminates(_:)`` so
-    /// the terminating node draws no rail below it. Structural, not per-device, so
-    /// it survives an in-place `apply` repaint.
-    private var busTerminates = false
+    /// This row's rail extent (Warm Signal v4 §Call-1) — set by the host via
+    /// ``setBusRail(above:below:)`` so the rail runs Main Audio → the LOWEST
+    /// SELECTED node and rows below it render BARE (no rail). Structural, not
+    /// per-device, so it survives an in-place `apply` repaint. Defaults to a
+    /// full through-rail; the host narrows it per its position in the spine.
+    private var busRailAbove = true
+    private var busRailBelow = true
     /// The current dormant-divergent tint state of the bus node (spec §4.7) —
     /// mirrors `selectionDimmed` for a bus row, where dimming is a node TINT, not
     /// the checkbox alpha (§4.7 "dim via tint … checkbox at full alpha").
@@ -195,10 +197,18 @@ public final class DeviceRowView: NSView {
     private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
 
-    /// The leading VU meter (task T-METER/T3), mounted only when `showsMeter`
-    /// is true — the mixer window and `GroupRowView` leave it out and stay
-    /// visually unchanged. See ``LevelMeterView``.
+    /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
+    /// identity stack only when `showsMeter` — the mixer window and
+    /// `GroupRowView` leave it out. Shown (un-hidden) only on armed rows. See
+    /// ``LevelMeterView``.
     private let meterView = LevelMeterView()
+
+    /// The vertical identity cluster (Warm Signal v4 §Call-1): row order
+    /// **name / meter / sublabel**, left-aligned, centred vertically on the row
+    /// as a group. `meterView` (when `showsMeter`) and `statusLabel` toggle their
+    /// `isHidden` so the stack recentres the visible lines automatically — this
+    /// replaces the old manual `nameCenterYConstraint` half-line juggling.
+    private let identityStack = NSStackView()
     /// Whether the leading VU meter column is shown. Defaults to `false` so
     /// the mixer window's existing layout is untouched; only the popover's
     /// Selected Devices rows and Main Out pass `true`.
@@ -404,6 +414,16 @@ public final class DeviceRowView: NSView {
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
         faderCell.isRouteArmed = isRouteArmed
+        // Muted-unconnected controls (v4 §Call-1): a connecting/reconnecting or
+        // failed device — or an unavailable one — renders its controls muted
+        // (desaturated + lower-contrast), "not adjustable right now"; a connected
+        // member is full-gold. Drives the fader dim and the readout tint below.
+        let controlsMuted: Bool
+        switch device.connectionState {
+        case .connecting, .reconnecting, .failed: controlsMuted = true
+        case .connected, .off:                    controlsMuted = !device.isAvailable
+        }
+        faderCell.isMutedControl = controlsMuted
 
         // Single sublabel precedence ladder (failed → unavailable → routing →
         // none), evaluated here after `device`/`isSelectedInSet`/`isMasterMuted`
@@ -430,21 +450,23 @@ public final class DeviceRowView: NSView {
         muteButton.isEnabled = device.isAvailable && controllable
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        // V7: the `%` readout dims in lockstep with the slider's enabled state —
-        // a disabled/unavailable slider reads as fully de-emphasized, not just
-        // its track.
-        readoutLabel.textColor = slider.isEnabled ? Tokens.Color.secondaryLabel : Tokens.Color.tertiaryLabel
+        // V7 + v4 §Call-1: the `%` readout dims in lockstep with the slider's
+        // enabled state OR the muted-unconnected state — a disabled / unavailable
+        // / connecting / failed row reads as fully de-emphasized.
+        readoutLabel.textColor = (slider.isEnabled && !controlsMuted)
+            ? Tokens.Color.secondaryLabel : Tokens.Color.tertiaryLabel
 
-        // The meter can only be showing a live level while the route is armed
-        // (the §3.3 predicate — the exact set of states where audio can be
-        // flowing here); otherwise a stale bar could stick (same transient-
-        // reset discipline as `isHovered` above). HOW it empties matters (S3):
-        // when MUTE is the only blocker (the row would be armed if unmuted)
-        // the meter DRAINS through the existing decay ballistics — target 0,
-        // the bar eases down (snaps under Reduce Motion via `setLevel`'s own
-        // gate) — mirroring how mute sounds. Any other cause (deselected,
-        // disconnected, unavailable) hard-resets as before.
-        if showsMeter && !(device.isAvailable && isRouteArmed) {
+        // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
+        // armed + unmuted + connected rows (the §3.3 armed predicate captures
+        // exactly that). Otherwise it is HIDDEN (collapsing in the identity
+        // stack, leaving name / sublabel) and drained/reset so a stale bar can't
+        // stick — same transient-reset discipline as `isHovered`. HOW it empties
+        // matters (S3): when MUTE is the only blocker (the row would be armed if
+        // unmuted) the meter DRAINS through the existing decay ballistics; any
+        // other cause (deselected, disconnected, unavailable) hard-resets.
+        let showMeterNow = showsMeter && isRouteArmed
+        if showsMeter { meterView.isHidden = !showMeterNow }
+        if showsMeter && !showMeterNow {
             let mutedOnly = device.isAvailable && activeMember && isConnected
             if mutedOnly {
                 meterView.setLevel(0)   // ballistic drain (reused decay path)
@@ -462,13 +484,22 @@ public final class DeviceRowView: NSView {
         setNeedsDisplay(bounds)
     }
 
-    /// Set whether this row is the terminating (last) node on the bus (spec §4.1)
-    /// — the host calls this once at build time; it survives in-place `apply`
-    /// repaints because it's structural, not per-device. The terminating node
-    /// draws no rail below it, so the line ends at the last node.
-    public func setBusTerminates(_ terminates: Bool) {
-        busTerminates = terminates
+    /// Set this row's rail extent (Warm Signal v4 §Call-1) — the host calls this
+    /// once per rebuild from the row's position in the spine: `above`/`below`
+    /// gate the vertical rail segments so the rail runs Main Audio → the LOWEST
+    /// SELECTED node, and a row BELOW that terminus passes `above: false,
+    /// below: false` (a bare hollow node with no rail). Structural, so it
+    /// survives an in-place `apply` repaint.
+    public func setBusRail(above: Bool, below: Bool) {
+        busRailAbove = above
+        busRailBelow = below
         updateBus()
+    }
+
+    /// Convenience for the terminating (lowest selected) node: rail above, none
+    /// below. Retained for callers/tests that only distinguish "terminates".
+    public func setBusTerminates(_ terminates: Bool) {
+        setBusRail(above: true, below: !terminates)
     }
 
     /// Re-derive and push the bus node rendering from the current membership /
@@ -488,15 +519,22 @@ public final class DeviceRowView: NSView {
             node = .nonMember
             dim = true
         } else if isSelectedInSet {
-            node = .member               // §4.3 filled gold node
+            // Selected members key their node off the CONNECTION state (v4
+            // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
+            // failed → failure-red ring; connected/idle → filled gold.
+            switch device.connectionState {
+            case .connecting, .reconnecting: node = .connecting
+            case .failed:                    node = .failed
+            case .connected, .off:           node = .member
+            }
         } else {
             node = .nonMember            // §4.4 hollow node, line detours
         }
         // A FAILED member always renders at full failure emphasis regardless of
-        // dormancy — never dim its node (the red ring/sublabel carry it, and the
-        // node stays a full member until an honest toggle-off).
+        // dormancy — never dim its node (the red ring carries it, and the node
+        // stays in the spine until an honest toggle-off).
         if case .failed = device.connectionState { dim = false }
-        busView.apply(node: node, railAbove: true, railBelow: !busTerminates, dimmed: dim)
+        busView.apply(node: node, railAbove: busRailAbove, railBelow: busRailBelow, dimmed: dim)
     }
 
     /// Updates the mute button's engaged treatment for the current
@@ -676,17 +714,6 @@ public final class DeviceRowView: NSView {
 
     private var isDraggingSlider = false
 
-    /// The name label's vertical offset off row center. Flipped live by
-    /// ``applyNameStackLayout(twoLine:)``: 0 when the row is single-line (name
-    /// centered), and a half-line rise when ANY sublabel (failed / unavailable /
-    /// routing) is shown so the name + sublabel PAIR is centered instead.
-    private var nameCenterYConstraint: NSLayoutConstraint!
-
-    /// Half-line offset used to center the two-line name/sublabel pair whenever a
-    /// sublabel is shown. Kept at the value the two-line stack used before the
-    /// redesign.
-    private static let sublabelNameRise: CGFloat = 7.5
-
     private func buildSubviews() {
         wantsLayer = true
         // Leading edge of the row's first control (task B shared grid). Members
@@ -785,38 +812,32 @@ public final class DeviceRowView: NSView {
         let nameClick = NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:)))
         nameLabel.addGestureRecognizer(nameClick)
 
+        // Identity cluster (v4 §Call-1): name / meter / sublabel in a vertical
+        // stack, centred as a group. The meter is present only on `showsMeter`
+        // rows (hidden until armed); the sublabel toggles `isHidden` via the
+        // precedence ladder — the stack recentres the visible lines automatically.
+        identityStack.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.orientation = .vertical
+        identityStack.alignment = .leading
+        identityStack.spacing = 2
+        identityStack.distribution = .fill
+        identityStack.addArrangedSubview(nameLabel)
+        if showsMeter {
+            identityStack.addArrangedSubview(meterView)
+            meterView.isHidden = true   // shown only on armed rows (gated in `apply`)
+        }
+        identityStack.addArrangedSubview(statusLabel)
+
         if busActive { addSubview(busView) }
         addSubview(enableCheckbox)
-        if showsMeter { addSubview(meterView) }
         addSubview(iconView)
         addSubview(haloRingView)           // ring around the icon glyph
         addSubview(armedDotView)           // gold route-armed dot on its corner
-        addSubview(nameLabel)
-        addSubview(statusLabel)
+        addSubview(identityStack)
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
 
-        // The icon now LEADS the row (task B grid): at `leading` for top-level
-        // rows, `indentedLeadingInset` for members — the toggle no longer leads.
-        // The mute glyph, slider and trailing "Selected" checkbox are anchored off
-        // the TRAILING edge via the shared grid so they line up with every other
-        // row type; the `%` readout hangs off the slider's trailing edge (change
-        // 4) so the number is tight to the slider on every slider row.
-        //
-        // The name is SINGLE-LINE and centered by default (2026-07-17); when ANY
-        // sublabel (failed / unavailable / routing) is shown, `applyNameStackLayout`
-        // raises the name by a half-line so the pair is centered. The right-side
-        // status slot was retired — connection status is the on-icon corner dot.
-        let nameCenterY = nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
-        nameCenterYConstraint = nameCenterY
-
-        // The meter (when shown) sits at the row's leading edge; the icon then
-        // repoints its leading anchor off the meter's trailing edge instead of
-        // `leadingAnchor` directly — together these land the icon at exactly
-        // `PopoverColumnGrid.firstElementLeading(indented:)`, matching T1's
-        // shared grid contract. When `showsMeter` is false the icon anchors
-        // directly to `leadingAnchor` as before — layout is IDENTICAL to today.
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -831,8 +852,7 @@ public final class DeviceRowView: NSView {
             haloRingView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 
             // Route-armed dot: centered on the icon box's bottom-right corner,
-            // pulled in by `statusDotInset` (the retired connection dot's
-            // geometry, spec §3.3).
+            // pulled in by `statusDotInset` (spec §3.3).
             armedDotView.widthAnchor.constraint(
                 equalToConstant: PopoverColumnGrid.routeArmedDotBoxSize),
             armedDotView.heightAnchor.constraint(
@@ -844,19 +864,12 @@ public final class DeviceRowView: NSView {
                 equalTo: iconView.bottomAnchor,
                 constant: -PopoverColumnGrid.statusDotInset),
 
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
-                                               constant: PopoverColumnGrid.iconToName),
-            nameCenterY,
-            // Name yields to the MUTE glyph now (it sits between name and slider):
-            // the name's trailing is a `<=` and the name truncates.
-            nameLabel.trailingAnchor.constraint(
-                lessThanOrEqualTo: muteButton.leadingAnchor,
-                constant: -PopoverColumnGrid.iconToName),
-
-            // Sublabel (any kind) sits a half-line under the (raised) name.
-            statusLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
-            statusLabel.trailingAnchor.constraint(
+            // Identity cluster: leading off the icon, centred vertically as a
+            // group; its trailing yields to the mute glyph so the name truncates.
+            identityStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                    constant: PopoverColumnGrid.iconToName),
+            identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            identityStack.trailingAnchor.constraint(
                 lessThanOrEqualTo: muteButton.leadingAnchor,
                 constant: -PopoverColumnGrid.iconToName),
 
@@ -876,63 +889,71 @@ public final class DeviceRowView: NSView {
             readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
             readoutLabel.leadingAnchor.constraint(
                 equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
-
-            // Primary "Selected Devices" checkbox: centered UNDER its "Selected"
-            // header — its centerX sits on the trailing-control column center,
-            // not the column's trailing edge. The `.switch` NSButton with an
-            // empty title is ~18pt square; centerX/centerY handle it (no width
-            // constraint needed).
-            enableCheckbox.centerXAnchor.constraint(
-                equalTo: trailingAnchor,
-                constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
-            enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
         ]
 
+        // The under-name meter's fixed size (v4 §Call-1), when it's in the stack.
+        if showsMeter {
+            constraints.append(contentsOf: [
+                meterView.widthAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.meterUnderNameWidth),
+                meterView.heightAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.meterUnderNameHeight),
+            ])
+        }
+
+        // Membership control + bus spine (v4 §Call-1). On a BUS host the node +
+        // its invisible checkbox move to the LEFT gutter (`railGutterCenterX`), so
+        // a left-gutter node click still toggles the same checkbox; the bus
+        // overlay spans the full row height for the continuous rail (zero layout
+        // shift on toggle — R7). On a non-bus host (mixer window / tests) the
+        // checkbox stays in the trailing control column, byte-for-byte unchanged.
         if busActive {
-            // The bus overlay is centered on the SAME node column x as the checkbox
-            // (both anchored to the trailing edge via the shared grid), so the node
-            // never moves when membership toggles — zero layout shift (spec §4.1 /
-            // R7). It spans the full row height for the continuous rail.
             constraints.append(contentsOf: [
                 busView.centerXAnchor.constraint(
-                    equalTo: trailingAnchor,
-                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
+                    equalTo: leadingAnchor, constant: PopoverColumnGrid.railGutterCenterX),
                 busView.centerYAnchor.constraint(equalTo: centerYAnchor),
                 busView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.busColumnWidth),
                 busView.heightAnchor.constraint(equalTo: heightAnchor),
-                // Pin the invisible checkbox to a deterministic hit area covering
-                // the node (the no-op cell draws nothing; without an explicit size
-                // its intrinsic hit target is undefined). Centered on the column, so
-                // a click on the node toggles membership exactly as before.
+                enableCheckbox.centerXAnchor.constraint(
+                    equalTo: leadingAnchor, constant: PopoverColumnGrid.railGutterCenterX),
+                enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+                // A deterministic hit area over the node (the no-op cell draws
+                // nothing; without an explicit size its hit target is undefined).
                 enableCheckbox.widthAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
                 enableCheckbox.heightAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
             ])
+        } else {
+            constraints.append(contentsOf: [
+                enableCheckbox.centerXAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
+                enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
         }
 
+        // Icon leading: at `firstElementLeading` on meter/bus rows (reserving the
+        // left rail gutter, unchanged x from the pre-v4 leading-meter layout),
+        // else flush at the plain leading inset (mixer-window rows, unchanged).
         if showsMeter {
-            constraints.append(contentsOf: [
-                meterView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leading),
-                meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
-                meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
-                meterView.heightAnchor.constraint(equalToConstant: 22),
-                iconView.leadingAnchor.constraint(
-                    equalTo: meterView.trailingAnchor, constant: PopoverColumnGrid.meterToLeading),
-            ])
+            constraints.append(iconView.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: PopoverColumnGrid.firstElementLeading(indented: indented)))
         } else {
-            constraints.append(iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leading))
+            constraints.append(iconView.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: leading))
         }
 
         NSLayoutConstraint.activate(constraints)
     }
 
-    /// Center the name for a single-line row, or raise it a half-line when ANY
-    /// sublabel (failed / unavailable / routing) is showing so the name +
-    /// sublabel pair is centered as a group on the icon.
-    private func applyNameStackLayout(twoLine: Bool) {
-        nameCenterYConstraint.constant = twoLine ? -Self.sublabelNameRise : 0
-    }
+    /// No-op under the v4 identity stack (Warm Signal §Call-1): the vertical
+    /// `identityStack` recentres its visible lines (name / meter / sublabel)
+    /// automatically when `statusLabel.isHidden` flips, so no manual half-line
+    /// offset is needed. Retained as the single call site the sublabel ladder
+    /// already funnels through, in case a later density setting needs it.
+    private func applyNameStackLayout(twoLine: Bool) {}
 
     private func configureAccessoryButton(_ button: NSButton, symbol: String,
                                           action: Selector) {
@@ -1256,9 +1277,15 @@ public final class DeviceRowView: NSView {
     /// so it can't drift from the pixels.
     public var test_busNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
 
-    /// Whether the bus draws a rail BELOW this row's node — `false` only on the
-    /// terminating last node (spec §4.1). `nil` when the row has no bus.
+    /// Whether the bus draws a rail BELOW this row's node — `false` on the
+    /// terminating (lowest selected) node and on a bare node below it (spec v4
+    /// §Call-1). `nil` when the row has no bus.
     public var test_busRailBelow: Bool? { busActive ? busView.test_railBelow : nil }
+
+    /// Whether the bus draws a rail ABOVE this row's node — `false` only on a
+    /// BARE node below the rail terminus (spec v4 §Call-1 "bare hollow nodes …
+    /// no rail through them"). `nil` when the row has no bus.
+    public var test_busRailAbove: Bool? { busActive ? busView.test_railAbove : nil }
 
     /// Whether the bus node is ACTUALLY drawn in the de-emphasis tint — reads
     /// the drawn value (dormant tint, unavailable tint, and the failed-member
@@ -1357,7 +1384,9 @@ public final class DeviceRowView: NSView {
     /// AppKit mechanisms).
     public override func resetCursorRects() {
         super.resetCursorRects()
-        addCursorRect(nameLabel.frame, cursor: .pointingHand)
+        // `nameLabel` lives inside `identityStack` now (v4 §Call-1), so its own
+        // frame is in the stack's coordinates — convert to this row's space.
+        addCursorRect(convert(nameLabel.bounds, from: nameLabel), cursor: .pointingHand)
     }
 
     /// Cursor rects are frame-snapshotted by AppKit, not live — re-establish
@@ -1621,6 +1650,23 @@ public final class DeviceRowView: NSView {
         case .failed:        return "couldn't connect"
         }
     }
+}
+
+// MARK: - Continuous rail contribution (Warm Signal v4 §Call-1)
+
+extension DeviceRowView: RailNodeProviding {
+    /// The node this row renders, or `nil` when it hosts no bus.
+    public var railNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
+    /// Within the rail span iff it carries a rail above it (false on a bare node
+    /// below the terminus).
+    public var railHasSpine: Bool { busRailAbove }
+    /// Whether the rail continues below this node (false on the terminus).
+    public var railBelow: Bool { busRailBelow }
+    /// Whether the node renders dimmed (dormant-divergent tint).
+    public var railDimmed: Bool { busView.test_dimmed }
+    /// The node is centred on the row's own centre-y.
+    public var railNodeView: NSView { self }
+    public var railNodeBounds: NSRect { bounds }
 }
 
 // MARK: - Delegate default (backward-compatible)

@@ -28,7 +28,7 @@ The menu-bar popover UI (pure AppKit). `PopoverController` owns the `NSPopover`,
 | `PopoverController` | Orchestrator: `NSPopover`, cards, `Device` ingestion. |
 | `PopoverPanelViewController` | Card container: build/collapse by header title. |
 | `CardView` | Rounded module: header rows + collapsible body. |
-| `MainOutRowView` | System row — slider, mute, destination dropdown, leading `LevelMeterView`. |
+| `MainOutRowView` | System Audio "Main Audio" row — slider, mute, "Output" destination dropdown, under-name `LevelMeterView`, and the membership rail's `.origin` hook (rises in the left gutter and turns into the meter). |
 | `ConnectionDiagnosisView` | "Couldn't connect" panel under a failed row. |
 | `PopoverHeaderView` | Top bar: title + groups / settings / quit. |
 | `GroupRowView` | Group's master row; built for the window, unused here. |

@@ -616,6 +616,61 @@ func snapshotDormantGroup(appearanceName: NSAppearance.Name, label: String, outD
     window.contentView = NSView()
 }
 
+/// Render the `rail-depth` scenario (Warm Signal v4 §Call-1 fixture: "left-rail
+/// spine at varying selection depths"): only ONE AirPlay device (Bedroom
+/// HomePod) is checked, so the spine runs Main Audio → HomePod and TERMINATES
+/// there — every AirPlay row below it (Living Room TV, Mixer, Move 2, Office,
+/// Sonos Move) renders a BARE hollow clickable node with NO rail through it. The
+/// local Mac (above the terminus) is local-mix blocked and detoured. This proves
+/// the rail's length is information — "how far down the mix reaches" — and the
+/// bare-node vocabulary the energize agent extends the spine into.
+@MainActor
+func snapshotRailDepth(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    // Shallow selection: ONLY Bedroom HomePod (the first AirPlay row). The rail
+    // terminates at it; every AirPlay row below renders BARE.
+    _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-rail-depth-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 /// Render the `local-mix-blocked` scenario (spec §4.6, the §4.8 fixture list's
 /// **greyed-blocked** and **hover** nodes): an AirPlay device (Office) is
 /// checked, so the Mac's own row ("MacBook Pro Speakers") is local-mix BLOCKED —
@@ -754,6 +809,12 @@ func run() -> Int32 {
     if mode == "local-mix-blocked" {
         snapshotLocalMixBlocked(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLocalMixBlocked(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "rail-depth" {
+        snapshotRailDepth(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotRailDepth(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

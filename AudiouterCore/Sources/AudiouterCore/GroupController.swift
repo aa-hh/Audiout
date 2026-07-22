@@ -273,12 +273,19 @@ public final class GroupController {
             guard selectedDeviceIDs.contains(id) else { return .ok }
             selectedDeviceIDs.remove(id)
 
-            // Reverse auto-swap (see the doc comment above): the last AirPlay
-            // device leaving the set restores the local passthrough default.
+            // Current-device floor (Warm Signal v4 §Call-1): there is NEVER a
+            // zero-selected state — deselecting the LAST remaining device
+            // auto-reselects the current (local) device, so the spine always
+            // exists. This SUBSUMES the reverse auto-swap (removing the last
+            // AirPlay device restored {local}); now removing the last device of
+            // ANY kind does — including the local device itself, whose deselect
+            // therefore becomes a no-op the row bounces back from.
             var autoSwapped = false
-            if !d.isLocalDevice, selectedDeviceIDs.isEmpty, let local = localDeviceID {
+            if selectedDeviceIDs.isEmpty, let local = localDeviceID {
                 selectedDeviceIDs.insert(local)
-                autoSwapped = true
+                // The auto-swap flash is for when the LOCAL row was re-toggled
+                // FOR the user (the removed device wasn't the local one).
+                autoSwapped = !d.isLocalDevice
             }
 
             persistRouting()

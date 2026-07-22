@@ -87,10 +87,13 @@ func topLevelCards(panelView: NSView) -> [NSView] {
 }
 
 /// The index of the card whose header title is `title` among `topLevelCards`,
-/// found by checking each card's own labels for an exact match — `nil` if no
-/// card carries that title.
+/// found by checking each card's own labels for a case-insensitive match — the
+/// section header now DISPLAYS uppercased (Warm Signal §5.1 silkscreen) while
+/// the lookup title is title-case. `nil` if no card carries that title.
 func cardIndex(titled title: String, in cards: [NSView]) -> Int? {
-    cards.firstIndex { allLabelStrings(under: $0).contains(title) }
+    cards.firstIndex { card in
+        allLabelStrings(under: card).contains { $0.caseInsensitiveCompare(title) == .orderedSame }
+    }
 }
 
 @MainActor
@@ -387,8 +390,14 @@ func run() -> Int32 {
     }
     checks.expectEqual(railBelows.count, backend.devices.count,
                        "every device row carries a bus segment")
-    checks.expectEqual(railBelows.filter { $0 == false }.count, 1,
-                       "exactly one terminating node ends the line (spec §4.1)")
+    // v4 §Call-1: the rail runs to the LOWEST SELECTED node — exactly one
+    // terminus (rail above, none below); bare nodes below it have no rail.
+    let terminusCount = backend.devices.filter { d in
+        let row = popover.test_deviceRow(for: d.id)
+        return row?.test_busRailAbove == true && row?.test_busRailBelow == false
+    }.count
+    checks.expectEqual(terminusCount, 1,
+                       "exactly one terminating (lowest selected) node ends the spine (spec v4 §Call-1)")
 
     // --- 22. Connection-status flow (brief §7.3), on a scripted MockBackend:
     // fail → toggle bounced + warning + auto-expanded panel; sticky warning

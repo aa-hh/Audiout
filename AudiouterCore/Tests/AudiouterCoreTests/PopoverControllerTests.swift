@@ -641,21 +641,35 @@ final class PopoverControllerTests: XCTestCase {
 
     // MARK: Membership bus — popover-level wiring (spec §4, S-BUS)
 
-    /// The bus originates at the Audio Out row (§4.1) and terminates at exactly
-    /// one device row — the LAST rendered node (rail-below false there, true
-    /// everywhere else).
-    func testBusOriginatesAtMainOutAndTerminatesAtTheLastDeviceRow() async throws {
+    /// The bus originates at the Main Audio row (the `.origin` hook) and runs to
+    /// the LOWEST SELECTED node (v4 §Call-1): exactly one terminus (rail above,
+    /// none below); nodes below it are BARE (no rail either side). Under the
+    /// default {current device} selection the local row (rendered first) is the
+    /// terminus and every AirPlay row below is bare.
+    func testBusRunsFromMainAudioToTheLowestSelectedNode() async throws {
         let (popover, _, backend) = try await makePopover()
         XCTAssertEqual(popover.test_mainOutRow.test_busOriginNode, .origin,
-                       "the Audio Out row launches the bus out of its dropdown column")
+                       "the Main Audio row launches the bus (the origin hook)")
         XCTAssertFalse(popover.test_mainOutRow.test_busOriginDimmed,
                        "the origin renders at full ink under a Selected Devices target")
+        // Every device row carries a bus segment view.
         let railBelows = backend.devices.compactMap {
             popover.test_deviceRow(for: $0.id)?.test_busRailBelow
         }
         XCTAssertEqual(railBelows.count, backend.devices.count, "every device row carries a bus segment")
-        XCTAssertEqual(railBelows.filter { $0 == false }.count, 1,
-                       "exactly one row terminates the line (the last node, §4.1)")
+        // Exactly one TERMINUS: rail above, none below (the lowest selected node).
+        let terminusCount = backend.devices.filter { d in
+            let row = popover.test_deviceRow(for: d.id)
+            return row?.test_busRailAbove == true && row?.test_busRailBelow == false
+        }.count
+        XCTAssertEqual(terminusCount, 1, "exactly one terminating (lowest selected) node")
+        // The local row (first, selected by default) is that terminus; AirPlay
+        // rows below it are BARE (no rail above OR below).
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busRailAbove, true)
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busRailBelow, false,
+                       "the local row terminates the spine under the default selection")
+        XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busRailAbove, false,
+                       "an AirPlay row below the terminus is bare — no rail through it")
     }
 
     /// Node rendering across a real popover: members filled, non-members hollow,
@@ -708,7 +722,7 @@ final class PopoverControllerTests: XCTestCase {
         popover.update(devices: devices)
 
         XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"),
-                       ["Inactive — Audio Out is using '\(group.name)'"],
+                       ["Inactive — Main Audio is using '\(group.name)'"],
                        "the failure auto-deselect diverged the checked set — the note "
                        + "reconciled live off update(devices:)")
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
@@ -843,7 +857,7 @@ final class PopoverControllerTests: XCTestCase {
     /// expanded ⇄ `chevron.right` collapsed — GroupRowView precedent).
     func testToggleFlipsChevronSymbol() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Main Audio"
+        let title = "System Audio"
         XCTAssertEqual(popover.test_cardChevronSymbolName(title: title), "chevron.down",
                        "expanded card shows the down chevron")
         popover.test_toggleCard(title: title)
@@ -933,7 +947,7 @@ final class PopoverControllerTests: XCTestCase {
     func testCollapseDefaultsAppliedOnOpen() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Main Audio"), false)
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "System Audio"), false)
         XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), false)
     }
 
@@ -1779,7 +1793,7 @@ final class PopoverControllerTests: XCTestCase {
         // Diverge: check a device the group doesn't hold ⇒ note + scoped tint.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain()
         XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"),
-                       ["Inactive — Audio Out is using '\(group.name)'"],
+                       ["Inactive — Main Audio is using '\(group.name)'"],
                        "genuine divergence posts the note with the group's name")
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
                        "a row INSIDE the active target keeps full emphasis")

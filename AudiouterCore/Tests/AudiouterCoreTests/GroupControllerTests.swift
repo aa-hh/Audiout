@@ -116,14 +116,18 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.selectedDeviceIDs, ["homepod-bed"], "the remaining speaker keeps the set")
     }
 
-    /// Toggling the LOCAL device itself off is a deliberate act on that row, not a
-    /// disconnect — the restore must not fire (it would make the toggle a no-op).
-    func testDeselectingLocalItselfDoesNotSelfRestore() async throws {
+    /// Current-device floor (Warm Signal v4 §Call-1): there is NEVER a
+    /// zero-selected state, so deselecting the LAST remaining device — even the
+    /// local one itself — auto-reselects the current device. The toggle becomes a
+    /// no-op the row bounces back from; the flash does NOT fire (the user acted on
+    /// the local row directly, it wasn't an auto-swap done for them).
+    func testDeselectingLastDeviceReselectsCurrentDeviceFloor() async throws {
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()                       // {local}
         let r = controller.setDeviceSelected("local-mac", false)
-        XCTAssertFalse(r.autoSwappedCurrentDevice)
-        XCTAssertTrue(controller.selectedDeviceIDs.isEmpty)
+        XCTAssertFalse(r.autoSwappedCurrentDevice, "no flash — the user toggled the local row itself")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"],
+                       "the current-device floor keeps the spine — never zero selected")
     }
 
     /// THE SYMPTOM: the Main Out master must track the Mac's own volume after the

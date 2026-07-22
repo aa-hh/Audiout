@@ -91,10 +91,17 @@ public final class MainOutRowView: NSView {
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMutedState = false
-    /// The System row's name — "Audio Out" (2026-07-14), matching SoundSource's
-    /// "Output" row and filling the shared name column so it aligns with the
-    /// device/group rows below.
-    private let nameLabel = NSTextField(labelWithString: "Audio Out")
+    /// Whether the Main Audio spine is armed (connected target ∧ unmuted) — the
+    /// continuous rail overlay reads this to tone the origin hook gold vs ember.
+    private var isArmedState = false
+    /// The System Audio row's item title — **"Main Audio"** (Warm Signal v4
+    /// §Call-1; was "Audio Out"), filling the shared name column so it aligns
+    /// with the device rows below.
+    private let nameLabel = NSTextField(labelWithString: "Main Audio")
+    /// The vertical identity cluster (Warm Signal v4 §Call-1): **name / meter**,
+    /// left-aligned, centred as a group — the under-name meter, same anatomy as
+    /// the device rows. The rail's `.origin` hook terminates into this meter.
+    private let identityStack = NSStackView()
     private let slider = NSSlider()
     /// The Warm Signal fader skin over the master slider (drawing-only
     /// `NSSliderCell` swap — behavior/keyboard/VoiceOver stay stock): recessed
@@ -170,10 +177,15 @@ public final class MainOutRowView: NSView {
         // state — never RMS.
         let isConnected: Bool
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
-        armedDotView.apply(armed: isConnected && !isMuted)
+        let armed = isConnected && !isMuted
+        isArmedState = armed
+        armedDotView.apply(armed: armed)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
-        faderCell.isRouteArmed = isConnected && !isMuted
+        faderCell.isRouteArmed = armed
+        // Under-name meter shown only on armed (connected + unmuted) rows (v4
+        // §Call-1); hidden it collapses in the identity stack, leaving the name.
+        meterView.isHidden = !armed
 
         // Master mute drains the master meter through the existing decay
         // ballistics (S3 — no new animation machinery; Reduce Motion snaps
@@ -192,7 +204,8 @@ public final class MainOutRowView: NSView {
         // that omit `busOriginDimmed` keep the old any-group-target derivation.
         let isGroupTarget: Bool
         if case .group = current { isGroupTarget = true } else { isGroupTarget = false }
-        busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget)
+        busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget,
+                            originGold: armed)
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
@@ -362,12 +375,20 @@ public final class MainOutRowView: NSView {
 
         busOriginView.translatesAutoresizingMaskIntoConstraints = false
 
+        // Identity cluster (v4 §Call-1): "Main Audio" over the under-name meter.
+        identityStack.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.orientation = .vertical
+        identityStack.alignment = .leading
+        identityStack.spacing = 2
+        identityStack.distribution = .fill
+        identityStack.addArrangedSubview(nameLabel)
+        identityStack.addArrangedSubview(meterView)
+
         addSubview(busOriginView)
-        addSubview(meterView)
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
-        addSubview(nameLabel)
+        addSubview(identityStack)
         addSubview(muteButton)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -383,12 +404,6 @@ public final class MainOutRowView: NSView {
         // and truncates gracefully.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
-
-            meterView.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                               constant: PopoverColumnGrid.leadingInset),
-            meterView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterWidth),
-            meterView.heightAnchor.constraint(equalToConstant: 22),
 
             iconView.leadingAnchor.constraint(equalTo: leadingAnchor,
                                               constant: PopoverColumnGrid.firstElementLeading(indented: false)),
@@ -415,14 +430,17 @@ public final class MainOutRowView: NSView {
                 equalTo: iconView.bottomAnchor,
                 constant: -PopoverColumnGrid.statusDotInset),
 
-            // "Audio Out" name fills the shared name column, icon → slider.
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
-                                               constant: PopoverColumnGrid.iconToName),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // The name column now yields to the mute glyph, which sits between the
-            // name and the slider.
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor,
-                                                constant: -PopoverColumnGrid.nameToSlider),
+            // Identity cluster ("Main Audio" over the under-name meter), centred
+            // as a group; yields to the mute glyph so the name truncates.
+            identityStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
+                                                    constant: PopoverColumnGrid.iconToName),
+            identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor,
+                                                    constant: -PopoverColumnGrid.nameToSlider),
+
+            // The under-name meter's fixed size (v4 §Call-1).
+            meterView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.meterUnderNameWidth),
+            meterView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.meterUnderNameHeight),
 
             // Speaker mute button, LEFT of the slider.
             muteButton.trailingAnchor.constraint(equalTo: slider.leadingAnchor,
@@ -449,18 +467,16 @@ public final class MainOutRowView: NSView {
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
 
-            // Bus origin stub (spec §4.1): centered on the SAME node column x
-            // the device rows' nodes use (the shared grid's trailing-control
-            // center), dropping from just under the destination dropdown to the
-            // row's bottom edge — the line's launch point out of the dropdown.
-            busOriginView.centerXAnchor.constraint(
-                equalTo: trailingAnchor,
-                constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
-            busOriginView.topAnchor.constraint(equalTo: destinationPopUp.bottomAnchor,
-                                               constant: 1),
+            // Bus origin HOOK (v4 §Call-1): the rail rises at `railGutterCenterX`
+            // in the LEFT gutter and turns INTO the under-name meter. The view is
+            // framed leading-edge → the identity cluster's leading (= the meter's
+            // leading, left-aligned), and top → the cluster's bottom (the meter's
+            // band) → row bottom; `MembershipBusView.origin` draws the L from the
+            // row bottom up to the top-right corner (the meter's leading edge).
+            busOriginView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            busOriginView.trailingAnchor.constraint(equalTo: identityStack.leadingAnchor),
+            busOriginView.topAnchor.constraint(equalTo: identityStack.bottomAnchor),
             busOriginView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            busOriginView.widthAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.busColumnWidth),
         ])
     }
 
@@ -530,7 +546,7 @@ public final class MainOutRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Audio Out, master volume \(slider.integerValue) percent")
+        setAccessibilityLabel("Main Audio, master volume \(slider.integerValue) percent")
         // The row's VALUE carries the live signal channels (S2/S3): "muted"
         // for the engaged master-mute pill, "armed" for the lit route-armed
         // dot — the spoken equivalents shipped with the drawing.
@@ -539,9 +555,9 @@ public final class MainOutRowView: NSView {
         if armedDotView.test_isLit { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("Audio Out master volume")
-        muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Audio Out" : "Mute Audio Out")
-        destinationPopUp.setAccessibilityLabel("Audio Out destination")
+        slider.setAccessibilityLabel("Main Audio master volume")
+        muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Main Audio" : "Mute Main Audio")
+        destinationPopUp.setAccessibilityLabel("Main Audio destination")
         destinationPopUp.setAccessibilityValue(selectedTitle ?? "")
     }
 
@@ -655,5 +671,21 @@ public final class MainOutRowView: NSView {
         delegate?.mainOutRowBeginMasterDrag(self)
         delegate?.mainOutRow(self, didSetMaster: value)
         delegate?.mainOutRowEndMasterDrag(self)
+    }
+}
+
+// MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
+
+extension MainOutRowView: RailHookProviding {
+    /// The origin-hook anchor for the continuous rail overlay: the under-name
+    /// meter's leading edge + centre-y (or, when the meter is hidden on an idle
+    /// Main Audio, the identity cluster's leading + centre), converted into
+    /// `view`'s coordinates, plus whether the spine is armed (gold vs ember).
+    public func railHookAnchor(in view: NSView) -> (leadingX: CGFloat, centerY: CGFloat, gold: Bool)? {
+        layoutSubtreeIfNeeded()
+        let anchorView: NSView = meterView.isHidden ? identityStack : meterView
+        let rectInSelf = anchorView.convert(anchorView.bounds, to: self)
+        let point = convert(NSPoint(x: rectInSelf.minX, y: rectInSelf.midY), to: view)
+        return (point.x, point.y, isArmedState)
     }
 }

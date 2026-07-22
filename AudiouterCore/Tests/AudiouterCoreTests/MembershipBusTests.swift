@@ -97,15 +97,14 @@ final class MembershipBusTests: XCTestCase {
 
         row.apply(makeDevice(), selected: true, controllable: true)
         let selectedX = row.test_busNodeCenterX()
-        // A free-standing row settles to its own fitting width under a headless
-        // layout pass; the load-bearing claim is the node's distance from the
-        // TRAILING edge — the shared grid's trailing-control column center.
-        let expectedX = row.bounds.width - PopoverColumnGrid.trailingControlCenterFromTrailing
+        // Warm Signal v4 §Call-1: the spine moved to the LEFT gutter — every node
+        // sits on `railGutterCenterX` (measured from the row's leading edge).
+        let expectedX = PopoverColumnGrid.railGutterCenterX
         row.apply(makeDevice(), selected: false)
         let deselectedX = row.test_busNodeCenterX()
 
         XCTAssertEqual(selectedX ?? -1, expectedX, accuracy: 0.5,
-                       "the node sits on the shared trailing-control column center")
+                       "the node sits on the left-gutter rail centreline")
         XCTAssertEqual(deselectedX ?? -1, expectedX, accuracy: 0.5,
                        "…whether tapped in or out — toggling changes only fill and line path")
         XCTAssertEqual(selectedX ?? -1, deselectedX ?? -2, accuracy: 0.001,
@@ -135,14 +134,14 @@ final class MembershipBusTests: XCTestCase {
         XCTAssertEqual(row.test_isEnabledOn, true)
     }
 
-    func testFailedMemberNodeIsNeverDimmed() {
+    func testFailedMemberNodeIsFailureRedAndNeverDimmed() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, selectionDimmed: true)
         XCTAssertEqual(row.test_busNodeDimmed, false,
                        "a failed member renders at full failure emphasis even in a dormant card")
-        XCTAssertEqual(row.test_busNode, .member,
-                       "…and holds its membership node until an honest toggle-off")
+        XCTAssertEqual(row.test_busNode, .failed,
+                       "…in the failure-red ring node form (v4 §Call-1 node vocabulary)")
     }
 
     // MARK: The node IS the checkbox (§4.8)

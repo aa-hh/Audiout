@@ -121,6 +121,22 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudiouterSharedUI.DeviceIcon`, not here.
+- **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
+  not the full suite (874 tests). Scope to the test suite(s) touched by your
+  change, e.g. `swift test --filter PopoverControllerTests`.
+- **The full pre-commit run is `swift test --parallel`** (~70s vs ~124s for a
+  bare serial `swift test`). It parallelizes at the test-CLASS level: each
+  suite runs in its own process, so tests must not race on cross-process shared
+  state.
+- **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
+  each suite its own process, two suites that both write `UserDefaults.standard`
+  or the same `FileManager.default.temporaryDirectory` path race and flake.
+  Subclass `IsolatedTestCase` (`Tests/AudiouterCoreTests/IsolatedTestCase.swift`)
+  and use `scratchDir` (per-test temp dir), `isolatedDefaults` (per-test suite),
+  or `uniqueName(_:)` (for APIs like `NSWindow.setFrameAutosaveName` that always
+  write `.standard`) instead of the shared globals. `.githooks/pre-commit`
+  Guard 3 warns when a newly added test line reaches those globals; a line that
+  genuinely must touch one takes a trailing `isolation-ok` comment.
 
 ## Map
 

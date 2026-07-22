@@ -76,6 +76,8 @@ symbol you cannot find in source, believe the source and fix the doc.
   look as though it had never existed. Also check `git fsck --unreachable`,
   `git stash list`, the reflog, and the other worktrees. Quote every path: this
   repo's own path contains a space, which silently breaks unquoted loops.
+- **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
+  guidance on scoping tests with `--filter`.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 

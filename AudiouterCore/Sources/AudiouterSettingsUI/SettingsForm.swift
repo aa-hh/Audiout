@@ -26,6 +26,14 @@ enum SettingsForm {
     static func row(title: String, subtitle: String? = nil, control: NSView) -> NSView {
         let titleLabel = label(title)
         titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        // Titles WRAP within the text column instead of truncating: the control
+        // owns a fixed trailing column, so a long title (e.g. "Volume when
+        // connecting a speaker") flows onto a second line rather than being cut
+        // off mid-word. Same treatment the subtitle already gets; the container's
+        // layout() feeds both a resolved preferredMaxLayoutWidth.
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.maximumNumberOfLines = 0
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let textStack = NSStackView()
         textStack.orientation = .vertical
@@ -50,7 +58,7 @@ enum SettingsForm {
         control.setContentHuggingPriority(.required, for: .horizontal)
         control.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let container = RowContainerView(subtitleLabel: subtitleLabel, controlView: control)
+        let container = RowContainerView(titleLabel: titleLabel, subtitleLabel: subtitleLabel, controlView: control)
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(textStack)
         container.addSubview(control)
@@ -150,10 +158,12 @@ enum SettingsForm {
 /// fixed literal) keeps it correct if a future row uses a wider control than
 /// the switch this was diagnosed against.
 private final class RowContainerView: NSView {
+    private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField?
     private let controlView: NSView
 
-    init(subtitleLabel: NSTextField?, controlView: NSView) {
+    init(titleLabel: NSTextField, subtitleLabel: NSTextField?, controlView: NSView) {
+        self.titleLabel = titleLabel
         self.subtitleLabel = subtitleLabel
         self.controlView = controlView
         super.init(frame: .zero)
@@ -162,11 +172,13 @@ private final class RowContainerView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func layout() {
-        if let subtitleLabel {
-            let available = bounds.width - controlView.frame.width - 16
-            if available > 0 {
-                subtitleLabel.preferredMaxLayoutWidth = available
-            }
+        // Feed BOTH the title and subtitle a resolved wrap width (bounds minus the
+        // control column and gap) so wrapping labels compute their height from the
+        // real text-column width, not an earlier too-narrow trial width.
+        let available = bounds.width - controlView.frame.width - 16
+        if available > 0 {
+            titleLabel.preferredMaxLayoutWidth = available
+            subtitleLabel?.preferredMaxLayoutWidth = available
         }
         super.layout()
     }

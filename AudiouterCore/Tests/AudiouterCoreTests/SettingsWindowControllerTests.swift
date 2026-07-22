@@ -77,12 +77,14 @@ final class SettingsWindowControllerTests: XCTestCase {
         // 460.5 vs the 460 constraint — a device-pixel autolayout artifact, not
         // a real size discrepancy).
         XCTAssertEqual(size.width, SettingsForm.contentWidth, accuracy: 1)
-        // Three real sections + headers + dividers land around ~550-600pt. The
-        // bug this guards against produced a window close to full screen height
-        // (1000+pt) with the same three sections — 750 stays well clear of that
-        // while still catching a "collapsed to nothing" regression.
+        // Three real sections + headers + dividers land around ~760-770pt (a long
+        // row title like "Volume when connecting a speaker" wraps to two lines by
+        // design — SettingsForm titles now wrap rather than truncate). The bug this
+        // guards against produced a window close to full screen height (1000+pt)
+        // with the same three sections — 850 stays well clear of that while still
+        // catching a "collapsed to nothing" regression.
         XCTAssertGreaterThan(size.height, 150)
-        XCTAssertLessThan(size.height, 750)
+        XCTAssertLessThan(size.height, 850)
     }
 
     func testAudioExcludeAndRemoveDrivesTheModelAndNotifies() {

@@ -30,8 +30,34 @@ import AudiouterSharedUI
 @MainActor
 final class PopoverHeaderView: NSView {
 
-    /// Header bar height — compact toolbar strip.
-    static let barHeight: CGFloat = 34
+    /// Square side length of each header icon button (task: header legibility pass,
+    /// 2026-07-22). The product owner's complaint was that the three icon
+    /// buttons (Groups/Settings/Quit) were hard to parse at a glance; he
+    /// suggested "bigger" as the likely fix even with the same glyphs. There is
+    /// no macOS HIG number for a borderless *accessoryBar* toolbar-glyph button
+    /// specifically (the HIG's 44×44pt minimum target is an iOS/touch figure,
+    /// not applicable to a pointer-driven desktop bar). Instead this sizes off
+    /// Apple's own first-party borderless-toolbar precedent: Control Center's
+    /// module tiles and Music.app's mini-player transport buttons both render
+    /// as ~28pt square hit boxes around a glyph that fills roughly half the
+    /// box, leaving even, generous padding on all sides. 28pt (up from the
+    /// previous 26×22 non-square box) is "slightly larger" per his ask while
+    /// staying a compact toolbar control, not a full-size button.
+    static let iconButtonSide: CGFloat = 28
+
+    /// Horizontal gap between adjacent header icon buttons. Widened slightly
+    /// from the previous 2pt so three now-bigger 28pt squares still read as
+    /// discrete buttons rather than a fused strip.
+    static let iconButtonSpacing: CGFloat = 6
+
+    /// Inset of the trailing-most button (Quit) from the bar's trailing edge.
+    static let iconButtonTrailingInset: CGFloat = 10
+
+    /// Header bar height — compact toolbar strip. Grown from 34 to fit the
+    /// larger `iconButtonSide` (28pt) with even vertical padding above and
+    /// below the button cluster, matching the "square, evenly padded" ask:
+    /// `(barHeight - iconButtonSide) / 2` = 5pt of clearance on top and bottom.
+    static let barHeight: CGFloat = 38
 
     /// Tapped the "Open Groups editor" button — the host opens the mixer window.
     var onOpenGroupsEditor: (() -> Void)?
@@ -93,32 +119,61 @@ final class PopoverHeaderView: NSView {
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             // Right-aligned icon cluster: groups · settings · quit (quit outermost).
-            quitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            // Each button is a fixed iconButtonSide×iconButtonSide square (not a
+            // wide-short rect) so the glyph reads as evenly padded on all four
+            // sides rather than floating off-center in a rectangle.
+            quitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.iconButtonTrailingInset),
             quitButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            quitButton.widthAnchor.constraint(equalToConstant: 26),
-            quitButton.heightAnchor.constraint(equalToConstant: 22),
+            quitButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
+            quitButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
 
-            settingsButton.trailingAnchor.constraint(equalTo: quitButton.leadingAnchor, constant: -2),
+            settingsButton.trailingAnchor.constraint(equalTo: quitButton.leadingAnchor, constant: -Self.iconButtonSpacing),
             settingsButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            settingsButton.widthAnchor.constraint(equalToConstant: 26),
-            settingsButton.heightAnchor.constraint(equalToConstant: 22),
+            settingsButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
+            settingsButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
 
-            groupsButton.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -2),
+            groupsButton.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -Self.iconButtonSpacing),
             groupsButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            groupsButton.widthAnchor.constraint(equalToConstant: 26),
-            groupsButton.heightAnchor.constraint(equalToConstant: 22),
+            groupsButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
+            groupsButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
         ])
     }
 
-    /// The chosen SF Symbol for "audio group" (task A). `hifispeaker.and.homepod.mini.badge.plus.fill`
+    /// The chosen SF Symbol for "audio group" (task A; re-checked in the
+    /// header legibility pass, 2026-07-22). `hifispeaker.and.homepod.mini.badge.plus.fill`
     /// depicts multiple speaker devices with an "add" badge — the clearest
     /// "audio groups editor" metaphor of the candidates, but it's macOS-15+
-    /// only (resolves nil on this machine's macOS 14). Below macOS 15, ahh's
+    /// only (resolves nil on this machine's macOS 14). Below macOS 15, the
     /// choice is `hifispeaker.and.homepod.fill` (available back to macOS 14 —
     /// verified on this machine); `rectangle.3.group` then `hifispeaker.2.fill`
     /// remain as further fallbacks, verified non-nil at runtime in
     /// `configureIconButton`, so the button is never blank.
+    ///
+    /// Re-litigated candidates before keeping this symbol: `rectangle.3.group[.fill]`
+    /// is Apple's own glyph for Stage Manager in System Settings, so reusing it
+    /// here risks the OPPOSITE problem (a clear glyph that means something else
+    /// already); `airplayaudio` reads as "pick a single AirPlay destination"
+    /// (the iOS Control Center metaphor), not "edit which devices are grouped
+    /// together," which is what this button actually opens (the mixer's group
+    /// membership editor); generic grid glyphs (`square.grid.2x2`) carry no
+    /// audio meaning at all. Nothing found clearly beats a speaker-with-plus
+    /// glyph for "manage speaker groups," so per the product owner's own framing
+    /// ("I defer to you... maybe if they were all just bigger... and a hover
+    /// tooltip") the fix here is sizing + tooltip, not a symbol swap.
     static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
+
+    /// Point size of each header glyph within its `iconButtonSide` square.
+    /// 16pt fills roughly half of the 28pt box on each axis (matching the
+    /// Control Center / Music.app mini-player proportion this button system is
+    /// modeled on, see `iconButtonSide`), leaving visibly even padding instead
+    /// of a glyph that nearly touches the button's edge.
+    private static let iconGlyphPointSize: CGFloat = 16
+
+    /// Weight applied to every header glyph. `.medium` (up from `.regular`)
+    /// reads slightly bolder/larger at a glance without changing the point
+    /// size — part of the "make it bigger" fix — and is applied identically
+    /// to all three buttons so no one glyph looks heavier than its neighbors.
+    private static let iconGlyphWeight: NSFont.Weight = .medium
 
     /// A stock `NSButton` with `bezelStyle = .accessoryBar` and
     /// `showsBorderOnlyWhileMouseInside = true` — the system's borderless
@@ -129,7 +184,18 @@ final class PopoverHeaderView: NSView {
     /// **hierarchical** color style (`NSImage.SymbolConfiguration(hierarchicalColor:)`),
     /// which shades the glyph's sub-parts by depth for a less flat, more
     /// "system" look than a single flat tint; verified non-nil at runtime,
-    /// falling back through `fallbacks` in order.
+    /// falling back through `fallbacks` in order. All three buttons share the
+    /// exact same `symbolConfig` (size, weight, color style) and the same
+    /// `.scaleProportionallyDown` + fixed square frame, so even though the
+    /// three glyphs have different natural aspect ratios (a wide speaker glyph
+    /// vs. a roughly round gearshape vs. a roughly round power glyph), they
+    /// all render inside the same box at the same visual scale — "matched
+    /// proportions" per the product owner's ask.
+    ///
+    /// `button.toolTip` is set below to the same string passed for VoiceOver
+    /// (`accessibilityLabel`) as a complete phrase ("Open Groups editor" /
+    /// "Settings" / "Quit"), so a mouse-hover reveals in words exactly what the
+    /// icon-only button in this ask (2) is unclear about on its own.
     private func configureIconButton(_ button: NSButton,
                                      symbol: String,
                                      fallbacks: [String],
@@ -144,7 +210,7 @@ final class PopoverHeaderView: NSView {
         button.target = self
         button.action = action
 
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: Self.iconGlyphPointSize, weight: Self.iconGlyphWeight)
             .applying(.init(hierarchicalColor: Tokens.Color.secondaryLabel))
         for name in [symbol] + fallbacks {
             if let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityLabel) {
@@ -195,4 +261,19 @@ final class PopoverHeaderView: NSView {
     func test_tapSettings() { settingsTapped() }
     /// Simulate tapping the Quit button.
     func test_tapQuit() { quitTapped() }
+    /// The Groups-editor button's hover tooltip text (should be a complete
+    /// phrase, not just a one-word label — the whole point of the tooltip fix).
+    var test_groupsButtonToolTip: String? { groupsButton.toolTip }
+    /// The Settings button's hover tooltip text.
+    var test_settingsButtonToolTip: String? { settingsButton.toolTip }
+    /// The Quit button's hover tooltip text.
+    var test_quitButtonToolTip: String? { quitButton.toolTip }
+    /// Rendered frame size of each icon button, forcing layout first. Used to
+    /// confirm the buttons are actually square (width == height ==
+    /// `iconButtonSide`) after Auto Layout resolves, not just that the
+    /// constraints were authored that way.
+    func test_iconButtonFrames() -> (groups: NSRect, settings: NSRect, quit: NSRect) {
+        layoutSubtreeIfNeeded()
+        return (groupsButton.frame, settingsButton.frame, quitButton.frame)
+    }
 }

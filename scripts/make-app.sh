@@ -114,6 +114,18 @@ HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
 ICON_SOURCE="$SCRIPT_DIR/AudioOuter-MacOS-Default-1024x1024@1x.png"
 
 # --- Build (release) ------------------------------------------------------
+# For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST
+# (idempotent — skips if already built; set FFMPEG_MIN_FORCE=1 to rebuild), so the
+# app links ONLY the ALAC encoder statically and bundle-dylibs.sh finds zero
+# video-codec dylibs — a ~30 MB smaller download. Package.swift auto-detects
+# AirPlayEngine/vendor/ffmpeg-min/ and prefers it; absent, it falls back to
+# Homebrew's fat ffmpeg unchanged. Gated to the bundling path only, since the trim
+# is invisible when dylibs aren't bundled. See AirPlayEngine/docs/ffmpeg-minimal-build.md.
+if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
+  echo "==> Building minimal audio-only ffmpeg for the release bundle (first run compiles from source; then cached)"
+  "$SCRIPT_DIR/build-min-ffmpeg.sh"
+fi
+
 echo "==> Building $EXECUTABLE (release)"
 swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
 BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"

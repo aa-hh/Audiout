@@ -76,7 +76,13 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+    // Default timeout is a generous ceiling, not an expected wait: the loop
+    // returns the instant `cond()` holds, so a higher bound only adds headroom
+    // for the FAILURE/slow case and costs nothing on the happy path. Raised from
+    // 2s so it doesn't spuriously time out under `swift test --parallel`, where
+    // ~8 test processes contend for cores and an async state transition can take
+    // longer than 2s of wall-clock to land.
+    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }

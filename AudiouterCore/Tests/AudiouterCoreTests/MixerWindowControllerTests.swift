@@ -20,7 +20,7 @@ import AppKit
 /// touch it (and the non-`Sendable` `GroupController`) on the main thread,
 /// exactly as the app does.
 @MainActor
-final class MixerWindowControllerTests: XCTestCase {
+final class MixerWindowControllerTests: IsolatedTestCase {
 
     /// A MockBackend with the full demo fleet discovered, a GroupController, and
     /// a `MixerWindowController` with the devices pushed in.
@@ -30,7 +30,8 @@ final class MixerWindowControllerTests: XCTestCase {
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           frameAutosaveName: mixerWindowAutosaveName)
         window.update(devices: backend.devices)
         return (window, controller, backend)
     }
@@ -74,7 +75,8 @@ final class MixerWindowControllerTests: XCTestCase {
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
-        let window = MixerWindowController(groupController: controller, deviceIconController: iconController)
+        let window = MixerWindowController(groupController: controller, deviceIconController: iconController,
+                                           frameAutosaveName: mixerWindowAutosaveName)
         window.update(devices: backend.devices)
         return (window, controller, backend, iconController)
     }
@@ -108,8 +110,15 @@ final class MixerWindowControllerTests: XCTestCase {
     // launch after a previous session saved a frame" — the case the live smoke
     // test never actually exercised.
 
-    private static let mixerWindowAutosaveName = NSWindow.FrameAutosaveName("MixerWindow")
-    private static let mixerWindowFrameDefaultsKey = "NSWindow Frame MixerWindow"
+    // A per-test-instance autosave name (via `IsolatedTestCase.uniqueName`), NOT
+    // the real "MixerWindow" the app ships. AppKit's `setFrameAutosaveName`
+    // always persists into `UserDefaults.standard`, so under `swift test
+    // --parallel` — where each test class runs in its own process — two suites
+    // sharing the literal "MixerWindow" key race and flake. A unique name per
+    // test isolates the key; the controller reads it back via its injectable
+    // `frameAutosaveName` init parameter (default "MixerWindow" in the real app).
+    private lazy var mixerWindowAutosaveName = NSWindow.FrameAutosaveName(uniqueName("MixerWindow"))
+    private var mixerWindowFrameDefaultsKey: String { "NSWindow Frame \(mixerWindowAutosaveName)" }
 
     /// Simulate "a previous session left the window here": build a throwaway
     /// window under the SAME "MixerWindow" autosave name `MixerWindowController`
@@ -119,17 +128,18 @@ final class MixerWindowControllerTests: XCTestCase {
         let seed = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
                             backing: .buffered, defer: false)
-        seed.setFrameAutosaveName(Self.mixerWindowAutosaveName)
+        seed.setFrameAutosaveName(mixerWindowAutosaveName)
         seed.setFrame(frame, display: false)
-        seed.saveFrame(usingName: Self.mixerWindowAutosaveName)
+        seed.saveFrame(usingName: mixerWindowAutosaveName)
     }
 
-    /// Clear any saved "MixerWindow" frame so this test's seed can never leak
-    /// into another test in the same process (all `swift test` cases share one
-    /// `UserDefaults.standard` domain) and a stale seed from an earlier failed
-    /// run can never leak into this one.
+    /// Clear this test's saved frame. The autosave name is unique per test
+    /// instance, so the key can't collide with another test — but AppKit's
+    /// `saveFrame` writes to `UserDefaults.standard` regardless of any suite, so
+    /// the clear has to target `.standard` under that unique key too.
     private func clearSavedMixerWindowFrame() {
-        UserDefaults.standard.removeObject(forKey: Self.mixerWindowFrameDefaultsKey)
+        // isolation-ok: unique per-test autosave key; AppKit forces `.standard`.
+        UserDefaults.standard.removeObject(forKey: mixerWindowFrameDefaultsKey)
     }
 
     func testWindowRestoresPreviouslySavedFrameInsteadOfRecentering() async throws {

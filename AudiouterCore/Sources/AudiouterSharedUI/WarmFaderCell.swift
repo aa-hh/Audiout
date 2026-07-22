@@ -11,21 +11,30 @@ import AppKit
 /// untouched (the same "only the DRAWING changes" contract as
 /// `MembershipBusView` over its checkbox, spec §4.8).
 ///
-/// What it draws:
+/// What it draws (contrast floors re-measured in the fader-legibility pass,
+/// 2026-07-22 — ratios live on the `faderThumb`/`faderRim`/`well` tokens):
 /// - **Track**: a flat recessed trough (`PopoverColumnGrid.faderTrackHeight`
-///   ≈ 4 pt) filled with the `well` inset token — the exact surface spec §1
-///   reserves for "slider track trough" — with a `hairline` rim and a 1 px
-///   inner top shade (drawn, not a layer shadow) so the trough reads inset.
-/// - **Filled portion** (min side → thumb): the gold `ember → gold` gradient
-///   ONLY while the row is **route-armed** (the same §3.3 model predicate the
-///   row already pushes to its `RouteArmedDotView`; `AppRowView` uses its
-///   routed ∧ running equivalent). Unarmed or disabled rows fill with the
-///   hue-neutral warm `ringConnected` grey — gold stays a signal, never
-///   decoration (house rule: the gold budget).
-/// - **Thumb**: a smaller rounded-rect handle
-///   (`faderThumbWidth × faderThumbHeight` ≈ 9×15 pt) replacing the stock
-///   white circle — a raised warm neutral (`raised` fill, `hairline` outline)
-///   with a 1 px top hairline highlight so it reads raised off the trough.
+///   ≈ 5 pt) filled with the `well` inset token — the exact surface spec §1
+///   reserves for "slider track trough" — with a `faderRim` rim (load-bearing
+///   for the recess: ≈3.1:1 dark / 2.6:1 light vs `well`) and a 1 px inner
+///   top shade (drawn, not a layer shadow) so the trough reads inset.
+/// - **Filled portion** (min side → thumb): the gold gradient ONLY while the
+///   row is **route-armed** (the same §3.3 model predicate the row already
+///   pushes to its `RouteArmedDotView`; `AppRowView` uses its routed ∧
+///   running equivalent). The gradient's dim end is `ember` pre-blended
+///   halfway toward `gold` (`armedDimEndGoldBlend`) so the low-value end
+///   still reads against the trough (raw light `ember` measured 1.98:1 vs
+///   `well`; the blend lifts it to 2.38:1, dark to 6.62:1). Unarmed or
+///   disabled rows fill with the hue-neutral warm `ringConnected` grey
+///   (4.82:1 dark / 2.60:1 light vs `well` — both clear the ≥2.5:1 unarmed
+///   floor) — gold stays a signal, never decoration (house rule: the gold
+///   budget).
+/// - **Thumb**: a rounded-rect handle (`faderThumbWidth × faderThumbHeight`
+///   ≈ 10×17 pt) replacing the stock white circle — the dedicated
+///   `faderThumb` warm neutral (≥3:1 vs BOTH `canvas` and `well`, both
+///   themes; see the token's measured table), edged by a derived darkened
+///   outline and a 1 px top highlight so it reads as a grabbable raised
+///   object.
 ///
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
@@ -81,10 +90,18 @@ public final class WarmFaderCell: NSSliderCell {
             NSGraphicsContext.current?.saveGraphicsState()
             trough.addClip()
             if isRouteArmed && isEnabled {
-                // Engaged: the ember → gold instrument gradient (accent-dial
-                // aware via the tokens themselves — under `.systemAccent` this
-                // resolves to controlAccentColor and its dimmed companion).
-                if let gradient = NSGradient(starting: Tokens.Color.ember,
+                // Engaged: the gold instrument gradient (accent-dial aware via
+                // the tokens themselves — under `.systemAccent` this resolves
+                // to controlAccentColor and its dimmed companion). The dim end
+                // is `ember` pre-blended toward `gold` so the low-value end of
+                // the fill clears the trough (ratios in the header doc);
+                // blending two live tokens at draw time keeps the accent dial
+                // and IC variants authoritative (same derivation idiom as the
+                // thumb highlight).
+                let dimEnd = Tokens.Color.ember
+                    .blended(withFraction: Self.armedDimEndGoldBlend,
+                             of: Tokens.Color.gold) ?? Tokens.Color.ember
+                if let gradient = NSGradient(starting: dimEnd,
                                              ending: Tokens.Color.gold) {
                     let leftToRight = fillRect.minX == track.minX
                     gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
@@ -100,8 +117,10 @@ public final class WarmFaderCell: NSSliderCell {
             NSGraphicsContext.current?.restoreGraphicsState()
         }
 
-        // Hairline rim, inset half a hairline so the stroke stays inside.
-        Tokens.Color.hairline.withAlphaComponent(interiorAlpha).setStroke()
+        // Trough rim (`faderRim` — the recess's load-bearing edge; `hairline`
+        // measured 1.21:1 vs `well`, invisible), inset half a hairline so the
+        // stroke stays inside.
+        Tokens.Color.faderRim.withAlphaComponent(interiorAlpha).setStroke()
         let rimPath = NSBezierPath(
             roundedRect: track.insetBy(dx: Self.hairlineWidth / 2, dy: Self.hairlineWidth / 2),
             xRadius: radius, yRadius: radius)
@@ -118,27 +137,33 @@ public final class WarmFaderCell: NSSliderCell {
         let radius = PopoverColumnGrid.faderThumbCornerRadius
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
 
-        // Raised warm-neutral body…
-        Tokens.Color.raised.withAlphaComponent(interiorAlpha).setFill()
+        // Grabbable warm-neutral body — the dedicated `faderThumb` instrument
+        // token (≥3:1 vs canvas AND trough, both themes; `raised` measured
+        // 1.09:1 dark / 1.25:1 light and sank into the surfaces)…
+        Tokens.Color.faderThumb.withAlphaComponent(interiorAlpha).setFill()
         path.fill()
 
-        // …a 1 px top hairline highlight (clipped to the rounded body) so the
-        // handle reads raised — `raised` lightened, derived from the token so
-        // the accent dial/IC variants stay authoritative…
+        // …a 1 px top highlight (clipped to the rounded body) so the handle
+        // reads raised — `faderThumb` lightened, derived from the token so
+        // the IC variants stay authoritative…
         let flipped = controlView?.isFlipped ?? false
         NSGraphicsContext.current?.saveGraphicsState()
         path.addClip()
-        let highlight = Tokens.Color.raised
-            .blended(withFraction: Self.thumbHighlightFraction, of: .white) ?? Tokens.Color.raised
+        let highlight = Tokens.Color.faderThumb
+            .blended(withFraction: Self.thumbHighlightFraction, of: .white) ?? Tokens.Color.faderThumb
         highlight.withAlphaComponent(interiorAlpha).setFill()
         let highlightY = flipped ? thumb.minY : thumb.maxY - Self.hairlineWidth
         NSRect(x: thumb.minX, y: highlightY,
                width: thumb.width, height: Self.hairlineWidth).fill()
         NSGraphicsContext.current?.restoreGraphicsState()
 
-        // …and the hairline outline that keeps it defined on the light/paper
-        // surfaces where `raised` is pure white.
-        Tokens.Color.hairline.withAlphaComponent(interiorAlpha).setStroke()
+        // …and a darkened outline (thumb blended toward `shadow`, derived so
+        // IC tracks) that separates the bright handle from the gold fill in
+        // dark mode and defines its edge on the paper surfaces in light.
+        let outlineColor = Tokens.Color.faderThumb
+            .blended(withFraction: Self.thumbOutlineDarkenFraction,
+                     of: Tokens.Color.shadow) ?? Tokens.Color.faderThumb
+        outlineColor.withAlphaComponent(interiorAlpha).setStroke()
         let outline = NSBezierPath(
             roundedRect: thumb.insetBy(dx: Self.hairlineWidth / 2, dy: Self.hairlineWidth / 2),
             xRadius: radius, yRadius: radius)
@@ -168,8 +193,17 @@ public final class WarmFaderCell: NSSliderCell {
     private static let hairlineWidth: CGFloat = 1
     /// Alpha of the trough's inner top shade (`shadow` token over `well`).
     private static let insetShadeAlpha: CGFloat = 0.18
-    /// How far the thumb's top highlight lightens `raised` toward white.
-    private static let thumbHighlightFraction: CGFloat = 0.4
+    /// How far the thumb's top highlight lightens `faderThumb` toward white
+    /// (raised 0.4 → 0.5 in the legibility pass — the brighter catch-light is
+    /// part of what makes the handle read as a grabbable object).
+    private static let thumbHighlightFraction: CGFloat = 0.5
+    /// How far the thumb's outline darkens `faderThumb` toward `shadow`.
+    private static let thumbOutlineDarkenFraction: CGFloat = 0.4
+    /// How far the armed gradient's dim end pre-blends `ember` toward `gold`
+    /// (0 = raw ember). At 0.5 the dim end measures 6.62:1 (dark) / 2.38:1
+    /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the
+    /// track's low-value end in light.
+    private static let armedDimEndGoldBlend: CGFloat = 0.5
 
     // MARK: Test-support hooks
 

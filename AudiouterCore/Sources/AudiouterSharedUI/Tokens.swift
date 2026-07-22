@@ -161,11 +161,22 @@ public enum Tokens {
         public static var raised: NSColor {
             warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
         }
-        /// Inset well fill (slider track trough, dropdown fill, §1). Not yet
-        /// painted by any call site in V2 — reserved for a later wave. No
-        /// stated contrast floor.
+        /// Inset well fill (slider track trough, dropdown fill, §1). First
+        /// consumer: `WarmFaderCell`'s recessed trough. CONTRAST RATIONALE
+        /// (fader-legibility pass, 2026-07-22): the spec's dark hex
+        /// (`#2B2620`) sat LIGHTER than `canvas` `#16130F`, so the "recess"
+        /// read as a faintly raised strip and everything drawn in it (thumb
+        /// 1.09:1, rim 1.21:1) sank; dark is re-tuned to `#100D0A` — darker
+        /// than `canvas` (1.05:1, a true recess whose edge the `faderRim`
+        /// carries) — which lifts every fill drawn on it (measured, WCAG
+        /// relative luminance: `ringConnected` 4.82:1, `faderThumb` 4.44:1,
+        /// `ember` 3.86:1, `gold` 10.51:1). Light `#ECE5D8` is unchanged
+        /// (the spec hex; darkening it would LOWER the light thumb/fill
+        /// ratios, which run darker than the well). Backgrounds carry no IC
+        /// variant (same precedent as `canvas`/`panel`/`raised`); the fills
+        /// and rim drawn on the well brighten under IC instead.
         public static var well: NSColor {
-            warmDynamic(name: "well", dark: 0x2B2620, light: 0xECE5D8)
+            warmDynamic(name: "well", dark: 0x100D0A, light: 0xECE5D8)
         }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
@@ -346,6 +357,45 @@ public enum Tokens {
                                              light: 0xE8B84B, lightHighContrast: 0xE8B84B),
                           subtle: nil,
                           systemAccentScale: 1.25)
+        }
+
+        // MARK: Fader instruments (spec §5 slider skin, fader-legibility pass)
+        //
+        // The two hues `WarmFaderCell` needs beyond the surface ladder — the
+        // grabbable thumb and the trough's rim. Added with their consumer
+        // (2026-07-22) after the owner's live feedback that the fader sank
+        // into the warm-dark canvas: `raised` (the old thumb fill) measured
+        // 1.09:1 vs the trough and `hairline` (the old rim) 1.21:1 —
+        // invisible. `raised`/`hairline` keep their quiet surface roles
+        // elsewhere (icon well, section dividers); the fader gets dedicated
+        // instrument-grade values with measured floors.
+
+        /// The fader THUMB fill (`WarmFaderCell.drawKnob`) — the daily-primary
+        /// grab handle, held to an instrument floor: **≥3:1 vs BOTH `canvas`
+        /// and `well`** in both themes. Measured (WCAG relative luminance):
+        /// dark `#857762` = 4.44:1 vs `well` `#100D0A` / 4.24:1 vs `canvas`
+        /// `#16130F`; light `#8A7A62` (a warm mid-brown knob on paper —
+        /// `raised`'s pure white measured 1.25:1, unusable) = 3.33:1 vs
+        /// `well` `#ECE5D8` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
+        /// further (dark `#9A8C74` = 5.88:1 / 5.62:1; light `#6E6050` =
+        /// 4.86:1 / 5.31:1).
+        public static var faderThumb: NSColor {
+            warmDynamic(name: "faderThumb", dark: 0x857762, darkHighContrast: 0x9A8C74,
+                       light: 0x8A7A62, lightHighContrast: 0x6E6050)
+        }
+
+        /// The fader trough's 1 px RIM (`WarmFaderCell.drawBar`) — load-bearing
+        /// for the recess where no fill covers it (dark `well` sits 1.05:1 off
+        /// `canvas`; the rim IS the trough's edge), so it gets a real floor
+        /// where `hairline` (1.21:1 dark / 1.11:1 light vs `well`) has none.
+        /// Measured: dark `#6B5F4E` = 3.11:1 vs `well` / 2.97:1 vs `canvas`;
+        /// light `#9E8D6B` = 2.59:1 vs `well` / 2.83:1 vs `canvas` — kept
+        /// just under strict 3:1 in light so a 1 px ring reads as a rim, not
+        /// a stripe, on paper. IC variants clear 3:1 outright (dark `#786B5A`
+        /// = 3.74:1 vs `well`; light `#8A7550` = 3.54:1 vs `well`).
+        public static var faderRim: NSColor {
+            warmDynamic(name: "faderRim", dark: 0x6B5F4E, darkHighContrast: 0x786B5A,
+                       light: 0x9E8D6B, lightHighContrast: 0x8A7550)
         }
 
         /// The route-armed dot's **dark/empty socket** resting fill (spec §3.3

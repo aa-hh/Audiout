@@ -275,16 +275,22 @@ public enum PopoverColumnGrid {
     // per house rule (and the future density setting) even though only the
     // cell reads them.
 
-    /// Height of the recessed fader trough (the flat `well` track).
-    public static let faderTrackHeight: CGFloat = 4
-    /// Corner radius of the fader trough (fully rounds the 4 pt track ends).
-    public static let faderTrackCornerRadius: CGFloat = 2
+    /// Height of the recessed fader trough (the flat `well` track). Raised
+    /// 4 → 5 pt in the fader-legibility pass (2026-07-22) so the armed
+    /// gradient's dim end and the unarmed fill read at a glance — the 4 pt
+    /// line was part of why the fader sank into the warm canvas.
+    public static let faderTrackHeight: CGFloat = 5
+    /// Corner radius of the fader trough (fully rounds the 5 pt track ends).
+    public static let faderTrackCornerRadius: CGFloat = 2.5
     /// Width of the rounded-rect fader thumb (replaces the stock circle).
-    public static let faderThumbWidth: CGFloat = 9
+    /// Grown 9×15 → 10×17 in the fader-legibility pass so the handle reads
+    /// as a grabbable object at arm's length (alongside the `faderThumb`
+    /// token's ≥3:1 fill).
+    public static let faderThumbWidth: CGFloat = 10
     /// Height of the rounded-rect fader thumb.
-    public static let faderThumbHeight: CGFloat = 15
+    public static let faderThumbHeight: CGFloat = 17
     /// Corner radius of the fader thumb.
-    public static let faderThumbCornerRadius: CGFloat = 3.5
+    public static let faderThumbCornerRadius: CGFloat = 4
     /// Alpha the fader's interior drawing (fill/rim/thumb) dims to while the
     /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
     public static let faderDisabledAlpha: CGFloat = 0.4

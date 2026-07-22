@@ -198,6 +198,39 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertTrue(row.test_isEnabledOn)
     }
 
+    /// T-UI-ALLOW: the sibling of `testAddingLocalIntoAMixedSetIsAllowed` above,
+    /// but driven through the row's REAL AppKit dispatch path
+    /// (`enableCheckbox.performClick(_:)` via `test_performEnableClick()`)
+    /// instead of `test_toggleDeviceEnabled`, which calls
+    /// `GroupController.setDeviceSelected` directly and never touches the
+    /// checkbox or its target/action wiring at all. Per the repo's own
+    /// documented lesson (row selection tests bypassing AppKit dispatch let a
+    /// real `MainOutRowView` regression through green tests), a delegate
+    /// shortcut can't catch a checkbox that's actually left disabled/greyed —
+    /// `performClick` is a no-op on a disabled `NSControl`, so if the local row
+    /// were still blocked (a T-GROUPCTL/T-UI-ALLOW regression) this test would
+    /// fail because the click would silently do nothing.
+    func testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "starts out of the set")
+
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        row.test_performEnableClick()   // real enableCheckbox.performClick(_:) dispatch
+
+        XCTAssertTrue(row.test_isEnabledOn, "the checkbox itself flips ON via its own action")
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"),
+                      "a real click joins the Mac into the mixed Selected Devices set")
+        XCTAssertTrue(controller.isSpeakerSelected("office"),
+                      "the AirPlay member stays selected — nothing drops when the Mac joins")
+
+        // Click again (real dispatch) to remove it — same path, both directions.
+        row.test_performEnableClick()
+        XCTAssertFalse(row.test_isEnabledOn)
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "a second real click removes it again")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "removing local never touches the AirPlay member")
+    }
+
     func testMainOutMasterReflectsCurrentTarget() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // set = {office}

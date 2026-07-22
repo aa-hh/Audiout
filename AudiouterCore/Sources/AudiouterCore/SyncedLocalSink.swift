@@ -152,6 +152,17 @@ public final class SyncedLocalSink: @unchecked Sendable {
     private let deinterleaveScratch: UnsafeMutablePointer<Float>
     private let deinterleaveScratchCapacity: Int
 
+    // T-CORRECTION — continuous phase-lock DSP (see `PhaseController.swift`). Both
+    // are touched only by the single render (consumer) thread while streaming, and
+    // reset only while the engine is stopped (`clearSessionState`), so they follow
+    // the same single-consumer, no-render-thread-lock contract as the ring read.
+    /// Reads the ring at a variable `1 ± ppm` rate via cubic interpolation, so the
+    /// buffered audio can be micro-sped/slowed inaudibly to hold phase (replaces the
+    /// old 1:1 `ring.read` at the drain site).
+    private let resampler: FractionalResampler
+    /// PI loop nulling the per-cycle residual phase error; drives `resampler`'s rate.
+    private let phaseController = PhaseController()
+
     private let stateLock = NSLock()
     private let graphQueue = DispatchQueue(label: "com.audiouter.syncedlocalsink.graph")
     /// T-LIFECYCLE: dedicated queue for the default-output-device listener, kept
@@ -203,6 +214,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
         self.deinterleaveScratch = UnsafeMutablePointer<Float>.allocate(capacity: deinterleaveScratchCapacity)
         self.deinterleaveScratch.initialize(repeating: 0, count: deinterleaveScratchCapacity)
 
+        self.resampler = FractionalResampler(channelCount: channels)
+
         guard let format = AVAudioFormat(standardFormatWithSampleRate: renderSampleRate, channels: AVAudioChannelCount(channels)) else {
             fatalError("SyncedLocalSink: could not build a \(renderSampleRate)/\(channels)ch render format")
         }
@@ -242,14 +255,17 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
             engine.attach(sourceNode)
 
-            // ── T-CORRECTION / T-SPIKE-PHASE INSERTION SEAM ─────────────────────
-            // The continuous rate-correction node (AVAudioUnitTimePitch /
-            // AVAudioUnitVarispeed, or a custom fractional resampler per the
-            // T-SPIKE-PHASE finding) is inserted HERE, between the source node and
-            // the mixer: attach it and connect sourceNode → correction → mainMixer
-            // instead of the direct connection below, driving its rate parameter
-            // from `latestPhaseErrorNanos`. v1 wires the source node straight to
-            // the mixer with no correction.
+            // ── T-CORRECTION / T-SPIKE-PHASE ────────────────────────────────────
+            // The rate correction is NOT a separate graph node. Per the
+            // T-SPIKE-PHASE finding (`dev/notes/phase-lock-spike-findings.md` §5:
+            // AVAudioUnitVarispeed adds a fixed 1 ms latency, AVAudioUnitTimePitch is
+            // an unsuitable phase vocoder), the correction lives INSIDE this source
+            // node's render block: `renderInterleaved` drains the ring through
+            // `resampler` (a custom fractional cubic resampler) at a rate the
+            // `phaseController` PI loop steers to null `latestPhaseErrorNanos`
+            // continuously. So the graph stays the simple sourceNode → mixer
+            // connection — no added node, no added latency, no reconnection race
+            // with T-LIFECYCLE — and all the correction is in the DSP below.
             try catchingObjCException {
                 engine.connect(sourceNode, to: engine.mainMixerNode, format: connectionFormat)
             }
@@ -301,6 +317,12 @@ public final class SyncedLocalSink: @unchecked Sendable {
             lastPhaseErrorNanos = 0
         }
         ring.reset()
+        // T-CORRECTION: the render thread is stopped by the time a rebuild reaches
+        // here (teardownEngine ran first), so resetting the render-thread-owned DSP
+        // is safe. A stale phase accumulator / integrator from the pre-event session
+        // would otherwise fight the fresh anchor's first cycles.
+        resampler.reset()
+        phaseController.reset()
     }
 
     // MARK: T-LIFECYCLE — device-change + sleep/wake rebuild
@@ -511,6 +533,15 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// frames of interleaved output for a cycle beginning at
     /// `cycleStartMonotonicNanos`, and returns whether any non-silence was emitted.
     /// Silent (and non-draining) until the gate opens at `targetReleaseNanos`.
+    ///
+    /// T-CORRECTION: once released, the ring is drained through `resampler` at a rate
+    /// the `phaseController` PI loop steers each cycle to null the residual phase
+    /// error — the CONTINUOUS phase-lock, not a one-shot anchor. The phase error is
+    /// re-estimated EVERY cycle (not just at release) as the gap between where the
+    /// output's content position IS (`resampler.inputFramesConsumed`) and where the
+    /// reference timeline says it SHOULD be at this cycle's presentation instant:
+    /// any ppm clock skew between the reference (PTP-grandmaster) domain and the
+    /// local output device shows up here as a slow drift the loop cancels.
     @discardableResult
     func renderInterleaved(
         into out: UnsafeMutableBufferPointer<Float>,
@@ -522,8 +553,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
         var silentFrames = frameCount
         var shouldDrain = false
+        var target: Int64 = 0
         if stateLock.try() {
             if anchored {
+                target = targetReleaseNanos
                 if released {
                     silentFrames = 0
                     shouldDrain = true
@@ -537,9 +570,6 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     if plan.releasesThisCycle {
                         released = true
                         shouldDrain = true
-                        let firstRealNanos = cycleStartMonotonicNanos
-                            &+ Int64((Double(silentFrames) * 1_000_000_000.0 / renderSampleRate).rounded())
-                        lastPhaseErrorNanos = firstRealNanos &- targetReleaseNanos
                     }
                 }
             }
@@ -554,13 +584,49 @@ public final class SyncedLocalSink: @unchecked Sendable {
         if silentSamples > 0 { base.update(repeating: 0, count: silentSamples) }
         guard shouldDrain else { return false }
 
-        let wanted = total - silentSamples
-        let got = ring.read(into: base.advanced(by: silentSamples), maxCount: wanted)
-        // Underrun: zero-fill the shortfall so a starved ring is silence, not garbage.
-        if got < wanted {
-            base.advanced(by: silentSamples + got).update(repeating: 0, count: wanted - got)
+        // ── T-CORRECTION: measure phase error, drive the PI loop + resampler ──────
+        // The instant the first real sample of THIS cycle is presented, and the
+        // content position (input frames consumed) the output has reached going in.
+        // At the release cycle `inputFramesConsumed == 0` and `audioStartNanos ≈
+        // target`, so `phaseErrorNanos` reduces exactly to the old one-shot
+        // `firstRealNanos − target` — this generalizes that readout to every cycle.
+        let nsPerFrame = 1_000_000_000.0 / renderSampleRate
+        let audioStartNanos = cycleStartMonotonicNanos
+            &+ Int64((Double(silentFrames) * nsPerFrame).rounded())
+        // The CONTINUOUS content position (fractional, not the integer pull count) —
+        // using the integer count would leave a ±½-frame sawtooth the loop can't null.
+        let contentFramesBefore = resampler.consumedContentFrames
+        let phaseErrorNanos =
+            Double(audioStartNanos &- target) - contentFramesBefore * nsPerFrame
+
+        phaseController.update(phaseErrorNanos: phaseErrorNanos, nsPerFrame: nsPerFrame)
+        let ratio = phaseController.ratio
+
+        let outFrames = frameCount - silentFrames
+        // Drain the ring at `ratio` input-frames-per-output-frame via cubic
+        // interpolation. `pullFrame` reads exactly one interleaved frame; the ring
+        // only ever holds whole frames (writes are frame-multiples), so a short read
+        // means the ring is empty, not a partial frame.
+        let produced = resampler.render(
+            into: out, outFrameOffset: silentFrames, outFrames: outFrames, ratio: ratio
+        ) { framePtr in
+            ring.read(into: framePtr, maxCount: channelCount) == channelCount
         }
-        return got > 0
+
+        // Underrun: zero-fill the shortfall so a starved ring is silence, not garbage.
+        if produced < outFrames {
+            let tailStart = (silentFrames + produced) * channelCount
+            base.advanced(by: tailStart).update(repeating: 0, count: total - tailStart)
+        }
+
+        // Publish the phase-error readout the correction loop just acted on, for
+        // `latestPhaseErrorNanos`. A missed `try()` just leaves the previous cycle's
+        // value visible — it is a monitoring readout, never on the control path.
+        if stateLock.try() {
+            lastPhaseErrorNanos = Int64(phaseErrorNanos.rounded())
+            stateLock.unlock()
+        }
+        return produced > 0
     }
 }
 

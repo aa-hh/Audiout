@@ -4,7 +4,8 @@
 // `settings-snapshot`). The live window isn't visible to an agent shell, so
 // this assembles the REAL `MixerWindowController` against a MockBackend-backed
 // `GroupController` and renders the whole window frame (titlebar + toolbar +
-// split view) via `bitmapImageRepForCachingDisplay(in:)` + `cacheDisplay(in:)`.
+// split view) into an explicit @2x bitmap via `displayIgnoringOpacity(_:in:)`
+// (see `captureOnce` for why not `cacheDisplay(in:to:)`).
 // Also renders the control-panel shell (T11) hosting the same Groups content
 // in a sticky floating NSPanel with decorative beak chrome.
 //
@@ -70,7 +71,18 @@ private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
     if let bitmapData = rep.bitmapData {
         memset(bitmapData, 0, rep.bytesPerRow * pixelsHigh)
     }
-    view.cacheDisplay(in: bounds, to: rep)
+    // Render through an explicit NSGraphicsContext (not `cacheDisplay`) so
+    // font smoothing can be VETOED at the CGContext level. Whether AppKit
+    // text/symbol drawing applies smoothing (stem darkening — glyph AA
+    // coverage ~15-20% heavier) is decided per-cell against display state
+    // that resolves asynchronously and latches per capture host, so
+    // mixer-6-icon-picker settled bimodally (~1 in 10) in a heavier-glyph
+    // vs lighter-glyph state that no amount of settling reconciles.
+    // `setAllowsFontSmoothing(false)` overrides any cell-level enable, making
+    // glyph rasterization identical no matter which way the latch resolved.
+    guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+    ctx.cgContext.setAllowsFontSmoothing(false)
+    view.displayIgnoringOpacity(bounds, in: ctx)
     return rep.representation(using: .png, properties: [:])
 }
 
@@ -90,12 +102,12 @@ func renderPNG(view: NSView, to url: URL) {
     // can run before the view exists (it then appears mid-loop in some runs).
     // Hiding inside the loop guarantees the only stable end state is
     // separator-free.
-    hideTitlebarSeparators(in: view)
+    hideNondeterministicChrome(in: view)
     var data = captureOnce(view: view, bounds: bounds)
     var stable = false
     for _ in 0..<40 {
         drain(0.05)
-        hideTitlebarSeparators(in: view)
+        hideNondeterministicChrome(in: view)
         let next = captureOnce(view: view, bounds: bounds)
         if next != nil && next == data { stable = true; break }
         data = next
@@ -163,6 +175,13 @@ func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppeara
     // and `cacheDisplay` reads model values, unaffected by window alpha.
     if !window.isVisible {
         window.alphaValue = 0
+        // An alpha-0 window still HIT-TESTS against the real cursor on the
+        // live desktop it's ordered onto — if the pointer happens to rest
+        // over the sidebar, the outline's group-row hover "Show/Hide" button
+        // fades in mid-run and lands in the capture (observed once as a
+        // ~10x6pt glyph at the sidebar row's trailing edge). Opt the window
+        // out of mouse routing entirely so no tracking area can ever fire.
+        window.ignoresMouseEvents = true
         window.orderFront(nil)
         drain(0.1)
     }
@@ -170,7 +189,7 @@ func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppeara
     window.contentView?.layoutSubtreeIfNeeded()
     let frameView = window.contentView?.superview ?? window.contentView!
     pinMaterialsWithinWindow(in: frameView)
-    hideTitlebarSeparators(in: frameView)
+    hideNondeterministicChrome(in: frameView)
     drain(0.1)
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
@@ -216,11 +235,35 @@ func pinMaterialsWithinWindow(in view: NSView) {
 /// creation and post-hoc style changes race it, so a 1pt hairline at the
 /// titlebar's bottom edge flickered run-to-run in captures. Hiding the view
 /// itself is deterministic. Generator-only; never ships in the app.
-func hideTitlebarSeparators(in view: NSView) {
-    if NSStringFromClass(type(of: view)).contains("TitlebarSeparator") {
+func hideNondeterministicChrome(in view: NSView) {
+    // Two distinct private views can paint the hairline:
+    // - `NSTitlebarSeparatorView`: a dedicated 1pt view (the original fix).
+    // - `_NSTitlebarDecorationView`: a FULL-HEIGHT (28pt) titlebar overlay
+    //   that draws the separator line + its soft shadow INSIDE itself when
+    //   AppKit's async separator resolution latched "separator on" before
+    //   `titlebarSeparatorStyle = .none` took effect. Because the view spans
+    //   the whole titlebar, no thin view ever intersects the strip
+    //   (SNAPSHOT_DEBUG_STRIP found nothing), and whether it draws the line
+    //   latches once per window — all whole-window captures of that window
+    //   flipped together, ~1 in 3 runs. It draws nothing else we keep, so
+    //   hiding it collapses both latch states onto the same pixels.
+    let cls = NSStringFromClass(type(of: view))
+    if cls.contains("TitlebarSeparator") || cls.contains("TitlebarDecoration") {
         view.isHidden = true
     }
-    for subview in view.subviews { hideTitlebarSeparators(in: subview) }
+    // The sidebar outline's group-row hover "Show"/"Hide" button: a bare
+    // `NSButton` AppKit mounts DIRECTLY on the `NSTableRowView` (real cell
+    // content always sits inside an `NSTableCellView`, so this match can't
+    // catch app content). It fades in when the live cursor crosses the
+    // ordered-in (alpha-0) window OR transiently after a sidebar selection
+    // change, on its own animation clock — a capture that stabilizes during
+    // a stalled fade keeps a half-faded button (observed as a ~10x6pt glyph
+    // at the group row's trailing edge). `ignoresMouseEvents` closes the
+    // hover path; this closes the selection-change path.
+    if view is NSButton, view.superview is NSTableRowView {
+        view.isHidden = true
+    }
+    for subview in view.subviews { hideNondeterministicChrome(in: subview) }
 }
 
 /// DEBUG (SNAPSHOT_DEBUG_STRIP=1): print every view whose frame intersects
@@ -231,9 +274,10 @@ func dumpStrip(in root: NSView) {
     let rootH = root.bounds.height
     let strip = NSRect(x: 0, y: rootH - stripTopFromTop - stripHeight,
                        width: root.bounds.width, height: stripHeight)
+    let all = ProcessInfo.processInfo.environment["SNAPSHOT_DEBUG_STRIP_ALL"] != nil
     func walk(_ v: NSView, depth: Int) {
         let f = v.convert(v.bounds, to: root)
-        if f.intersects(strip) && f.height <= 6 {
+        if f.intersects(strip) && (all || f.height <= 6) {
             let cls = NSStringFromClass(type(of: v))
             print("  STRIP \(String(repeating: " ", count: depth))\(cls) frame=\(f) hidden=\(v.isHidden) alpha=\(v.alphaValue) layerBG=\(v.layer?.backgroundColor != nil)")
         }
@@ -275,10 +319,27 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
     host.layoutIfNeeded()
     pinMaterialsWithinWindow(in: backdrop)
     view.layoutSubtreeIfNeeded()
+    // Order the host in, invisibly (alpha 0) — same rationale as
+    // `snapshotWindow`: a window that is never ordered in leaves its Core
+    // Animation machinery half-engaged, and WHETHER the first commit ran
+    // before the capture loop stabilized decided the text/glyph rendering
+    // path (layer-backed vs direct → different antialiasing weight), so
+    // mixer-6-icon-picker settled in one of two internally-stable states
+    // per capture. A full order-in makes the commit happen every run,
+    // before the first capture.
+    host.alphaValue = 0
+    host.ignoresMouseEvents = true   // same live-cursor hover hazard as `snapshotWindow`
+    host.orderFront(nil)
+    // No text field may keep an active field editor into the capture — an
+    // insertion caret blinks on its own clock, far slower than the 0.05s
+    // recapture drain, so the loop can "stabilize" in either caret phase.
+    host.endEditing(for: nil)
+    host.makeFirstResponder(nil)
     drain(0.1)
 
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: backdrop, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
+    host.orderOut(nil)
     host.contentView = NSView()   // detach so the view isn't torn down under us
 }
 
@@ -302,9 +363,13 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
         controller.show(anchorRect: nil)
     }
 
-    // Set appearance on both windows.
+    // Set appearance on both windows; keep them out of mouse routing for the
+    // same live-cursor hover hazard as `snapshotWindow` (headless gating
+    // means they normally never order in, but this costs nothing).
     controller.test_panel?.appearance = appearance
+    controller.test_panel?.ignoresMouseEvents = true
     controller.test_backingWindow?.appearance = appearance
+    controller.test_backingWindow?.ignoresMouseEvents = true
 
     // Layout the panel's content.
     controller.test_panel?.layoutIfNeeded()

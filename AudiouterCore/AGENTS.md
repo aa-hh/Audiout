@@ -128,6 +128,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   bare serial `swift test`). It parallelizes at the test-CLASS level: each
   suite runs in its own process, so tests must not race on cross-process shared
   state.
+- **Enforcement (two layers, so filtering is fast AND safe):** a `PreToolUse`
+  hook (`.claude/hooks/swift-test-nudge.sh`, wired in `.claude/settings.json`)
+  bounces a *bare* `swift test` and points you to `--filter`/`--parallel` — it
+  fires for subagents too. Coverage is then guaranteed at commit: `.githooks/
+  pre-commit` Guard 4 runs the full `swift test --parallel` whenever staged
+  files touch AudiouterCore Swift sources/tests and blocks the commit on
+  failure. So a too-narrow filter in the loop can never ship a regression — it
+  only costs one fix cycle at commit. Escapes: `AIRPLAY_SERIAL_TEST=1 swift
+  test` for a genuine serial run; `git commit --no-verify` for a gate emergency.
 - **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
   each suite its own process, two suites that both write `UserDefaults.standard`
   or the same `FileManager.default.temporaryDirectory` path race and flake.

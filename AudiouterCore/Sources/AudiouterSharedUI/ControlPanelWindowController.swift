@@ -173,20 +173,20 @@ public final class ControlPanelWindowController: NSWindowController {
     /// The hosted view is left TRANSPARENT on purpose — it must NOT paint an
     /// opaque background of its own. The panel is fully transparent (see
     /// `makePanel`), and the decorative backing window behind it already draws
-    /// an opaque, LIVE-adaptive `windowBackgroundColor` bubble
-    /// (`ControlPanelBackingView.draw`). An earlier version filled this layer
-    /// with a resolved `windowBackgroundColor.cgColor` "defensive fallback",
-    /// but a CGColor is frozen at the instant's appearance and cannot follow a
-    /// light/dark change — which is exactly what left Groups' transparent
-    /// split-view content pane rendering a stale LIGHT fill in dark mode while
-    /// its vibrancy sidebar adapted correctly (visual C3b, the "half-render").
-    /// Clearing the fill lets the backing bubble's live color show through the
-    /// content pane — identical to how the rounded corners already reveal it —
-    /// so the whole panel tracks the appearance as one, and Groups in the shell
-    /// matches Groups in its standalone window (source-list sidebar + a
-    /// `windowBackgroundColor` content pane). Content that paints its OWN
-    /// opaque, appearance-adaptive background (Settings' `NSVisualEffectView`
-    /// root) simply covers the bubble, unaffected.
+    /// an opaque, LIVE-adaptive warm `canvas` bubble
+    /// (`ControlPanelBackingView.draw`, Warm Signal §5.4 — bubble, beak, and
+    /// content pane are one continuous warm shape with no seam). An earlier
+    /// version filled this layer with a resolved `.cgColor` "defensive
+    /// fallback", but a CGColor is frozen at the instant's appearance and
+    /// cannot follow a light/dark change — which is exactly what left Groups'
+    /// transparent split-view content pane rendering a stale LIGHT fill in
+    /// dark mode while its vibrancy sidebar adapted correctly (visual C3b,
+    /// the "half-render"). Clearing the fill lets the backing bubble's live
+    /// warm color show through the content pane — identical to how the
+    /// rounded corners already reveal it — so the whole panel tracks the
+    /// appearance as one. Content that paints its OWN opaque,
+    /// appearance-adaptive background (Settings' `NSVisualEffectView` root)
+    /// simply covers the bubble, unaffected — intended per §5.4.
     private func configureContentAppearance(_ view: NSView) {
         view.wantsLayer = true
         view.layer?.backgroundColor = Tokens.Color.clear.cgColor

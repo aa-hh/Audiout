@@ -75,8 +75,12 @@ public enum PopoverColumnGrid {
     /// destination dropdown (task B). The device row's small mute button and the
     /// group row's (empty) slot right-align within this reserved column, so the
     /// slider's trailing edge lands at the same x in all three sections. Kept as
-    /// tight as a named dropdown allows so the flexible name column keeps room.
-    public static let trailingControlWidth: CGFloat = 116
+    /// tight as a named dropdown allows so the flexible name column keeps room —
+    /// sized (116 → 140, Warm Signal C1) so the two longest fixed dropdown
+    /// titles, "Follows main output" (the app-row bridge phrase, decision 3) and
+    /// the count-free "Selected Devices" (decision m), fit a small-control
+    /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
+    public static let trailingControlWidth: CGFloat = 140
 
     // MARK: On-icon status badge (2026-07-17)
     //

@@ -33,11 +33,22 @@ public final class AppearanceSettingsViewController: NSViewController {
     /// `AppSettings.theme` directly there.
     public var onThemeChanged: ((AppearanceTheme) -> Void)?
 
+    /// Fired after an Accent dial selection is persisted AND applied to the
+    /// live token remap (`Tokens.accentStyle`), so the app layer can nudge any
+    /// open surfaces to repaint. Not called at launch — the app seeds
+    /// `Tokens.accentStyle` from `AppSettings.accentStyle` there.
+    public var onAccentChanged: ((AccentStyle) -> Void)?
+
     /// Tile order == this array; the single source of truth mapping a tile index
     /// to a theme (no parallel `switch` to drift out of sync).
     private let order: [AppearanceTheme] = [.system, .light, .dark]
     private var tiles: [ThemeTileButton] = []
     private var selectedIndex = 0
+
+    /// Radio order == this array — same single-source-of-truth idiom as `order`.
+    private let accentOrder: [AccentStyle] = [.fullGold, .subtle, .systemAccent]
+    private var accentRadios: [NSButton] = []
+    private let accentHint = SettingsForm.hintLabel()
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -67,7 +78,70 @@ public final class AppearanceSettingsViewController: NSViewController {
         column.alignment = .leading
         column.spacing = 8
 
-        view = SettingsForm.paneView(rows: [column])
+        view = SettingsForm.paneView(rows: [column, makeAccentSection()])
+    }
+
+    /// The **Accent** dial (Warm Signal spec §1.3 / §5.2 — decision i): three
+    /// stock radios under a hairline. The pane persists the choice AND applies
+    /// the live token remap itself (`Tokens.accentStyle` — the token module is
+    /// process-local state, not an `NSApp` side effect, so unlike the theme
+    /// there is no app-layer apply step to defer to); ``onAccentChanged`` then
+    /// lets the app nudge open surfaces to repaint.
+    private func makeAccentSection() -> NSView {
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+
+        let heading = SettingsForm.label("Accent")
+        heading.font = Tokens.Font.body
+
+        let subtitle = SettingsForm.label("How strongly meters, dots, and rings use the brand gold.")
+        subtitle.font = Tokens.Font.caption
+        subtitle.textColor = Tokens.Color.secondaryLabel
+
+        accentRadios = accentOrder.map { style in
+            let radio = NSButton(radioButtonWithTitle: style.displayName,
+                                 target: self,
+                                 action: #selector(accentTapped(_:)))
+            radio.translatesAutoresizingMaskIntoConstraints = false
+            radio.setAccessibilityLabel(style.displayName)
+            return radio
+        }
+        // Horizontal on purpose: the three dial names fit comfortably in the
+        // fixed 460 pt form width, and the merged one-screen Settings column
+        // is height-precious (see `testContentSizeIsFittedNotDegenerate`).
+        let radioColumn = NSStackView(views: accentRadios)
+        radioColumn.orientation = .horizontal
+        radioColumn.alignment = .firstBaseline
+        radioColumn.spacing = 12
+
+        applyAccentSelection(settings.accentStyle)
+
+        let column = NSStackView(views: [hairline, heading, subtitle, radioColumn, accentHint])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 8
+        hairline.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        return column
+    }
+
+    /// Reflect `style` in the radio group + the live hint line (no persistence,
+    /// no side effects — shared by `loadView` and the click path).
+    private func applyAccentSelection(_ style: AccentStyle) {
+        let index = accentOrder.firstIndex(of: style) ?? 0
+        for (radioIndex, radio) in accentRadios.enumerated() {
+            radio.state = radioIndex == index ? .on : .off
+        }
+        accentHint.stringValue = style.hintLine
+    }
+
+    @objc private func accentTapped(_ sender: NSButton) {
+        guard let index = accentRadios.firstIndex(of: sender),
+              let style = accentOrder[safe: index] else { return }
+        applyAccentSelection(style)
+        settings.accentStyle = style
+        Tokens.accentStyle = style
+        onAccentChanged?(style)
     }
 
     public override func viewDidLoad() {
@@ -140,6 +214,30 @@ public final class AppearanceSettingsViewController: NSViewController {
         guard let index = order.firstIndex(of: theme), let tile = tiles[safe: index] else { return false }
         return (tile.accessibilityValue() as? NSNumber)?.boolValue ?? false
     }
+
+    // MARK: Test-support hooks (Accent dial — W1, spec §1.3)
+
+    /// The accent style whose radio is currently on.
+    public var test_selectedAccentStyle: AccentStyle {
+        _ = view
+        let index = accentRadios.firstIndex(where: { $0.state == .on }) ?? 0
+        return accentOrder[safe: index] ?? .fullGold
+    }
+
+    /// Select `style` and run the same action a real radio click would
+    /// (persist + remap `Tokens.accentStyle` + fire ``onAccentChanged``).
+    public func test_selectAccentStyle(_ style: AccentStyle) {
+        _ = view
+        guard let index = accentOrder.firstIndex(of: style),
+              let radio = accentRadios[safe: index] else { return }
+        accentTapped(radio)
+    }
+
+    /// The live hint line under the accent radios.
+    public var test_accentHint: String {
+        _ = view
+        return accentHint.stringValue
+    }
 }
 
 /// A theme-picker tile: a miniature window preview rendered *in* its target
@@ -187,19 +285,55 @@ final class ThemeTileButton: NSButton {
     private enum Mock {
         // Absolute (non-adaptive) preview palettes — a Light tile must look light
         // in dark mode and vice versa, so these are fixed sRGB, never semantic.
-        static let lightBody = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         static let lightChrome = NSColor(srgbRed: 0.91, green: 0.91, blue: 0.92, alpha: 1)
-        static let lightBar = NSColor(srgbRed: 0.84, green: 0.84, blue: 0.86, alpha: 1)
         static let lightStroke = NSColor(srgbRed: 0.74, green: 0.74, blue: 0.76, alpha: 1)
 
-        static let darkBody = NSColor(srgbRed: 0.14, green: 0.14, blue: 0.15, alpha: 1)
         static let darkChrome = NSColor(srgbRed: 0.24, green: 0.24, blue: 0.25, alpha: 1)
-        static let darkBar = NSColor(srgbRed: 0.33, green: 0.33, blue: 0.35, alpha: 1)
         static let darkStroke = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.55)
 
         static let red = NSColor(srgbRed: 1.0, green: 0.37, blue: 0.34, alpha: 1)
         static let yellow = NSColor(srgbRed: 0.99, green: 0.74, blue: 0.18, alpha: 1)
         static let green = NSColor(srgbRed: 0.15, green: 0.79, blue: 0.25, alpha: 1)
+    }
+
+    /// One theme's **warm product-panel** preview palette (Warm Signal spec
+    /// §5.2 — the tiles "preview the actual product", so the body is the real
+    /// warm canvas with a lit gold row + meter sliver; these are the ONLY
+    /// warm/gold pixels anywhere in Settings, because they depict the product).
+    /// Same ABSOLUTE-palette exception as `Mock` above, deliberately extended
+    /// to the warm values: the tile portrays an appearance, it doesn't adopt
+    /// one, so these are fixed sRGB mirrors of the spec §1.1/§1.2 hexes —
+    /// never the live semantic `Tokens` (which follow the CURRENT appearance
+    /// and accent dial, and would make a "Light" tile go dark in dark mode).
+    private struct WarmPreviewPalette {
+        let chrome: NSColor    // title-bar strip (window chrome stays system-ish)
+        let stroke: NSColor    // outer frame
+        let canvas: NSColor    // §1.1/§1.2 `canvas`
+        let well: NSColor      // §1.1/§1.2 `well` (the row's icon well)
+        let name: NSColor      // §1.1/§1.2 `text` (the lit row's name bar)
+        let nameDim: NSColor   // §1.1/§1.2 `text-3` (the idle row's name bar)
+        let gold: NSColor      // §1.1/§1.2 `gold` (route-armed dot, meter hot end)
+        let ember: NSColor     // §1.1/§1.2 `ember` (meter low end)
+
+        /// Dark flagship (spec §1.1).
+        static let dark = WarmPreviewPalette(
+            chrome: Mock.darkChrome, stroke: Mock.darkStroke,
+            canvas: NSColor(srgbRed: 0x16 / 255, green: 0x13 / 255, blue: 0x0F / 255, alpha: 1),
+            well: NSColor(srgbRed: 0x2B / 255, green: 0x26 / 255, blue: 0x20 / 255, alpha: 1),
+            name: NSColor(srgbRed: 0xEF / 255, green: 0xE9 / 255, blue: 0xDD / 255, alpha: 1),
+            nameDim: NSColor(srgbRed: 0x7A / 255, green: 0x70 / 255, blue: 0x62 / 255, alpha: 1),
+            gold: NSColor(srgbRed: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255, alpha: 1),
+            ember: NSColor(srgbRed: 0x8A / 255, green: 0x6A / 255, blue: 0x2F / 255, alpha: 1))
+
+        /// Warm paper light (spec §1.2 — deepened gold).
+        static let light = WarmPreviewPalette(
+            chrome: Mock.lightChrome, stroke: Mock.lightStroke,
+            canvas: NSColor(srgbRed: 0xF4 / 255, green: 0xEF / 255, blue: 0xE7 / 255, alpha: 1),
+            well: NSColor(srgbRed: 0xEC / 255, green: 0xE5 / 255, blue: 0xD8 / 255, alpha: 1),
+            name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
+            nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
+            gold: NSColor(srgbRed: 0xA9 / 255, green: 0x7F / 255, blue: 0x1E / 255, alpha: 1),
+            ember: NSColor(srgbRed: 0xC2 / 255, green: 0xA0 / 255, blue: 0x5A / 255, alpha: 1))
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -248,17 +382,14 @@ final class ThemeTileButton: NSButton {
     private func drawPreview(in rect: NSRect) {
         switch theme {
         case .light:
-            drawWindowMock(in: rect, body: Mock.lightBody, chrome: Mock.lightChrome,
-                           bar: Mock.lightBar, stroke: Mock.lightStroke, trafficLights: true)
+            drawWindowMock(in: rect, palette: .light, trafficLights: true)
         case .dark:
-            drawWindowMock(in: rect, body: Mock.darkBody, chrome: Mock.darkChrome,
-                           bar: Mock.darkBar, stroke: Mock.darkStroke, trafficLights: true)
+            drawWindowMock(in: rect, palette: .dark, trafficLights: true)
         case .system:
             // Diagonal split: light on the left, dark clipped to the leaning
             // right region — the macOS "Auto" metaphor for "matches whichever the
             // system is".
-            drawWindowMock(in: rect, body: Mock.lightBody, chrome: Mock.lightChrome,
-                           bar: Mock.lightBar, stroke: Mock.lightStroke, trafficLights: true)
+            drawWindowMock(in: rect, palette: .light, trafficLights: true)
 
             // Right region leans across the split (top-down coords: minY = top).
             let lean: CGFloat = 8
@@ -271,8 +402,7 @@ final class ThemeTileButton: NSButton {
 
             NSGraphicsContext.saveGraphicsState()
             rightRegion.addClip()
-            drawWindowMock(in: rect, body: Mock.darkBody, chrome: Mock.darkChrome,
-                           bar: Mock.darkBar, stroke: Mock.darkStroke, trafficLights: false)
+            drawWindowMock(in: rect, palette: .dark, trafficLights: false)
             NSGraphicsContext.restoreGraphicsState()
 
             // A crisp divider along the split.
@@ -294,23 +424,26 @@ final class ThemeTileButton: NSButton {
         }
     }
 
-    /// Draw one miniature window: rounded body, a title-bar strip with optional
-    /// traffic lights, and a few faint content bars.
-    private func drawWindowMock(in rect: NSRect, body: NSColor, chrome: NSColor,
-                                bar: NSColor, stroke: NSColor, trafficLights: Bool) {
+    /// Draw one miniature window previewing the REAL warm panel (spec §5.2):
+    /// rounded body filled with the warm canvas, a title-bar strip with
+    /// optional traffic lights, then a **lit gold row** (icon well · name bar ·
+    /// gold route-armed dot, with an ember→gold meter sliver beneath the name)
+    /// over an idle dimmed row — the popover's own status-cluster language in
+    /// miniature.
+    private func drawWindowMock(in rect: NSRect, palette: WarmPreviewPalette, trafficLights: Bool) {
         let radius: CGFloat = 6
         let frame = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
 
         NSGraphicsContext.saveGraphicsState()
         frame.addClip()
 
-        body.setFill()
+        palette.canvas.setFill()
         rect.fill()
 
         // Title bar at the top (top-down coords: minY = top).
         let barHeight = max(11, rect.height * 0.28)
         let titleBar = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: barHeight)
-        chrome.setFill()
+        palette.chrome.setFill()
         titleBar.fill()
 
         if trafficLights {
@@ -324,20 +457,46 @@ final class ThemeTileButton: NSButton {
             }
         }
 
-        // Content bars below the title bar, marching downward.
-        bar.setFill()
-        let barX = rect.minX + 9
-        var barY = titleBar.maxY + 6
-        for widthFraction in [0.52, 0.66, 0.42] {
-            guard barY < rect.maxY - 5 else { break }
-            let line = NSRect(x: barX, y: barY, width: rect.width * widthFraction, height: 3)
-            NSBezierPath(roundedRect: line, xRadius: 1.5, yRadius: 1.5).fill()
-            barY += 8
+        // Lit row: icon well · name bar · gold dot, meter sliver under the name.
+        let wellSize: CGFloat = 9
+        let rowX = rect.minX + 8
+        let litY = titleBar.maxY + 6
+        let well = NSRect(x: rowX, y: litY, width: wellSize, height: wellSize)
+        palette.well.setFill()
+        NSBezierPath(roundedRect: well, xRadius: 2.5, yRadius: 2.5).fill()
+
+        let nameX = well.maxX + 5
+        let name = NSRect(x: nameX, y: litY + 1.5, width: rect.width * 0.34, height: 2.5)
+        palette.name.setFill()
+        NSBezierPath(roundedRect: name, xRadius: 1.25, yRadius: 1.25).fill()
+
+        // Route-armed gold corner dot at the row's trailing edge.
+        let dotDiameter: CGFloat = 4
+        let dot = NSRect(x: rect.maxX - 10 - dotDiameter, y: well.midY - dotDiameter / 2,
+                         width: dotDiameter, height: dotDiameter)
+        palette.gold.setFill()
+        NSBezierPath(ovalIn: dot).fill()
+
+        // Meter sliver: the warm ember→gold gradient (never failure red).
+        let meter = NSRect(x: nameX, y: name.maxY + 2.5, width: rect.width * 0.42, height: 2)
+        let meterPath = NSBezierPath(roundedRect: meter, xRadius: 1, yRadius: 1)
+        NSGradient(colors: [palette.ember, palette.gold])?.draw(in: meterPath, angle: 0)
+
+        // Idle row beneath: dimmed name, no dot, no meter.
+        let idleY = meter.maxY + 5
+        if idleY + wellSize < rect.maxY - 3 {
+            let idleWell = NSRect(x: rowX, y: idleY, width: wellSize, height: wellSize)
+            palette.well.setFill()
+            NSBezierPath(roundedRect: idleWell, xRadius: 2.5, yRadius: 2.5).fill()
+
+            let idleName = NSRect(x: nameX, y: idleWell.midY - 1.25, width: rect.width * 0.28, height: 2.5)
+            palette.nameDim.setFill()
+            NSBezierPath(roundedRect: idleName, xRadius: 1.25, yRadius: 1.25).fill()
         }
 
         NSGraphicsContext.restoreGraphicsState()
 
-        stroke.setStroke()
+        palette.stroke.setStroke()
         frame.lineWidth = 1
         frame.stroke()
     }
@@ -350,6 +509,27 @@ private extension AppearanceTheme {
         case .system: return "Match System"
         case .light:  return "Light"
         case .dark:   return "Dark"
+        }
+    }
+}
+
+private extension AccentStyle {
+    /// Radio title (spec §1.3's three dial names).
+    var displayName: String {
+        switch self {
+        case .fullGold:     return "Full gold"
+        case .subtle:       return "Subtle"
+        case .systemAccent: return "Follow system accent"
+        }
+    }
+
+    /// The live hint line for the current dial position — what this choice
+    /// actually does to the instruments, per §1.3's remap table.
+    var hintLine: String {
+        switch self {
+        case .fullGold:     return "Meters, dots, and rings glow in the full brand gold."
+        case .subtle:       return "A quieter gold — softer meters, and no glow around the routing dot."
+        case .systemAccent: return "Gold instruments take on this Mac's accent color instead."
         }
     }
 }

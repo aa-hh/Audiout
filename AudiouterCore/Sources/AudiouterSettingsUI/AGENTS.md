@@ -60,6 +60,21 @@ package layout and where the settings model types (`AppSettings`,
   re-measure behavior or the existing standalone window path, which remains
   the shipping default.
 
+- **Settings chrome stays system** (Warm Signal spec §5.2): no warm canvas and
+  no gold anywhere in these panes. The ONLY warm/gold pixels are inside the
+  theme tiles' previews, and those use ABSOLUTE sRGB mirrors of the spec
+  palette on purpose — a tile depicts an appearance; live `Tokens` would adopt
+  the current appearance/accent and lie. Don't "fix" them to semantic tokens.
+- **The Appearance pane is the accent dial's writer**: a radio click persists
+  `AppSettings.accentStyle` AND applies the live remap (`Tokens.accentStyle`)
+  itself, then fires `onAccentChanged` as a repaint nudge only. The app layer
+  seeds `Tokens.accentStyle` from settings once at launch — don't add a second
+  apply path.
+- **Consequential controls carry a LIVE hint line** (spec §5.2,
+  `SettingsForm.hintLabel`): the owning pane re-writes the hint on every value
+  change so it always states the current value's consequence — don't replace
+  one with a static subtitle.
+
 ## Map
 
 | Type | What it is |
@@ -67,5 +82,5 @@ package layout and where the settings model types (`AppSettings`,
 | `SettingsWindowController` | Owns the window, forwards `onThemeChanged`/`onExcludedAppsChanged`, exposes `settingsContentViewController` + `test_*` hooks. |
 | `SettingsRootViewController` | Assembles the three sections into one scrolling-free column; `preferredContentSize` follows `fittingSize`. |
 | `GeneralSettingsViewController` | Launch-at-login. |
-| `AppearanceSettingsViewController` | Theme picker (icon-tile). |
+| `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
 | `AudioSettingsViewController` | Excluded-apps list + Advanced › Audio buffer (when `LatencyConfigurable`). |

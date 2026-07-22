@@ -226,6 +226,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // status item and popover pick it up on first paint (Settings ›
         // Appearance). `.system` is a no-op (`NSApp.appearance = nil`).
         applyAppearance(settings.theme)
+        // Seed the accent dial's live token remap (W1, spec §1.3) before any
+        // UI paints — the token module defaults to `.fullGold`, so this only
+        // matters when the user has dialed it elsewhere. Changes made later in
+        // Settings › Appearance apply themselves (the pane writes
+        // `Tokens.accentStyle` directly); this is the launch-time read of the
+        // persisted choice.
+        Tokens.accentStyle = settings.accentStyle
 
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action toggles the popover (SPEC §9 revised) — EXCEPT while
@@ -664,6 +671,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   latency: makeLatencySettingModel(),
                                                   wakeRestore: makeWakeRestoreSettingModel())
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
+            // Accent dial (W1, spec §1.3): the pane has already persisted and
+            // remapped `Tokens.accentStyle`; this nudge repaints whatever is
+            // on screen so `draw(_:)`-based instruments re-resolve now.
+            // Layer-color instruments re-read the tokens on their next state
+            // update/rebuild (the popover rebuilds on every open).
+            controller.onAccentChanged = { [weak self] _ in self?.repaintOpenWindowsForAccentChange() }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
             // "Check Permissions…" (General pane) re-opens the first-run priming
             // window; the backend is already running, so its onFinished is a
@@ -759,6 +772,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pruneRoutesForExcludedApps() {
         for bundleID in excludedApps.excludedBundleIDs {
             appRouting.removeRoute(bundleID: bundleID)
+        }
+    }
+
+    /// Accent-dial change nudge (W1, spec §1.3): mark every open window's view
+    /// tree display-dirty so `draw(_:)`-based instruments (bus, icon wells,
+    /// tiles) re-resolve the freshly remapped gold/ember/glow tokens on the
+    /// next display pass. Deliberately NOT a rebuild: layer-color instruments
+    /// pick the remap up on their own next state update, and the popover
+    /// rebuilds on every open anyway.
+    @MainActor
+    private func repaintOpenWindowsForAccentChange() {
+        func markDirty(_ view: NSView) {
+            view.needsDisplay = true
+            for subview in view.subviews { markDirty(subview) }
+        }
+        for window in NSApp.windows {
+            if let contentView = window.contentView { markDirty(contentView) }
         }
     }
 

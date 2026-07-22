@@ -35,6 +35,31 @@ public final class WarmCanvasView: NSView {
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        // Reduce Transparency / Increase Contrast are read inside `draw(_:)`,
+        // and — unlike a light/dark switch — a Reduce Transparency toggle does
+        // NOT change the effective appearance, so nothing would ever trigger
+        // the flatten repaint mid-session without observing the workspace's
+        // display-options notification directly. Selector-based observation
+        // needs no matching removal (post-10.11 AppKit auto-unregisters).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    /// A mid-session accessibility-display change flips the gradient+grain ↔
+    /// flat-`canvas` decision, so the whole surface repaints (§D live path).
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        needsDisplay = true
+    }
+
+    /// Overrides the flatten decision (`Reduce Transparency || Increase
+    /// Contrast`) for tests — `nil` = read the real workspace values. Headless
+    /// tests can't flip the real settings, and the §D flat-canvas branch must
+    /// still be drawable/assertable.
+    public var test_flattenOverride: Bool? {
+        didSet { needsDisplay = true }
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -45,7 +70,7 @@ public final class WarmCanvasView: NSView {
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
         let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        let flattenForAccessibility = reduceTransparency || increaseContrast
+        let flattenForAccessibility = test_flattenOverride ?? (reduceTransparency || increaseContrast)
 
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 

@@ -48,6 +48,15 @@ public final class SettingsWindowController: NSWindowController {
         set { appearanceVC.onThemeChanged = newValue }
     }
 
+    /// Forwarded from the Appearance section: fired when the user changes the
+    /// Accent dial (W1, spec §1.3) — the pane has already persisted the choice
+    /// and applied the live token remap (`Tokens.accentStyle`); this lets the
+    /// app nudge open surfaces to repaint.
+    public var onAccentChanged: ((AccentStyle) -> Void)? {
+        get { appearanceVC.onAccentChanged }
+        set { appearanceVC.onAccentChanged = newValue }
+    }
+
     /// Forwarded from the Audio section: fired when the excluded-apps list
     /// changes so the app can enforce the "excluded ⇒ un-routable" precedence
     /// (prune routes) and refresh the popover.

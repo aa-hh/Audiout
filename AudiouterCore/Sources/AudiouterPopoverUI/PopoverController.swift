@@ -589,18 +589,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
         let allDevices = orderedDevices()
 
-        // 1. System card — the single Main Out row. Combined header row (change
-        // 1): "System" title on the left, "VOLUME" over the slider and "DEVICE"
-        // over the destination dropdown on the right (change 2).
+        // 1. Main Audio card — the single Main Out row. Combined header row
+        // (change 1): "Main Audio" title (Warm Signal §5.1 silkscreen vocabulary)
+        // on the left, "VOLUME" over the slider and "OUTPUT" over the destination
+        // dropdown on the right ("Output" framing, decision m).
         //
         // Collapsible (T-4, PLAN decision 5): the chevron/title toggle the body.
         // Collapse-DEFAULT policy (T-5, PLAN §B): defaults are recomputed on
-        // every OPEN (System starts expanded); a rebuild WITHIN one open (backend
-        // events, etc.) instead preserves whatever the transient state currently
-        // is — `collapsedState(for:default:)` picks the right one.
-        panel.beginCard(header: "System", volumeTitle: "Volume", trailingTitle: "Device",
-                        collapsible: true, collapsed: collapsedState(for: "System", default: false),
-                        onToggle: { [weak self] in self?.toggleCard("System") })
+        // every OPEN (Main Audio starts expanded); a rebuild WITHIN one open
+        // (backend events, etc.) instead preserves whatever the transient state
+        // currently is — `collapsedState(for:default:)` picks the right one.
+        panel.beginCard(header: Self.mainAudioCardTitle, volumeTitle: "Volume", trailingTitle: "Output",
+                        collapsible: true,
+                        collapsed: collapsedState(for: Self.mainAudioCardTitle, default: false),
+                        onToggle: { [weak self] in self?.toggleCard(Self.mainAudioCardTitle) })
         panel.addRow(mainOutRow)
         refreshMainOutRow()
 
@@ -611,22 +613,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         devicesPlaceholderShown = false
-        // Combined header row (change 1): "Devices" title on the left, "VOLUME"
-        // over the slider and "Selected" over the membership checkbox on the
-        // right. Collapsible (main merge) — the collapse key must equal the
-        // display header, since cards are looked up by header title. The
-        // trailing accessory (F1) saves the current Selected Devices set as a
-        // group; its enabled state tracks `canSaveCurrentSetup` and is kept
-        // fresh in place via `refreshDevicesAccessory()` on selection repaints.
-        panel.beginCard(header: "Devices", volumeTitle: "Volume", trailingTitle: "Selected",
+        // Combined header row (change 1): "Output Devices" title (Warm Signal
+        // §5.1 silkscreen vocabulary) on the left, "VOLUME" over the slider and
+        // "Selected" over the membership checkbox on the right. Collapsible
+        // (main merge) — the collapse key must equal the display header, since
+        // cards are looked up by header title. The trailing accessory (F1)
+        // saves the current Selected Devices set as a group; its enabled state
+        // tracks `canSaveCurrentSetup` and is kept fresh in place via
+        // `refreshDevicesAccessory()` on selection repaints.
+        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Selected",
                         trailingAccessory: PopoverPanelViewController.HeaderAccessory(
                             symbol: "plus",
                             label: "Save Selected Devices as group",
                             action: { [weak self] in self?.saveCurrentSetup() },
                             isEnabled: canSaveCurrentSetup),
                         collapsible: true,
-                        collapsed: collapsedState(for: "Devices", default: false),
-                        onToggle: { [weak self] in self?.toggleCard("Devices") })
+                        collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
+                        onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
         // Dormancy note (spec §4.7 FINAL, S5): only a GENUINELY-DIVERGING group
         // target annotates the card ("Inactive — Audio Out is using 'X'", a
         // header-region note that survives collapse). The derived-identity case
@@ -716,9 +719,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
+    /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
+    /// ("MAIN AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; any uppercasing is
+    /// the panel's styling concern, the copy lives here). Named constants
+    /// because the title string IS the card's lookup/collapse key.
+    static let mainAudioCardTitle = "Main Audio"
+    static let outputDevicesCardTitle = "Output Devices"
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
-    static let applicationsCardTitle = "Applications"
+    static let applicationsCardTitle = "App Exceptions"
 
     /// The collapsed state `rebuild()` should hand `beginCard` for the card
     /// titled `title`: on an OPEN-triggered rebuild, the freshly computed
@@ -758,20 +767,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func refreshMainOutRow() {
         guard let controller = groupController else { return }
-        // A2: the "Selected Devices" option carries a live count of every checked
-        // row (the Mac included). `MainOutRowView` matches options by TARGET, not
-        // title, so a changing title is safe; the count feeds both the dropdown
-        // item and the popup's collapsed title, staying in sync because
-        // `refreshMainOutRow` re-runs on every selection change. The open menu
-        // shows the full "Selected Devices (n)"; the collapsed button shows the
-        // shorter "Selected (n)" (via `buttonTitle`) so the count isn't truncated
-        // to "Selected Device…" by the fixed trailing-control width — the "DEVICE"
-        // column header already supplies the "Devices" word.
-        let selectedCount = controller.selectedDeviceIDs.count
+        // "Selected Devices" is CLEAN — no live "(n)" count (Warm Signal §5.1,
+        // decision m: the dropdown names the current target, the device rows'
+        // checkboxes already show the composition). The trailing-control column
+        // (`PopoverColumnGrid.trailingControlWidth`) is sized so the full title
+        // fits the collapsed button untruncated — no `buttonTitle` short form.
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices,
-                  buttonTitle: "Selected (\(selectedCount))"),
+            .init(title: "Selected Devices", target: .selectedDevices),
         ]
         // Only groups that actually have a device are offered as routing targets —
         // an empty group can't be activated (and shouldn't exist under the
@@ -984,7 +987,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Sync the Devices card's "Save Selected Devices as group" accessory enabled
     /// state with `canSaveCurrentSetup` in place — no-op if the card isn't built.
     private func refreshDevicesAccessory() {
-        panel.setAccessoryEnabled(title: "Devices", enabled: canSaveCurrentSetup)
+        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: canSaveCurrentSetup)
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
@@ -1231,8 +1234,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Applications card rows (T-8, PLAN §C decisions 3/4/6/8)
 
     /// Build one `AppRowView` for `route` against the discovered device `devices`.
-    /// The destination popup leads with the standalone "No Redirect" entry (the
-    /// new default/neutral state), then mirrors `refreshMainOutRow`'s split — a
+    /// The destination popup leads with the standalone "Follows main output"
+    /// entry (the default/neutral state), then mirrors `refreshMainOutRow`'s split — a
     /// "Current Device" entry (local, now an explicit pick) then the available
     /// (present + reachable) non-local AirPlay devices. The selected id is
     /// derived from `route.destination`, and the slider dims while local
@@ -1255,18 +1258,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     /// The destination entries for the Applications popup, in display order:
-    /// the standalone "No Redirect" entry (the default/neutral state) first,
-    /// then the "Current Device" entry (decision 8, now an explicit pick),
-    /// then every AVAILABLE non-local device (`availableAirPlayDestinations`).
+    /// the standalone unrouted entry (the default/neutral state) first, then
+    /// the "Current Device" entry (decision 8, now an explicit pick), then
+    /// every AVAILABLE non-local device (`availableAirPlayDestinations`).
     /// Plain values only — `AppRowView` is isolated from Core's `AppRoute` (T-6).
+    ///
+    /// The standalone entry's title IS the bridge phrase **"Follows main
+    /// output"** (Warm Signal §5.1, decision 3 — names the app's relationship
+    /// to the main mix). The HOST supplies this copy (host-supplies-copy
+    /// doctrine); `AppRowView` renders every `Destination.title` verbatim.
     private func appDestinations(devices: [Device]) -> [AppRowView.Destination] {
         var entries: [AppRowView.Destination] = [
             .init(id: Self.noRedirectDestinationID,
-                  title: "No Redirect",
+                  title: "Follows main output",
                   isLocal: true,
                   symbolName: nil,
                   isStandalone: true,
-                  subtitle: "Follows the system audio output"),
+                  subtitle: "Plays in the main mix"),
             .init(id: Self.currentDeviceDestinationID,
                   title: currentDeviceTitle(devices: devices),
                   isLocal: true,

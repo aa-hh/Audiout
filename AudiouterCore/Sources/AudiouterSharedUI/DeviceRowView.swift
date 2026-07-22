@@ -1260,6 +1260,14 @@ public final class DeviceRowView: NSView {
     /// call is needed to read it.
     public var test_nameColor: NSColor? { nameLabel.textColor }
 
+    /// Drive the transient hover state through the same private path
+    /// `mouseEntered(with:)`/`mouseExited(with:)` use (`setHovered`), since a real
+    /// pointer crossing can't be synthesized headlessly. Spec §4.8's snapshot
+    /// fixture list requires a HOVERED row render (the neutral wash at
+    /// `PopoverColumnGrid.rowHoverWashAlpha`, never gold); note any later
+    /// `apply(...)` or window re-attach clears it, exactly like a live hover.
+    public func test_setHovered(_ hovered: Bool) { setHovered(hovered) }
+
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
     public override func updateTrackingAreas() {
@@ -1494,7 +1502,18 @@ public final class DeviceRowView: NSView {
         setAccessibilityElement(true)
         // A menu row is a `.menuItem`; a mixer-window row is a plain grouping.
         setAccessibilityRole(isInMenu ? .menuItem : .group)
-        let membership = isSelectedInSet ? "selected" : "not selected"
+        // Membership fragment matches the visible control's vocabulary (C2
+        // coherence): a BUS row draws mix membership (spec §4) and its checkbox
+        // says "Include … in main audio", so the row-level clause speaks the
+        // same concept — never two vocabularies ("selected" here, "main audio"
+        // on the checkbox) inside one composed announcement. Non-bus hosts
+        // (mixer window, group members) keep the checkbox-column phrasing.
+        let membership: String
+        if busActive {
+            membership = isSelectedInSet ? "in main audio" : "not in main audio"
+        } else {
+            membership = isSelectedInSet ? "selected" : "not selected"
+        }
         // Connection state reads as a trailing clause (brief §6) — omitted
         // entirely for `.off` so an unrouted row's label is unchanged.
         let state = accessibilityStateSuffix

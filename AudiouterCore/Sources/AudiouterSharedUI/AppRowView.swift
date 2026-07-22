@@ -134,16 +134,6 @@ public final class AppRowView: NSView {
     /// list reads as one cohesive density instead of two interleaved ones.
     public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
-    /// The BRIDGE PHRASE (Warm Signal spec §5.1, decision 3): an unrouted
-    /// app's dropdown reads **"Follows main output"** — naming the app's
-    /// relationship to the main mix — instead of the host-supplied sentinel
-    /// title ("No Redirect"). Applied at DISPLAY time in `menuItem(for:)`
-    /// (this stage may not touch `PopoverController`, which supplies the
-    /// sentinel's `Destination.title`); every other entry keeps the host's
-    /// title verbatim, so a routed row's collapsed dropdown always names the
-    /// destination device.
-    private static let followsMainOutputTitle = "Follows main output"
-
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
     private var destinations: [Destination] = []
@@ -428,20 +418,15 @@ public final class AppRowView: NSView {
     ///   plain title (still setting `toolTip` from `subtitle`); `true` also
     ///   renders `subtitle` as a second attributed line under the title (A3
     ///   destination microcopy).
-    /// The title an entry DISPLAYS (menu item + the popup's collapsed label,
-    /// which mirrors the selected item): the standalone sentinel renders the
-    /// bridge phrase "Follows main output" (spec §5.1, decision 3) so the
-    /// collapsed dropdown always names the destination — the relationship
-    /// when unrouted, the device name when routed. Every other entry shows
-    /// the host-supplied title verbatim.
-    private func displayTitle(for entry: Destination) -> String {
-        entry.isStandalone ? Self.followsMainOutputTitle : entry.title
-    }
-
+    ///
+    /// Every entry displays the host-supplied `Destination.title` VERBATIM
+    /// (host-supplies-copy doctrine) — the unrouted bridge phrase "Follows
+    /// main output" (spec §5.1, decision 3) is the HOST's title for the
+    /// standalone entry, not a view-level rewrite.
     private func menuItem(
         for entry: Destination, isCurrent: Bool, action: Selector, allowsAttributedSubtitle: Bool = true
     ) -> NSMenuItem {
-        let item = NSMenuItem(title: displayTitle(for: entry), action: action, keyEquivalent: "")
+        let item = NSMenuItem(title: entry.title, action: action, keyEquivalent: "")
         item.target = self
         item.state = isCurrent ? .on : .off
         item.representedObject = entry.id
@@ -454,7 +439,7 @@ public final class AppRowView: NSView {
             item.toolTip = subtitle
             if allowsAttributedSubtitle {
                 let attributedTitle = NSMutableAttributedString(
-                    string: displayTitle(for: entry),
+                    string: entry.title,
                     attributes: [.font: Tokens.Font.menuItem])
                 attributedTitle.append(NSAttributedString(string: "\n"))
                 attributedTitle.append(NSAttributedString(

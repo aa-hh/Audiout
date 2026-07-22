@@ -306,7 +306,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `start()` with the engine's DACP-ID so its advertised `iTunes_Ctrl_<id>`
     /// matches what the engine tells receivers. Volume travels here, not the RTSP
     /// event channel — confirmed against the AirPlay spec + OwnTone's httpd_dacp.
-    private let dacpServer = DACPServer()
+    /// Injectable behind ``DACPEndpoint`` (same discipline as `discovery`) so the
+    /// hermetic suite never binds the real `NWListener`/Bonjour advert — see the
+    /// protocol's doc comment.
+    private let dacpServer: DACPEndpoint
 
     /// The in-flight engine-teardown Task from the last `stop()` (C1). Stored so
     /// `stopAndWait(timeout:)` can await it on the app's terminate path. Confined to
@@ -544,13 +547,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a `.processNotYetAudible` failure/recovery) instead construct a
     /// ``PerAppCaptureCoordinator`` over a fake ``ProcessAudioTap`` themselves and
     /// pass it in here, bypassing the real Core Audio path entirely — mirrors how
-    /// `engineControl`/`discoverySource` are always doubles in this init.
+    /// `engineControl`/`discoverySource` are always doubles in this init, and
+    /// tests pass a `dacpEndpoint` double too (the default is the REAL
+    /// ``DACPServer`` — its `start` binds a live socket; see ``DACPEndpoint``).
     /// `processNotYetAudibleRetryDelay`/`processNotYetAudibleMaxBackoff` (T8) tune
     /// the capped-exponential retry for a `.processNotYetAudible` capture failure;
     /// tests shrink the delay so the retry doesn't cost real wall-clock seconds.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
+        dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
@@ -563,6 +569,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ) {
         self.engine = engineControl
         self.discovery = discoverySource
+        self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.connectVolumeProvider = connectVolume
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
@@ -3434,6 +3441,25 @@ protocol DiscoverySource: AnyObject, Sendable {
 }
 
 extension NativeDiscovery: DiscoverySource {}
+
+/// The slice of ``DACPServer`` ``NativeBackend`` drives. Extracted as a protocol
+/// for the same reason as ``DiscoverySource``: the real server's `start(dacpID:)`
+/// binds a live `NWListener` and advertises `_dacp._tcp` over Bonjour — a real
+/// socket that fires the macOS Local Network permission prompt (once per
+/// `swift test --parallel` worker process). Tests inject a no-op double so the
+/// hermetic suite opens zero sockets; the volume-report handling itself stays
+/// covered via `applyDacpVolume`/`applyDacpVolumeStep` (the exact closures
+/// `start()` wires to `onVolume`/`onVolumeStep`) and the pure
+/// `DACPServer.parse(_:)`/`level(fromDb:)` statics. The real listener wiring is
+/// exercised by the gated live tests only (D7 discipline).
+protocol DACPEndpoint: AnyObject, Sendable {
+    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)? { get set }
+    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)? { get set }
+    func start(dacpID: UInt64)
+    func stop()
+}
+
+extension DACPServer: DACPEndpoint {}
 
 /// The slice of ``NativeCaptureCoordinator`` ``NativeBackend`` drives. Extracted
 /// as a protocol so the capture GATE (`NativeBackend.reconcileCaptureGate`) is

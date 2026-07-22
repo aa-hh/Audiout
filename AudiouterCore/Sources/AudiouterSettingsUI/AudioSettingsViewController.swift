@@ -105,9 +105,11 @@ public final class AudioSettingsViewController: NSViewController {
     // Connect-volume state.
     private let connectVolumeSlider = NSSlider()
     private let connectVolumeValueLabel = NSTextField(labelWithString: "")
+    private let connectVolumeHint = SettingsForm.hintLabel()
 
     // Wake-restore state (nil/untouched when `wakeRestore` is nil).
     private let wakeRestorePopup = NSPopUpButton()
+    private let wakeRestoreHint = SettingsForm.hintLabel()
 
     /// Fired after the denylist changes so the app can enforce precedence (prune
     /// routes) and refresh the popover.
@@ -118,6 +120,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     // Advanced › Audio buffer state (all nil/untouched when `latency` is nil).
     private let bufferPopup = NSPopUpButton()
+    private let bufferHint = SettingsForm.hintLabel()
     private let applyButton = NSButton()
     private let applySpinner = NSProgressIndicator()
     private let applyStatusLabel = NSTextField(labelWithString: "")
@@ -241,8 +244,8 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeSlider.setAccessibilityLabel("Volume when connecting a speaker")
         connectVolumeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
-        connectVolumeValueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        connectVolumeValueLabel.textColor = .secondaryLabelColor
+        connectVolumeValueLabel.font = Tokens.Font.body
+        connectVolumeValueLabel.textColor = Tokens.Color.secondaryLabel
         connectVolumeValueLabel.alignment = .right
         connectVolumeValueLabel.stringValue = Self.percentLabel(settings.connectVolume)
         // Fixed width so the row doesn't shift as the number's digit count changes.
@@ -256,15 +259,34 @@ public final class AudioSettingsViewController: NSViewController {
 
         views.append(SettingsForm.row(
             title: "Volume when connecting a speaker",
-            subtitle: "The starting volume a speaker gets the moment it connects. "
-                + "Each speaker's own slider takes over right after.",
             control: control))
+
+        // Live hint (spec §5.2): re-written on every drag, so the consequence
+        // of the chosen level is always spelled out — replaces the old static
+        // subtitle.
+        connectVolumeHint.stringValue = Self.connectVolumeHintLine(settings.connectVolume)
+        views.append(connectVolumeHint)
         return views
+    }
+
+    /// The connect-volume live hint: value + consequence, the
+    /// "`Buffer: 120 ms — safe for Wi-Fi speakers`" pattern.
+    private static func connectVolumeHintLine(_ percent: Int) -> String {
+        let consequence: String
+        switch percent {
+        case ..<21:  consequence = "a quiet, gentle start"
+        case ..<51:  consequence = "a moderate, comfortable start"
+        case ..<76:  consequence = "a loud start"
+        default:     consequence = "a very loud start — may startle"
+        }
+        return "Connects at \(percentLabel(percent)) — \(consequence). "
+            + "Each speaker's own slider takes over right after."
     }
 
     @objc private func connectVolumeChanged() {
         let percent = connectVolumeSlider.integerValue
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
+        connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
         settings.connectVolume = percent
     }
 
@@ -305,17 +327,31 @@ public final class AudioSettingsViewController: NSViewController {
 
         views.append(SettingsForm.row(
             title: "Restore Mac audio if speakers don't reconnect",
-            subtitle: "After the Mac wakes from sleep, if a selected speaker hasn't "
-                + "reconnected within this time, play audio on this Mac instead.",
             control: wakeRestorePopup))
+
+        // Live hint (spec §5.2) — re-written on every popup change.
+        wakeRestoreHint.stringValue = Self.wakeRestoreHintLine(wakeRestore.initialMinutes)
+        views.append(wakeRestoreHint)
         return views
+    }
+
+    /// The wake-restore live hint: what the chosen delay actually does after a
+    /// wake from sleep.
+    private static func wakeRestoreHintLine(_ minutes: Int) -> String {
+        guard minutes != 0 else {
+            return "Never — after waking, this Mac stays silent until the speakers reconnect."
+        }
+        return "After waking, if the speakers are still gone after "
+            + "\(wakeMinutesLabel(minutes).lowercased()), audio plays on this Mac instead."
     }
 
     @objc private func wakeRestoreChanged() {
         guard let wakeRestore else { return }
         let index = wakeRestorePopup.indexOfSelectedItem
         guard wakeRestore.minuteOptions.indices.contains(index) else { return }
-        wakeRestore.apply(wakeRestore.minuteOptions[index])
+        let minutes = wakeRestore.minuteOptions[index]
+        wakeRestoreHint.stringValue = Self.wakeRestoreHintLine(minutes)
+        wakeRestore.apply(minutes)
     }
 
     // MARK: Advanced › Audio buffer (PLAN-LATENCY-SETTING.md)
@@ -370,9 +406,13 @@ public final class AudioSettingsViewController: NSViewController {
 
         views.append(SettingsForm.row(
             title: "Audio buffer",
-            subtitle: "A smaller buffer reacts faster to play and pause. "
-                + "A larger buffer resists Wi-Fi hiccups and dropouts.",
             control: bufferPopup))
+
+        // Live hint (spec §5.2 — the "`Buffer: 120 ms — safe for Wi-Fi
+        // speakers`" pattern itself): re-written on every popup change, keyed
+        // on the PENDING value so it always describes what Apply would do.
+        bufferHint.stringValue = Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs)
+        views.append(bufferHint)
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
@@ -439,11 +479,25 @@ public final class AudioSettingsViewController: NSViewController {
         bufferPopup.isEnabled = !isApplying
     }
 
+    /// The audio-buffer live hint: value + consequence. Banded on the value
+    /// (not the option index) so a future option list re-tune keeps honest
+    /// wording without touching this.
+    private static func bufferHintLine(_ ms: Int) -> String {
+        let consequence: String
+        switch ms {
+        case ..<1001: consequence = "fastest response, safe for Wi-Fi speakers"
+        case ..<1501: consequence = "extra cushion for busy Wi-Fi"
+        default:      consequence = "slowest response, strongest against dropouts"
+        }
+        return "Buffer: \(msLabel(ms)) — \(consequence)."
+    }
+
     @objc private func bufferOptionChanged() {
         guard let latency else { return }
         let index = bufferPopup.indexOfSelectedItem
         guard latency.optionsMs.indices.contains(index) else { return }
         pendingMs = latency.optionsMs[index]
+        bufferHint.stringValue = Self.bufferHintLine(pendingMs)
         clearTransientStatus()
         updateApplyState()
     }
@@ -707,6 +761,12 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeChanged()
     }
 
+    /// The connect-volume live hint line (W1, spec §5.2).
+    public var test_connectVolumeHint: String {
+        _ = view
+        return connectVolumeHint.stringValue
+    }
+
     // MARK: Test-support hooks (Wake restore — B6b)
 
     /// Whether the wake-restore section mounted (a `WakeAudioRestoreModel` was injected).
@@ -735,6 +795,12 @@ public final class AudioSettingsViewController: NSViewController {
         wakeRestoreChanged()
     }
 
+    /// The wake-restore live hint line (W1, spec §5.2).
+    public var test_wakeRestoreHint: String {
+        _ = view
+        return wakeRestoreHint.stringValue
+    }
+
     // MARK: Test-support hooks (Advanced › Audio buffer)
 
     /// Whether the Advanced section mounted (i.e. a `LatencySettingModel` was
@@ -756,6 +822,12 @@ public final class AudioSettingsViewController: NSViewController {
         guard let latency, let index = latency.optionsMs.firstIndex(of: ms) else { return }
         bufferPopup.selectItem(at: index)
         bufferOptionChanged()
+    }
+
+    /// The audio-buffer live hint line (W1, spec §5.2).
+    public var test_bufferHint: String {
+        _ = view
+        return bufferHint.stringValue
     }
 
     public var test_applyButtonTitle: String { _ = view; return applyButton.title }

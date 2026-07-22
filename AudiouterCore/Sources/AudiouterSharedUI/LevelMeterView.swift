@@ -99,6 +99,20 @@ public final class LevelMeterView: NSView {
         layer?.addSublayer(trackLayer)
         layer?.addSublayer(fillLayer)
         updateLayerColors()
+        // The warm-token Increase-Contrast variants resolve off the LIVE
+        // `NSWorkspace` flag, not the appearance name — so a mid-session
+        // Increase Contrast toggle must re-stamp the (static CGColor) gradient
+        // directly off the display-options notification rather than trusting
+        // an appearance change to arrive (same pattern as `HaloRingView`).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        updateLayerColors()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

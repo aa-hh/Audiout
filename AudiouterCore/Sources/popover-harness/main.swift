@@ -137,8 +137,8 @@ func run() -> Int32 {
     print("\n[2] Main Out selector sections")
     checks.expect(popover.test_mainOutRow.test_selectableTargets.contains(.selectedDevices),
                   "selector offers Selected Devices")
-    // A2: the entry title now carries a live count, e.g. "Selected Devices (1)".
-    checks.expect(popover.test_mainOutRow.test_optionTitles.contains { $0.hasPrefix("Selected Devices (") },
+    // Decision m: the entry title is clean — no live "(n)" count.
+    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Selected Devices"),
                   "selector has a Selected Devices entry")
 
     // --- 3. Auto-swap: toggling an AirPlay device ON while local is sole member drops local.
@@ -255,22 +255,22 @@ func run() -> Int32 {
     // --- 13. Main Out named dropdown reflects the current target's title (task B).
     print("\n[13] Main Out named dropdown")
     popover.test_selectMainOut(.selectedDevices); drain()
-    // A2: the menu title now carries a live count, e.g. "Selected Devices (2)".
-    checks.expect(popover.test_mainOutRow.test_selectedTitle?.hasPrefix("Selected Devices (") ?? false,
-                  "the Main Out dropdown shows the current target's name")
+    // Decision m: the title is clean — no live "(n)" count.
+    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
+                       "the Main Out dropdown shows the current target's name")
     popover.test_selectMainOut(.group(id: group.id)); drain()
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown to the group name")
 
     // --- 14. Applications card: present, last, collapsed with zero routes.
     print("\n[14] Applications card — present + last + collapsed by default")
-    checks.expect(popover.test_isCardCollapsed(title: "Applications") != nil,
+    checks.expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil,
                   "Applications card exists")
-    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), true,
                        "Applications card is collapsed with zero routes")
     checks.expectEqual(popover.test_appRowCount, 0, "no app rows with zero routes")
     let cardsBeforeRoute = topLevelCards(panelView: popover.test_panelView)
-    checks.expectEqual(cardIndex(titled: "Applications", in: cardsBeforeRoute),
+    checks.expectEqual(cardIndex(titled: "App Exceptions", in: cardsBeforeRoute),
                        cardsBeforeRoute.count - 1,
                        "Applications card renders LAST")
 
@@ -280,7 +280,7 @@ func run() -> Int32 {
     appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
     appRouting.setDestination(.device(id: "office"), for: musicBundleID)
     popover.test_simulateOpen()   // reopen-style rebuild (T-5 recomputes defaults)
-    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), false,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), false,
                        "Applications card is expanded once a route is redirected")
     checks.expectEqual(popover.test_appRowCount, 1, "one app row mounted for the seeded route")
 
@@ -349,7 +349,7 @@ func run() -> Int32 {
     appRouting.removeRoute(bundleID: musicBundleID)
     popover.test_simulateOpen()
     checks.expectEqual(popover.test_appRowCount, 0, "removing the last route empties the card")
-    checks.expectEqual(popover.test_isCardCollapsed(title: "Applications"), true,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), true,
                        "the card collapses again once no app is redirected")
 
     // --- 21. Membership bus (Warm Signal v3 §4, S-BUS): the origin stub on the

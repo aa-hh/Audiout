@@ -51,6 +51,29 @@ public final class RouteArmedDotView: NSView {
         wantsLayer = true
         dotLayer.lineWidth = PopoverColumnGrid.statusDotBorderWidth
         layer?.addSublayer(dotLayer)
+        // Mid-session accessibility-display changes reconcile LIVE (same
+        // pattern as `HaloRingView`): Increase Contrast re-stamps the token
+        // colors, and Reduce Motion cancels any in-flight arm bloom — the
+        // model layer is already settled gold, so removing the animation IS
+        // the instant swap Reduce Motion asks for. Selector-based observation
+        // needs no matching removal (post-10.11 AppKit auto-unregisters).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    /// Live accessibility-display reconcile: re-resolve colors (IC variants)
+    /// and, if Reduce Motion just turned ON, strip the one-shot bloom so the
+    /// dot lands on its settled state immediately instead of finishing a
+    /// transition the user asked not to see.
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        updateLayerAppearance()
+        if reduceMotion {
+            dotLayer.removeAnimation(forKey: Self.bloomFillKey)
+            dotLayer.removeAnimation(forKey: Self.bloomGlowKey)
+        }
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -120,7 +143,7 @@ public final class RouteArmedDotView: NSView {
     // MARK: Bloom (arm transition, spec §6)
 
     private var reduceMotion: Bool {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     /// One-shot `ember → gold` fill bloom + glow fade-in, ease-out, over the
@@ -145,6 +168,13 @@ public final class RouteArmedDotView: NSView {
     }
 
     // MARK: Test-support hooks
+
+    /// Overrides the live `accessibilityDisplayShouldReduceMotion` read for
+    /// tests (`nil` = real workspace value). Tests flip it and then post
+    /// `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` on
+    /// `NSWorkspace.shared.notificationCenter` — exercising the same
+    /// notification path a real System Settings toggle takes.
+    public var test_reduceMotionOverride: Bool?
 
     /// Whether the dot is currently rendered LIT (armed) — the same state the
     /// drawing reads, so it can't drift from the pixels.

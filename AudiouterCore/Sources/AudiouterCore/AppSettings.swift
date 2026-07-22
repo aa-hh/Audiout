@@ -14,6 +14,20 @@ public enum AppearanceTheme: String, CaseIterable, Sendable {
     case dark
 }
 
+/// The accent dial (Settings › Appearance › Accent — Warm Signal spec §1.3,
+/// decision i): how strongly the gold instrument tokens (`gold`/`ember`/`glow`)
+/// render. `.fullGold` is the flagship default; `.subtle` desaturates the gold
+/// channel and removes the glow; `.systemAccent` pulls the Mac's accent color
+/// into every gold slot. The dial remaps ONLY the gold channel — `failure`,
+/// `caution`, `ring-connected`, and all text tokens are never remapped. Core
+/// owns only the persisted choice; the token remap itself lives with the token
+/// module (`AudiouterSharedUI.Tokens`), since Core imports no AppKit.
+public enum AccentStyle: String, CaseIterable, Sendable {
+    case fullGold
+    case subtle
+    case systemAccent
+}
+
 /// Row/icon density for the popover (Settings › Appearance). Two levels for now
 /// — `.comfortable` is today's Control-Center spacing; `.compact` fits more
 /// devices on screen at once. A third (`.large`, accessibility) is intentionally
@@ -51,6 +65,7 @@ public struct AppSettings {
     private enum Keys {
         static let theme = "appearance.theme"
         static let density = "appearance.density"
+        static let accentStyle = "appearance.accentStyle"
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
@@ -81,6 +96,13 @@ public struct AppSettings {
     public var density: InterfaceDensity {
         get { defaults.string(forKey: Keys.density).flatMap(InterfaceDensity.init(rawValue:)) ?? .comfortable }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.density) }
+    }
+
+    /// The accent dial (Settings › Appearance › Accent, spec §1.3). Defaults to
+    /// `.fullGold` when unset or unrecognised (a value written by a newer build).
+    public var accentStyle: AccentStyle {
+        get { defaults.string(forKey: Keys.accentStyle).flatMap(AccentStyle.init(rawValue:)) ?? .fullGold }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.accentStyle) }
     }
 
     /// The persisted sender start buffer (ms). Values outside

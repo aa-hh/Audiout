@@ -539,6 +539,170 @@ func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDi
     window.contentView = NSView()
 }
 
+/// Render the `dormant-group` scenario (spec §4.7, the §4.8 fixture list's
+/// **dormant-tinted** node): Audio Out targets a saved group ("Upstairs" =
+/// Sonos Move + Bedroom HomePod) while the CHECKED set genuinely diverges
+/// (Sonos Move + Office), so:
+///   - the Devices card mounts the **"Inactive — Audio Out is using
+///     'Upstairs'"** card note (only under genuine divergence — the
+///     derived-identity case posts none),
+///   - every row OUTSIDE the group's member set de-emphasizes via **node
+///     TINT** (`test_busNodeIsDimmed` — checkbox stays full-alpha, never a
+///     whole-row alpha dim), while members (Sonos Move, Bedroom HomePod)
+///     keep full emphasis,
+///   - "Sonos Move" (a checked group member) is additionally ROW-MUTED, so the
+///     same panel carries the S3 mute channel: engaged accent mute pill, dark
+///     corner dot, and the leading small-caps `MUTED · System` sublabel token.
+@MainActor
+func snapshotDormantGroup(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    // Checked set = {Sonos Move, Office} (the first toggle auto-swaps the local
+    // default off) — deliberately NOT equal to the group's member set below.
+    _ = popover.test_toggleDeviceEnabled(deviceID: "sonos-move", on: true)
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+
+    // Saved group "Upstairs" = {Sonos Move, Bedroom HomePod}, activated as the
+    // Main Out target → genuine divergence vs the checked set.
+    guard let created = try? controller.createGroup(
+        name: "Upstairs", memberIDs: ["sonos-move", "homepod-bed"]) else {
+        print("  SETUP FAIL: could not create the 'Upstairs' group"); return
+    }
+    controller.setMainOut(.group(id: created.group.id))
+
+    // S3 mute channel on a checked group member: MUTED · System token, engaged
+    // pill, dark dot — at FULL emphasis (member rows never dim, §4.7).
+    popover.test_toggleMute(deviceID: "sonos-move", muted: true)
+
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()   // reopen-style rebuild mounts the card note
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame,
+                          styleMask: [.borderless],
+                          backing: .buffered,
+                          defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    let url = outDir.appendingPathComponent("popover-dormant-group-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
+/// Render the `local-mix-blocked` scenario (spec §4.6, the §4.8 fixture list's
+/// **greyed-blocked** and **hover** nodes): an AirPlay device (Office) is
+/// checked, so the Mac's own row ("MacBook Pro Speakers") is local-mix BLOCKED —
+/// greyed hollow bus node, honestly-disabled checkbox, tertiary name. The
+/// production body-click branch (`test_simulateBlockedBodyClick` → the exact
+/// `mouseDown` path) then MOUNTS the in-place one-line refusal note
+/// (`GroupController.localMixRefusalReason`) under the row — the reachable
+/// trigger, proven rendered rather than tooltip-only. "Bedroom HomePod"
+/// (an ordinary hollow row) is set HOVERED via `test_setHovered(true)` (the
+/// same `setHovered` path a real pointer crossing drives), so the neutral
+/// hover wash — never gold, never on the node — is pinned in the same panel.
+@MainActor
+func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let controller = GroupController(backend: backend,
+                                     store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+    let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false)
+    let popover = PopoverController(appRouting: appRouting)
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: controller)
+    controller.ensureDefaultSelection()
+
+    // Checking Office auto-swaps the local default off → the checked set holds
+    // an AirPlay device, so the unchecked local row is now BLOCKED
+    // (`!canSelectLocalSpeaker`, spec §4.6).
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+    popover.update(devices: backend.devices)
+    popover.test_simulateOpen()
+
+    // Mount the refusal note through the REAL blocked-body-click branch — the
+    // same `mouseDown(with:)` production path, minus the synthesized event.
+    guard let localRow = popover.test_deviceRow(for: "local-mac") else {
+        print("  SETUP FAIL: no local-mac row mounted"); return
+    }
+    localRow.test_simulateBlockedBodyClick()
+    // `insertRow(animated: true)` mounts the note HIDDEN and un-hides it in a
+    // 0.22 s fade's completion handler — but with no on-screen window there is
+    // no display refresh to drive the fade, so the completion never fires
+    // headlessly and the note would stay hidden (zero-height) in the capture.
+    // Settle the animation's END STATE synchronously instead (the same
+    // discipline `snapshotMeters` uses via `test_setDisplayedLevel`): un-hide
+    // every arranged row in the local row's body stack — a no-op for the
+    // already-visible device rows, and exactly what the fade's completion
+    // handler would have done to the note.
+    if let bodyStack = localRow.superview as? NSStackView {
+        for arranged in bodyStack.arrangedSubviews { arranged.isHidden = false }
+    }
+    drain(0.1)
+
+    let appearance = NSAppearance(named: appearanceName)
+    let panelView = popover.test_panelView
+    panelView.appearance = appearance
+    panelView.layoutSubtreeIfNeeded()
+    let size = panelView.fittingSize
+    let frame = NSRect(origin: .zero, size: size)
+
+    let window = NSWindow(contentRect: frame,
+                          styleMask: [.borderless],
+                          backing: .buffered,
+                          defer: false)
+    window.appearance = appearance
+    window.contentView?.appearance = appearance
+    window.contentView?.addSubview(panelView)
+    panelView.frame = frame
+    window.setContentSize(size)
+    window.layoutIfNeeded()
+    panelView.layoutSubtreeIfNeeded()
+    drain(0.1)
+
+    // Hover LAST: `apply(...)` and window re-attach both clear the transient
+    // hover (by design), so it must land after every layout/model pass and
+    // immediately before capture — mirrors how a live hover exists only while
+    // nothing repaints the row.
+    popover.test_deviceRow(for: "homepod-bed")?.test_setHovered(true)
+
+    let url = outDir.appendingPathComponent("popover-local-mix-blocked-\(label).png")
+    renderPNG(view: panelView, to: url)
+    window.contentView = NSView()
+}
+
 @MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
@@ -578,6 +742,18 @@ func run() -> Int32 {
     if mode == "live-routing" {
         snapshotLiveRouting(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLiveRouting(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "dormant-group" {
+        snapshotDormantGroup(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotDormantGroup(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return 0
+    }
+    if mode == "local-mix-blocked" {
+        snapshotLocalMixBlocked(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotLocalMixBlocked(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
         return 0
     }

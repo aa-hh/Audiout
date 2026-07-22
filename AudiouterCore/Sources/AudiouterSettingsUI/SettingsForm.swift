@@ -20,6 +20,21 @@ enum SettingsForm {
         return field
     }
 
+    /// A **live hint line** (Warm Signal spec §5.2 — "every consequential
+    /// control self-explains with a live hint", the `Buffer: 120 ms — safe for
+    /// Wi-Fi speakers` pattern): a wrapping caption in the secondary color the
+    /// owning pane RE-WRITES whenever its control's value changes, so the
+    /// consequence of the current value is always spelled out beneath it.
+    /// Styling only — the update-on-change contract is the caller's.
+    static func hintLabel(_ string: String = "") -> NSTextField {
+        let field = label(string)
+        field.font = Tokens.Font.caption
+        field.textColor = Tokens.Color.secondaryLabel
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 0
+        return field
+    }
+
     /// One form row: a `title` (plus optional wrapping `subtitle` beneath it) on
     /// the leading edge, `control` pinned to the trailing edge and vertically
     /// centred on the title text. The returned view sizes its own height from its

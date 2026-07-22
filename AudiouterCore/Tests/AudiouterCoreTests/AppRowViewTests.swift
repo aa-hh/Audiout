@@ -52,7 +52,7 @@ final class AppRowViewTests: XCTestCase {
     /// three-state shape a real host (`PopoverController`) actually builds.
     private func makeThreeStateDestinations() -> [AppRowView.Destination] {
         [
-            AppRowView.Destination(id: "no-redirect", title: "No Redirect", isLocal: true,
+            AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
                                    symbolName: nil, isStandalone: true),
             AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
                                    symbolName: "laptopcomputer"),
@@ -125,9 +125,9 @@ final class AppRowViewTests: XCTestCase {
 
     /// The standalone entry is first, with no header of its own, followed by
     /// the "Current Device" section, then "AirPlay Devices" — in that order.
-    /// It DISPLAYS as the bridge phrase "Follows main output" (Warm Signal
-    /// spec §5.1, decision 3 — S6) regardless of the host-supplied sentinel
-    /// title ("No Redirect").
+    /// Its host-supplied title is the bridge phrase "Follows main output"
+    /// (Warm Signal spec §5.1, decision 3 — S6), rendered VERBATIM like every
+    /// other entry (host-supplies-copy doctrine).
     func testNoRedirectEntryLeadsMenuAheadOfBothSections() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
         let titles = row.test_menuTitles
@@ -411,7 +411,7 @@ final class AppRowViewTests: XCTestCase {
 
     private func makeSubtitledDestinations() -> [AppRowView.Destination] {
         [
-            AppRowView.Destination(id: "no-redirect", title: "No Redirect", isLocal: true,
+            AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
                                    symbolName: nil, isStandalone: true,
                                    subtitle: "Plays in the whole-system mix"),
             AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,

@@ -73,6 +73,27 @@ public final class HaloRingView: NSView {
         ringLayer.fillColor = NSColor.clear.cgColor
         ringLayer.lineCap = .round
         layer?.addSublayer(ringLayer)
+        // A mid-session accessibility-display change (Reduce Motion toggled in
+        // System Settings, Increase Contrast flipped) must reconcile LIVE — the
+        // breathing pulse starts/stops and the token colors re-stamp without
+        // waiting for the next `apply`. Selector-based observation on the
+        // workspace center needs no matching removal (post-10.11 AppKit
+        // auto-unregisters on dealloc).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    /// A mid-session Reduce Motion / Increase Contrast toggle: re-stamp colors
+    /// (the Increase-Contrast token variants resolve live) and re-reconcile the
+    /// breathing pulse (a connecting ring goes static under Reduce Motion, and
+    /// resumes breathing the moment it's switched back off) — spec §3.2's
+    /// dashed-form guarantee holds through the toggle, not just across `apply`s.
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        updateLayerAppearance()
+        reconcileBreathing()
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -175,8 +196,11 @@ public final class HaloRingView: NSView {
 
     /// True when the OS is set to reduce motion — a static dashed ring must be
     /// shown then (the dashed FORM still carries "pending"; only the pulse drops).
+    /// Consults ``test_reduceMotionOverride`` first so headless tests can drive
+    /// both sides of a mid-session toggle (the real workspace value can't be
+    /// flipped from a test process).
     private var reduceMotion: Bool {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     /// Add or remove the breathing animation to match the current form, honoring
@@ -215,6 +239,14 @@ public final class HaloRingView: NSView {
     }
 
     // MARK: Test-support hooks
+
+    /// Overrides the live `accessibilityDisplayShouldReduceMotion` read for
+    /// tests (`nil` = use the real workspace value). Setting it does NOT
+    /// reconcile by itself — tests post
+    /// `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` on
+    /// `NSWorkspace.shared.notificationCenter` exactly as the OS would, so the
+    /// notification path itself is what's under test.
+    public var test_reduceMotionOverride: Bool?
 
     /// The ring form currently rendered (structural hook — derived from the same
     /// `state` the layer renders from, so it can never drift from the drawing).

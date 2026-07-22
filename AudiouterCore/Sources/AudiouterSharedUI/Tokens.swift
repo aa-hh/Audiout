@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterCore
 
 /// **Warm Signal token module — the design-system entry point.**
 ///
@@ -35,6 +36,25 @@ import AppKit
 /// does not speculate ahead of real usage.
 public enum Tokens {
 
+    // MARK: - Accent dial (spec §1.3, W1)
+
+    /// The LIVE accent-dial position (Settings › Appearance › Accent —
+    /// `AudiouterCore.AccentStyle`). The dial remaps ONLY ``Color/gold``,
+    /// ``Color/ember``, and ``Color/glow``; `failure`/`caution`/`ringConnected`
+    /// and all text tokens are never remapped (spec §1.3: red stays red,
+    /// caution stays caution, in every mode).
+    ///
+    /// Defaults to `.fullGold` (the flagship look — and the one the checked-in
+    /// popover goldens render, so a process that never touches this sees
+    /// identical output). The app layer seeds it from `AppSettings.accentStyle`
+    /// at launch; the Appearance pane writes it on every dial change. The
+    /// switch lives INSIDE the three tokens' dynamic providers, so even an
+    /// already-handed-out `NSColor` re-resolves against the CURRENT dial the
+    /// next time AppKit asks — surfaces pick the new accent up on their next
+    /// draw/rebuild with no color re-fetch needed. Main-thread-only by
+    /// convention (same as every other AppKit token access here).
+    public static var accentStyle: AccentStyle = .fullGold
+
     // MARK: - Color
 
     /// Semantic color aliases. Every case forwards to the exact `NSColor`
@@ -59,8 +79,10 @@ public enum Tokens {
         public static var accent: NSColor { .controlAccentColor }
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
-        /// Opaque window chrome background (onboarding, Settings, control-panel
-        /// backing bubble). Alias of `NSColor.windowBackgroundColor`.
+        /// Opaque window chrome background (onboarding, Settings). Alias of
+        /// `NSColor.windowBackgroundColor`. (Its former consumer, the
+        /// control-panel backing bubble, repointed to the warm `canvas` token
+        /// in W8, spec §5.4.)
         public static var windowBackground: NSColor { .windowBackgroundColor }
         /// The color a decorative punch-out border is drawn in so a corner badge
         /// reads as separate from what's behind it. Alias of
@@ -113,8 +135,11 @@ public enum Tokens {
         // `AudiouterPopoverUI` for the pattern).
 
         /// The popover/content canvas — darkest rung, gradient base
-        /// (§1.1/§1.2). No stated contrast floor (it's a background, not a
-        /// foreground instrument), so no separate Increase Contrast value.
+        /// (§1.1/§1.2). Also the control-panel shell's bubble+beak fill
+        /// (`ControlPanelBackingView.draw`, §5.4 — W8) so shell chrome and
+        /// hosted transparent content read as one warm shape. No stated
+        /// contrast floor (it's a background, not a foreground instrument),
+        /// so no separate Increase Contrast value.
         public static var canvas: NSColor {
             warmDynamic(name: "canvas", dark: 0x16130F, light: 0xF4EFE7)
         }
@@ -236,18 +261,45 @@ public enum Tokens {
         // `gold` `#8A6614`, light `ember` `#9A7A2E`.
 
         /// THE gold accent — the bus-node fill (spec §4.2), route-armed dot, and
-        /// meter hot end (spec §1). Remapped only by the accent dial (§1.3); never
-        /// by anything else. Full-gold default values here.
+        /// meter hot end (spec §1). Remapped ONLY by the accent dial
+        /// (``Tokens/accentStyle``, spec §1.3 — W1); never by anything else.
+        /// Full-gold column = the spec §1.1/§1.2 hexes + the S-BUS IC picks.
+        /// Subtle column: dark `#B99B53` is the spec §1.3 hex (measured 6.55:1
+        /// vs dark `panel` — clears the ≥3:1 instrument floor); the spec names
+        /// no light value and its hex measures 2.52:1 on paper `panel`, under
+        /// floor, so light is a symmetrical desaturated-DEEPENED pick
+        /// `#8F7B4A` (3.88:1 — same deepen-for-paper move §1.2's own gold
+        /// makes). IC variants (dark `#CBAF6A` 8.22:1, light `#6F5E33`
+        /// 5.96:1) are my picks, flagged for the Wave-5 sweep like
+        /// `ringConnected`'s. Follow-system resolves `controlAccentColor`
+        /// under the drawing appearance (no fixed hex to rationalize; the OS
+        /// owns its contrast behavior).
         public static var gold: NSColor {
-            warmDynamic(name: "gold", dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                       light: 0xA97F1E, lightHighContrast: 0x8A6614)
+            accentDynamic(name: "gold",
+                          full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
+                                             light: 0xA97F1E, lightHighContrast: 0x8A6614),
+                          subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
+                                               light: 0x8F7B4A, lightHighContrast: 0x6F5E33),
+                          systemAccentScale: 1.0)
         }
 
         /// Gold's dim companion — the bus LINE ink (spec §4.1), the filled node's
         /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design.
+        /// Accent-dial columns (§1.3 — W1): Subtle dark `#6D5B34` is the spec
+        /// hex (2.66:1 vs dark `panel` — below the instrument floor exactly
+        /// like Full-gold light ember already is: `ember` is a 2 pt line
+        /// paired with high-contrast `gold` nodes, and the IC variant is the
+        /// spec's escape valve — dark IC `#877146` 3.73:1). Subtle light
+        /// `#AE9668` (2.69:1, IC `#8A744C` 4.23:1) is my symmetrical pick,
+        /// flagged for the Wave-5 sweep. Follow-system = accent × 0.55
+        /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
-            warmDynamic(name: "ember", dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                       light: 0xC2A05A, lightHighContrast: 0x9A7A2E)
+            accentDynamic(name: "ember",
+                          full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
+                                             light: 0xC2A05A, lightHighContrast: 0x9A7A2E),
+                          subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
+                                               light: 0xAE9668, lightHighContrast: 0x8A744C),
+                          systemAccentScale: 0.55)
         }
 
         // MARK: Signal-dot + meter instruments (spec §3.3 / §1, S2+S3)
@@ -284,9 +336,16 @@ public enum Tokens {
         /// paper halo — acceptable because floor-exempt). House rule 3 still
         /// requires IC variants: both reuse the base hexes (a halo needs no
         /// extra IC contrast; the disc's IC variant carries that).
+        /// Accent-dial columns (§1.3 — W1): Subtle = **none** (the spec's "no
+        /// glow shadow" — resolves fully `clear`, so every halo/bloom call
+        /// site goes quiet with zero call-site changes); Follow-system =
+        /// accent × 1.25, clamped.
         public static var glow: NSColor {
-            warmDynamic(name: "glow", dark: 0xFFD97A, darkHighContrast: 0xFFD97A,
-                       light: 0xE8B84B, lightHighContrast: 0xE8B84B)
+            accentDynamic(name: "glow",
+                          full: WarmVariants(dark: 0xFFD97A, darkHighContrast: 0xFFD97A,
+                                             light: 0xE8B84B, lightHighContrast: 0xE8B84B),
+                          subtle: nil,
+                          systemAccentScale: 1.25)
         }
 
         /// The route-armed dot's **dark/empty socket** resting fill (spec §3.3
@@ -461,6 +520,68 @@ private func warmDynamic(name: String,
         }
         return NSColor(warmSignalHex: hex)
     }
+}
+
+/// One accent instrument's four authored hexes (light/dark × base/Increase
+/// Contrast) for a single dial position — the value shape `warmDynamic` takes
+/// as loose parameters, named so `accentDynamic` can carry two columns of them.
+private struct WarmVariants {
+    let dark: UInt32
+    let darkHighContrast: UInt32
+    let light: UInt32
+    let lightHighContrast: UInt32
+
+    func hex(isDark: Bool, increaseContrast: Bool) -> UInt32 {
+        if isDark { return increaseContrast ? darkHighContrast : dark }
+        return increaseContrast ? lightHighContrast : light
+    }
+}
+
+/// The accent-dial-aware sibling of `warmDynamic`, for the ONLY three tokens
+/// the dial remaps (spec §1.3): `gold`, `ember`, `glow`. The dial switch lives
+/// INSIDE the dynamic provider, so a stored `NSColor` re-resolves against the
+/// CURRENT `Tokens.accentStyle` on its next resolution — the live-remap seam.
+///
+/// - `full`/`subtle`: the authored hex columns. `subtle: nil` means the token
+///   has NO Subtle rendering (`glow` — "no glow shadow") and resolves `.clear`.
+/// - `systemAccentScale`: Follow-system multiplies the resolved
+///   `controlAccentColor`'s sRGB components by this (§1.3: gold ×1, ember
+///   ×0.55, glow ×1.25), clamped to `0...1`.
+private func accentDynamic(name: String,
+                           full: WarmVariants,
+                           subtle: WarmVariants?,
+                           systemAccentScale: CGFloat) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        switch Tokens.accentStyle {
+        case .fullGold:
+            return NSColor(warmSignalHex: full.hex(isDark: isDark, increaseContrast: increaseContrast))
+        case .subtle:
+            guard let subtle else { return .clear }
+            return NSColor(warmSignalHex: subtle.hex(isDark: isDark, increaseContrast: increaseContrast))
+        case .systemAccent:
+            return systemAccentColor(in: appearance, scale: systemAccentScale)
+        }
+    }
+}
+
+/// Resolve `NSColor.controlAccentColor` under `appearance` to concrete sRGB
+/// components and scale them (the §1.3 "accent × N luminance" formula,
+/// realized as component scaling), clamped to the displayable range. Returns
+/// a component color, not the dynamic accent itself, so a provider closure
+/// hands AppKit a fully-resolved value.
+private func systemAccentColor(in appearance: NSAppearance, scale: CGFloat) -> NSColor {
+    var resolved = NSColor.controlAccentColor
+    appearance.performAsCurrentDrawingAppearance {
+        resolved = NSColor.controlAccentColor.usingColorSpace(.sRGB) ?? resolved
+    }
+    guard let srgb = resolved.usingColorSpace(.sRGB) else { return resolved }
+    func scaled(_ component: CGFloat) -> CGFloat { min(max(component * scale, 0), 1) }
+    return NSColor(srgbRed: scaled(srgb.redComponent),
+                   green: scaled(srgb.greenComponent),
+                   blue: scaled(srgb.blueComponent),
+                   alpha: 1)
 }
 
 private extension NSColor {

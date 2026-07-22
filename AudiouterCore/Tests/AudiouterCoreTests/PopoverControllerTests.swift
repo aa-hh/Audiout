@@ -323,10 +323,9 @@ final class PopoverControllerTests: XCTestCase {
         let group = controller.groups[0]
 
         popover.test_selectMainOut(.selectedDevices); await drain()
-        // A2: the Selected Devices option now carries a live count (here {office}
-        // after the auto-swap dropped the local device ⇒ 1).
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
-                       "the named dropdown shows the current target with its live count")
+        // Warm Signal decision m: the title is CLEAN — no live "(n)" count.
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
+                       "the named dropdown shows the current target, count-free")
         popover.test_selectMainOut(.group(id: group.id)); await drain()
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
                        "selecting a group updates the named dropdown")
@@ -708,7 +707,7 @@ final class PopoverControllerTests: XCTestCase {
         devices[idx].connectionState = .failed(.init(cause: .timedOut))
         popover.update(devices: devices)
 
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"),
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"),
                        ["Inactive — Audio Out is using '\(group.name)'"],
                        "the failure auto-deselect diverged the checked set — the note "
                        + "reconciled live off update(devices:)")
@@ -727,7 +726,7 @@ final class PopoverControllerTests: XCTestCase {
         await drain()
         XCTAssertEqual(controller.groups.first?.memberIDs, group.memberIDs,
                        "the retry edited the Selected set, never the saved group")
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"), [],
                        "…and re-deriving the checked set removed the note live")
     }
 
@@ -821,7 +820,7 @@ final class PopoverControllerTests: XCTestCase {
 
         // Both cards are collapsible and open EXPANDED (T-4 wires the affordance;
         // the collapse-default policy is a later task).
-        let title = "Devices"
+        let title = "Output Devices"
         XCTAssertEqual(popover.test_isCardCollapsed(title: title), false, "opens expanded")
         let fitting = try XCTUnwrap(popover.test_cardBodyFittingHeight(title: title))
         XCTAssertGreaterThan(fitting, 0, "an expanded card has a non-zero body")
@@ -844,7 +843,7 @@ final class PopoverControllerTests: XCTestCase {
     /// expanded ⇄ `chevron.right` collapsed — GroupRowView precedent).
     func testToggleFlipsChevronSymbol() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "System"
+        let title = "Main Audio"
         XCTAssertEqual(popover.test_cardChevronSymbolName(title: title), "chevron.down",
                        "expanded card shows the down chevron")
         popover.test_toggleCard(title: title)
@@ -861,7 +860,7 @@ final class PopoverControllerTests: XCTestCase {
     /// applies the end state synchronously so `fittingSize` is exact immediately.
     func testPanelHeightShrinksAndGrowsByBodyHeight() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Devices"
+        let title = "Output Devices"
 
         popover.test_applyExactFitSize()
         let expandedHeight = popover.test_panelFittingSize.height
@@ -888,7 +887,7 @@ final class PopoverControllerTests: XCTestCase {
     /// state and the body clip height are already final (no pending animation).
     func testReduceMotionPathAppliesEndStateSynchronously() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Devices"
+        let title = "Output Devices"
         // `animated: false` is the exact code path Reduce Motion takes.
         popover.test_toggleCard(title: title, animated: false)
         XCTAssertEqual(popover.test_isCardCollapsed(title: title), true, "collapsed immediately")
@@ -901,7 +900,7 @@ final class PopoverControllerTests: XCTestCase {
     /// state matches the parity of the toggle count.
     func testRapidTogglesEndConsistent() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Devices"
+        let title = "Output Devices"
         // 5 toggles from expanded ⇒ collapsed (odd count).
         for _ in 0..<5 { popover.test_toggleCard(title: title, animated: true) }
         XCTAssertEqual(popover.test_isCardCollapsed(title: title), true,
@@ -934,8 +933,8 @@ final class PopoverControllerTests: XCTestCase {
     func testCollapseDefaultsAppliedOnOpen() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "System"), false)
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), false)
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Main Audio"), false)
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), false)
     }
 
     /// A manual toggle during one open is discarded on the NEXT open — defaults
@@ -944,13 +943,13 @@ final class PopoverControllerTests: XCTestCase {
     func testManualToggleDiscardedOnReopen() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
-        popover.test_toggleCard(title: "Devices", animated: false)
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), true,
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), true,
                        "manual toggle collapsed it this open")
 
         // Simulate close + reopen: defaults are recomputed, discarding the toggle.
         popover.test_simulateOpen()
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), false,
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), false,
                        "reopening resets to the default — the manual toggle didn't persist")
     }
 
@@ -959,13 +958,13 @@ final class PopoverControllerTests: XCTestCase {
     func testMidOpenRebuildPreservesTransientState() async throws {
         let (popover, _, backend) = try await makePopover()
         popover.test_simulateOpen()
-        popover.test_toggleCard(title: "Devices", animated: false)
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), true)
+        popover.test_toggleCard(title: "Output Devices", animated: false)
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), true)
 
         // A mid-open rebuild triggered by a backend event (not a reopen).
         popover.update(devices: backend.devices)
         popover.rebuild()
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), true,
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), true,
                        "a mid-open rebuild preserves the transient toggle instead of resetting it")
     }
 
@@ -1137,7 +1136,7 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(popover.test_appRowBundleIDs(), ["com.example.music", "com.example.safari"],
                        "rows render in stable appRoutes order")
         // The card exists and is the LAST card (after System + Selected Devices).
-        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Applications"),
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "App Exceptions"),
                         "the Applications card is present")
     }
 
@@ -1148,7 +1147,7 @@ final class PopoverControllerTests: XCTestCase {
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
         XCTAssertEqual(popover.test_appRowCount, 0, "no routes ⇒ no app rows")
-        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Applications"),
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "App Exceptions"),
                         "the card is still present as the empty state (Add row only)")
     }
 
@@ -1166,9 +1165,9 @@ final class PopoverControllerTests: XCTestCase {
                                                      runningAppsProvider: routedApps)
 
         let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
-        // The standalone sentinel DISPLAYS as the bridge phrase "Follows main
-        // output" (Warm Signal S6, spec §5.1 decision 3) even though the
-        // host-supplied `Destination.title` stays "No Redirect".
+        // The standalone sentinel's HOST-supplied title IS the bridge phrase
+        // "Follows main output" (Warm Signal S6, spec §5.1 decision 3 —
+        // host-supplies-copy doctrine; the view renders titles verbatim).
         XCTAssertEqual(titles.first, "Follows main output",
                        "the menu leads with the standalone entry, displayed as the bridge phrase")
         let noRedirectIndex = titles.firstIndex(of: "Follows main output")
@@ -1503,7 +1502,7 @@ final class PopoverControllerTests: XCTestCase {
         let (popoverNone, _, _) = try await makePopover(appRouting: none,
                                                         runningAppsProvider: routedApps)
         popoverNone.test_simulateOpen()
-        XCTAssertEqual(popoverNone.test_isCardCollapsed(title: "Applications"), true,
+        XCTAssertEqual(popoverNone.test_isCardCollapsed(title: "App Exceptions"), true,
                        "no routes ⇒ Applications starts collapsed")
 
         // A route on the neutral "No Redirect" default ⇒ NOW expanded (C5 change).
@@ -1512,7 +1511,7 @@ final class PopoverControllerTests: XCTestCase {
         let (popoverNeutral, _, _) = try await makePopover(appRouting: neutral,
                                                            runningAppsProvider: routedApps)
         popoverNeutral.test_simulateOpen()
-        XCTAssertEqual(popoverNeutral.test_isCardCollapsed(title: "Applications"), false,
+        XCTAssertEqual(popoverNeutral.test_isCardCollapsed(title: "App Exceptions"), false,
                        "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
 
         // A redirected app ⇒ expanded on open (unchanged).
@@ -1522,7 +1521,7 @@ final class PopoverControllerTests: XCTestCase {
         let (popover, _, _) = try await makePopover(appRouting: redirected,
                                                      runningAppsProvider: routedApps)
         popover.test_simulateOpen()
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Applications"), false,
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "App Exceptions"), false,
                        "≥1 redirected app ⇒ Applications starts expanded")
     }
 
@@ -1695,11 +1694,11 @@ final class PopoverControllerTests: XCTestCase {
         let (popover, _, backend) = try await makePopover()
         // Devices present initially ⇒ no placeholder, card exists.
         XCTAssertFalse(popover.test_devicesPlaceholderShown, "devices present ⇒ no placeholder")
-        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Devices"), "the Devices card exists")
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Output Devices"), "the Devices card exists")
 
         // Clear the fleet ⇒ card still present, placeholder shown.
         popover.update(devices: [])
-        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Devices"),
+        XCTAssertNotNil(popover.test_isCardCollapsed(title: "Output Devices"),
                         "the Devices card is still built when empty (V2)")
         XCTAssertTrue(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
         XCTAssertEqual(popover.test_deviceSectionRowCount, 0, "no interactive device rows")
@@ -1766,7 +1765,7 @@ final class PopoverControllerTests: XCTestCase {
 
         // Point Main Out at the group; checked == members ⇒ DERIVED case.
         popover.test_selectMainOut(.group(id: group.id)); await drain()
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"), [],
                        "derived-equal (checked set == group members) posts NO note (§4.7)")
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNode, .member,
                        "the derived member keeps its filled node")
@@ -1779,7 +1778,7 @@ final class PopoverControllerTests: XCTestCase {
 
         // Diverge: check a device the group doesn't hold ⇒ note + scoped tint.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain()
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"),
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"),
                        ["Inactive — Audio Out is using '\(group.name)'"],
                        "genuine divergence posts the note with the group's name")
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_busNodeDimmed, false,
@@ -1798,47 +1797,41 @@ final class PopoverControllerTests: XCTestCase {
         // Un-diverge (checked set returns to the group's members) ⇒ derived
         // again: the note unmounts LIVE off the membership toggle.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false); await drain()
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"), [],
                        "returning to the derived set removes the note live")
         XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed, false,
                        "…and releases every tint")
 
         // Back to Selected Devices ⇒ no dormancy machinery at all.
         popover.test_selectMainOut(.selectedDevices); await drain()
-        XCTAssertEqual(popover.test_cardNoteTexts(title: "Devices"), [],
+        XCTAssertEqual(popover.test_cardNoteTexts(title: "Output Devices"), [],
                        "no dormancy note under Selected Devices")
         XCTAssertEqual(popover.test_deviceRowSelectionDimmed(id: "office"), false,
                        "no dim under Selected Devices")
     }
 
-    // MARK: A2 — live Selected Devices count
+    // MARK: Decision m — count-free "Selected Devices" title
 
-    /// The "Selected Devices (n)" title tracks the count of checked rows and
-    /// updates as toggles change it — visible on both the dropdown item and the
-    /// popup's collapsed title.
-    func testSelectedDevicesCountUpdatesOnToggle() async throws {
+    /// The "Selected Devices" title is CLEAN (Warm Signal §5.1, decision m —
+    /// the old A2 live "(n)" count is gone) and stays stable as toggles change
+    /// the checked set; the collapsed button shows the same full title (no
+    /// short-form `buttonTitle` — the trailing column is sized to fit it).
+    func testSelectedDevicesTitleStaysCountFree() async throws {
         let (popover, _, _) = try await makePopover()
-        // Default selection is {local-mac} ⇒ 1.
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)")
+        // Default selection is {local-mac}.
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices")
 
-        // Toggle office on (auto-swap drops local) ⇒ {office} still 1.
+        // Toggling devices in and out never adds a count to the title.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
-                       "auto-swap kept the count at 1")
-
-        // Add a second AirPlay device ⇒ {office, homepod-bed} = 2.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (2)",
-                       "the count rose to 2 on the toggle")
-        // The full count lives in the menu title; the collapsed button shows the
-        // shorter "Selected (n)" so the count survives the fixed trailing width.
-        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected (2)",
-                       "the collapsed button shows the count in the short form")
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
+                       "the title stays count-free as the checked set grows")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected Devices",
+                       "the collapsed button shows the same full, count-free title")
 
-        // Remove one ⇒ back to 1.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false)
-        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
-                       "the count fell to 1 on the untoggle")
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
+                       "…and as it shrinks")
     }
 
     // MARK: A4 — auto-swap flashes the local row
@@ -1972,16 +1965,16 @@ final class PopoverControllerTests: XCTestCase {
     func testDevicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Devices"), true,
+        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Output Devices"), true,
                        "a non-empty, not-yet-saved selection ⇒ accessory enabled")
-        let wasCollapsed = popover.test_isCardCollapsed(title: "Devices")
+        let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
 
-        XCTAssertTrue(popover.test_fireCardAccessory(title: "Devices"), "the accessory fired")
+        XCTAssertTrue(popover.test_fireCardAccessory(title: "Output Devices"), "the accessory fired")
         XCTAssertEqual(controller.groups.count, 1, "firing the accessory created a group")
-        XCTAssertEqual(popover.test_isCardCollapsed(title: "Devices"), wasCollapsed,
+        XCTAssertEqual(popover.test_isCardCollapsed(title: "Output Devices"), wasCollapsed,
                        "the accessory click did NOT collapse the card")
         // The just-saved selection now equals a group ⇒ accessory disables (dedup).
-        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Devices"), false,
+        XCTAssertEqual(popover.test_cardAccessoryEnabled(title: "Output Devices"), false,
                        "selection already saved as a group ⇒ accessory disables in place")
     }
 
@@ -2033,8 +2026,8 @@ final class PopoverControllerTests: XCTestCase {
 
         let noRedirect = try XCTUnwrap(
             row.test_destinationPopUpMenuItem(forDestinationID: PopoverController.noRedirectDestinationID))
-        XCTAssertEqual(noRedirect.toolTip, "Follows the system audio output",
-                       "No Redirect carries its clarifying tooltip")
+        XCTAssertEqual(noRedirect.toolTip, "Plays in the main mix",
+                       "the unrouted entry carries its clarifying tooltip")
         let currentDevice = try XCTUnwrap(
             row.test_destinationPopUpMenuItem(forDestinationID: PopoverController.currentDeviceDestinationID))
         XCTAssertEqual(currentDevice.toolTip, "Plays locally with its own volume",

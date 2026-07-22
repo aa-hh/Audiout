@@ -228,6 +228,23 @@ final class NativeBackendTests: XCTestCase {
         func fire(_ event: DiscoveryEvent) { onEvent?(event) }
     }
 
+    /// A no-socket ``DACPEndpoint`` double: the REAL `DACPServer.start(dacpID:)`
+    /// binds an `NWListener` and advertises `_dacp._tcp` over Bonjour, which fires
+    /// the macOS Local Network permission prompt once per `--parallel` worker
+    /// process. Every backend this file constructs gets this fake instead (via
+    /// `makeBackend` or explicitly), so the hermetic suite opens zero sockets.
+    /// The volume-report handling stays covered: tests drive
+    /// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
+    /// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
+    private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
+        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        private(set) var startCount = 0
+        private(set) var stopCount = 0
+        func start(dacpID: UInt64) { startCount += 1 }
+        func stop() { stopCount += 1 }
+    }
+
     /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
     /// through the REAL ``NativeDiscovery`` production pipeline (identity →
     /// `descriptor(from:)` → `buildDevice`), so the end-to-end AP1 test exercises
@@ -383,7 +400,7 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery,
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: systemVolume, connectVolume: connectVolume, resolvePID: resolvePID,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture)
@@ -3418,7 +3435,8 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
         defer { backend.stop() }
@@ -3454,7 +3472,8 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
         defer { backend.stop() }
@@ -3486,7 +3505,8 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
         defer { backend.stop() }
@@ -3541,7 +3561,8 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
@@ -3590,7 +3611,8 @@ final class NativeBackendTests: XCTestCase {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
             resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }

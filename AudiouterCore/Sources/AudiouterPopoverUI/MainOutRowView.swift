@@ -48,10 +48,10 @@ public final class MainOutRowView: NSView {
         public let isHeader: Bool
         /// An optional SHORTER label to show on the collapsed pop-up button when
         /// this option is the current selection, while the open menu keeps the
-        /// full `title`. Used for "Selected Devices (n)" (menu) vs "Selected (n)"
-        /// (button), so the live count survives the fixed trailing-control width
-        /// instead of being truncated to "Selected Device…". `nil` ⇒ the button
-        /// shows `title` like every other option.
+        /// full `title` — for any title too long for the fixed trailing-control
+        /// width. `nil` ⇒ the button shows `title` like every other option.
+        /// (The host currently passes none: "Selected Devices" is count-free —
+        /// Warm Signal decision m — and the column is sized to fit it.)
         public let buttonTitle: String?
         public init(title: String, target: MainOutTarget = .selectedDevices,
                     isHeader: Bool = false, buttonTitle: String? = nil) {
@@ -219,8 +219,8 @@ public final class MainOutRowView: NSView {
         // (SoundSource-style named dropdown, task B). The pop-up truncates a long
         // title with a tail ellipsis via its fixed max width + cell line break.
         if let currentItem { destinationPopUp.select(currentItem) }
-        // A distinct `buttonTitle` (e.g. "Selected (n)") is shown on the COLLAPSED
-        // button while the open menu keeps the full `title` ("Selected Devices (n)").
+        // A distinct `buttonTitle` (when an option carries one) is shown on the
+        // COLLAPSED button while the open menu keeps the full `title`.
         // `usesItemFromMenu = false` + a display-only cell item is the documented way
         // to make the button label differ from the selected menu item; re-set every
         // `apply` (both branches) so a later selection without an override reverts.

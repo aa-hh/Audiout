@@ -271,12 +271,102 @@ final class AppTetherColorTests: IsolatedTestCase {
             XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue),
                            "\(c.name) landed in the gold band")
 
-            // The warm-adapted output is desaturated and legibly bright on the
-            // dark canvas.
+            // The warm-adapted output is CALMED (never full brand vividness)
+            // but legibly bright AND legibly coloured on the dark canvas —
+            // the 2026-07-22 contrast pass raised the ceiling from 0.55 to
+            // 0.70 (`saturationCap`) specifically so this no longer reads as
+            // a near-grey smudge; see `test_measuredContrast_clearsWCAGFloor`
+            // for the actual WCAG numbers this range was picked against.
             let render = AppTetherColor.components(for: tone, dark: true, increaseContrast: false)
-            XCTAssertLessThanOrEqual(render.saturation, 0.55, "\(c.name) not desaturated")
+            XCTAssertTrue(render.saturation > 0.30 && render.saturation <= 0.70,
+                          "\(c.name) saturation \(render.saturation) outside the calmed-but-legible band")
             XCTAssertTrue(render.brightness >= 0.55 && render.brightness <= 0.85,
                           "\(c.name) brightness \(render.brightness) off warm-dark range")
         }
+    }
+
+    // MARK: Measured WCAG contrast floor (2026-07-22 "still reads almost
+    // black" pass) — the discipline `93a134b` set for the warm fader:
+    // compute ACTUAL WCAG relative-luminance contrast ratios rather than
+    // eyeballing a brightness number, and assert a real floor.
+
+    /// WCAG 2.x relative luminance of an sRGB color.
+    private func relativeLuminance(_ color: NSColor) -> CGFloat {
+        func channel(_ c: CGFloat) -> CGFloat {
+            c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        let c = color.usingColorSpace(.sRGB)!
+        return 0.2126 * channel(c.redComponent) + 0.7152 * channel(c.greenComponent) + 0.0722 * channel(c.blueComponent)
+    }
+
+    /// WCAG contrast ratio between two sRGB colors, `1...21`.
+    private func contrastRatio(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let l1 = relativeLuminance(a), l2 = relativeLuminance(b)
+        let (hi, lo) = l1 > l2 ? (l1, l2) : (l2, l1)
+        return (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The genuine measured floor this pass targets: **>=3:1** against the
+    /// chip's OWN-THEME canvas (WCAG 1.4.11 non-text/graphical-object
+    /// contrast — this is a small coloured UI mark, not a body of text, so
+    /// 3:1 rather than the 4.5:1 text floor is the correct criterion; the
+    /// same criterion `93a134b` used for the fader thumb/rim). Checked against
+    /// a representative sample of real brand hues spanning all three hue
+    /// families (warm/mid/cool) — including a Firefox-purple-style cool hue,
+    /// the family the earlier brightness-only floor was built to rescue —
+    /// each rendered in ITS OWN theme against ITS OWN canvas token (a
+    /// dark-theme chip is never actually drawn against the light canvas, so
+    /// only same-theme pairings are asserted), with and without Increase
+    /// Contrast.
+    func test_measuredContrast_clearsWCAGFloor() {
+        let canvasDark = NSColor(srgbRed: 0x16 / 255.0, green: 0x13 / 255.0, blue: 0x0F / 255.0, alpha: 1)
+        let canvasLight = NSColor(srgbRed: 0xF4 / 255.0, green: 0xEF / 255.0, blue: 0xE7 / 255.0, alpha: 1)
+        let floor: CGFloat = 3.0
+
+        // (name, brand hex) — spans warm (Firefox/Instagram/Chrome), mid
+        // (Spotify/Slack), and cool (Safari/Discord) families, plus a
+        // synthetic cool-violet standing in for the real Firefox icon's
+        // *actual* dominant hue (the globe, ~265°, per the earlier fix's own
+        // comment) rather than the brand's marketing orange.
+        let apps: [(name: String, hex: UInt32)] = [
+            ("Spotify", 0x1DB954), ("YouTube", 0xFF0000), ("Firefox", 0xFF7139),
+            ("Safari", 0x1C9BF0), ("Slack", 0x4A154B), ("Discord", 0x5865F2),
+            ("Instagram", 0xE1306C), ("Chrome", 0xDB4437),
+            ("Firefox-globe (cool violet)", 0x6A2FBF),
+        ]
+
+        var worstDark: (name: String, ratio: CGFloat) = ("", .infinity)
+        var worstLight: (name: String, ratio: CGFloat) = ("", .infinity)
+
+        for (name, hex) in apps {
+            guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(hex)) else {
+                continue   // a synthetic swatch landing on neutral carries no tint to measure
+            }
+            for ic in [false, true] {
+                let dark = AppTetherColor.components(for: tone, dark: true, increaseContrast: ic)
+                let darkColor = AppTetherColor.srgb(hue: dark.hue, saturation: dark.saturation, brightness: dark.brightness)
+                let darkRatio = contrastRatio(darkColor, canvasDark)
+                XCTAssertGreaterThanOrEqual(darkRatio, floor,
+                                            "\(name) dark ic=\(ic): \(darkRatio):1 vs canvas below the \(floor):1 floor")
+                if darkRatio < worstDark.ratio { worstDark = (name, darkRatio) }
+
+                let light = AppTetherColor.components(for: tone, dark: false, increaseContrast: ic)
+                let lightColor = AppTetherColor.srgb(hue: light.hue, saturation: light.saturation, brightness: light.brightness)
+                let lightRatio = contrastRatio(lightColor, canvasLight)
+                XCTAssertGreaterThanOrEqual(lightRatio, floor,
+                                            "\(name) light ic=\(ic): \(lightRatio):1 vs canvas below the \(floor):1 floor")
+                if lightRatio < worstLight.ratio { worstLight = (name, lightRatio) }
+            }
+        }
+
+        // Genuine headroom, not a bare pass — the worst case in each theme
+        // should clear the floor with real margin (measured 2026-07-22:
+        // worst dark ~3.48:1, a cool-violet hue in the Firefox-globe family
+        // the earlier brightness-only floor targeted; worst light ~4.0:1),
+        // not sit at 3.0 exactly.
+        XCTAssertGreaterThan(worstDark.ratio, 3.4,
+                             "worst dark-theme case (\(worstDark.name)) has too little headroom above the floor")
+        XCTAssertGreaterThan(worstLight.ratio, 3.9,
+                             "worst light-theme case (\(worstLight.name)) has too little headroom above the floor")
     }
 }

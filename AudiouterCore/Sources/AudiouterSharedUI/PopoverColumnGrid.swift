@@ -200,7 +200,17 @@ public enum PopoverColumnGrid {
     /// that app's name in the App Exceptions row so the tether reads at both
     /// ends. Edge length only — never the state-carrying halo ring or meter
     /// (house rule: tether colour lives on FEED/redirect app-name text only).
-    public static let feedChipSize: CGFloat = 5
+    /// Raised 5 → 7pt (2026-07-22, the same pass as the tuning-constant
+    /// contrast raise above): the owner's live-build feedback was that even a
+    /// correctly-contrasted chip was too small to read as a colour swatch at
+    /// all rather than a fleck. `feedColumnWidth` itself is UNCHANGED — the
+    /// STATIC "+N" overflow measurement in `DeviceRowView.setFeedSegments`
+    /// reads `feedChipSize`/`feedChipGap` live via `FeedChip.attachmentString`
+    /// and `pillWidth(_:)`, so a wider chip correctly eats into the same
+    /// margin rather than needing a second constant updated in lockstep; see
+    /// `FeedColumnTests` for the still-passing (now slightly-earlier-tripping)
+    /// two-app overflow cases this shifts by construction, not regression.
+    public static let feedChipSize: CGFloat = 7
     /// Visual gap between a chip and the app-name text that follows it, baked
     /// into the chip's own attachment width (no separate space glyph) so
     /// stripping the attachment character back out of `attributedStringValue`

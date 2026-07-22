@@ -303,6 +303,16 @@ public enum AppTetherColor {
         // ``minimumLegibleBrightness``). Applied last so it caps the whole chain.
         bright = max(bright, minimumLegibleBrightness)
 
+        // The brightness floor above binds LUMINANCE, but a WCAG luminance
+        // ratio is colour-blind by design: a chip can clear it while still
+        // reading as a grey/near-black smudge if its CHROMA is low (2026-07-22
+        // "still reads almost black" pass — the earlier floor targeted the
+        // single darkest hue/appearance combination, not the general muted
+        // register every family's `saturationTrim` × `saturationCap` produces).
+        // Re-floor saturation here, LAST, same discipline as the brightness
+        // floor: see ``minimumChipSaturation``.
+        sat = max(sat, minimumChipSaturation)
+
         return (tone.hue, clamp01(sat), clamp01(bright))
     }
 
@@ -315,8 +325,17 @@ public enum AppTetherColor {
         var darkBrightness: CGFloat {
             switch self { case .warm: return 0.75; case .cool: return 0.66; case .mid: return 0.70 }
         }
+        /// Restraint on the cool/mid families (`mid` nudged 0.90 → 0.88,
+        /// 2026-07-22 contrast pass — see the "Warm-adapt shape" tuning
+        /// constants below for the bulk of that pass, which raises
+        /// `saturationScale`/`saturationCap`/`saturationFloorOut` instead:
+        /// this per-family trim was ALREADY the more conservative of the two
+        /// levers, so it moves only slightly while the shared scale/cap/floor
+        /// do the real work). Warm stays at full punch (it was never the
+        /// complaint — see the measured-contrast table in
+        /// `AppTetherColorTests.test_measuredContrast_clearsWCAGFloor`).
         var saturationTrim: CGFloat {
-            switch self { case .warm: return 1.0; case .cool: return 0.80; case .mid: return 0.90 }
+            switch self { case .warm: return 1.0; case .cool: return 0.80; case .mid: return 0.88 }
         }
     }
 
@@ -435,12 +454,25 @@ public enum AppTetherColor {
     static let roseHigh: CGFloat = 349            // failure-band escape upper (just below 350)
     static let roseLow: CGFloat = 335             // …lower
 
-    // Warm-adapt shape.
-    private static let saturationScale: CGFloat = 0.62
-    private static let saturationCap: CGFloat = 0.50
-    private static let saturationFloorOut: CGFloat = 0.30
-    private static let lightSaturationBoost: CGFloat = 0.06
-    private static let lightSaturationCap: CGFloat = 0.58
+    // Warm-adapt shape. RAISED 2026-07-22 ("still reads almost black" pass —
+    // the owner's live-build follow-up to the brightness-floor fix above):
+    // measuring the OLD constants' output against `Tokens.Color.canvas` in
+    // both themes (see `AppTetherColorTests.test_measuredContrast_*`) showed
+    // the WCAG *luminance* floor was already clearing 3:1 almost everywhere —
+    // the actual complaint is CHROMA, not luminance: `saturationScale`/
+    // `saturationCap`/`saturationFloorOut` calmed vivid brand hues into a
+    // register desaturated enough to read as a grey/near-black smudge at the
+    // chip's tiny size even where the luminance ratio was technically fine.
+    // Each constant below is raised so more of the icon's own vividness comes
+    // through; `saturationFloorOut` in particular is raised so a
+    // LOW-saturation source icon (common: white halos/gradients/highlights
+    // pull a real icon's *measured* dominant saturation well below a
+    // solid-brand swatch's) still resolves to a genuine colour, not a beige.
+    private static let saturationScale: CGFloat = 0.75
+    private static let saturationCap: CGFloat = 0.62
+    private static let saturationFloorOut: CGFloat = 0.38
+    private static let lightSaturationBoost: CGFloat = 0.07
+    private static let lightSaturationCap: CGFloat = 0.70
     private static let lightBrightnessDrop: CGFloat = 0.28
     private static let goldSteeredBrightnessScale: CGFloat = 0.88
 
@@ -455,8 +487,19 @@ public enum AppTetherColor {
     /// below the lowest DARK-canvas brightness (cool / gold-steered = 0.66) so
     /// the "warm-paper text is darker than dark-canvas text" ordering the
     /// appearance variants rely on still holds, yet high enough that the dimmest
-    /// tint is a distinguishable coloured dot rather than a black one.
-    static let minimumLegibleBrightness: CGFloat = 0.45
+    /// tint is a distinguishable coloured dot rather than a black one. Raised
+    /// slightly (0.45 → 0.50, 2026-07-22) alongside the saturation raise above
+    /// for a touch more headroom against the measured WCAG floor.
+    static let minimumLegibleBrightness: CGFloat = 0.50
+    /// Saturation counterpart to `minimumLegibleBrightness` (2026-07-22): a
+    /// tint can clear the brightness floor and still look colourless if its
+    /// saturation bottoms out low. Applied LAST in `components(for:dark:increaseContrast:)`,
+    /// after every desaturating step, so nothing downstream of it can undo it.
+    /// Kept below `saturationFloorOut` so it never overrides the ordinary
+    /// warm-adapt shape — it only binds on inputs that would otherwise slip
+    /// under it (a near-greyscale source hue that still cleared
+    /// `AppTetherColor.saturationFloor` to count as "tinted" at all).
+    static let minimumChipSaturation: CGFloat = 0.32
     private static let icBrightnessStep: CGFloat = 0.08
     private static let icSaturationStep: CGFloat = 0.05
 

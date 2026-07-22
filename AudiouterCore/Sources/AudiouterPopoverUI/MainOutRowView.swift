@@ -124,8 +124,8 @@ public final class MainOutRowView: NSView {
                 item.attributedTitle = NSAttributedString(
                     string: option.title.uppercased(),
                     attributes: [
-                        .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
-                        .foregroundColor: NSColor.tertiaryLabelColor,
+                        .font: Tokens.Font.captionEmphasized,
+                        .foregroundColor: Tokens.Color.tertiaryLabel,
                     ])
             } else {
                 item.target = self
@@ -207,7 +207,7 @@ public final class MainOutRowView: NSView {
         // Match device row icon styling (2026-07-17): neutral gray, not accent.
         // Consistency across System and Devices sections — all icons are identity
         // only, connection status lives on the icon as a corner badge.
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = Tokens.Color.secondaryLabel
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false
@@ -238,8 +238,8 @@ public final class MainOutRowView: NSView {
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        readoutLabel.textColor = .secondaryLabelColor
+        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -250,7 +250,7 @@ public final class MainOutRowView: NSView {
         destinationPopUp.translatesAutoresizingMaskIntoConstraints = false
         destinationPopUp.pullsDown = false
         destinationPopUp.controlSize = .small
-        destinationPopUp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        destinationPopUp.font = Tokens.Font.caption
         // Truncate a long target title with a tail ellipsis inside the fixed
         // dropdown width (task B — "truncated with '…' if long").
         (destinationPopUp.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
@@ -258,8 +258,8 @@ public final class MainOutRowView: NSView {
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        nameLabel.textColor = .labelColor
+        nameLabel.font = Tokens.Font.body
+        nameLabel.textColor = Tokens.Color.label
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -336,9 +336,9 @@ public final class MainOutRowView: NSView {
     /// Updates the mute button's tint color and accessibility label based on current state.
     private func updateMuteTint() {
         if muteButton.state == .on {
-            muteButton.contentTintColor = .controlAccentColor
+            muteButton.contentTintColor = Tokens.Color.accent
         } else {
-            muteButton.contentTintColor = .secondaryLabelColor
+            muteButton.contentTintColor = Tokens.Color.secondaryLabel
         }
         configureAccessibility()
     }

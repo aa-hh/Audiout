@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// A single device's controls (SPEC §9 "Device row"), shared by BOTH the
 /// menu-bar extra's popover dropdown and the full mixer window (both host it in
@@ -288,7 +289,7 @@ public final class DeviceRowView: NSView {
         // accent-when-selected fill. Selection reads from the switch state; the
         // on-icon corner dot carries the connection status instead. (This also
         // covers unsupported/AP1 rows — no accent regardless of stale selection.)
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = Tokens.Color.secondaryLabel
         nameLabel.stringValue = device.name
         nameLabel.textColor = rowTextColor
         alphaValue = 1.0
@@ -328,7 +329,7 @@ public final class DeviceRowView: NSView {
         // V7: the `%` readout dims in lockstep with the slider's enabled state —
         // a disabled/unavailable slider reads as fully de-emphasized, not just
         // its track.
-        readoutLabel.textColor = slider.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
+        readoutLabel.textColor = slider.isEnabled ? Tokens.Color.secondaryLabel : Tokens.Color.tertiaryLabel
 
         // The meter can only be showing a live level while the device is an
         // actual selected, unmuted output — otherwise a stale bar could stick
@@ -350,7 +351,7 @@ public final class DeviceRowView: NSView {
     /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
     /// both paths land the same tint instantly.
     private func updateMuteTint() {
-        muteButton.contentTintColor = muteButton.state == .on ? .controlAccentColor : .secondaryLabelColor
+        muteButton.contentTintColor = muteButton.state == .on ? Tokens.Color.accent : Tokens.Color.secondaryLabel
     }
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
@@ -387,11 +388,11 @@ public final class DeviceRowView: NSView {
     /// 4. else → no sublabel; single-line row (name centered).
     private func resolveSublabel(routedAppNames: [String], liveAppNames: [String]) {
         if case .failed = device.connectionState {
-            showSublabel("Couldn't connect", color: .systemOrange)
+            showSublabel("Couldn't connect", color: Tokens.Color.warning)
         } else if !device.isAvailable {
-            showSublabel("Unavailable", color: .tertiaryLabelColor)
+            showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
         } else if let routing = routingLine(routedAppNames: routedAppNames, liveAppNames: liveAppNames) {
-            showSublabel(routing, color: .secondaryLabelColor)
+            showSublabel(routing, color: Tokens.Color.secondaryLabel)
         } else {
             hideSublabel()
         }
@@ -502,7 +503,7 @@ public final class DeviceRowView: NSView {
         statusDotView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = .menuFont(ofSize: 0)
+        nameLabel.font = Tokens.Font.menuItem
         nameLabel.lineBreakMode = .byTruncatingTail   // task B: "…" tail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -512,7 +513,7 @@ public final class DeviceRowView: NSView {
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = .systemFont(ofSize: 10)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = Tokens.Color.secondaryLabel
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -528,8 +529,8 @@ public final class DeviceRowView: NSView {
         // `%` readout, right-aligned, small secondary — hangs off the slider's
         // trailing edge (change 4) so the number reads tight against the slider.
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        readoutLabel.textColor = .secondaryLabelColor
+        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -679,7 +680,7 @@ public final class DeviceRowView: NSView {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.imagePosition = .imageOnly
-        button.contentTintColor = .secondaryLabelColor
+        button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = action
     }
@@ -731,8 +732,8 @@ public final class DeviceRowView: NSView {
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
         if !device.isAvailable { return .disabledControlTextColor }
-        if isToggleBlocked { return .tertiaryLabelColor }
-        return isSelectedInSet ? .labelColor : .secondaryLabelColor
+        if isToggleBlocked { return Tokens.Color.tertiaryLabel }
+        return isSelectedInSet ? Tokens.Color.label : Tokens.Color.secondaryLabel
     }
 
     // MARK: Test-support hooks
@@ -955,7 +956,7 @@ public final class DeviceRowView: NSView {
             // In a menu the row must paint its own highlight — the menu paints no
             // background behind a custom view (brief §2, gotcha #5).
             if enclosingMenuItem?.isHighlighted == true {
-                NSColor.selectedContentBackgroundColor.setFill()
+                Tokens.Color.selectedContentBackground.setFill()
                 bounds.fill()
             }
         } else {
@@ -967,10 +968,10 @@ public final class DeviceRowView: NSView {
             let rect = bounds.insetBy(dx: 5, dy: 2)
             let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
             if isSelectedInSet && paintsSelectionBackground {
-                NSColor.controlAccentColor.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
+                Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
                 path.fill()
             } else if isHovered {
-                NSColor.selectedContentBackgroundColor.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+                Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
                 path.fill()
             }
         }
@@ -990,7 +991,7 @@ public final class DeviceRowView: NSView {
     /// transient-vs-persistent discipline documented on `isHovered` above).
     private lazy var flashLayer: CALayer = {
         let layer = CALayer()
-        layer.backgroundColor = NSColor.controlAccentColor.cgColor
+        layer.backgroundColor = Tokens.Color.accent.cgColor
         layer.opacity = 0
         layer.cornerRadius = PopoverColumnGrid.selectionHighlightCornerRadius
         return layer

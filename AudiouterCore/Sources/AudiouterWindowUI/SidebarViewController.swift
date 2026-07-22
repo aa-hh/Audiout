@@ -176,7 +176,7 @@ public final class SidebarViewController: NSViewController {
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         addButton.imagePosition = .imageLeading
         addButton.title = "New Group"
-        addButton.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        addButton.font = Tokens.Font.body
         addButton.target = self
         addButton.action = #selector(addTapped(_:))
         addButton.toolTip = "New Group"
@@ -479,7 +479,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
             ?? Self.newCell(identifier: id)
         cell.textField?.stringValue = text
-        cell.textField?.textColor = secondary ? .secondaryLabelColor : .labelColor
+        cell.textField?.textColor = secondary ? Tokens.Color.secondaryLabel : Tokens.Color.label
         cell.imageView?.image = nil
         cell.imageView?.isHidden = true
         return cell
@@ -511,8 +511,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         textField.translatesAutoresizingMaskIntoConstraints = false
         // Matches Finder's own sidebar section-header weight — a plain
         // `NSTextField(labelWithString:)` label reads noticeably thinner.
-        textField.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        textField.textColor = .secondaryLabelColor
+        textField.font = Tokens.Font.captionEmphasized
+        textField.textColor = Tokens.Color.secondaryLabel
         textField.lineBreakMode = .byTruncatingTail
         cell.addSubview(textField)
         cell.textField = textField
@@ -540,9 +540,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // fill instead, via `.isTemplate` + an explicit `contentTintColor`.
         image?.isTemplate = true
         cell.imageView?.image = image
-        cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : .labelColor
+        cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         cell.textField?.stringValue = text
-        cell.textField?.textColor = dimmed ? .disabledControlTextColor : .labelColor
+        cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         return cell
     }
 

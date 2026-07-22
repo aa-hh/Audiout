@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// The static identity of one permission row (the parts that never change).
 struct PermissionRowContent {
@@ -48,8 +49,8 @@ func onboardingRowStatusLabel(_ text: String, symbol: String, tint: NSColor) -> 
     image.translatesAutoresizingMaskIntoConstraints = false
 
     let label = NSTextField(labelWithString: text)
-    label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-    label.textColor = tint == .systemGreen || tint == .systemOrange ? .labelColor : .secondaryLabelColor
+    label.font = Tokens.Font.caption
+    label.textColor = tint == .systemGreen || tint == .systemOrange ? Tokens.Color.label : Tokens.Color.secondaryLabel
     label.translatesAutoresizingMaskIntoConstraints = false
 
     let stack = NSStackView(views: [image, label])
@@ -121,12 +122,12 @@ final class PermissionRowView: NSView {
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
         titleLabel.stringValue = content.title
-        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        titleLabel.font = Tokens.Font.bodyEmphasized
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         detailLabel.stringValue = content.detail
-        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.font = Tokens.Font.caption
+        detailLabel.textColor = Tokens.Color.secondaryLabel
         detailLabel.lineBreakMode = .byWordWrapping
         detailLabel.maximumNumberOfLines = 0
         detailLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -309,7 +310,7 @@ final class ProminentButton: NSButton {
         self.action = action
         bezelStyle = .rounded
         controlSize = .regular
-        bezelColor = .controlAccentColor
+        bezelColor = Tokens.Color.accent
         setContentHuggingPriority(.required, for: .horizontal)
         applyTitleColour()
     }
@@ -334,11 +335,11 @@ final class ProminentButton: NSButton {
     deinit { keyStateObservers.forEach { NotificationCenter.default.removeObserver($0) } }
 
     private func applyTitleColour() {
-        let colour: NSColor = (window?.isKeyWindow ?? false) ? .white : .labelColor
+        let colour: NSColor = (window?.isKeyWindow ?? false) ? .white : Tokens.Color.label
         attributedTitle = NSAttributedString(
             string: plainTitle,
             attributes: [.foregroundColor: colour,
-                         .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+                         .font: Tokens.Font.body])
     }
 }
 

@@ -128,7 +128,9 @@ let package = Package(
         // yet.
         .target(
             name: "AudiouterSettingsUI",
-            dependencies: ["AudiouterCore"]
+            // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the
+            // Warm Signal redesign) — Settings styles through Tokens.* now.
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
         ),
         // The pure-AppKit first-run onboarding window (permission priming): an
         // `OnboardingWindowController` hosting a single-screen explanation + a
@@ -139,7 +141,9 @@ let package = Package(
         // Only needs Core (`SetupModel` + the permission seams).
         .target(
             name: "AudiouterOnboardingUI",
-            dependencies: ["AudiouterCore"]
+            // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the
+            // Warm Signal redesign) — onboarding styles through Tokens.* now.
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
         // lifecycle); the popover dropdown lives in AudiouterPopoverUI,

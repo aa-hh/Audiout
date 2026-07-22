@@ -113,7 +113,7 @@ public final class GroupEditorViewController: NSViewController {
         // off-center — live-test feedback 2026-07-18).
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
-        nameField.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
+        nameField.font = Tokens.Font.heading
         nameField.alignment = .natural   // left-aligned (LTR) to match the column
         nameField.isBezeled = false
         nameField.drawsBackground = false
@@ -125,7 +125,7 @@ public final class GroupEditorViewController: NSViewController {
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
-        speakersLabel.textColor = .secondaryLabelColor
+        speakersLabel.textColor = Tokens.Color.secondaryLabel
 
         membershipStack.translatesAutoresizingMaskIntoConstraints = false
         membershipStack.orientation = .vertical
@@ -212,7 +212,7 @@ public final class GroupEditorViewController: NSViewController {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = .secondaryLabelColor
+        iconWell.iconImageView.contentTintColor = Tokens.Color.secondaryLabel
     }
 
     /// Recompute `candidateDevices` from `allDevices` — available devices,

@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Why the onboarding window is being presented right now — drives whether the
 /// "a permission got turned off" banner renders.
@@ -164,7 +165,7 @@ public final class OnboardingViewController: NSViewController {
         content.setCustomSpacing(22, after: header)
 
         let background = NSVisualEffectView()
-        background.material = .windowBackground
+        background.material = Tokens.Material.windowBackground
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false
@@ -326,8 +327,8 @@ public final class OnboardingViewController: NSViewController {
         title.alignment = .center
 
         let subtitle = NSTextField(labelWithString: "Play your Mac's sound on any AirPlay speaker.")
-        subtitle.font = .systemFont(ofSize: NSFont.systemFontSize)
-        subtitle.textColor = .secondaryLabelColor
+        subtitle.font = Tokens.Font.body
+        subtitle.textColor = Tokens.Color.secondaryLabel
         subtitle.alignment = .center
 
         let stack = NSStackView(views: [tile, title, subtitle])
@@ -350,14 +351,14 @@ public final class OnboardingViewController: NSViewController {
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                              accessibilityDescription: "Warning")
         icon.symbolConfiguration = .init(pointSize: 16, weight: .semibold)
-        icon.contentTintColor = .systemOrange
+        icon.contentTintColor = Tokens.Color.warning
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let text = NSTextField(wrappingLabelWithString: Self.bannerText(for: unmet))
         text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
-        text.textColor = .labelColor
+        text.textColor = Tokens.Color.label
         text.translatesAutoresizingMaskIntoConstraints = false
         text.preferredMaxLayoutWidth = Self.contentWidth - 56 - 32 - 16
         permissionBannerLabel = text
@@ -411,8 +412,8 @@ public final class OnboardingViewController: NSViewController {
         let text = NSTextField(wrappingLabelWithString:
             "Routing audio requires permission to access your Mac's audio stream. "
             + "Nothing is ever saved or recorded; it all streams right through.")
-        text.font = .systemFont(ofSize: NSFont.systemFontSize)
-        text.textColor = .labelColor
+        text.font = Tokens.Font.body
+        text.textColor = Tokens.Color.label
         text.alignment = .center
         text.translatesAutoresizingMaskIntoConstraints = false
         text.preferredMaxLayoutWidth = Self.contentWidth - 56
@@ -424,8 +425,8 @@ public final class OnboardingViewController: NSViewController {
         // next-best help is telling the user exactly what to look for in the list.
         let note = NSTextField(wrappingLabelWithString:
             "In System Settings, find Audiouter in the list and switch it on.")
-        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        note.textColor = .secondaryLabelColor
+        note.font = Tokens.Font.caption
+        note.textColor = Tokens.Color.secondaryLabel
         note.maximumNumberOfLines = 2
         note.translatesAutoresizingMaskIntoConstraints = false
         note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

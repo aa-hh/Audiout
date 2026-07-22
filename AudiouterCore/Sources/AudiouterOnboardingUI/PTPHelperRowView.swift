@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// The onboarding row for the privileged PTP helper daemon (T6,
 /// AirPlayEngine/docs/ptp-helper-design.md §2.3) — the root `SMAppService`
@@ -45,13 +46,13 @@ final class PTPHelperRowView: NSView {
                                 accessibility: "AirPlay 2 Clock Sync")
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
-        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        titleLabel.font = Tokens.Font.bodyEmphasized
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         detailLabel.stringValue = "AirPlay 2 speakers share one clock through a small "
             + "background helper. Approve it once in Login Items to enable it."
-        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.font = Tokens.Font.caption
+        detailLabel.textColor = Tokens.Color.secondaryLabel
         detailLabel.lineBreakMode = .byWordWrapping
         detailLabel.maximumNumberOfLines = 0
         detailLabel.translatesAutoresizingMaskIntoConstraints = false

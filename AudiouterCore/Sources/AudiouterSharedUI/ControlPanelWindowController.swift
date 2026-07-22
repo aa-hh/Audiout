@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
 /// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
@@ -113,7 +114,7 @@ public final class ControlPanelWindowController: NSWindowController {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isOpaque = false
-        panel.backgroundColor = .clear
+        panel.backgroundColor = Tokens.Color.clear
         panel.hasShadow = false
         // Not user-draggable: an anchored, transient panel has no business
         // being repositioned by the user, and keeping it fixed guarantees the
@@ -144,7 +145,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // Match the panel's Space behavior so the decorative backing follows it.
         window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         window.isOpaque = false
-        window.backgroundColor = .clear
+        window.backgroundColor = Tokens.Color.clear
         window.hasShadow = true
         window.ignoresMouseEvents = true     // purely decorative — never intercepts a click
         window.isReleasedWhenClosed = false
@@ -188,7 +189,7 @@ public final class ControlPanelWindowController: NSWindowController {
     /// root) simply covers the bubble, unaffected.
     private func configureContentAppearance(_ view: NSView) {
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.clear.cgColor
+        view.layer?.backgroundColor = Tokens.Color.clear.cgColor
         view.layer?.cornerRadius = ControlPanelBackingView.cornerRadius
         view.layer?.masksToBounds = true
     }

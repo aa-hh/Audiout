@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// A single row of the popover's future **Applications** card
 /// (PLAN-POPOVER-ROUTING.md §A/§C task T-6): app icon · truncating name ·
@@ -231,13 +232,13 @@ public final class AppRowView: NSView {
         // Device" (Bug T2) and AirPlay routes each have their own stream, so the
         // slider is live for them.
         slider.isEnabled = !isNoRedirect
-        readoutLabel.textColor = isNoRedirect ? .tertiaryLabelColor : .secondaryLabelColor
+        readoutLabel.textColor = isNoRedirect ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
 
         // T4 offline indicator: badge and dimmed icon/name when not running.
         let isRunning = configuration.isRunning
         offlineBadge.isHidden = isRunning
         iconView.alphaValue = isRunning ? 1.0 : 0.5
-        nameLabel.textColor = isRunning ? .labelColor : .secondaryLabelColor
+        nameLabel.textColor = isRunning ? Tokens.Color.label : Tokens.Color.secondaryLabel
 
         rebuildDestinationMenu(selecting: configuration.selectedDestinationID)
         configureAccessibility()
@@ -314,8 +315,8 @@ public final class AppRowView: NSView {
             item.attributedTitle = NSAttributedString(
                 string: title.uppercased(),
                 attributes: [
-                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
-                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .font: Tokens.Font.captionEmphasized,
+                    .foregroundColor: Tokens.Color.tertiaryLabel,
                 ])
             menu.addItem(item)
         }
@@ -375,13 +376,13 @@ public final class AppRowView: NSView {
             if allowsAttributedSubtitle {
                 let attributedTitle = NSMutableAttributedString(
                     string: entry.title,
-                    attributes: [.font: NSFont.menuFont(ofSize: 0)])
+                    attributes: [.font: Tokens.Font.menuItem])
                 attributedTitle.append(NSAttributedString(string: "\n"))
                 attributedTitle.append(NSAttributedString(
                     string: subtitle,
                     attributes: [
-                        .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
-                        .foregroundColor: NSColor.secondaryLabelColor,
+                        .font: Tokens.Font.caption,
+                        .foregroundColor: Tokens.Color.secondaryLabel,
                     ]))
                 item.attributedTitle = attributedTitle
             }
@@ -399,7 +400,7 @@ public final class AppRowView: NSView {
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = .menuFont(ofSize: 0)
+        nameLabel.font = Tokens.Font.menuItem
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -412,15 +413,15 @@ public final class AppRowView: NSView {
         slider.action = #selector(volumeChanged(_:))
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        readoutLabel.textColor = .secondaryLabelColor
+        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         destinationPopUp.translatesAutoresizingMaskIntoConstraints = false
         destinationPopUp.pullsDown = false
         destinationPopUp.controlSize = .small
-        destinationPopUp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        destinationPopUp.font = Tokens.Font.caption
         (destinationPopUp.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
         destinationPopUp.setContentHuggingPriority(.required, for: .horizontal)
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -534,9 +535,9 @@ public final class AppRowView: NSView {
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
     private var currentHighlightColor: NSColor? {
         if isSelected {
-            return NSColor.controlAccentColor.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
+            return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            return NSColor.selectedContentBackgroundColor.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+            return Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
             return nil
         }
@@ -606,7 +607,7 @@ public final class AppRowView: NSView {
         removeItem.target = self
         removeItem.attributedTitle = NSAttributedString(
             string: "Remove from list",
-            attributes: [.foregroundColor: NSColor.systemRed])
+            attributes: [.foregroundColor: Tokens.Color.destructive])
         menu.addItem(removeItem)
 
         return menu

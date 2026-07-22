@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Bundle-sourced app identity for the About/Credits surface (Settings ›
 /// General › "About Audiouter…"): name + version + build. Read live from
@@ -148,8 +149,8 @@ public final class AboutViewController: NSViewController {
             control: sourceCodeButton))
 
         let creditsLabel = SettingsForm.label("Third-Party Notices")
-        creditsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        creditsLabel.textColor = .secondaryLabelColor
+        creditsLabel.font = Tokens.Font.captionEmphasized
+        creditsLabel.textColor = Tokens.Color.secondaryLabel
         rows.append(creditsLabel)
         rows.append(makeCreditsScrollView())
 
@@ -157,8 +158,8 @@ public final class AboutViewController: NSViewController {
         rows.append(supportLabel)
 
         let supportBody = SettingsForm.label(AboutLinks.supportContactPlaceholder)
-        supportBody.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        supportBody.textColor = .secondaryLabelColor
+        supportBody.font = Tokens.Font.caption
+        supportBody.textColor = Tokens.Color.secondaryLabel
         supportBody.lineBreakMode = .byWordWrapping
         supportBody.maximumNumberOfLines = 0
         rows.append(supportBody)
@@ -170,7 +171,7 @@ public final class AboutViewController: NSViewController {
         // whatever happens to sit behind the window — illegible; confirmed by
         // rendering this offscreen in dark mode.
         let background = NSVisualEffectView()
-        background.material = .windowBackground
+        background.material = Tokens.Material.windowBackground
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false
@@ -200,8 +201,8 @@ public final class AboutViewController: NSViewController {
         creditsTextView.isSelectable = true
         creditsTextView.isRichText = false
         creditsTextView.drawsBackground = false
-        creditsTextView.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        creditsTextView.textColor = .secondaryLabelColor
+        creditsTextView.font = Tokens.Font.caption
+        creditsTextView.textColor = Tokens.Color.secondaryLabel
         creditsTextView.textContainerInset = NSSize(width: 6, height: 6)
         creditsTextView.string = AboutCredits.thirdPartyNoticesText
         creditsTextView.isVerticallyResizable = true

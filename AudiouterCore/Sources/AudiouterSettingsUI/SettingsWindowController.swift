@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// The Settings window (the header gear's destination — previously a `// TODO:
 /// settings` stub).
@@ -211,7 +212,7 @@ final class SettingsRootViewController: NSViewController {
         // controls draw with dark-adapted (light) text/colors over whatever
         // happens to sit behind the window, which is illegible.
         let background = NSVisualEffectView()
-        background.material = .windowBackground
+        background.material = Tokens.Material.windowBackground
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false

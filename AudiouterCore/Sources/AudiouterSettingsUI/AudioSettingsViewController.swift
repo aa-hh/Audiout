@@ -3,6 +3,7 @@
 import AppKit
 import UniformTypeIdentifiers
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Everything the Audio pane's **Advanced › Audio buffer** control needs from
 /// the app layer (PLAN-LATENCY-SETTING.md). Built by the app ONLY when the
@@ -131,12 +132,12 @@ public final class AudioSettingsViewController: NSViewController {
 
     public override func loadView() {
         let heading = SettingsForm.label("Excluded applications")
-        heading.font = .systemFont(ofSize: NSFont.systemFontSize)
+        heading.font = Tokens.Font.body
 
         let subtitle = SettingsForm.label(
             "Audio from these apps always plays on your Mac — never sent to speakers.")
-        subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        subtitle.textColor = .secondaryLabelColor
+        subtitle.font = Tokens.Font.caption
+        subtitle.textColor = Tokens.Color.secondaryLabel
         subtitle.lineBreakMode = .byWordWrapping
         subtitle.maximumNumberOfLines = 0
 
@@ -266,8 +267,8 @@ public final class AudioSettingsViewController: NSViewController {
         views.append(hairline)
 
         let advancedLabel = SettingsForm.label("Advanced")
-        advancedLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        advancedLabel.textColor = .secondaryLabelColor
+        advancedLabel.font = Tokens.Font.captionEmphasized
+        advancedLabel.textColor = Tokens.Color.secondaryLabel
         views.append(advancedLabel)
 
         // The popup: numeric options, or the env value alone (disabled) when
@@ -299,8 +300,8 @@ public final class AudioSettingsViewController: NSViewController {
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
                 "Overridden by AIRPLAY_START_BUFFER_MS (\(Self.msLabel(envMs))) for this launch.")
-            note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            note.textColor = .systemOrange
+            note.font = Tokens.Font.caption
+            note.textColor = Tokens.Color.warning
             note.lineBreakMode = .byWordWrapping
             note.maximumNumberOfLines = 0
             views.append(note)
@@ -325,8 +326,8 @@ public final class AudioSettingsViewController: NSViewController {
         applySpinner.isDisplayedWhenStopped = false
 
         applyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
-        applyStatusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        applyStatusLabel.textColor = .secondaryLabelColor
+        applyStatusLabel.font = Tokens.Font.caption
+        applyStatusLabel.textColor = Tokens.Color.secondaryLabel
         applyStatusLabel.isHidden = true
 
         let ctaRow = NSView()
@@ -457,7 +458,7 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")?
             .withSymbolConfiguration(config)
-        remove.contentTintColor = .secondaryLabelColor
+        remove.contentTintColor = Tokens.Color.secondaryLabel
         remove.target = self
         remove.action = #selector(removeTapped(_:))
         remove.identifier = NSUserInterfaceItemIdentifier(app.bundleID)
@@ -494,7 +495,7 @@ public final class AudioSettingsViewController: NSViewController {
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.title = "Add app…"
-        button.contentTintColor = .secondaryLabelColor
+        button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = #selector(addTapped(_:))
         button.setAccessibilityLabel("Add excluded application")
@@ -675,7 +676,7 @@ final class BorderedListView: NSView {
         super.draw(dirtyRect)
         let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
         let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-        NSColor.separatorColor.setStroke()
+        Tokens.Color.separator.setStroke()
         path.lineWidth = 1
         path.stroke()
     }

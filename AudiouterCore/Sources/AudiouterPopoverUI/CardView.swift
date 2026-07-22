@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// A rounded-rect **Control Center module** container (SPEC §9 restyle; T-U10
 /// semantic-first pass; raised 3D chrome added 2026-07-14 per ahh's request).
@@ -324,7 +325,7 @@ final class CardView: NSView {
     /// separate the tile from an already-dark popover.
     private func updateShadow() {
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowColor = Tokens.Color.shadow.cgColor
         layer?.shadowOpacity = isDark ? 0.45 : 0.22
         layer?.shadowRadius = isDark ? 6 : 5
         // Non-flipped layer geometry: negative height drops the shadow BELOW.
@@ -352,7 +353,7 @@ final class CardView: NSView {
     private static func roundedMask(radius: CGFloat) -> NSImage {
         let side = radius * 2 + 1
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
-            NSColor.black.setFill()
+            Tokens.Color.shadow.setFill()
             NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             return true
         }

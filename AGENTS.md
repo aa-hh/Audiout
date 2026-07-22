@@ -129,7 +129,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **System colors and materials, never hardcoded hex** — so Dark Mode, accent
   color and contrast settings all work for free. **One sanctioned exception:**
   `Tokens` (`AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift`, sub-namespaces
-  `Tokens.Color`, `` Tokens.`Type` ``, `Tokens.Layout`, `Tokens.Material`) is the
+  `Tokens.Color`, `Tokens.Font`, `Tokens.Layout`, `Tokens.Material`) is the
   only place a custom palette value may ever live. Everywhere else in the app
   stays plain semantic `NSColor`/`NSFont`/`NSVisualEffectView.Material` — do not
   add a second token module or a raw hex/RGB literal anywhere outside this file.

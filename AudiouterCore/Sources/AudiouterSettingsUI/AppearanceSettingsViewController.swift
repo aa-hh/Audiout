@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Settings › **Appearance** pane: a Theme picker built from **miniature window
 /// previews** (Match System / Light / Dark) — the standard macOS pattern
@@ -56,10 +57,10 @@ public final class AppearanceSettingsViewController: NSViewController {
         tileRow.translatesAutoresizingMaskIntoConstraints = false
 
         let heading = SettingsForm.label("Theme")
-        heading.font = .systemFont(ofSize: NSFont.systemFontSize)
+        heading.font = Tokens.Font.body
         let subtitle = SettingsForm.label("Follow the system, or force light or dark.")
-        subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        subtitle.textColor = .secondaryLabelColor
+        subtitle.font = Tokens.Font.caption
+        subtitle.textColor = Tokens.Color.secondaryLabel
 
         let column = NSStackView(views: [heading, tileRow, subtitle])
         column.orientation = .vertical
@@ -218,11 +219,11 @@ final class ThemeTileButton: NSButton {
         let ringRect = thumb.insetBy(dx: -2.5, dy: -2.5)
         let ring = NSBezierPath(roundedRect: ringRect, xRadius: 9, yRadius: 9)
         if isSelectedTile {
-            NSColor.controlAccentColor.setStroke()
+            Tokens.Color.accent.setStroke()
             ring.lineWidth = 2.5
             ring.stroke()
         } else if isHovered {
-            NSColor.separatorColor.setStroke()
+            Tokens.Color.separator.setStroke()
             ring.lineWidth = 1.5
             ring.stroke()
         }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
@@ -25,7 +26,7 @@ enum SettingsForm {
     /// contents.
     static func row(title: String, subtitle: String? = nil, control: NSView) -> NSView {
         let titleLabel = label(title)
-        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        titleLabel.font = Tokens.Font.body
 
         let textStack = NSStackView()
         textStack.orientation = .vertical
@@ -37,8 +38,8 @@ enum SettingsForm {
         var subtitleLabel: NSTextField?
         if let subtitle {
             let sub = label(subtitle)
-            sub.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            sub.textColor = .secondaryLabelColor
+            sub.font = Tokens.Font.caption
+            sub.textColor = Tokens.Color.secondaryLabel
             sub.lineBreakMode = .byWordWrapping
             sub.maximumNumberOfLines = 0
             sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -73,7 +74,7 @@ enum SettingsForm {
     /// section — there's no tab bar to carry that label anymore.
     static func sectionHeaderLabel(_ text: String) -> NSView {
         let title = label(text)
-        title.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        title.font = Tokens.Font.bodyEmphasized
 
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false

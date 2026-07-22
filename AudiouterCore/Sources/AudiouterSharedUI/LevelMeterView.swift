@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 import QuartzCore
 
 /// The **leading-column VU meter** (task T1): a thin vertical bar whose green
@@ -96,8 +97,8 @@ public final class LevelMeterView: NSView {
 
     private func updateLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            trackLayer.backgroundColor = NSColor.tertiarySystemFill.cgColor
-            fillLayer.backgroundColor = NSColor.systemGreen.cgColor
+            trackLayer.backgroundColor = Tokens.Color.tertiarySystemFill.cgColor
+            fillLayer.backgroundColor = Tokens.Color.meterFill.cgColor
         }
     }
 

@@ -301,7 +301,7 @@ final class PopoverPanelViewController: NSViewController {
         let label = NSTextField(labelWithString: header)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.textColor = .labelColor
+        label.textColor = Tokens.Color.label
         let headerWrap = NSView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
@@ -318,7 +318,7 @@ final class PopoverPanelViewController: NSViewController {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = .secondaryLabelColor
+            chevron.contentTintColor = Tokens.Color.secondaryLabel
             chevron.setAccessibilityLabel(collapsed ? "Expand \(header)" : "Collapse \(header)")
             let toggle = onToggle
             let onChevron = ClosureActionTarget { toggle?() }
@@ -383,7 +383,7 @@ final class PopoverPanelViewController: NSViewController {
             button.bezelStyle = .smallSquare
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
-            button.contentTintColor = .secondaryLabelColor
+            button.contentTintColor = Tokens.Color.secondaryLabel
             button.isEnabled = accessory.isEnabled
             // System-rendered template SF Symbol (task D — `plus`), verified
             // non-nil with a graceful fallback.
@@ -610,8 +610,8 @@ final class PopoverPanelViewController: NSViewController {
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text.uppercased())
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        label.textColor = .secondaryLabelColor
+        label.font = Tokens.Font.captionMedium
+        label.textColor = Tokens.Color.secondaryLabel
         label.alignment = .center
         return label
     }
@@ -624,8 +624,8 @@ final class PopoverPanelViewController: NSViewController {
     func addSubsectionHeader(_ title: String) {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        label.textColor = .tertiaryLabelColor
+        label.font = Tokens.Font.captionMedium
+        label.textColor = Tokens.Color.tertiaryLabel
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
@@ -647,7 +647,7 @@ final class PopoverPanelViewController: NSViewController {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 11)
-        label.textColor = .tertiaryLabelColor
+        label.textColor = Tokens.Color.tertiaryLabel
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         let wrapper = NSView()

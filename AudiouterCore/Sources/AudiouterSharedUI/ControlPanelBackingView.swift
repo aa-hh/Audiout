@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The ONE approved custom-drawn element in the control-panel shell (T11,
 /// documented exception — see `AGENTS.md`): draws the rounded bubble +
@@ -70,7 +71,7 @@ public final class ControlPanelBackingView: NSView {
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        Tokens.Color.windowBackground.setFill()
         bubblePath().fill()
     }
 

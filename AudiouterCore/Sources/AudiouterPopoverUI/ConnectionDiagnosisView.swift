@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// The inline **diagnosis panel** that expands under a failed device row
 /// (`dev/notes/p1-connection-status-brief.md` §7.1): a one-line cause, a
@@ -113,7 +114,7 @@ public final class ConnectionDiagnosisView: NSView {
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
         suggestionLabel.font = .systemFont(ofSize: 11)
-        suggestionLabel.textColor = .secondaryLabelColor
+        suggestionLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(suggestionLabel)
 
         configureSmallButton(retryButton, title: "Try again", action: #selector(retryClicked(_:)))
@@ -165,7 +166,7 @@ public final class ConnectionDiagnosisView: NSView {
         button.title = title
         button.bezelStyle = .rounded
         button.controlSize = .small
-        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.font = Tokens.Font.caption
         button.target = self
         button.action = action
         button.setContentHuggingPriority(.required, for: .horizontal)
@@ -184,7 +185,7 @@ public final class ConnectionDiagnosisView: NSView {
         dismissButton.isBordered = false
         dismissButton.imagePosition = .imageOnly
         dismissButton.imageScaling = .scaleProportionallyDown
-        dismissButton.contentTintColor = .tertiaryLabelColor
+        dismissButton.contentTintColor = Tokens.Color.tertiaryLabel
         dismissButton.target = self
         dismissButton.action = #selector(dismissClicked(_:))
 

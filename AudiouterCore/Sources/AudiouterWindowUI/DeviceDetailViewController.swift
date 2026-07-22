@@ -97,7 +97,7 @@ public final class DeviceDetailViewController: NSViewController {
         }
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
+        nameLabel.font = Tokens.Font.heading
         nameLabel.alignment = .natural   // left-aligned (LTR) to match the form column
         nameLabel.lineBreakMode = .byTruncatingTail
 
@@ -136,8 +136,8 @@ public final class DeviceDetailViewController: NSViewController {
         divider.widthAnchor.constraint(equalTo: formStack.widthAnchor).isActive = true
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.font = Tokens.Font.caption
+        hintLabel.textColor = Tokens.Color.secondaryLabel
         hintLabel.lineBreakMode = .byTruncatingTail
 
         let container = NSView()
@@ -187,7 +187,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// (so all five rows' values line up in a column) plus the value label.
     private func makeMetadataRow(caption: String, valueLabel: NSTextField) -> NSView {
         let captionLabel = NSTextField(labelWithString: caption)
-        captionLabel.textColor = .secondaryLabelColor
+        captionLabel.textColor = Tokens.Color.secondaryLabel
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
         captionLabel.widthAnchor.constraint(equalToConstant: Self.captionWidth).isActive = true
 

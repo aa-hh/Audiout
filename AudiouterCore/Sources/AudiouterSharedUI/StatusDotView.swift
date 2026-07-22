@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// The on-icon **connection-status badge** (2026-07-17 redesign): a small dot
 /// overlapping the device icon's bottom-right corner (a notification-badge
@@ -114,10 +115,10 @@ final class StatusDotView: NSView {
             fill = .systemTeal
         } else {
             switch state {
-            case .off:                        fill = .clear
-            case .connecting, .reconnecting:  fill = .secondaryLabelColor
-            case .connected:                  fill = .systemGreen
-            case .failed:                     fill = .systemOrange
+            case .off:                        fill = Tokens.Color.clear
+            case .connecting, .reconnecting:  fill = Tokens.Color.secondaryLabel
+            case .connected:                  fill = Tokens.Color.meterFill
+            case .failed:                     fill = Tokens.Color.warning
             }
         }
         effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -125,7 +126,7 @@ final class StatusDotView: NSView {
             // Best-effort punch-out ring matching the card/menu surface so the dot
             // reads as a separate badge over the icon. Uses underPageBackgroundColor
             // which adapts well to both light and dark appearances on menu materials.
-            dotLayer.borderColor = NSColor.underPageBackgroundColor.cgColor
+            dotLayer.borderColor = Tokens.Color.underPageBackground.cgColor
         }
     }
 

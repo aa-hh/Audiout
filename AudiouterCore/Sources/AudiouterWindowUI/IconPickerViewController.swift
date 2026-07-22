@@ -97,7 +97,7 @@ public final class IconPickerViewController: NSViewController {
 
         previewImageView.translatesAutoresizingMaskIntoConstraints = false
         previewImageView.imageScaling = .scaleProportionallyUpOrDown
-        previewImageView.contentTintColor = .secondaryLabelColor
+        previewImageView.contentTintColor = Tokens.Color.secondaryLabel
         previewImageView.isHidden = true
 
         applyButton.translatesAutoresizingMaskIntoConstraints = false
@@ -114,8 +114,8 @@ public final class IconPickerViewController: NSViewController {
         defaultButton.action = #selector(defaultTapped(_:))
 
         emptyResultsLabel.translatesAutoresizingMaskIntoConstraints = false
-        emptyResultsLabel.textColor = .secondaryLabelColor
-        emptyResultsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        emptyResultsLabel.textColor = Tokens.Color.secondaryLabel
+        emptyResultsLabel.font = Tokens.Font.caption
         emptyResultsLabel.alignment = .center
         emptyResultsLabel.isHidden = true
 
@@ -191,7 +191,7 @@ public final class IconPickerViewController: NSViewController {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: plainLabel)
         image?.isTemplate = true
         button.image = image
-        button.contentTintColor = .secondaryLabelColor
+        button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = #selector(curatedButtonTapped(_:))
         button.identifier = NSUserInterfaceItemIdentifier(name)
@@ -257,7 +257,7 @@ public final class IconPickerViewController: NSViewController {
             let image = NSImage(systemSymbolName: trimmed, accessibilityDescription: trimmed)
             image?.isTemplate = true
             previewImageView.image = image
-            previewImageView.contentTintColor = .secondaryLabelColor
+            previewImageView.contentTintColor = Tokens.Color.secondaryLabel
             previewImageView.isHidden = false
             applyButton.isEnabled = true
         } else {

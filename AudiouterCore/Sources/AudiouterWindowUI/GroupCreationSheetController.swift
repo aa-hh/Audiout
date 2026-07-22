@@ -119,7 +119,7 @@ public final class GroupCreationSheetController: NSViewController {
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
-        speakersLabel.textColor = .secondaryLabelColor
+        speakersLabel.textColor = Tokens.Color.secondaryLabel
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
@@ -138,8 +138,8 @@ public final class GroupCreationSheetController: NSViewController {
         scrollView.borderType = .noBorder
 
         countLabel.translatesAutoresizingMaskIntoConstraints = false
-        countLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        countLabel.textColor = .secondaryLabelColor
+        countLabel.font = Tokens.Font.caption
+        countLabel.textColor = Tokens.Color.secondaryLabel
 
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         cancelButton.title = "Cancel"
@@ -301,7 +301,7 @@ public final class GroupCreationSheetController: NSViewController {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
         iconWellButton.image = image
-        iconWellButton.contentTintColor = .secondaryLabelColor
+        iconWellButton.contentTintColor = Tokens.Color.secondaryLabel
     }
 
     /// Persist the checked candidates as a new group via

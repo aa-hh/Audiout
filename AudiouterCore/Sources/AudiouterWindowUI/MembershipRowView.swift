@@ -86,17 +86,17 @@ public final class MembershipRowView: NSView {
         // Identity-neutral secondary tint, matching the sidebar's device rows
         // (`SidebarViewController.makeIconLabel`) — no accent-on-membership,
         // since this checklist has no "currently active" concept to show.
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = Tokens.Color.secondaryLabel
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        nameLabel.font = Tokens.Font.body
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         unavailableLabel.translatesAutoresizingMaskIntoConstraints = false
-        unavailableLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        unavailableLabel.textColor = .secondaryLabelColor
+        unavailableLabel.font = Tokens.Font.caption
+        unavailableLabel.textColor = Tokens.Color.secondaryLabel
         unavailableLabel.stringValue = "Unavailable"
         unavailableLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -151,7 +151,7 @@ public final class MembershipRowView: NSView {
         // Dimmed like the sidebar's unavailable devices — de-emphasized, still
         // fully interactive (an unavailable device stays checkable/uncheckable
         // so an existing member can be removed even while offline).
-        nameLabel.textColor = device.isAvailable ? .labelColor : .disabledControlTextColor
+        nameLabel.textColor = device.isAvailable ? Tokens.Color.label : .disabledControlTextColor
 
         unavailableLabel.isHidden = device.isAvailable
 

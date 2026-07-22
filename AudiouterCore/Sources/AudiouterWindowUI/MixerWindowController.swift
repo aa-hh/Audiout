@@ -521,8 +521,8 @@ final class ContentPaneHostViewController: NSViewController {
 
     override func loadView() {
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
-        footerLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        footerLabel.textColor = .secondaryLabelColor
+        footerLabel.font = Tokens.Font.caption
+        footerLabel.textColor = Tokens.Color.secondaryLabel
         footerLabel.alignment = .center
         footerLabel.lineBreakMode = .byTruncatingTail
 
@@ -586,13 +586,13 @@ public final class GroupsEmptyStateViewController: NSViewController {
 
     public override func loadView() {
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
-        messageLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 2)
-        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.font = Tokens.Font.titleLarge
+        messageLabel.textColor = Tokens.Color.secondaryLabel
         messageLabel.alignment = .center
 
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.font = .systemFont(ofSize: NSFont.systemFontSize - 1)
-        subtitleLabel.textColor = .tertiaryLabelColor
+        subtitleLabel.font = Tokens.Font.subtitleLarge
+        subtitleLabel.textColor = Tokens.Color.tertiaryLabel
         subtitleLabel.alignment = .center
 
         newGroupButton.translatesAutoresizingMaskIntoConstraints = false

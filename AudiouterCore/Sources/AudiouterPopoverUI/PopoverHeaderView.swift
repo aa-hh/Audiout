@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The popover's **header bar** (task A) — a borderless toolbar-style strip at
 /// the very top of the panel, above the System card, styled per the macOS HIG for
@@ -59,7 +60,7 @@ final class PopoverHeaderView: NSView {
     private func buildSubviews() {
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = .labelColor
+        titleLabel.textColor = Tokens.Color.label
         titleLabel.alignment = .center
 
         configureIconButton(groupsButton,
@@ -144,7 +145,7 @@ final class PopoverHeaderView: NSView {
         button.action = action
 
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            .applying(.init(hierarchicalColor: .secondaryLabelColor))
+            .applying(.init(hierarchicalColor: Tokens.Color.secondaryLabel))
         for name in [symbol] + fallbacks {
             if let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityLabel) {
                 if let hierarchical = image.withSymbolConfiguration(symbolConfig) {

@@ -14,7 +14,7 @@ import AppKit
 /// **As of this module's creation, `Tokens` holds ZERO custom values.** Every
 /// `Tokens.Color` case below aliases an existing stock `NSColor` semantic
 /// (`.labelColor`, `.controlAccentColor`, …) that call sites already use
-/// directly today; every `Tokens.Type` case aliases an existing
+/// directly today; every `Tokens.Font case aliases an existing
 /// `NSFont.systemFont`/`NSFont.boldSystemFont` pattern and size already in
 /// use; `Tokens.Layout` re-exports `PopoverColumnGrid`'s existing constants
 /// (which remains the geometry authority — nothing moved); `Tokens.Material`
@@ -91,7 +91,7 @@ public enum Tokens {
     /// codebase already uses (verified via `git grep -n "NSFont\."` across
     /// the same five UI packages). No custom font family or arbitrary point
     /// size lives here — only forwarding of patterns already in use.
-    public enum `Type` {
+    public enum Font {
         /// Standard body text at the system's default control size — the most
         /// common label font in the app (row names, headings, form labels).
         /// Alias of `NSFont.systemFont(ofSize: NSFont.systemFontSize)`.

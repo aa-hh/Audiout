@@ -88,14 +88,14 @@ public final class GroupRowView: NSView {
         muteButton.state = isMuted ? .on : .off
 
         nameLabel.stringValue = group.name
-        nameLabel.font = isActive ? .boldSystemFont(ofSize: NSFont.systemFontSize)
-                                  : .systemFont(ofSize: NSFont.systemFontSize)
+        nameLabel.font = isActive ? Tokens.Font.bodyBold
+                                  : Tokens.Font.body
 
         activateButton.image = NSImage(
             systemSymbolName: isActive ? "checkmark.circle.fill" : "circle",
             accessibilityDescription: isActive ? "Group is active" : "Activate group"
         )
-        activateButton.contentTintColor = isActive ? .controlAccentColor : .secondaryLabelColor
+        activateButton.contentTintColor = isActive ? Tokens.Color.accent : Tokens.Color.secondaryLabel
 
         chevronButton.image = NSImage(
             systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
@@ -132,7 +132,7 @@ public final class GroupRowView: NSView {
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = Tokens.Color.secondaryLabel
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -141,8 +141,8 @@ public final class GroupRowView: NSView {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        readoutLabel.textColor = .secondaryLabelColor
+        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -156,7 +156,7 @@ public final class GroupRowView: NSView {
         muteButton.alternateImage = NSImage(
             systemSymbolName: "speaker.slash.fill",
             accessibilityDescription: "Unmute group")
-        muteButton.contentTintColor = .secondaryLabelColor
+        muteButton.contentTintColor = Tokens.Color.secondaryLabel
         muteButton.target = self
         muteButton.action = #selector(muteClicked(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -376,7 +376,7 @@ public final class GroupRowView: NSView {
             NSColor.selectedContentBackgroundColor.withAlphaComponent(0.12).setFill()
             path.fill()
         }
-        nameLabel.textColor = .labelColor
+        nameLabel.textColor = Tokens.Color.label
         super.draw(dirtyRect)
     }
 

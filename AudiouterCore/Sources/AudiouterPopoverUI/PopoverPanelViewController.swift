@@ -3,14 +3,18 @@
 import AppKit
 import AudiouterSharedUI
 
-/// The **Control-Center-style** panel hosted inside the popover's
-/// `contentViewController` (SPEC §9 revised, restyled 2026-07-14 — T-U8). Each
-/// section ("System / Main Out", "Selected Devices") is a rounded-rect **card
-/// module**: a translucent `NSVisualEffectView` (material `.menu`,
-/// `.withinWindow`, corner radius 11, continuous curve) inset from the popover
-/// edges, sitting on the popover's vibrant material with a small uppercase
-/// tertiary header ABOVE it, exactly like a macOS Control Center component. Rows
-/// live INSIDE the card, which clips to its rounded corners.
+/// The panel hosted inside the popover's `contentViewController` (SPEC §9
+/// revised, restyled 2026-07-14 — T-U8).
+///
+/// **De-nested (warm-signal-v2, spec §5.1):** through 2026-07-21 each section
+/// ("System / Main Out", "Selected Devices") drew as a separate rounded-rect
+/// Control Center-style card module — a translucent `NSVisualEffectView` tile
+/// floating on the panel's own vibrant `.behindWindow` background (see git
+/// history). The spec's "de-nest" replaces both halves of that: `background`
+/// is now a single continuous **warm canvas** (`WarmCanvasView`, always
+/// opaque — no vibrancy) and `CardView` no longer draws a tile of its own —
+/// every section's rows sit directly on the canvas, separated only by a 1px
+/// hairline divider this controller inserts between cards (`beginCard`).
 ///
 /// It is a dumb container: `PopoverController` composes the sections and hands in
 /// the rows; this controller lays them out and sizes the popover. The outer
@@ -97,40 +101,45 @@ final class PopoverPanelViewController: NSViewController {
     /// truncate more — accepted. (Footer removed; actions moved to the header +
     /// Groups "+".)
     private let panelWidth: CGFloat = 623
-    /// Side inset of a card from the popover edge (Control Center–style).
-    static let cardMargin: CGFloat = 12
+    /// Trailing inset of a header's accessory button ("+", Groups) from the
+    /// header row's OWN trailing edge — unrelated to card-tile geometry
+    /// (there's no card margin to reuse after V2's de-nest; this keeps the
+    /// button's on-screen position unchanged from before that change).
+    private static let headerAccessoryTrailingInset: CGFloat = 12
 
     /// Associated-object key that keeps a chevron/title `ClosureActionTarget` alive
     /// for the lifetime of its button (target/action holds `target` weakly).
     private static var actionTargetKey: UInt8 = 0
 
-    /// The popover's own BACKGROUND — distinct from the card tiles floating on
-    /// top of it. `NSPopover` gives a vibrant frame "for free" only around
-    /// `container`'s edges; historically `container` itself was a plain,
-    /// materialless `NSView`, so the visible background behind/between cards
-    /// was really just that free popover chrome. ahh asked (2026-07-16) for
-    /// MORE translucency specifically here (not on the cards, which stay
-    /// `.withinWindow` — see `CardView`): this is a real, `.behindWindow`
-    /// `NSVisualEffectView` blending against the actual desktop behind the
-    /// popover, filling `container` behind everything else.
-    private let background = NSVisualEffectView()
+    /// The popover's own warm CANVAS (spec §5.1) — the single continuous
+    /// surface every de-nested section sits directly on, filling `container`
+    /// behind everything else. Through 2026-07-21 this was a real,
+    /// `.behindWindow`-blended `NSVisualEffectView` (ahh asked, 2026-07-16, for
+    /// more translucency specifically here, distinct from the then-separate
+    /// card tiles). warm-signal-v2 replaces it with `WarmCanvasView` — the
+    /// spec'd `canvasHi → canvas` gradient (+ deterministic grain in dark
+    /// mode) instead of system vibrancy. Always fully opaque (V2 §D — no
+    /// Reduce-Transparency special case needed: unlike the vibrant view it
+    /// replaces, this one was never translucent).
+    private let background = WarmCanvasView()
 
     override func loadView() {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
         background.translatesAutoresizingMaskIntoConstraints = false
-        background.material = .menu
-        background.blendingMode = .behindWindow
-        background.state = .active
         container.addSubview(background)
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
         stackView.alignment = .leading
         stackView.distribution = .fill
-        // Vertical gap BETWEEN modules (each module's header sits inside the tile).
-        stackView.spacing = 12
+        // Vertical gap BETWEEN sections (V2: cards no longer float as separate
+        // tiles with their own margin-created gap — narrowed from 12 to 8pt now
+        // that the 1px hairline divider (`beginCard`) carries the separation
+        // instead of whitespace-around-a-rounded-tile; a designer's pick, tune
+        // live).
+        stackView.spacing = 8
         stackView.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
 
         container.addSubview(header)
@@ -407,7 +416,7 @@ final class PopoverPanelViewController: NSViewController {
             headerWrap.addSubview(button)
             NSLayoutConstraint.activate([
                 button.trailingAnchor.constraint(equalTo: headerWrap.trailingAnchor,
-                                                 constant: -Self.cardMargin),
+                                                 constant: -Self.headerAccessoryTrailingInset),
                 button.centerYAnchor.constraint(equalTo: label.centerYAnchor),
                 button.widthAnchor.constraint(equalToConstant: 24),
                 button.heightAnchor.constraint(equalToConstant: 22),
@@ -434,11 +443,28 @@ final class PopoverPanelViewController: NSViewController {
 
         card.addRow(headerWrap)
 
-        // The card fills the panel width minus the side margins.
+        // V2 de-nest (spec §5.1): a card no longer floats as its own tile with
+        // a side margin — it fills the FULL panel width, edge-to-edge with the
+        // stack, so every section sits flush on the continuous warm canvas.
+        // The ONLY visual separation from the section before it is a 1px
+        // hairline divider, inserted here (not by `CardView` itself — cards
+        // draw zero chrome of their own now) BEFORE this card, skipped for the
+        // very first section.
+        if stackView.arrangedSubviews.contains(where: { $0 is CardView }) {
+            let hairline = HairlineView()
+            hairline.translatesAutoresizingMaskIntoConstraints = false
+            stackView.addArrangedSubview(hairline)
+            NSLayoutConstraint.activate([
+                hairline.heightAnchor.constraint(equalToConstant: 1),
+                hairline.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
+                hairline.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
+            ])
+        }
+
         stackView.addArrangedSubview(card)
         NSLayoutConstraint.activate([
-            card.leadingAnchor.constraint(equalTo: stackView.leadingAnchor, constant: Self.cardMargin),
-            card.trailingAnchor.constraint(equalTo: stackView.trailingAnchor, constant: -Self.cardMargin),
+            card.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
         ])
 
         currentCard = card
@@ -773,4 +799,26 @@ private final class ClosureActionTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
     @objc func fire() { action() }
+}
+
+/// A 1px section-divider hairline (spec §5.1: "separated by 1px hairline
+/// dividers") — the ONLY visual separation between de-nested cards now that
+/// they no longer draw their own material/shadow/rim (`CardView`). Purely
+/// decorative and non-interactive; `beginCard` inserts one into `stackView`
+/// before every card after the first.
+private final class HairlineView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = Tokens.Color.hairline.cgColor
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = Tokens.Color.hairline.cgColor
+    }
 }

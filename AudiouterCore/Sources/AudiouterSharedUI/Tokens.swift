@@ -11,22 +11,26 @@ import AppKit
 /// material through `Tokens`, never through a raw literal `NSColor`,
 /// `NSFont`, or magic number of its own.
 ///
-/// **As of this module's creation, `Tokens` holds ZERO custom values.** Every
-/// `Tokens.Color` case below aliases an existing stock `NSColor` semantic
-/// (`.labelColor`, `.controlAccentColor`, …) that call sites already use
-/// directly today; every `Tokens.Font case aliases an existing
-/// `NSFont.systemFont`/`NSFont.boldSystemFont` pattern and size already in
-/// use; `Tokens.Layout` re-exports `PopoverColumnGrid`'s existing constants
-/// (which remains the geometry authority — nothing moved); `Tokens.Material`
-/// aliases the existing `NSVisualEffectView.Material` cases already applied.
-/// Introducing this module is a **zero visual change, zero behavior change**
-/// step: it creates the one-import seam future call sites will route
-/// through, and the seam through which the warm palette will later be
-/// introduced (a later wave), without touching any call site yet.
+/// **At this module's creation, `Tokens` held ZERO custom values.** Every
+/// case aliased an existing stock `NSColor`/`NSFont`/`NSVisualEffectView.Material`
+/// already in use, and `Tokens.Layout` re-exported `PopoverColumnGrid` (which
+/// remains the geometry authority — nothing moved). That zero-custom-value
+/// state was the SEAM, not a permanent constraint: **warm-signal-v2** (the
+/// popover canvas + card de-nest, `dev/notes/warm-signal-v3.md` §1/§5.1) is
+/// the first wave to actually populate `Tokens.Color` with real custom
+/// values — the warm surface ladder + hairline (`canvas`, `canvasHi`,
+/// `panel`, `raised`, `well`, `hairline`; see the "Warm Signal custom
+/// palette" section below). `Tokens.Font`/`Tokens.Layout`/`Tokens.Material`
+/// remain pure forwarding aliases; only `Tokens.Color` gains custom cases,
+/// and only ones a real call site consumes this same wave. Gold/ember/glow/
+/// `ring-connected`/caution/failure/link are deliberately NOT added yet —
+/// those are the later S-chain (signal-color) tasks' job, once their call
+/// sites exist.
 ///
 /// Do not add a case here for a color/font/material combination that isn't
-/// already used in the codebase — this module documents and centralizes
-/// what exists, it does not speculate ahead of real usage.
+/// already used (or, for the warm palette, consumed by the very same commit)
+/// in the codebase — this module documents and centralizes what exists, it
+/// does not speculate ahead of real usage.
 public enum Tokens {
 
     // MARK: - Color
@@ -82,6 +86,81 @@ public enum Tokens {
         /// through to a view behind it (`ControlPanelWindowController`). Alias
         /// of `NSColor.clear`.
         public static var clear: NSColor { .clear }
+
+        // MARK: Warm Signal custom palette (V2, spec §1)
+        //
+        // The ONE place a custom (non-semantic) RGB value may live, per root
+        // AGENTS.md's governance rule ("Every `Tokens.Color` case ships
+        // light + dark + Increase Contrast variants with a documented
+        // contrast rationale"). V2 (the popover canvas + card de-nest) is
+        // the first consumer: the warm surface ladder + hairline from spec
+        // §1.1 (dark) / §1.2 (light). `panel`/`raised`/`well` are defined
+        // here per the spec's full palette table but are NOT YET painted
+        // anywhere — V2's de-nest removes the card's own panel fill rather
+        // than adding one; they're reserved for a later wave (ring contrast
+        // reference, slider track/well, mute-pill fill). Every case below
+        // resolves LIVE via `NSColor(name:dynamicProvider:)` against both
+        // the color's `NSAppearance` argument (light/dark) and the CURRENT
+        // `NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast`
+        // value every time AppKit asks for the resolved color — exactly
+        // like `NSColor.labelColor` above already behaves for Dark Mode.
+        // Never cache a `.cgColor`/`.set()` result outside a live draw or
+        // `viewDidChangeEffectiveAppearance` refresh (see `WarmCanvasView`
+        // in this target and `CardView`/its hairline sibling in
+        // `AudiouterPopoverUI` for the pattern).
+
+        /// The popover/content canvas — darkest rung, gradient base
+        /// (§1.1/§1.2). No stated contrast floor (it's a background, not a
+        /// foreground instrument), so no separate Increase Contrast value.
+        public static var canvas: NSColor {
+            warmDynamic(name: "canvas", dark: 0x16130F, light: 0xF4EFE7)
+        }
+        /// Canvas gradient top (§1.1/§1.2), paired with `canvas` by
+        /// `WarmCanvasView`'s vertical gradient. No stated contrast floor.
+        public static var canvasHi: NSColor {
+            warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xF7F3EC)
+        }
+        /// Card/panel fill — "the reference canvas a ring sits on" (§1). Not
+        /// yet painted by any call site in V2 (cards stop drawing their own
+        /// fill when de-nested onto the canvas, §5.1); reserved for a later
+        /// wave. No stated contrast floor.
+        public static var panel: NSColor {
+            warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBF8F2)
+        }
+        /// Raised well fill (icon well, blocked-checkbox fill, §1). Not yet
+        /// painted by any call site in V2 — reserved for a later wave. No
+        /// stated contrast floor.
+        public static var raised: NSColor {
+            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
+        }
+        /// Inset well fill (slider track trough, dropdown fill, §1). Not yet
+        /// painted by any call site in V2 — reserved for a later wave. No
+        /// stated contrast floor.
+        public static var well: NSColor {
+            warmDynamic(name: "well", dark: 0x2B2620, light: 0xECE5D8)
+        }
+        /// 1px section-divider hairline (§5.1 — the ONLY visual separation
+        /// between de-nested cards now that they no longer draw their own
+        /// material/shadow/rim). CONTRAST RATIONALE: dark carries a
+        /// NORMATIVE floor in §1.1 ("≥3:1 vs `panel` only where
+        /// load-bearing"). The spec's own literal hex (`#3A332B` on
+        /// `panel` `#1D1915`) measures ≈1.40:1 by the WCAG relative-
+        /// luminance formula — under floor. Per the spec's own escape valve
+        /// ("any token below floor is brightened until it passes", §1) the
+        /// Increase Contrast variant is a brightened warm-grey (`#786B5A`,
+        /// ≈3.3:1 vs `panel`) rather than the literal spec hex; the BASE
+        /// (non-IC) value stays exactly the spec'd hex since re-tuning base
+        /// tokens for everyday legibility is the Wave-5 accessibility
+        /// sweep's job, not V2's — V2 only has to make Increase Contrast
+        /// itself clear the floor. Light's table entry states NO floor
+        /// ("—"), but house rule 3 requires every case to ship an IC variant
+        /// regardless, so a symmetrical darkened warm-tan (`#9B8768`,
+        /// ≈3.25:1 vs light `panel` `#FBF8F2`) is used there too — the
+        /// quietest reasonable choice, not a spec requirement.
+        public static var hairline: NSColor {
+            warmDynamic(name: "hairline", dark: 0x3A332B, darkHighContrast: 0x786B5A,
+                       light: 0xE2DACC, lightHighContrast: 0x9B8768)
+        }
     }
 
     // MARK: - Type
@@ -176,9 +255,17 @@ public enum Tokens {
     /// codebase already applies. No custom material or blending mode lives
     /// here — only forwarding.
     public enum Material {
-        /// The popover/menu-surface material (`CardView`,
-        /// `PopoverPanelViewController`). Alias of
-        /// `NSVisualEffectView.Material.menu`.
+        /// The system menu-surface material. Alias of
+        /// `NSVisualEffectView.Material.menu`. UNCONSUMED as of V2: `CardView`
+        /// and `PopoverPanelViewController` both used `.menu` directly (not
+        /// through this alias) before the warm-signal-v2 de-nest, which
+        /// replaced both call sites with the custom-painted warm canvas
+        /// (`WarmCanvasView`, spec §5.1) — neither draws any
+        /// `NSVisualEffectView` material anymore. Kept as a forwarding alias
+        /// per the governance rule's spirit (it still names a real, applied-
+        /// elsewhere-in-AppKit system material) but has no current call site;
+        /// do not add a NEW consumer without checking this comment is still
+        /// accurate.
         public static var popover: NSVisualEffectView.Material { .menu }
         /// Opaque window-chrome material (onboarding background, Settings
         /// window background, About panel). Alias of
@@ -189,5 +276,42 @@ public enum Tokens {
         /// `SidebarViewController`/`MixerWindowController`. Alias of
         /// `NSVisualEffectView.Material.sidebar`.
         public static var sidebar: NSVisualEffectView.Material { .sidebar }
+    }
+}
+
+// MARK: - Warm Signal palette internals (private to this file, per the
+// governance rule: this is the ONE place a hex/RGB literal is permitted)
+
+/// Builds an appearance- and Increase-Contrast-resolving `NSColor` for a
+/// `Tokens.Color` warm-palette case. `name` becomes the `NSColor.Name` (so
+/// repeated calls describe the same logical color, matching how
+/// `NSColor.labelColor` etc. behave). The returned color re-evaluates the
+/// closure every time AppKit resolves it against a drawing context's
+/// appearance — never a frozen snapshot — exactly like the semantic aliases
+/// above.
+private func warmDynamic(name: String,
+                          dark: UInt32, darkHighContrast: UInt32? = nil,
+                          light: UInt32, lightHighContrast: UInt32? = nil) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let hex: UInt32
+        if isDark {
+            hex = increaseContrast ? (darkHighContrast ?? dark) : dark
+        } else {
+            hex = increaseContrast ? (lightHighContrast ?? light) : light
+        }
+        return NSColor(warmSignalHex: hex)
+    }
+}
+
+private extension NSColor {
+    /// A literal `0xRRGGBB` → opaque `NSColor`. The only place in the
+    /// codebase a hex literal is permitted to become a color.
+    convenience init(warmSignalHex hex: UInt32) {
+        self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                  green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255,
+                  alpha: 1)
     }
 }

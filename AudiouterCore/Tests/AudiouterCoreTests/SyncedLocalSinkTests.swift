@@ -129,5 +129,92 @@ final class SyncedLocalSinkTests: IsolatedTestCase {
         XCTAssertFalse(produced)
         XCTAssertTrue(out.allSatisfy { $0 == 0 })
     }
+
+    // MARK: T-LIFECYCLE — device-change + sleep/wake rebuild
+
+    /// Drives the trigger methods directly — no real device change, no real
+    /// sleep/wake, no real `AVAudioEngine`/Core Audio device — and asserts the
+    /// rebuild fires all four steps in the exact order the plan specifies: stop →
+    /// re-measure → reset → restart. `lifecycleHooks` is swapped for a recording
+    /// stub (reachable via `@testable import`) so this never touches the real
+    /// engine or a Core Audio latency probe.
+    func test_deviceChange_firesRebuildStepsInOrder() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1,
+            presentationDelayMs: { 100 }, localOutputLatency: { nil })
+
+        var order: [String] = []
+        sink.lifecycleHooks = SyncedLocalSink.LifecycleHooks(
+            stopEngine: { order.append("stop") },
+            remeasureLatency: { order.append("remeasure"); return 42 },
+            resetSessionState: { delay in
+                XCTAssertEqual(delay, 42, "reset must receive the just-remeasured delay")
+                order.append("reset")
+            },
+            restartEngine: { order.append("restart") })
+
+        sink.handleDefaultOutputDeviceChanged()
+
+        XCTAssertEqual(order, ["stop", "remeasure", "reset", "restart"])
+    }
+
+    /// Same assertion, driven via the sleep/wake entry points instead of the
+    /// device-change one — all three triggers share one rebuild sequence per the
+    /// plan's "always rebuild, don't diff" rule (brief §7/§3).
+    func test_willSleepAndDidWake_fireTheSameRebuildStepsInOrder() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1,
+            presentationDelayMs: { 100 }, localOutputLatency: { nil })
+
+        var order: [String] = []
+        func stubbedHooks() -> SyncedLocalSink.LifecycleHooks {
+            SyncedLocalSink.LifecycleHooks(
+                stopEngine: { order.append("stop") },
+                remeasureLatency: { order.append("remeasure"); return 0 },
+                resetSessionState: { _ in order.append("reset") },
+                restartEngine: { order.append("restart") })
+        }
+
+        sink.lifecycleHooks = stubbedHooks()
+        sink.handleSystemWillSleep()
+        XCTAssertEqual(order, ["stop", "remeasure", "reset", "restart"])
+
+        order.removeAll()
+        sink.lifecycleHooks = stubbedHooks()
+        sink.handleSystemDidWake()
+        XCTAssertEqual(order, ["stop", "remeasure", "reset", "restart"])
+    }
+
+    /// The live (production-default) `resetSessionState`/`remeasureLatency` hooks
+    /// — never swapped — must reach the real `clearSessionState()`/
+    /// `measureTotalDelayNanos()` plumbing. Deliberately does NOT drive
+    /// `restartEngine`/`stopEngine` here (those touch the real `AVAudioEngine`
+    /// and a live device, which this suite avoids per house rule — no real
+    /// audio/engine start in tests, verified by `swift build` + offline math
+    /// only): after enqueueing then calling `remeasureLatency()` +
+    /// `resetSessionState(_:)` directly, the anchor is gone and the sink is
+    /// silent again, matching `test_noAudioBeforeEnqueue_isSilent`.
+    func test_liveResetSessionStateHook_clearsAnchorAfterEnqueue() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1,
+            presentationDelayMs: { 100 }, localOutputLatency: { nil })
+
+        var ramp: [Float] = [1, 2, 3, 4]
+        ramp.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(
+                interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+        }
+
+        let delay = sink.lifecycleHooks.remeasureLatency()
+        sink.lifecycleHooks.resetSessionState(delay)
+
+        var out = [Float](repeating: 1, count: 128)
+        let produced = out.withUnsafeMutableBufferPointer { ob in
+            sink.renderInterleaved(into: ob, frameCount: 128, cycleStartMonotonicNanos: 1_000_000_000_000)
+        }
+        XCTAssertFalse(produced, "the anchor must be gone after the live reset hook runs")
+        XCTAssertTrue(out.allSatisfy { $0 == 0 })
+    }
     #endif
 }

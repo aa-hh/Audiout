@@ -7,6 +7,10 @@ import Foundation
 import AVFoundation
 #endif
 
+#if canImport(AudioToolbox)
+import AudioToolbox
+#endif
+
 /// Pure, hardware-free timing math for the synced local sink (T-SINK). Split out
 /// so the delay computation and the per-render-cycle release decision are
 /// unit-testable without an `AVAudioEngine` or any real audio device.
@@ -89,18 +93,20 @@ enum SyncTiming {
 /// not a slave-side PTP feedback loop (brief §2).
 ///
 /// ## Ownership / hot file
-/// This file is the shared foundation later edited by T-LIFECYCLE (device-change /
-/// sleep-wake rebuild), T-CORRECTION (continuous micro-rate correction), and
-/// T-OFFSET-UI (user ms bias) — never concurrently. The graph topology and the
-/// render block's `AVAudioTime` handling below leave explicit seams for those.
+/// This file is the shared foundation also edited by T-CORRECTION (continuous
+/// micro-rate correction) and T-OFFSET-UI (user ms bias) — never concurrently.
+/// T-LIFECYCLE (device-change / sleep-wake rebuild) has landed here — see
+/// "MARK: T-LIFECYCLE" below. The graph topology and the render block's
+/// `AVAudioTime` handling below leave explicit seams for the remaining two.
 ///
 /// ## What this v1 does and does NOT do
-/// It establishes the timeline anchor and the frame-accurate release gate. It does
-/// NOT do drift correction (the source-device vs output-device ppm-clock skew that
-/// accrues over long sessions) — that is T-CORRECTION, which plugs into the graph
-/// seam and the `latestPhaseErrorNanos` readout marked below. It also does NOT
-/// own device-change/sleep-wake rebuild (T-LIFECYCLE) or the tap self-exclude
-/// that prevents an echo feedback loop (T-FANOUT).
+/// It establishes the timeline anchor and the frame-accurate release gate, and
+/// (T-LIFECYCLE) rebuilds cleanly on a default-output-device change or a
+/// sleep/wake cycle. It does NOT do drift correction (the source-device vs
+/// output-device ppm-clock skew that accrues over long sessions) — that is
+/// T-CORRECTION, which plugs into the graph seam and the `latestPhaseErrorNanos`
+/// readout marked below. It also does NOT own the tap self-exclude that
+/// prevents an echo feedback loop (T-FANOUT).
 ///
 /// `@unchecked Sendable`: the render (consumer) and enqueue (producer) paths meet
 /// only through the lock-free SPSC ``InterleavedFloatRing``; the scalar release
@@ -148,6 +154,13 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private let graphQueue = DispatchQueue(label: "com.audiouter.syncedlocalsink.graph")
+    /// T-LIFECYCLE: dedicated queue for the default-output-device listener, kept
+    /// independent of `graphQueue` so installing/removing the listener never
+    /// contends with (or nests inside) a graph rebuild running on `graphQueue`.
+    private let lifecycleQueue = DispatchQueue(label: "com.audiouter.syncedlocalsink.lifecycle")
+    #if canImport(AudioToolbox)
+    private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+    #endif
     private var started = false
     /// Set on the first enqueue of a play session; pins ring-sample 0 to a pts.
     private var anchored = false
@@ -202,9 +215,11 @@ public final class SyncedLocalSink: @unchecked Sendable {
             boxed?.render(isSilence: isSilence, timestamp: timestamp, frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
         }
         boxed = self
+        self.lifecycleHooks = makeLiveLifecycleHooks()
     }
 
     deinit {
+        stopObservingLifecycleEvents()
         deinterleaveScratch.deallocate()
     }
 
@@ -222,13 +237,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public func start() throws {
         try graphQueue.sync {
             guard !started else { return }
-
-            // Sample the delay off the render path, so the render block never
-            // touches the actor-isolated engine read or a Core Audio latency probe.
-            let delay = SyncTiming.totalDelayNanos(
-                presentationDelayMs: presentationDelayMs(),
-                localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
-                safetyMarginMs: safetyMarginMs)
+            let delay = measureTotalDelayNanos()
             stateLock.withLock { cachedTotalDelayNanos = delay }
 
             engine.attach(sourceNode)
@@ -252,22 +261,159 @@ public final class SyncedLocalSink: @unchecked Sendable {
     }
 
     public func stop() {
+        teardownEngine()
+        clearSessionState()
+    }
+
+    /// Sample the delay off the render path, so the render block never touches
+    /// the actor-isolated engine read or a Core Audio latency probe. Factored out
+    /// of `start()` so T-LIFECYCLE's rebuild can call it as its own explicit
+    /// "re-measure" step, independent of the engine attach/connect/start below.
+    private func measureTotalDelayNanos() -> Int64 {
+        SyncTiming.totalDelayNanos(
+            presentationDelayMs: presentationDelayMs(),
+            localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
+            safetyMarginMs: safetyMarginMs)
+    }
+
+    /// Just the engine-level teardown half of `stop()` — no session-state reset.
+    /// Split out so T-LIFECYCLE's rebuild can sequence "stop engine" and "reset
+    /// session state" as two distinct, separately-testable steps even though a
+    /// plain `stop()` still does both together.
+    private func teardownEngine() {
         graphQueue.sync {
             if started {
                 sourceNode.reset()
                 engine.stop()
                 started = false
             }
-            stateLock.withLock {
-                anchored = false
-                released = false
-                targetReleaseNanos = 0
-                cachedTotalDelayNanos = nil
-                lastPhaseErrorNanos = 0
-            }
-            ring.reset()
         }
     }
+
+    /// Just the session/anchor-state half of `stop()` — no engine teardown. Split
+    /// out for the same reason as `teardownEngine()` above.
+    private func clearSessionState() {
+        stateLock.withLock {
+            anchored = false
+            released = false
+            targetReleaseNanos = 0
+            cachedTotalDelayNanos = nil
+            lastPhaseErrorNanos = 0
+        }
+        ring.reset()
+    }
+
+    // MARK: T-LIFECYCLE — device-change + sleep/wake rebuild
+
+    /// The four steps of a lifecycle rebuild, factored into swappable closures so
+    /// a unit test can assert their ORDER without a real device change, a real
+    /// sleep/wake, or a real `AVAudioEngine`/Core Audio device (`@testable import`
+    /// substitutes a recording stub before driving the trigger methods below).
+    /// Production leaves this at its `init` default, which wires each step to the
+    /// real engine/session methods on this type.
+    ///
+    /// Per the plan's "always rebuild, don't diff" rule (brief §7/§3): every
+    /// trigger below — default-output-device change, sleep, or wake — runs this
+    /// SAME full sequence. The mach↔`CLOCK_MONOTONIC` rebase used by the render
+    /// block (`CoreAudioSystemTap.timespec(fromHostTime:)`) re-seeds itself on
+    /// every call already (no cached offset in this file to go stale), so the only
+    /// state this file must explicitly clear is the release anchor (`anchored`/
+    /// `released`/`targetReleaseNanos`/`cachedTotalDelayNanos`/
+    /// `lastPhaseErrorNanos`) — a stale anchor from before the event would target
+    /// the OLD device's latency or a pts from before the sleep gap.
+    struct LifecycleHooks {
+        var stopEngine: () -> Void
+        var remeasureLatency: () -> Int64
+        var resetSessionState: (Int64) -> Void
+        var restartEngine: () -> Void
+    }
+
+    var lifecycleHooks: LifecycleHooks!
+
+    private func makeLiveLifecycleHooks() -> LifecycleHooks {
+        LifecycleHooks(
+            stopEngine: { [weak self] in self?.teardownEngine() },
+            remeasureLatency: { [weak self] in self?.measureTotalDelayNanos() ?? 0 },
+            resetSessionState: { [weak self] _ in self?.clearSessionState() },
+            restartEngine: { [weak self] in try? self?.start() })
+    }
+
+    /// Runs the four hooks in order: stop → re-measure → reset → restart. Never
+    /// throws — a failed restart (e.g. the new default device rejects the format
+    /// momentarily) just leaves the sink stopped until the next lifecycle event,
+    /// same posture as any other best-effort recovery path in this file.
+    private func performLifecycleRebuild() {
+        lifecycleHooks.stopEngine()
+        let delay = lifecycleHooks.remeasureLatency()
+        lifecycleHooks.resetSessionState(delay)
+        lifecycleHooks.restartEngine()
+    }
+
+    /// Called by the Core Audio listener block installed in
+    /// ``startObservingLifecycleEvents()`` when
+    /// `kAudioHardwarePropertyDefaultOutputDevice` changes. Internal (not
+    /// `private`) so a test can drive it directly — via `@testable import` — to
+    /// simulate a device change without a real Core Audio callback.
+    func handleDefaultOutputDeviceChanged() {
+        performLifecycleRebuild()
+    }
+
+    /// Wired externally to `NSWorkspace.willSleepNotification`. `AudiouterCore`
+    /// must never import AppKit (package rule, `AudiouterCore/AGENTS.md`), so —
+    /// same idiom as ``OutputBackend/handleSystemWillSleep()`` — this is a plain
+    /// public method the AppKit-importing layer forwards the notification to,
+    /// rather than an observer this type installs itself.
+    public func handleSystemWillSleep() {
+        performLifecycleRebuild()
+    }
+
+    /// Wired externally to `NSWorkspace.didWakeNotification` — see
+    /// ``handleSystemWillSleep()``.
+    public func handleSystemDidWake() {
+        performLifecycleRebuild()
+    }
+
+    #if canImport(AudioToolbox)
+    private var defaultOutputDeviceAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+
+    /// Install the `kAudioHardwarePropertyDefaultOutputDevice` listener — same
+    /// block-based `AudioObjectAddPropertyListenerBlock` idiom as
+    /// `NativeCaptureCoordinator.installDefaultDeviceListener()` /
+    /// `DefaultOutputObserver`, reused rather than reinvented. Idempotent. Kept
+    /// independent of `start()`/`stop()` (its own queue, its own lifetime) so a
+    /// device change that arrives while the sink is deliberately stopped doesn't
+    /// need special-casing here — ``performLifecycleRebuild()`` calling `start()`
+    /// again is the caller's concern (T-BACKEND wires whether the sink should be
+    /// running at all).
+    public func startObservingLifecycleEvents() {
+        lifecycleQueue.sync {
+            guard deviceChangeListenerBlock == nil else { return }
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.handleDefaultOutputDeviceChanged()
+            }
+            deviceChangeListenerBlock = block
+            AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &defaultOutputDeviceAddress, lifecycleQueue, block)
+        }
+    }
+
+    /// Remove the listener installed by ``startObservingLifecycleEvents()``.
+    /// Idempotent; also called from `deinit`.
+    public func stopObservingLifecycleEvents() {
+        lifecycleQueue.sync {
+            guard let block = deviceChangeListenerBlock else { return }
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &defaultOutputDeviceAddress, lifecycleQueue, block)
+            deviceChangeListenerBlock = nil
+        }
+    }
+    #else
+    public func startObservingLifecycleEvents() {}
+    public func stopObservingLifecycleEvents() {}
+    #endif
 
     // MARK: Producer (capture → ring)
 
@@ -516,6 +662,11 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public func start() throws {}
     public func stop() {}
     public func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
+    // T-LIFECYCLE: API parity no-ops for the AVFoundation-less fallback.
+    public func handleSystemWillSleep() {}
+    public func handleSystemDidWake() {}
+    public func startObservingLifecycleEvents() {}
+    public func stopObservingLifecycleEvents() {}
 }
 
 #endif

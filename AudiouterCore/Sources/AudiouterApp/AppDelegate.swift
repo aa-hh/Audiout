@@ -518,6 +518,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if case .permissionLost = reason {
                 self.permissionAuditCooldownUntil = Date().addingTimeInterval(self.permissionAuditCooldown)
             }
+            // First-run Done (or the ✕/lost-permission reopen) currently left
+            // the user with NO window at all — the whole point of finishing
+            // setup is to start using the app, so open the main popover the
+            // moment onboarding dismisses rather than making them go find the
+            // menu-bar icon themselves.
+            self.showPopoverHome()
         }
         onboardingWindowController = controller
         controller.present()

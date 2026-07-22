@@ -88,7 +88,7 @@ daemon_shm_destroy(struct airptp_daemon_info *shm, int fd)
     munmap(shm, sizeof(struct airptp_daemon_info));
   if (fd >= 0)
     close(fd);
-  shm_unlink(AIRPTP_SHM_NAME);
+  shm_unlink(airptp_shm_name);
 }
 
 static int
@@ -98,9 +98,9 @@ daemon_shm_create(struct airptp_daemon_info **shm, uint64_t clock_id, struct air
   int fd;
   int ret;
 
-  shm_unlink(AIRPTP_SHM_NAME);
+  shm_unlink(airptp_shm_name);
 
-  fd = shm_open(AIRPTP_SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0644);
+  fd = shm_open(airptp_shm_name, O_CREAT | O_EXCL | O_RDWR, 0644);
   if (fd < 0)
     goto error;
 

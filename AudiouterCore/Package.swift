@@ -54,6 +54,9 @@ let package = Package(
         // priming) — the window isn't visible to an agent shell, so this renders
         // it (light + dark, each permission status) for visual verification.
         .executable(name: "onboarding-snapshot", targets: ["onboarding-snapshot"]),
+        // Silent read-only Core Audio diagnostic for enumerating process objects and
+        // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
+        .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
@@ -190,6 +193,13 @@ let package = Package(
         .executableTarget(
             name: "window-snapshot",
             dependencies: ["AudiouterCore", "AudiouterWindowUI", "AudiouterSharedUI"]
+        ),
+        // Silent read-only diagnostic for enumerating Core Audio process objects
+        // and their associated PIDs and bundle IDs, useful for diagnosing per-app
+        // audio routing issues (T7). Run with: AUDIOUTER_CORE_AUDIO_DIAGNOSTIC=1 swift run core-audio-diagnostic
+        .executableTarget(
+            name: "core-audio-diagnostic",
+            dependencies: ["AudiouterCore"]
         ),
         .testTarget(
             name: "AudiouterCoreTests",

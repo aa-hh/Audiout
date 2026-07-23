@@ -4,6 +4,10 @@
 import XCTest
 @testable import AudiouterCore
 
+#if canImport(AudioToolbox)
+import AudioToolbox
+#endif
+
 /// Tests for ``LocalPlaybackEngine`` — specifically the per-app RMS metering
 /// hook (T10, the Current-Device app-bar meter): ``LocalPlaybackEngine/onAppLevel``
 /// + ``LocalPlaybackEngine/setMeteringActive(_:)``. These drive the REAL
@@ -185,4 +189,53 @@ final class LocalPlaybackEngineTests: XCTestCase {
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
     }
+
+    // MARK: - Anti-feedback follow guard (transport type)
+
+    #if canImport(AudioToolbox)
+
+    /// Real local-hardware transports are FOLLOWED: "Current Device" plays out
+    /// wherever the user is actually listening (built-in, Bluetooth headphones,
+    /// USB, HDMI, Thunderbolt, …), which is the whole point of the bug fix.
+    func testFollowableTransportsAreFollowed() {
+        for transport in [
+            kAudioDeviceTransportTypeBuiltIn,
+            kAudioDeviceTransportTypeBluetooth,
+            kAudioDeviceTransportTypeBluetoothLE,
+            kAudioDeviceTransportTypeUSB,
+            kAudioDeviceTransportTypeHDMI,
+            kAudioDeviceTransportTypeThunderbolt,
+            kAudioDeviceTransportTypeDisplayPort,
+            kAudioDeviceTransportTypePCI,
+            kAudioDeviceTransportTypeFireWire,
+        ] {
+            XCTAssertTrue(LocalPlaybackEngine.isFollowableTransport(transport),
+                          "transport \(transport) is real local hardware — must be followed")
+        }
+    }
+
+    /// The anti-feedback guard: AirPlay and virtual/aggregate defaults are REFUSED
+    /// (local playback stays on the built-in speakers), because this app may be
+    /// streaming the whole-system mix into exactly that device — following it would
+    /// loop local playback back into the capture.
+    func testFeedbackRiskTransportsAreRefused() {
+        for transport in [
+            kAudioDeviceTransportTypeAirPlay,
+            kAudioDeviceTransportTypeVirtual,
+            kAudioDeviceTransportTypeAggregate,
+            kAudioDeviceTransportTypeAutoAggregate,
+        ] {
+            XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(transport),
+                           "transport \(transport) is AirPlay/virtual — must be refused (anti-feedback)")
+        }
+    }
+
+    /// An unreadable transport (`nil`) is treated conservatively as not-followable,
+    /// so the safe built-in fallback is used rather than risking a feedback loop.
+    func testUnreadableTransportIsNotFollowed() {
+        XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(nil),
+                       "an unreadable transport must fall back to the safe built-in target")
+    }
+
+    #endif
 }

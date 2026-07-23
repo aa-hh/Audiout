@@ -2,6 +2,14 @@ import XCTest
 import AirPlayEngine
 @testable import AudiouterCore
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
+#if canImport(AudioToolbox)
+import AudioToolbox
+#endif
+
 /// Hermetic tests for ``NativeBackend`` (T-NB-BACKEND-1): a spy ``EngineControlling``
 /// (records ops, fires synthetic state transitions) + an injected ``DiscoverySource``
 /// double (feeds `DiscoveryEvent`s synchronously). No engine thread, no C cluster,
@@ -376,7 +384,7 @@ final class NativeBackendTests: XCTestCase {
     private func makeBackend(
         systemVolume: SystemVolumeControlling = FakeSystemVolume(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
@@ -384,48 +392,84 @@ final class NativeBackendTests: XCTestCase {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery,
-            systemVolume: systemVolume, connectVolume: connectVolume, resolvePID: resolvePID,
+            systemVolume: systemVolume, connectVolume: connectVolume, processResolver: processResolver,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture)
         return (backend, engine, discovery)
     }
 
+    /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list
+    /// so an `AudioProcessResolver` built on it resolves deterministically, with
+    /// no live Core Audio. Mirrors `NativeCaptureCoordinatorTests.FakeProcessEnumerator`.
+    private struct FakeProcessEnumerator: AudioProcessEnumerating {
+        let processes: [RawAudioProcess]
+        var parents: [pid_t: pid_t] = [:]
+        func enumerateProcesses() -> [RawAudioProcess] { processes }
+        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
+    }
+
+    /// Builds an `AudioProcessResolver` where each bundle id resolves to exactly
+    /// ONE process object, at `pid = objectID` — mirrors
+    /// `NativeCaptureCoordinatorTests.singleProcessResolver`.
+    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+        }
+        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+    }
+
     /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
     /// throws, so a coordinator built over it takes every bundle ID all the way
-    /// to `.capturing` — unlike the default `resolvePID`-returns-nil setup
-    /// (`PIDRecorder`), which fails fast at `.appNotRunning` by design and is
-    /// what most of this file uses to exercise routing TOPOLOGY independent of
-    /// real capture. Tests that need `.routedApps`/the mixer to reflect an app
+    /// to `.capturing` — unlike the default empty-`processResolver` setup
+    /// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` by design
+    /// and is what most of this file uses to exercise routing TOPOLOGY independent
+    /// of real capture. Tests that need `.routedApps`/the mixer to reflect an app
     /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
     /// "dead" — construct a coordinator with this tap instead.
     private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         }
         func teardown() {}
     }
 
     /// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
-    /// `.capturing` (T8) — pass as `injectedPerAppCapture:` to `makeBackend`.
-    private func workingPerAppCapture() -> PerAppCaptureCoordinator {
-        PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+    /// `.capturing` (T8) for each of `bundleIDs` — pass as `injectedPerAppCapture:`
+    /// to `makeBackend`. Each bundle id needs its own resolvable process (T2's
+    /// per-bundle-id process-set resolution, unlike the old single wildcard-pid
+    /// resolver) — callers list every bundle id their test routes so all of them
+    /// resolve non-empty.
+    private func workingPerAppCapture(bundleIDs: [String]) -> PerAppCaptureCoordinator {
+        var mapping: [String: AudioObjectID] = [:]
+        for (offset, bundleID) in bundleIDs.enumerated() {
+            mapping[bundleID] = AudioObjectID(9000 + offset)
+        }
+        return PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(mapping), muteBehavior: .mutedWhenTapped)
     }
 
-    /// Thread-safe recorder for the bundle IDs a per-app capture asked to resolve —
-    /// proof that `updateAppRoutes` spun up (`start(bundleID:)`) the right capture.
-    /// Always returns `nil` (no pid), so no real Core Audio tap is ever created:
-    /// the routing TOPOLOGY (`addOutput(_:streamId:)` + `.routedApps`) still runs.
-    private final class PIDRecorder: @unchecked Sendable {
+    /// A scriptable `AudioProcessEnumerating` fake that records every
+    /// `enumerateProcesses()` call — proof `AudioProcessResolver.resolve(bundleID:)`
+    /// was invoked by a per-app capture start — while always resolving to the EMPTY
+    /// process set, so no real Core Audio tap is ever created: the routing
+    /// TOPOLOGY (`addOutput(_:streamId:)` + `.routedApps`) still runs. Replaces the
+    /// pre-multi-process `PIDRecorder`: the resolver's `enumerateProcesses()` seam
+    /// isn't parameterized by the target bundle id (it returns the same snapshot
+    /// regardless), so per-bundle-id "which one was asked" tracking is no longer
+    /// observable at this seam — a nonzero call count is the equivalent proxy for
+    /// "a capture attempt happened", which is exact wherever (as below) only ONE
+    /// bundle id is ever routed in the test.
+    private final class ResolveAttemptRecorder: AudioProcessEnumerating, @unchecked Sendable {
         private let lock = NSLock()
-        private var _asked: [String] = []
-        var asked: [String] { lock.withLock { _asked } }
-        func resolve(_ bundleID: String) -> pid_t? {
-            lock.withLock { _asked.append(bundleID) }
-            return nil
+        private var _callCount = 0
+        func enumerateProcesses() -> [RawAudioProcess] {
+            lock.withLock { _callCount += 1 }
+            return []
         }
+        func parentPID(of pid: pid_t) -> pid_t? { nil }
+        var callCount: Int { lock.withLock { _callCount } }
     }
 
     /// A `.device(id:)` route fixture.
@@ -451,7 +495,7 @@ final class NativeBackendTests: XCTestCase {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         var onRegister: (@Sendable (String) -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             onRegister?(bundleID)
             return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
         }
@@ -477,22 +521,22 @@ final class NativeBackendTests: XCTestCase {
     }
 
     /// A `SystemAudioTap` (the WHOLE-SYSTEM tap seam, not the per-app one) that
-    /// records the `excludedPIDs` it was last created with — lets a test drive
-    /// the REAL ``NativeCaptureCoordinator`` (not a direct call to its
+    /// records the `excludedProcessObjectIDs` it was last created with — lets a
+    /// test drive the REAL ``NativeCaptureCoordinator`` (not a direct call to its
     /// `updateRouting`) through `NativeBackend.updateAppRoutes` and observe T4's
     /// exclusion list end to end.
     private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         private let lock = NSLock()
-        private var _excludedPIDs: Set<pid_t> = []
+        private var _excludedProcessObjectIDs: Set<AudioObjectID> = []
         private var _createCount = 0
-        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
-            lock.withLock { _excludedPIDs = excludedPIDs; _createCount += 1 }
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+            lock.withLock { _excludedProcessObjectIDs = excludedProcessObjectIDs; _createCount += 1 }
             return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
         }
         func teardown() {}
-        var excludedPIDs: Set<pid_t> { lock.withLock { _excludedPIDs } }
+        var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { _excludedProcessObjectIDs } }
         var createCount: Int { lock.withLock { _createCount } }
     }
 
@@ -515,7 +559,7 @@ final class NativeBackendTests: XCTestCase {
         private var attempts = 0
         let failuresBeforeSuccess: Int
         init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             let n = lock.withLock { attempts += 1; return attempts }
             if n <= failuresBeforeSuccess {
                 throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
@@ -2816,21 +2860,22 @@ final class NativeBackendTests: XCTestCase {
     }
 
     /// A `.device(id:)` route spins up that app's per-app capture (the resolver is
-    /// asked for its pid) and binds the destination device to a NON-ZERO stream id
-    /// via the engine's per-app `addOutput(_:streamId:)`.
+    /// asked to resolve its process set) and binds the destination device to a
+    /// NON-ZERO stream id via the engine's per-app `addOutput(_:streamId:)`.
     func testAppRouteBindsDeviceToNonZeroStream() async {
-        let pids = PIDRecorder()
-        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        let recorder = ResolveAttemptRecorder()
+        let (backend, engine, discovery) = makeBackend(processResolver: AudioProcessResolver(enumerator: recorder))
         defer { backend.stop() }
         let device = ap2Device()
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
 
-        // The per-app capture spun up for the routed bundle ID.
-        await pollUntil { pids.asked.contains("com.foo.player") }
-        XCTAssertTrue(pids.asked.contains("com.foo.player"),
-                      "the routed app's per-app capture must be started (pid resolved)")
+        // The per-app capture spun up for the routed bundle ID (only one bundle
+        // id is ever routed in this test, so any resolve attempt is it).
+        await pollUntil { recorder.callCount > 0 }
+        XCTAssertGreaterThan(recorder.callCount, 0,
+                      "the routed app's per-app capture must be started (its process set resolved)")
 
         // The destination device was bound to a non-zero per-app stream.
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 } }
@@ -2850,8 +2895,8 @@ final class NativeBackendTests: XCTestCase {
     /// sync with the rest of a group, and some classic receivers briefly reject
     /// the RTSP reconnect).
     func testAppRouteToAirPlay1OnlyDeviceIsRefused() async {
-        let pids = PIDRecorder()
-        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        let recorder = ResolveAttemptRecorder()
+        let (backend, engine, discovery) = makeBackend(processResolver: AudioProcessResolver(enumerator: recorder))
         defer { backend.stop() }
         let device = ap1Device()
         await startAndDiscover(backend, engine, discovery, device)
@@ -2860,7 +2905,7 @@ final class NativeBackendTests: XCTestCase {
 
         // Give the async bind-tail a moment to run, then assert it never touched
         // the engine for this device — no bind, no rebind, no removeOutput.
-        await pollUntil(timeout: 1) { pids.asked.contains("com.foo.player") }
+        await pollUntil(timeout: 1) { recorder.callCount > 0 }
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertTrue(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
                      "an AirPlay-1-only device must never be bound to a per-app stream")
@@ -2952,15 +2997,15 @@ final class NativeBackendTests: XCTestCase {
     /// name on a route change, and fires AGAIN with the updated app list when a
     /// second app is added to the same device.
     ///
-    /// Uses `workingPerAppCapture()` (T8), not the default `resolvePID`-returns-nil
+    /// Uses `workingPerAppCapture()` (T8), not the default empty-`processResolver`
     /// setup: `.routedApps` now reflects apps that are ACTUALLY capturing, not just
-    /// routed intent (T8 excludes a `.failed` bundle ID — e.g. `.appNotRunning`,
+    /// routed intent (T8 excludes a `.failed` bundle ID — e.g. `.processNotYetAudible`,
     /// which the default setup always hits immediately — from the mixer topology so
     /// a silent app is never claimed as streaming). This test verifies the
     /// event-firing/topology logic under the condition it's meant to hold for: the
     /// capture actually succeeds.
     func testRoutedAppsEventFiresAndUpdates() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
         defer { backend.stop() }
         let device = ap2Device()
         await startAndDiscover(backend, engine, discovery, device)
@@ -3045,7 +3090,7 @@ final class NativeBackendTests: XCTestCase {
                 tap.onRegister = { bundleID in registry.register(bundleID, tap) }
                 return tap
             },
-            resolvePID: { _ in 4242 },
+            processResolver: singleProcessResolver(["com.a": 4242, "com.b": 4243]),
             muteBehavior: .mutedWhenTapped)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
@@ -3113,13 +3158,12 @@ final class NativeBackendTests: XCTestCase {
     /// whole-system tap's exclusion-blind spot without disturbing the
     /// whole-system stream's own device.
     func testUpdateAppRoutesExcludesRoutedAppFromSystemMixWhileSelectedDevicesActive() async {
-        let pids: [String: pid_t] = ["com.routed": 111, "com.other": 222]
-        let resolvePID: @Sendable (String) -> pid_t? = { pids[$0] }
-        let (backend, engine, discovery) = makeBackend(resolvePID: resolvePID)
+        let resolver = singleProcessResolver(["com.routed": 111, "com.other": 222])
+        let (backend, engine, discovery) = makeBackend(processResolver: resolver)
         let tap = RecordingSystemTap()
         let coordinator = NativeCaptureCoordinator(
             makeTap: { tap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
-            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+            processResolver: resolver, muteBehavior: .mutedWhenTapped)
         backend.captureCoordinator = coordinator
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -3131,18 +3175,18 @@ final class NativeBackendTests: XCTestCase {
         // starts capturing with nobody excluded.
         backend.setOutputSet([systemDevice.id])
         await pollUntil { tap.createCount >= 1 }
-        XCTAssertEqual(tap.excludedPIDs, [], "nothing routed yet -> the system mix must include every app")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "nothing routed yet -> the system mix must include every app")
 
         // NOW route one app to its OWN device while Selected Devices stays active.
         let routedDevice = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Per-App Target")
         await startAndDiscover(backend, engine, discovery, routedDevice)
         backend.updateAppRoutes([route("com.routed", name: "Routed App", toDevice: routedDevice.id)])
 
-        await pollUntil { tap.excludedPIDs.contains(111) }
-        XCTAssertEqual(tap.excludedPIDs, [111],
-                       "the individually-routed app's pid must be excluded from the whole-system tap — " +
+        await pollUntil { tap.excludedProcessObjectIDs.contains(111) }
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111],
+                       "the individually-routed app's process object must be excluded from the whole-system tap — " +
                        "through the FULL updateAppRoutes call, not a direct coordinator call — " +
-                       "while an unrouted app's pid stays included")
+                       "while an unrouted app's process object stays included")
 
         // Both streams coexist: the per-app path bound its own dedicated stream…
         await pollUntil { engine.streamAddCalls.contains { $0.0 == routedDevice.outputID } }
@@ -3171,7 +3215,7 @@ final class NativeBackendTests: XCTestCase {
     /// invariant on its input, so this is still a real robustness property of
     /// the seam, exercised the same way `AppRouteMixerTests` exercises it.)
     func testMultiAppMultiDeviceSharedStreamAndNoRedirectCoexist() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar", "com.baz"]))
         defer { backend.stop() }
 
         let devA = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "Kitchen")
@@ -3222,7 +3266,7 @@ final class NativeBackendTests: XCTestCase {
     /// not simply unbind — and `.routedApps` must drop the terminated app's name
     /// while keeping the survivor's.
     func testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream() async throws {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:80", name: "Shared Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -3269,7 +3313,7 @@ final class NativeBackendTests: XCTestCase {
     /// quits mid-stream while a sibling app is independently routed to device B.
     /// The unrelated device's binding must be completely undisturbed.
     func testAppTerminatedOnOneDeviceDoesNotAffectSiblingAppOnAnotherDevice() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
         defer { backend.stop() }
         let devA = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Speaker A")
         let devB = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Speaker B")
@@ -3304,7 +3348,7 @@ final class NativeBackendTests: XCTestCase {
     /// so the UI can show an offline indicator, and `handleAppLaunched` emits
     /// `.routedAppRunning(isRunning: true)` to clear it. End-to-end event assertion.
     func testTerminateAndRelaunchEmitsRoutedAppRunningEvents() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.music"]))
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -3348,7 +3392,7 @@ final class NativeBackendTests: XCTestCase {
     /// capture tap so audio flows to the redirect target again without the user
     /// touching the route table.
     func testRelaunchRestartsCaptureAndRebindsDevice() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.bar.player"]))
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Restart Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -3413,13 +3457,14 @@ final class NativeBackendTests: XCTestCase {
     /// not by itself prove the retry mechanism ran.
     func testProcessNotYetAudibleBoundedRetryRecoversAndRejoinsMixerTopology() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 2)
+        let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
@@ -3449,13 +3494,14 @@ final class NativeBackendTests: XCTestCase {
     /// backend's own retry loop chases it down with no user action.
     func testProcessNotYetAudibleRetriesPastOldCapOfFiveAttempts() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 7)
+        let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
@@ -3481,13 +3527,14 @@ final class NativeBackendTests: XCTestCase {
     func testProcessNotYetAudibleRetriesStopOnDeRoute() async {
         // Never succeeds within the test window — every attempt fails.
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 10_000)
+        let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
@@ -3523,7 +3570,7 @@ final class NativeBackendTests: XCTestCase {
     private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         }
         func teardown() {}
@@ -3536,13 +3583,14 @@ final class NativeBackendTests: XCTestCase {
     /// succeeding again — all within `maxRebindRecoveryAttempts`.
     func testRebindRecoveryRetriesThenSucceedsWithinBoundedAttempts() async {
         let tap = RebindTriggerTap()
+        let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
@@ -3585,13 +3633,14 @@ final class NativeBackendTests: XCTestCase {
     /// genuinely gone.
     func testRebindRecoveryGivesUpAfterMaxAttempts() async {
         let tap = RebindTriggerTap()
+        let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
@@ -3711,10 +3760,11 @@ final class NativeBackendTests: XCTestCase {
     /// against the REAL `NativeCaptureCoordinator` (exclusion observed end to end)
     /// with a scripted per-app tap + a local-playback spy.
     func testCurrentDeviceRouteExcludesAppFromSystemMixAndStartsLocalStream() async {
-        let resolvePID: @Sendable (String) -> pid_t? = { $0 == "com.local" ? 111 : nil }
         // Per-app tap that always reaches `.capturing` (no real Core Audio).
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { AlwaysSucceedsTap() },
+            processResolver: singleProcessResolver(["com.local": 4242]),
+            muteBehavior: .mutedWhenTapped)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
 
         // Real whole-system coordinator over a recording tap, so its exclusion set
@@ -3722,7 +3772,7 @@ final class NativeBackendTests: XCTestCase {
         let systemTap = RecordingSystemTap()
         let coordinator = NativeCaptureCoordinator(
             makeTap: { systemTap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
-            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+            processResolver: singleProcessResolver(["com.local": 111]), muteBehavior: .mutedWhenTapped)
         backend.captureCoordinator = coordinator
         let localPlayback = SpyLocalPlayback()
         backend.localPlaybackEngine = localPlayback
@@ -3735,7 +3785,7 @@ final class NativeBackendTests: XCTestCase {
         await startAndDiscover(backend, engine, discovery, systemDevice)
         backend.setOutputSet([systemDevice.id])
         await pollUntil { systemTap.createCount >= 1 }
-        XCTAssertEqual(systemTap.excludedPIDs, [], "nothing local yet -> the system mix must include every app")
+        XCTAssertEqual(systemTap.excludedProcessObjectIDs, [], "nothing local yet -> the system mix must include every app")
 
         // Route an app to .currentDevice (deliberately "play here, on the Mac").
         backend.updateAppRoutes([
@@ -3744,9 +3794,9 @@ final class NativeBackendTests: XCTestCase {
 
         // 1) EXCLUDED from the whole-system AirPlay tap (so it plays locally, not
         //    ALSO in the AirPlay mix).
-        await pollUntil { systemTap.excludedPIDs.contains(111) }
-        XCTAssertTrue(systemTap.excludedPIDs.contains(111),
-                      "a .currentDevice app's pid must be excluded from the whole-system tap")
+        await pollUntil { systemTap.excludedProcessObjectIDs.contains(111) }
+        XCTAssertTrue(systemTap.excludedProcessObjectIDs.contains(111),
+                      "a .currentDevice app's process object must be excluded from the whole-system tap")
 
         // 2) Its per-app capture started …
         await pollUntil {
@@ -3770,7 +3820,9 @@ final class NativeBackendTests: XCTestCase {
     /// low-latency path) maps the 0–100 int onto the engine's 0.0…1.0 contract.
     func testSetLocalPlaybackVolumeReachesLocalEngine() async {
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { AlwaysSucceedsTap() },
+            processResolver: singleProcessResolver(["com.local": 4242]),
+            muteBehavior: .mutedWhenTapped)
         let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
         let localPlayback = SpyLocalPlayback()
         backend.localPlaybackEngine = localPlayback
@@ -3826,17 +3878,22 @@ final class NativeBackendTests: XCTestCase {
 
     /// A per-app capture over `BundleTaggingTap`s that self-register so a test can
     /// push content into a specific bundle's tap — same shape the cross-stream
-    /// leakage test uses, factored out for the metering tests.
+    /// leakage test uses, factored out for the metering tests. Every bundle id the
+    /// test will start needs its own resolvable process (T2), so callers list them.
     private func registeringPerAppCapture(
-        muteBehavior: TapMuteBehavior, into registry: TapRegistry
+        muteBehavior: TapMuteBehavior, bundleIDs: [String], into registry: TapRegistry
     ) -> PerAppCaptureCoordinator {
-        PerAppCaptureCoordinator(
+        var mapping: [String: AudioObjectID] = [:]
+        for (offset, bundleID) in bundleIDs.enumerated() {
+            mapping[bundleID] = AudioObjectID(9500 + offset)
+        }
+        return PerAppCaptureCoordinator(
             makeTap: {
                 let tap = BundleTaggingTap()
                 tap.onRegister = { bundleID in registry.register(bundleID, tap) }
                 return tap
             },
-            resolvePID: { _ in 4242 },
+            processResolver: singleProcessResolver(mapping),
             muteBehavior: muteBehavior)
     }
 
@@ -3857,7 +3914,7 @@ final class NativeBackendTests: XCTestCase {
     /// meter was permanently dead; now `onMixedBuffer` → `emitStreamLevel` feeds it.
     func testRedirectOnlyDeviceReceivesLevelFromItsStream() async {
         let registry = TapRegistry()
-        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Redirect Only")
@@ -3894,7 +3951,7 @@ final class NativeBackendTests: XCTestCase {
     /// drives the meter.
     func testDeviceFedBySystemAndStreamReportsMax() async {
         let registry = TapRegistry()
-        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
@@ -3950,7 +4007,7 @@ final class NativeBackendTests: XCTestCase {
     /// because it's unselected — so a torn-down stream can't leave a stuck meter.
     func testUnbindingStreamZeroesDeviceLevel() async {
         let registry = TapRegistry()
-        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, into: registry)
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Unbind Target")
@@ -3987,7 +4044,7 @@ final class NativeBackendTests: XCTestCase {
     /// starts the tap and the app's raw RMS flows as `.appLevel`.
     func testNoRedirectAppLevelOnlyWhileMeteringActive() async {
         let registry = TapRegistry()
-        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
         defer { backend.stop() }
         backend.start(); await waitUntilStarted(engine)
@@ -4027,7 +4084,7 @@ final class NativeBackendTests: XCTestCase {
     /// stops its tap immediately.
     func testExcludedAppIsNeverMetered() async {
         let registry = TapRegistry()
-        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.ok"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
         defer { backend.stop() }
         backend.start(); await waitUntilStarted(engine)
@@ -4073,7 +4130,7 @@ final class NativeBackendTests: XCTestCase {
     /// — a closed popover has nobody to render the app meter for).
     func testMeteringOnlyTapsStopWhenMeteringDeactivated() async {
         let registry = TapRegistry()
-        let metering = registeringPerAppCapture(muteBehavior: .unmuted, into: registry)
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
         let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
         defer { backend.stop() }
         backend.start(); await waitUntilStarted(engine)

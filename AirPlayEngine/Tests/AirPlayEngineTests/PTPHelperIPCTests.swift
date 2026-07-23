@@ -81,7 +81,15 @@ final class PTPHelperIPCTests: XCTestCase {
 
         // MARK: master role (stands in for the future root helper, minus
         // root - these are high ports so no privilege is required).
-        guard let masterHdl = ptp_test_daemon_bind(nil) else {
+        // Bind explicitly to loopback rather than passing `nil` (which
+        // resolves to `AI_PASSIVE`/`INADDR_ANY` — a listener on every
+        // interface). This test only ever talks to itself over 127.0.0.1
+        // (see the "loopback-UDP control path" note above), so nothing it
+        // verifies changes — but an all-interfaces bind is exactly what
+        // trips macOS's Application Firewall's "accept incoming network
+        // connections?" prompt for the xctest host process on every
+        // `swift test` run. A loopback-only listener is never firewalled.
+        guard let masterHdl = "127.0.0.1".withCString({ ptp_test_daemon_bind($0) }) else {
             // Guard against CI flakiness if something else already holds
             // these high ports; skip rather than fail the suite.
             throw XCTSkip("Could not bind PTP test ports \(Self.eventPort)/\(Self.generalPort) - \(String(cString: ptp_test_errmsg_get())); skipping (likely port contention)")

@@ -130,8 +130,17 @@ if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
 fi
 
 echo "==> Building $EXECUTABLE (release)"
-swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
-BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
+# --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
+# default for `swift build`, but it doesn't forward a C target's cSettings
+# unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths for libevent/
+# libsodium/libgcrypt/libplist) into the clang module dependency scan used by
+# Swift targets that `import CAirPlayEngine` — so <event2/thread.h> fails to
+# resolve and the build errors out with "could not build module
+# 'CAirPlayEngine'". The deprecated native engine still merges those flags
+# correctly. Pin it explicitly until Package.swift's header search paths are
+# restructured to survive the new engine (or SwiftPM fixes the propagation).
+swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
+BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
@@ -146,9 +155,9 @@ echo "==> Building $HELPER_EXECUTABLE (release)"
 # carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
 # it, which is fine — the section only matters to SMAppService registration.
 test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
-swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
+swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
-HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
+HELPER_BIN_DIR="$(swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
 

@@ -175,12 +175,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
   change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full pre-commit run is `swift test --parallel`** (~70s vs ~124s for a
-  bare serial `swift test`). It parallelizes at the test-CLASS level: each
-  suite runs in its own process, so tests must not race on cross-process shared
-  state.
+- **The full pre-commit run is `swift test --parallel --num-workers 4`**
+  (capped to 4 concurrent test processes to keep CPU/fan load reasonable on
+  an 8-core machine; ~70s warm vs ~124s for a bare serial `swift test`, only
+  marginally slower than an uncapped `--parallel`). It parallelizes at the
+  test-CLASS level: each suite runs in its own process, so tests must not
+  race on cross-process shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
-  Guard 4 runs the full `swift test --parallel` whenever a commit's staged
+  Guard 4 runs the full `swift test --parallel --num-workers 4` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
   fails. So a too-narrow filter in the loop can never ship a regression — it
   only costs one extra fix cycle at commit. Everything that reaches `main` was

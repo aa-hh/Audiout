@@ -185,4 +185,139 @@ final class LocalPlaybackEngineTests: XCTestCase {
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
     }
+
+    // MARK: - Follow-real-output-with-guard (R13)
+
+    /// A fake ``LocalOutputResolving`` so the follow-with-guard decision +
+    /// compare-before-rebuild are assertable without any real Core Audio: the test
+    /// dictates the "default output", the "built-in", and which ids are loop
+    /// risks. `@unchecked Sendable` (mutated across the listener contract) with a
+    /// lock, like the other fakes in this suite.
+    private final class FakeOutputResolver: LocalOutputResolving, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _defaultDevice: UInt32?
+        private let _builtIn: UInt32?
+        private let _loopRiskIDs: Set<UInt32>
+        init(defaultDevice: UInt32?, builtIn: UInt32?, loopRiskIDs: Set<UInt32> = []) {
+            self._defaultDevice = defaultDevice
+            self._builtIn = builtIn
+            self._loopRiskIDs = loopRiskIDs
+        }
+        func setDefaultDevice(_ id: UInt32?) { lock.withLock { _defaultDevice = id } }
+        func defaultOutputDevice() -> UInt32? { lock.withLock { _defaultDevice } }
+        func builtInOutputDevice() -> UInt32? { _builtIn }
+        func isLoopRisk(_ device: UInt32) -> Bool { _loopRiskIDs.contains(device) }
+    }
+
+    private let builtInID: UInt32 = 1
+
+    /// (a) Default = Bluetooth headphones (non-AirPlay, non-aggregate) → the engine
+    /// FOLLOWS it. This is the R13 fix: a "Current Device" app must play where the
+    /// user is actually listening, not blast out the built-in speakers.
+    func testFollowsPlainDefaultOutput() {
+        let bt: UInt32 = 42
+        let resolver = FakeOutputResolver(defaultDevice: bt, builtIn: builtInID)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), bt,
+                       "a plain (BT/USB/wired) default output must be followed")
+    }
+
+    /// (b) Default = an AirPlay-class device → the engine STAYS on built-in (loop
+    /// guard). Following the AirPlay default would feed the whole-system AirPlay
+    /// path back into playback in a loop.
+    func testAirPlayDefaultFallsBackToBuiltIn() {
+        let airplay: UInt32 = 99
+        let resolver = FakeOutputResolver(defaultDevice: airplay, builtIn: builtInID, loopRiskIDs: [airplay])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), builtInID,
+                       "an AirPlay-class default must fall back to built-in (loop guard)")
+    }
+
+    /// (c) Default = one of our OWN aggregate devices → the engine STAYS on
+    /// built-in (loop guard).
+    func testOwnAggregateDefaultFallsBackToBuiltIn() {
+        let ourAggregate: UInt32 = 77
+        let resolver = FakeOutputResolver(defaultDevice: ourAggregate, builtIn: builtInID, loopRiskIDs: [ourAggregate])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), builtInID,
+                       "one of our own tap aggregates as the default must fall back to built-in (loop guard)")
+    }
+
+    /// When neither the default nor built-in resolves, the target is `nil` (the
+    /// engine keeps `AVAudioEngine`'s own default — best effort).
+    func testNoResolvableDeviceYieldsNilTarget() {
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertNil(engine.resolveTargetDeviceID())
+    }
+
+    /// The loop-guard name classification, tested against the EXACT names the app's
+    /// three aggregate-creation sites build — so the prefix set can't silently
+    /// drift out of sync with them, while ordinary output devices are never
+    /// mistaken for ours.
+    func testOwnAggregateNamePrefixesMatchRealCreationSiteNames() {
+        let prefixes = LocalPlaybackEngine.ownAggregateNamePrefixes
+        func isOurs(_ name: String) -> Bool { prefixes.contains { name.hasPrefix($0) } }
+        // Exact names from NativeCaptureCoordinator / PerAppCaptureCoordinator /
+        // AudioCapturePermissionProbe:
+        XCTAssertTrue(isOurs("Tap-Audiouter"))
+        XCTAssertTrue(isOurs("PerAppTap-Audiouter-com.example.app"))
+        XCTAssertTrue(isOurs("SetupProbe-Audiouter"))
+        // Ordinary hardware outputs must not be classified as ours:
+        XCTAssertFalse(isOurs("MacBook Pro Speakers"))
+        XCTAssertFalse(isOurs("External Headphones"))
+        XCTAssertFalse(isOurs("Sonos Living Room"))
+    }
+
+    /// (d) The default output changes (BT connects) → the engine re-points exactly
+    /// once; a follow-up notification whose resolved target is UNCHANGED does ZERO
+    /// rebuilds (the compare-before-rebuild loop-breaker).
+    func testDefaultOutputChangeRepointsOnceThenZeroOnUnchanged() throws {
+        // Start with no resolvable device so the real engine boots on AVAudioEngine's
+        // own default (no fake device id is ever actually applied to hardware).
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        defer { engine.stop() }
+        XCTAssertNil(engine.test_configuredTargetDevice)
+        XCTAssertEqual(engine.test_repointCount, 0)
+
+        // BT connects: the default output now resolves to a new device.
+        resolver.setDefaultDevice(200)
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        XCTAssertEqual(engine.test_repointCount, 1, "a changed default output must repoint exactly once")
+        XCTAssertEqual(engine.test_configuredTargetDevice, 200)
+
+        // A duplicate/spurious notification resolving to the SAME target: no work.
+        // (Fired twice to be sure the guard is stable, not one-shot.)
+        engine.handleDefaultOutputChange()
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        XCTAssertEqual(engine.test_repointCount, 1,
+                       "an unchanged resolved target must do zero rebuilds (compare-before-rebuild)")
+        XCTAssertEqual(engine.test_configuredTargetDevice, 200)
+    }
+
+    /// (e) An output config-change event (the "dies through mic" trigger: the mic
+    /// engaging voice-processing mode stops `AVAudioEngine`) must REBUILD the graph
+    /// and keep playing — not die. Proven by a buffer still scheduling + metering
+    /// after the change.
+    func testConfigurationChangeRebuildsInsteadOfDying() throws {
+        let engine = try makeStartedEngine()
+        defer { engine.stop() }
+        let recorder = LevelRecorder()
+        engine.onAppLevel = { recorder.record($0, $1) }
+        engine.setMeteringActive(true)
+
+        // Simulate the AVAudioEngineConfigurationChange the mic (or a device switch)
+        // fires — the engine has stopped itself.
+        engine.test_simulateConfigurationChange()
+
+        // Playback survived: the node is still alive and engineRunning was restored,
+        // so a captured buffer still schedules and meters.
+        engine.receive(buffer: constantBuffer(amplitude: 0.5), for: bundleID)
+        XCTAssertEqual(recorder.count, 1,
+                       "receive() after a config change must still fire — the engine rebuilt, it did not die")
+    }
 }

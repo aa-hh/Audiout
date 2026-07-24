@@ -33,17 +33,34 @@ C-A/C-B, T16/T17) and `PLAN-FIREFOX-ROUTING-LEAK.md` for the routing fix.
 ## Test 1 — Wave 1 smoke (bounded-object leak fixes: L1/L2/L4/L5)
 1. Redirect **Music** (native Apple Music) to an AirPlay speaker, then un-redirect. Repeat **×3**.
 2. Route an app to **"Play on this Mac"**, then **quit that app** while it plays.
-3. Open the popover; watch the T5 diagnostic handle counters (taps/aggregates/IOProcs).
+3. Relaunch the quit app and re-route it — confirm capture actually restarts (this is the T4/L2
+   bug fix itself: a relaunch used to never get its audio back).
 
-**PASS:** no audio glitch beyond the redirect itself; counters return to **zero** after each
-cycle (no upward creep); quitting a routed app leaves nothing stuck.
+**PASS:** no audio glitch beyond the redirect itself; quitting a routed app leaves nothing
+audibly stuck (no ghost audio, no stuck "connecting" state); the relaunched app's audio comes
+back. **Note:** `AudioDiag`'s handle counters (taps/aggregates/IOProcs) are NOT surfaced in the
+popover — they're an internal, `$AIRPLAY_AUDIO_DIAG`-env-gated log with no wired dump call in
+production (only the unit tests call `dumpLiveHandles()`). Don't look for them in the UI. The
+actual leak proof for this wave is **Test 4** (real coreaudiod/Audiouter RSS via `ps`) — treat
+Test 1 here as a behavioral/audible smoke check, not the leak measurement itself.
 
 ## Test 2 — Wave 2 device-flip (storm damping: C-A rebuild loop)
 1. Route **2 apps** to AirPlay devices, both playing.
 2. Flip the Mac's output device mid-playback (toggle Bluetooth, or change Sound output).
 
-**PASS:** no audio gap > **1 s** on either app; `PAC.handleDeviceChange FIRED` in Console fires a
-**bounded** number of times (not endlessly); coreaudiod CPU settles < **10 s**.
+**PASS:** no audio gap > **1 s** on either app; coreaudiod CPU (Activity Monitor) settles <
+**10 s**; and the rebuild count is BOUNDED, not storming — see below for how to check that.
+
+**Checking rebuild count — use `Telemetry`, not `AudioDiag`.** Main's `Telemetry` system is
+**always-on** (no env var needed, unlike `AudioDiag`) and writes structured JSON lines to
+`~/Library/Logs/Audiouter/telemetry.jsonl` (rotated to `.1` at 5 MB). After the device flip,
+hand that file back — the relevant events are `captureWS transition`/`captureWS device_change`
+(whole-system tap rebuilds — this is the C-A storm signal) and `capturePA transition`/
+`capturePA device_change_coalesced` (per-app). A single flip should produce a SMALL, bounded
+number of these (one rebuild per tap, not a runaway stream) — e.g.:
+```
+grep '"cat":"captureWS"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -20
+```
 
 ## Test 3 — Wave 3 (Firefox/Chrome per-app routing leak)
 **Run the silent diagnostic FIRST, while the browser is actively playing audio:**

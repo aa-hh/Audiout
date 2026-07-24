@@ -48,6 +48,24 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
             return format
         }
 
+        /// W1-T4 in-place update seam. `inPlaceUpdateSucceeds` scripts whether the
+        /// fake reports the live update as applied (`true`, no recreate) or asks
+        /// the coordinator to fall back to a full recreate (`false`). Records the
+        /// pids and call count so a test can assert an in-place update happened
+        /// (and how many times) versus a recreate.
+        var inPlaceUpdateSucceeds = true
+        private(set) var updateCount = 0
+        private(set) var lastUpdatePids: [pid_t]?
+
+        func updateProcessSet(pids: [pid_t]) -> Bool {
+            lock.lock(); updateCount += 1; lastUpdatePids = pids; let ok = inPlaceUpdateSucceeds
+            if ok { lastPids = pids }
+            lock.unlock()
+            return ok
+        }
+
+        var updates: Int { lock.withLock { updateCount } }
+
         func teardown() {
             lock.lock(); teardownCount += 1; lock.unlock()
         }
@@ -468,6 +486,162 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         coordinator = nil
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "dropping the coordinator without stop() must not leak the tap")
     }
+
+    // MARK: - W1-T4: live-membership diffing (debounced, compare-before-rebuild)
+
+    #if canImport(AudioToolbox)
+
+    /// A thread-safe mutable process set for the resolver closure, so a test can
+    /// model a browser spawning/killing an audio child between notifications.
+    private final class PidSetBox: @unchecked Sendable {
+        let lock = NSLock()
+        private var value: [pid_t]
+        init(_ value: [pid_t]) { self.value = value }
+        func get() -> [pid_t] { lock.withLock { value } }
+        func set(_ newValue: [pid_t]) { lock.withLock { value = newValue } }
+    }
+
+    /// Bring one bundle ID to `.capturing` with a scripted process set, ready
+    /// for a membership diff. Returns the (tap, box, coordinator).
+    private func startedCoordinator(
+        initialPids: [pid_t],
+        inPlaceSucceeds: Bool = true,
+        debounce: DispatchTimeInterval = .milliseconds(300)
+    ) -> (FakeProcessTap, PidSetBox, PerAppCaptureCoordinator) {
+        let tap = FakeProcessTap()
+        tap.inPlaceUpdateSucceeds = inPlaceSucceeds
+        let box = PidSetBox(initialPids)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolveProcessSet: { _ in box.get() },
+            muteBehavior: .mutedWhenTapped,
+            membershipDebounceInterval: debounce
+        )
+        coordinator.start(bundleID: "com.example.browser")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
+        return (tap, box, coordinator)
+    }
+
+    /// (a) A new audio child pid appears for an already-tapped bundle ID → exactly
+    /// ONE guarded update. With the in-place path available, that's a single
+    /// in-place tap update and ZERO full recreates (no audible gap).
+    func testChildSpawnAppliesExactlyOneInPlaceUpdateNoRecreate() {
+        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242])
+        XCTAssertEqual(tap.creates, 1)
+
+        box.set([4242, 5001]) // a new tab's audio helper appears
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.updates, 1, "the changed set must be pushed to the live tap exactly once")
+        XCTAssertEqual(tap.creates, 1, "an in-place update must NOT recreate the tap")
+        XCTAssertEqual(tap.teardowns, 0, "in-place update tears nothing down")
+        XCTAssertEqual(tap.lastUpdatePids, [4242, 5001])
+        coordinator.stop(bundleID: "com.example.browser")
+    }
+
+    /// (a, fallback) Same spawn, but the in-place update is unavailable → exactly
+    /// ONE full recreate (create #2 + one teardown of the old tap).
+    func testChildSpawnFallsBackToExactlyOneRecreateWhenInPlaceUnavailable() {
+        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242], inPlaceSucceeds: false)
+        XCTAssertEqual(tap.creates, 1)
+
+        box.set([4242, 5001])
+        coordinator.handleMembershipChange()
+        waitFor { tap.creates >= 2 }
+
+        XCTAssertEqual(tap.creates, 2, "exactly one recreate on the fallback path")
+        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on recreate")
+        XCTAssertEqual(tap.lastPids, [4242, 5001], "the recreated tap covers the new set")
+        coordinator.stop(bundleID: "com.example.browser")
+    }
+
+    /// (b) A child pid disappears (tab closed) → exactly ONE guarded update.
+    func testChildKillAppliesExactlyOneUpdate() {
+        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242, 5001])
+        XCTAssertEqual(tap.creates, 1)
+
+        box.set([4242]) // the tab (and its helper) went away
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.updates, 1)
+        XCTAssertEqual(tap.creates, 1)
+        XCTAssertEqual(tap.lastUpdatePids, [4242])
+        coordinator.stop(bundleID: "com.example.browser")
+    }
+
+    /// (c) THE regression-prevention property: an unchanged process set — a
+    /// process-list notification whose re-resolve yields the same members (a
+    /// duplicate notification, or churn in some UNRELATED app) — triggers ZERO
+    /// rebuilds and ZERO in-place updates. A wrong equality check here would
+    /// reintroduce the coreaudiod CPU storm from rebuild thrashing.
+    func testUnchangedProcessSetTriggersZeroRebuilds() {
+        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242, 5001])
+        XCTAssertEqual(tap.creates, 1)
+
+        // The resolver still returns the identical set (order preserved).
+        _ = box // unchanged
+        coordinator.handleMembershipChange()
+        // And again, and with a reordered-but-identical membership set.
+        coordinator.handleMembershipChange()
+        box.set([5001, 4242]) // same members, different order — NOT a change
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.updates, 0, "no live update for an unchanged membership set")
+        XCTAssertEqual(tap.creates, 1, "no recreate for an unchanged membership set")
+        XCTAssertEqual(tap.teardowns, 0)
+        coordinator.stop(bundleID: "com.example.browser")
+    }
+
+    /// (d) Rapid spawn+kill+spawn within the debounce window coalesces to the
+    /// MINIMUM necessary work — a single diff against the settled set — not one
+    /// rebuild per Core Audio notification. Driven through the real debounced
+    /// `handleProcessListChanged` entry point with a short injected interval.
+    func testRapidChurnWithinDebounceWindowCoalescesToOneUpdate() {
+        let (tap, box, coordinator) = startedCoordinator(
+            initialPids: [4242], debounce: .milliseconds(60))
+        XCTAssertEqual(tap.creates, 1)
+
+        // A burst: three notifications inside the 60 ms window, ending on the
+        // settled set [4242, 7003].
+        box.set([4242, 7001]); coordinator.handleProcessListChanged()
+        box.set([4242])       ; coordinator.handleProcessListChanged()
+        box.set([4242, 7003]) ; coordinator.handleProcessListChanged()
+
+        // Wait out the debounce; the coalesced diff runs once against the final set.
+        waitFor { tap.updates >= 1 }
+        // Give any (erroneously) uncoalesced extra diffs a chance to show up.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+
+        XCTAssertEqual(tap.updates, 1, "the burst must coalesce to a single settled diff, not one per notification")
+        XCTAssertEqual(tap.creates, 1, "in-place update path — no recreate")
+        XCTAssertEqual(tap.lastUpdatePids, [4242, 7003], "the coalesced diff applies the SETTLED set")
+        coordinator.stop(bundleID: "com.example.browser")
+    }
+
+    /// Membership diffing only ever touches CAPTURING slots — a `.failed`
+    /// (awaiting-audio) slot is left to the resume/backoff path, never
+    /// half-rebuilt by a membership notification.
+    func testMembershipDiffIgnoresNonCapturingSlots() {
+        let tap = FakeProcessTap()
+        tap.startError = .processNotYetAudible(bundleID: "com.example.browser")
+        let box = PidSetBox([4242])
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolveProcessSet: { _ in box.get() },
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.browser")
+        waitFor { if case .failed = coordinator.state(for: "com.example.browser") { return true }; return false }
+        let createsAfterFail = tap.creates
+
+        box.set([4242, 5001])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.updates, 0, "a non-capturing slot is never membership-updated")
+        XCTAssertEqual(tap.creates, createsAfterFail, "no recreate driven from membership diff on a failed slot")
+    }
+
+    #endif
 }
 
 private extension NSLock {

@@ -98,10 +98,13 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// ordered main-first (W1-T1, ``AppProcessResolver``). W1-T2: the coordinator
     /// taps the WHOLE resolved set per slot (one `CATapDescription` covering every
     /// process object that translates), so a browser or Electron app whose audio
-    /// comes from a child process is captured too. Live membership changes
-    /// (a child spawning/dying mid-stream) are NOT diffed here — that's W1-T4;
-    /// this only resolves + taps the set at tap-creation time (initial `start`
-    /// and every `handleDeviceChange` rebuild).
+    /// comes from a child process is captured too. W1-T4: live membership
+    /// changes (a child spawning/dying mid-stream as browser tabs open/close)
+    /// are additionally diffed via the process-object-list listener and applied
+    /// to the running tap — debounced and compare-before-rebuild guarded (see
+    /// `handleMembershipChange`). Beyond tap-creation time (initial `start`,
+    /// `handleDeviceChange` rebuild), the set is re-resolved through this same
+    /// closure on every settled process-list change.
     private let resolveProcessSet: AppProcessResolver
     private let muteBehavior: TapMuteBehavior
 
@@ -118,6 +121,16 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         /// silently dropped — see `handleDeviceChange(bundleID:)` and
         /// dev/notes/stability-audit-2026-07-18.md §C6.
         var pendingDeviceChange = false
+        /// W1-T4: the process set (as a membership set) that this slot's live
+        /// tap was last (re)built or updated against. The compare-before-rebuild
+        /// key for live-membership diffing — a process-object-list notification
+        /// whose re-resolved set for this bundle ID equals this value triggers
+        /// ZERO work, so browser-tab churn that doesn't change our app's audible
+        /// pid set can't thrash the tap. Recorded on every successful
+        /// `.capturing` transition (initial start, device-change rebuild, and
+        /// in-place membership update). Set semantics (not `[pid_t]`) so a mere
+        /// reorder of the same members is not treated as a change.
+        var lastTappedPIDs: Set<pid_t> = []
     }
 
     private let queue = DispatchQueue(label: "PerAppCaptureCoordinator.state")
@@ -143,6 +156,28 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     #endif
+
+    // MARK: Live-membership diffing (W1-T4)
+    //
+    // A separate, DEBOUNCED serial queue that owns the membership-diff timer.
+    // The process-object-list listener fires once per process connecting/
+    // disconnecting — browsers churn this constantly as tabs open/close. Running
+    // a full per-slot re-resolve + rebuild on every one of those notifications
+    // would reintroduce the very coreaudiod CPU storm the `(deviceID,
+    // nominalRate)` compare-before-rebuild elsewhere in this program was written
+    // to kill, so notifications are coalesced onto this queue and only the LAST
+    // one in a burst actually runs the diff. This queue is DISTINCT from
+    // ``queue`` on purpose: `handleMembershipChange` reaches into the state via
+    // `queue.sync`, which would deadlock if it were itself running on `queue`.
+    private let membershipQueue = DispatchQueue(label: "PerAppCaptureCoordinator.membership")
+    /// The pending coalesced diff. Confined to ``membershipQueue``. Cancelled and
+    /// replaced by each new notification inside the debounce window, so a rapid
+    /// spawn/kill/spawn burst collapses to a single diff pass.
+    private var membershipDiffWork: DispatchWorkItem?
+    /// How long to wait for the process-list churn to settle before diffing.
+    /// Injectable so tests can shrink it; production default coalesces a burst
+    /// of tab open/close notifications into one rebuild.
+    private let membershipDebounceInterval: DispatchTimeInterval
 
     /// Fired on every per-bundle-ID state transition. Called on the
     /// coordinator's internal queue.
@@ -207,11 +242,13 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     init(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         resolveProcessSet: @escaping AppProcessResolver,
-        muteBehavior: TapMuteBehavior = .mutedWhenTapped
+        muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
         self.resolveProcessSet = resolveProcessSet
         self.muteBehavior = muteBehavior
+        self.membershipDebounceInterval = membershipDebounceInterval
     }
 
     /// Tears down every still-active tap. A backstop against leaking system
@@ -226,6 +263,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         // and `deinit` cannot run concurrently with one (same argument
         // ``SystemOutputVolume.deinit`` makes).
         removeProcessListListenerLocked()
+        membershipQueue.sync { membershipDiffWork?.cancel(); membershipDiffWork = nil }
         #endif
         let leftover = queue.sync { slots.values.compactMap { $0.tap } }
         leftover.forEach { $0.teardown() }
@@ -347,6 +385,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return
                 }
                 slot.tap = tap
+                slot.lastTappedPIDs = Set(pids) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
             }
         } catch {
@@ -418,6 +457,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return false
                 }
                 slot.tap = newTap
+                slot.lastTappedPIDs = Set(pids) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
                 // STABILITY(C6): a device-change notification landed while we were
                 // rebuilding — replay it once now that we're capturing again,
@@ -528,15 +568,124 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// notification in CI isn't possible without live Core Audio churn. Behavior
     /// is unchanged; this is only an access-level seam.
     func handleProcessListChanged() {
+        // (1) Resume self-heal (T3): re-drive dead-but-retryable slots IMMEDIATELY
+        // — this is a latency path (an app just resumed audio), so it is NOT
+        // debounced.
         let toRetry: [String] = queue.sync {
             slots.compactMap { key, slot -> String? in
                 guard case .failed(let error) = slot.state, error.isRetryable else { return nil }
                 return key
             }
         }
-        guard !toRetry.isEmpty else { return }
-        AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
-        for bundleID in toRetry { start(bundleID: bundleID) }
+        if !toRetry.isEmpty {
+            AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
+            for bundleID in toRetry { start(bundleID: bundleID) }
+        }
+
+        // (2) Live-membership diffing (W1-T4): a browser opening/closing a tab
+        // spawns/kills an audio child process, changing the pid set an ALREADY
+        // capturing slot should be tapping. Coalesce a burst of these onto the
+        // membership queue and diff once it settles.
+        scheduleMembershipDiff()
+    }
+
+    // MARK: - Live-membership diffing (W1-T4)
+    //
+    // Closes the browser-tab-churn half of R14. W1-T2/T3 resolve + tap the full
+    // process set only at tap-CREATION time (initial start, device-change
+    // rebuild). But browsers spawn/kill audio children per tab constantly, so a
+    // new tab that starts playing AFTER the tap was built would go uncaptured
+    // until the next unrelated rebuild trigger. This path listens to the same
+    // process-object-list notification the resume self-heal already uses and, on
+    // a genuine membership change for a bundle ID we are actively tapping,
+    // updates that tap — debounced and guarded by a per-slot
+    // `(processSet)` compare-before-rebuild so an unchanged set costs nothing.
+
+    /// Coalesce process-list notifications: cancel any pending diff and arm a
+    /// fresh one `membershipDebounceInterval` out. Only the last notification in
+    /// a burst survives to run `handleMembershipChange`. Runs on
+    /// ``membershipQueue`` (never ``queue``) so `queue.sync` inside the diff
+    /// cannot deadlock.
+    private func scheduleMembershipDiff() {
+        membershipQueue.async { [weak self] in
+            guard let self else { return }
+            self.membershipDiffWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.handleMembershipChange() }
+            self.membershipDiffWork = work
+            self.membershipQueue.asyncAfter(deadline: .now() + self.membershipDebounceInterval, execute: work)
+        }
+    }
+
+    /// Diff every currently-capturing slot's resolved process set against the
+    /// set its live tap was last built/updated against. Runs on
+    /// ``membershipQueue``. For each slot whose set genuinely changed, apply the
+    /// change (in-place update preferred, full recreate as fallback). A slot
+    /// whose set is unchanged — the overwhelmingly common case under tab churn —
+    /// is skipped with ZERO Core Audio work: this is the regression-prevention
+    /// property that keeps browser churn from thrashing coreaudiod.
+    ///
+    /// Internal (not `private`) purely so tests can drive a diff pass
+    /// deterministically without waiting out the real debounce timer. Behavior
+    /// is identical to the timer-driven path.
+    func handleMembershipChange() {
+        // Snapshot the capturing slots' baselines under the state lock, then do
+        // the (potentially blocking) resolve + Core Audio work OUTSIDE it.
+        let baselines: [(bundleID: String, oldPIDs: Set<pid_t>)] = queue.sync {
+            slots.compactMap { key, slot in
+                guard case .capturing = slot.state else { return nil }
+                return (key, slot.lastTappedPIDs)
+            }
+        }
+        guard !baselines.isEmpty else { return }
+
+        for baseline in baselines {
+            let newPIDs = resolveProcessSet(baseline.bundleID)
+            let newSet = Set(newPIDs)
+            // Empty set = the app fully quit (even its main process is gone). Do
+            // NOT churn the slot to `.failed` from here — leave that to the
+            // device-change / backoff paths; a transient empty resolve during
+            // churn shouldn't tear a healthy slot down.
+            guard !newSet.isEmpty else { continue }
+            // COMPARE-BEFORE-REBUILD: unchanged membership → zero work.
+            guard newSet != baseline.oldPIDs else { continue }
+            AudioDiag.log("PAC membership changed for \(baseline.bundleID): \(baseline.oldPIDs.sorted()) -> \(newSet.sorted())")
+            applyMembershipChange(bundleID: baseline.bundleID, newPIDs: newPIDs)
+        }
+    }
+
+    /// Apply a genuine membership change to one slot's live tap. Per the W1-T0
+    /// spike (`docs/plans/wave1-tap-update-spike.md`): try an in-place
+    /// `kAudioTapPropertyDescription` update first (no audible gap, no aggregate-
+    /// device churn); fall back to a full destroy/recreate on any non-zero
+    /// OSStatus or unhealthy post-update state. The in-place attempt is
+    /// best-effort — the recreate fallback is the proven path.
+    private func applyMembershipChange(bundleID: String, newPIDs: [pid_t]) {
+        // Claim the live tap under the lock, but only if still capturing (a
+        // concurrent stop()/device-change may have moved us on).
+        let tap: ProcessAudioTap? = queue.sync {
+            guard let slot = slots[bundleID], case .capturing = slot.state else { return nil }
+            return slot.tap
+        }
+        guard let tap else { return }
+
+        if tap.updateProcessSet(pids: newPIDs) {
+            // In-place update succeeded: no rebuild, no state transition. Record
+            // the new baseline (only if the slot still owns this exact tap — a
+            // race with stop()/recreate otherwise).
+            queue.sync {
+                guard let slot = slots[bundleID], case .capturing = slot.state, slot.tap === tap else { return }
+                slot.lastTappedPIDs = Set(newPIDs)
+            }
+            AudioDiag.log("PAC membership update applied in place for \(bundleID)")
+            return
+        }
+
+        // Fallback: full teardown + recreate. Reuse the proven device-change
+        // machinery — it re-resolves the set itself, tears the old tap down,
+        // rebuilds, and records the fresh `lastTappedPIDs` baseline. Exactly one
+        // rebuild per genuine change.
+        AudioDiag.log("PAC membership in-place update unavailable for \(bundleID) — full recreate")
+        handleDeviceChange(bundleID: bundleID)
     }
     #endif
 
@@ -581,6 +730,17 @@ public protocol ProcessAudioTap: AnyObject {
     /// has opened an audio stream yet — retryable) or `.tapCreationFailed`
     /// (most likely TCC not yet granted).
     func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat
+
+    /// W1-T4: try to update this LIVE tap's process set in place (no teardown),
+    /// via `AudioObjectSetPropertyData(tapID, kAudioTapPropertyDescription, …)`
+    /// with a mutated `CATapDescription.processes` array (see the W1-T0 spike,
+    /// `docs/plans/wave1-tap-update-spike.md`). Returns `true` if the live tap
+    /// now covers exactly `pids` (main-first) and remains healthy; returns
+    /// `false` to signal the coordinator must fall back to a full
+    /// destroy/recreate — on any non-zero `OSStatus`, an untranslatable main
+    /// pid, or an unhealthy post-update format read. Best-effort by contract:
+    /// a `false` return is never an error, just "recreate instead".
+    func updateProcessSet(pids: [pid_t]) -> Bool
 
     /// Stop and destroy the IOProc, aggregate device, and tap (in that
     /// order). Idempotent and non-throwing so teardown always completes.
@@ -666,6 +826,9 @@ final class UnavailableProcessTap: ProcessAudioTap, @unchecked Sendable {
     func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
         throw PerAppCaptureError.osUnsupported(minimum: "14.2")
     }
+
+    /// No live tap exists on this OS, so an in-place update is never possible.
+    func updateProcessSet(pids: [pid_t]) -> Bool { false }
 
     func teardown() {}
 }
@@ -829,6 +992,64 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
         }
         return objID
+    }
+
+    // MARK: In-place process-set update (W1-T4)
+
+    /// Push a new process set onto the LIVE tap via `kAudioTapPropertyDescription`
+    /// without tearing anything down (W1-T0 spike: that property is documented
+    /// settable, `CATapDescription.processes` is `readwrite`). Returns `false` —
+    /// signalling the coordinator to fall back to a full recreate — on any of:
+    /// no live tap, an untranslatable main pid, a non-zero `OSStatus` from the
+    /// set call, or an unhealthy post-update format read. Best-effort by
+    /// contract; the recreate fallback is the proven path.
+    func updateProcessSet(pids: [pid_t]) -> Bool {
+        guard tapID != kAudioObjectUnknown, let desc = tapDescription else { return false }
+        guard let mainPid = pids.first,
+              let mainObj = try? Self.translateProcessObject(pid: mainPid, bundleID: name) else {
+            return false
+        }
+        var processObjectIDs = [mainObj]
+        for childPid in pids.dropFirst() {
+            if let objID = try? Self.translateProcessObject(pid: childPid, bundleID: name) {
+                processObjectIDs.append(objID)
+            }
+        }
+
+        // Mutate the description's process list and push it back to the live tap.
+        desc.processes = processObjectIDs
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        // The property value is the CATapDescription object; Core Audio object-
+        // valued properties are passed as a pointer to the (CFTypeRef-sized)
+        // object reference.
+        var descRef = Unmanaged.passUnretained(desc).toOpaque()
+        let size = UInt32(MemoryLayout<UnsafeMutableRawPointer>.size)
+        let err = withUnsafePointer(to: &descRef) { ptr -> OSStatus in
+            AudioObjectSetPropertyData(tapID, &address, 0, nil, size, ptr)
+        }
+        guard err == noErr else {
+            AudioDiag.log("PAC in-place tap update failed (SetPropertyData \(err)) — will recreate")
+            return false
+        }
+
+        // Health check: re-read the tap's format. If the tap fell out of a
+        // healthy state under the live update, treat it as a failure and let the
+        // coordinator recreate rather than trusting a possibly-broken tap.
+        var fmtAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var readASBD = AudioStreamBasicDescription()
+        let fErr = AudioObjectGetPropertyData(tapID, &fmtAddress, 0, nil, &fmtSize, &readASBD)
+        guard fErr == noErr, readASBD.mSampleRate > 0 else {
+            AudioDiag.log("PAC in-place tap update health-check failed (format read \(fErr)) — will recreate")
+            return false
+        }
+        return true
     }
 
     // MARK: Aggregate device

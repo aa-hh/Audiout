@@ -2934,6 +2934,46 @@ final class NativeBackendTests: XCTestCase {
                        "whole-system reset must NOT use the per-app addOutput(_:streamId:)")
     }
 
+    /// T8: the signal-only `.streamHealth` echo of the same recapture/rebind
+    /// detection T2's test above exercises. `recovering == true` must fire the
+    /// moment the whole-system recapture is detected (the rebind is enqueued,
+    /// receiver known-silent from here) and `recovering == false` must fire once
+    /// that rebind actually SUCCEEDS (not merely enqueued) — ordered strictly
+    /// true-then-false, keyed by the device's id.
+    func testWholeSystemRecaptureEmitsRecoveringThenClears() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        capture.fireStateChange(capturingState())   // first capture: arms the epoch
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Subscribe BEFORE firing the recapture so neither signal can be missed,
+        // and collect until BOTH the in-flight `true` and the resolved `false`
+        // have arrived for this device.
+        let events = await collect(from: backend) { events in
+            let sawRecovering = events.contains {
+                if case .streamHealth(let id, let recovering) = $0 { return id == device.id && recovering }
+                return false
+            }
+            let sawCleared = events.contains {
+                if case .streamHealth(let id, let recovering) = $0 { return id == device.id && !recovering }
+                return false
+            }
+            return sawRecovering && sawCleared
+        } after: { capture.fireStateChange(self.capturingState()) }   // RE-capture: tap rebuilt
+
+        let healthEvents: [Bool] = events.compactMap {
+            if case .streamHealth(let id, let recovering) = $0, id == device.id { return recovering }
+            return nil
+        }
+        XCTAssertEqual(healthEvents, [true, false],
+                       "recapture must emit recovering:true the instant the rebind is enqueued, "
+                       + "then recovering:false only once that rebind actually succeeds — in that order")
+    }
+
     /// After a FULL stop (the tap goes `.idle`, e.g. the capture gate deselected the
     /// last receiver), the epoch ends: the NEXT `.capturing` is a fresh first-capture
     /// and must NOT be mistaken for a rebuild — otherwise a normal deselect→reselect

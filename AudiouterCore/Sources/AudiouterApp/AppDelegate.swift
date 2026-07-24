@@ -923,6 +923,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mediaKeyController.handle(command)
             log("event: \(describe(event))")
             return
+        case .streamHealth:
+            // Signal-only (T8): a re-capture/rebind was detected on some device
+            // and is in flight (`recovering == true`) or resolved
+            // (`recovering == false`). No UI surfaces this yet — designing that
+            // is an explicit follow-up. Log and return; no device model to repaint.
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -959,6 +966,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         case .remoteTransport(let command):
             return "remoteTransport(\(command)) — driving Mac media playback"
+        case .streamHealth(let id, let recovering):
+            return "streamHealth(\(id), recovering: \(recovering))"
         }
     }
 

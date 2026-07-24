@@ -1647,6 +1647,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.rebindRecoveryGen[deviceID] = gen
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
+                    self.emit(.streamHealth(id: deviceID, recovering: true))
                     self.enqueueRebindRecovery(
                         deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
                         gen: gen, attempt: 1)
@@ -1679,6 +1680,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.rebindRecoveryGen[deviceID] = gen
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 AudioDiag.log("RESET AirPlay session (whole-system): device=\(deviceID) stream=0 (tap rebuilt)")
+                self.emit(.streamHealth(id: deviceID, recovering: true))
                 self.enqueueRebindRecovery(
                     deviceID: deviceID, outputID: outputID, scope: .wholeSystem,
                     gen: gen, attempt: 1)
@@ -1756,6 +1758,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if ok {
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                    self.emit(.streamHealth(id: deviceID, recovering: false))
                     return
                 }
                 guard attempt < self.maxRebindRecoveryAttempts else {

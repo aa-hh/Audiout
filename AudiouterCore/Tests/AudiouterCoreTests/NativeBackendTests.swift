@@ -378,7 +378,9 @@ final class NativeBackendTests: XCTestCase {
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
         resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
-        injectedMeteringCapture: PerAppCaptureCoordinator? = nil
+        injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
+        captureRetryDelay: TimeInterval = 2.0,
+        captureRetryMaxBackoff: TimeInterval = 10.0
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
@@ -386,7 +388,9 @@ final class NativeBackendTests: XCTestCase {
             engineControl: engine, discoverySource: discovery,
             systemVolume: systemVolume, connectVolume: connectVolume, resolvePID: resolvePID,
             injectedPerAppCapture: injectedPerAppCapture,
-            injectedMeteringCapture: injectedMeteringCapture)
+            injectedMeteringCapture: injectedMeteringCapture,
+            captureRetryDelay: captureRetryDelay,
+            captureRetryMaxBackoff: captureRetryMaxBackoff)
         return (backend, engine, discovery)
     }
 
@@ -2602,6 +2606,212 @@ final class NativeBackendTests: XCTestCase {
             "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
     }
 
+    // MARK: Whole-system capture retry (T16, E10)
+    //
+    // Before this fix `captureCoordinator.onStateChange` was never wired to
+    // anything at all — a `.failed` whole-system tap (TCC lost mid-session, a
+    // HAL hiccup building the aggregate device, a bad ASBD read) stayed dead
+    // until the user happened to toggle a Selected Device (the only OTHER path
+    // that re-invokes `reconcileCaptureGate`). These mirror the T8
+    // `.processNotYetAudible` retry tests above (bounded/backoff/cancellation),
+    // but for the ONE whole-system tap rather than a per-bundle-ID capture —
+    // plus the extra "must not restart a tap nobody wants any more" guard that
+    // has no per-app equivalent (see `scheduleCaptureRetry`'s doc comment).
+    //
+    // `FakeCapture` has no real state machine of its own — `fireState(_:)`
+    // drives `NativeBackend.handleCaptureCoordinatorStateChange` directly, the
+    // same way the real `NativeCaptureCoordinator.onStateChange` would, with no
+    // Core Audio tap in the loop.
+
+    /// A transient `.failed` (e.g. `.tapCreationFailed`) while capture is
+    /// desired must self-heal: the backend's own backoff retry re-invokes
+    /// `coordinator.start()` with NO further UI action (no re-toggle of the
+    /// Selected Device).
+    func testWholeSystemCaptureFailedSchedulesRetryThatRestartsTheTap() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.03, captureRetryMaxBackoff: 0.1)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Retry Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        XCTAssertEqual(capture.startCount, 1)
+
+        capture.fireState(.failed(.tapCreationFailed(reason: "test failure")))
+
+        await pollUntil(timeout: 2) { capture.startCount >= 2 }
+        XCTAssertGreaterThanOrEqual(capture.startCount, 2,
+            "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
+    }
+
+    /// A `.capturing` transition — recovery, whether from our own retry or a
+    /// device-change rebuild inside the real coordinator — must cancel any
+    /// pending retry immediately and reset the backoff attempt counter, so a
+    /// LATER unrelated failure starts its backoff from attempt 1 again, not
+    /// wherever the prior chain left off.
+    func testWholeSystemCaptureRetryCancelledOnRecovery() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.2, captureRetryMaxBackoff: 0.5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Recovery Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        capture.fireState(.failed(.aggregateDeviceFailed(reason: "test")))
+        await pollUntil { backend.test_hasPendingCaptureRetry() }
+        XCTAssertEqual(backend.test_captureRetryCount(), 1)
+
+        // Recovered well before the 0.2s backoff would have fired.
+        let format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        capture.fireState(.capturing(format))
+
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "recovering to .capturing must cancel any pending retry immediately")
+        XCTAssertEqual(backend.test_captureRetryCount(), 0, "recovery resets the backoff attempt counter")
+
+        // Give the cancelled timer's original deadline time to pass and prove
+        // no stray start() lands from it.
+        let countAfterRecover = capture.startCount
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertEqual(capture.startCount, countAfterRecover,
+            "a cancelled retry must never fire a stray start() after recovery")
+    }
+
+    /// Single-flighting: N `.failed` events in a row (well within the backoff
+    /// window) must replace, never stack, the pending retry timer — so exactly
+    /// ONE retry-driven `start()` lands, not N of them landing back-to-back.
+    /// The attempt counter still grows per failure (it feeds the backoff delay
+    /// math), even though only the LAST scheduled timer ever fires.
+    func testWholeSystemCaptureRetryIsSingleFlighted() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.15, captureRetryMaxBackoff: 0.3)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "SingleFlight Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        // Two `.failed` events back to back, well inside the first's 0.15s
+        // backoff window — the second must REPLACE the first's timer.
+        capture.fireState(.failed(.tapCreationFailed(reason: "first")))
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        capture.fireState(.failed(.tapCreationFailed(reason: "second")))
+
+        XCTAssertEqual(backend.test_captureRetryCount(), 2,
+            "the attempt counter still grows per failure (feeds the backoff delay)")
+
+        await pollUntil(timeout: 2) { capture.startCount > startsBefore }
+        // Past BOTH original timers' deadlines (0.15s and 0.02+0.3s) — if the
+        // first had NOT been cancelled, this window would show a 2nd extra
+        // start() beyond the one the surviving (2nd) timer produces.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(capture.startCount, startsBefore + 1,
+            "N `.failed` events in a row must never stack N retry timers (single-flighting)")
+    }
+
+    /// `.osUnsupported` is the one permanently-dead `NativeCaptureError` — no
+    /// retry can ever fix an OS-version gate, so it must never schedule one
+    /// (matches `PerAppCaptureError.isRetryable`'s exact same carve-out).
+    func testWholeSystemCaptureRetryDoesNotSpinOnOSUnsupported() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Unsupported Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        capture.fireState(.failed(.osUnsupported(minimum: "14.2")))
+
+        // Several backoff periods' worth of margin — a permanently-dead
+        // failure must never spin a retry.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "a permanently-dead failure (.osUnsupported) must not schedule a retry")
+        XCTAssertEqual(capture.startCount, startsBefore,
+            "an unretryable failure must never re-invoke start()")
+    }
+
+    /// A `.failed` while NOTHING is selected (capture was never desired) must
+    /// be a pure no-op — there is no per-bundle route to check against for the
+    /// whole-system tap, only `captureRunning`, and it must gate the retry here
+    /// too, not just at fire time.
+    func testWholeSystemCaptureFailedWithNothingSelectedNeverSchedulesRetry() async {
+        let (backend, engine, _) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        capture.fireState(.failed(.tapCreationFailed(reason: "test")))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "a `.failed` while capture isn't desired at all must never schedule a retry")
+        XCTAssertEqual(capture.startCount, 0, "start() must never be called with nothing selected")
+    }
+
+    /// The whole-system tap is the ONE global `.mutedWhenTapped` tap — unlike an
+    /// orphaned per-app retry (harmless: it's caught and stopped at its OWN
+    /// `.capturing` landing site), blindly restarting THIS tap once capture is
+    /// no longer desired would mute the Mac's speakers with nowhere for the
+    /// captured audio to go. Deselecting during the backoff wait must cancel
+    /// the pending retry so it never fires at all.
+    func testWholeSystemCaptureRetryDoesNotFireAfterDeselect() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.15, captureRetryMaxBackoff: 0.3)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Deselect Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        capture.fireState(.failed(.deviceLost(reason: "test")))
+        await pollUntil { backend.test_hasPendingCaptureRetry() }
+
+        // Deselect everything DURING the backoff wait.
+        backend.setOutputSet([])
+        await pollUntil { capture.ops.last == "stop" }
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "deselecting must cancel the pending retry (reconcileCaptureGate's own hygiene)")
+
+        // Past the original backoff deadline: no stray start() must land.
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertEqual(capture.startCount, startsBefore,
+            "a retry must never restart the whole-system tap once capture is no longer " +
+            "desired — it would mute the Mac with the audio going nowhere")
+    }
+
     // MARK: Sleep/wake (B6b)
 
     /// Discover an AP2 device, select it, and wait until it's streaming (`added`).
@@ -2772,14 +2982,27 @@ final class NativeBackendTests: XCTestCase {
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
         private var _ops: [String] = []
         private var _meteringActive = false
+        /// How many times `start()` has actually been called — including a
+        /// retry-driven restart, not just the first one (T16, E10). `ops` also
+        /// records this (as another `"start"` entry), but a dedicated counter
+        /// reads clearer at the call site of a retry-recovery test.
+        private var _startCount = 0
 
         var onLevel: (@Sendable (_ rms: Float) -> Void)? {
             get { lock.withLock { _onLevel } }
             set { lock.withLock { _onLevel = newValue } }
         }
-        func start() { lock.withLock { _ops.append("start") } }
+        /// T16, E10: fired by `fireState(_:)` to script the whole-system tap's
+        /// state machine — `NativeBackend.start()` wires this exactly like the
+        /// real `NativeCaptureCoordinator.onStateChange`.
+        var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
+            get { lock.withLock { _onStateChange } }
+            set { lock.withLock { _onStateChange = newValue } }
+        }
+        func start() { lock.withLock { _ops.append("start"); _startCount += 1 } }
         func stop() { lock.withLock { _ops.append("stop") } }
         func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
 
@@ -2788,6 +3011,8 @@ final class NativeBackendTests: XCTestCase {
         /// Whether the tap is running right now — i.e. exactly when the real
         /// `.mutedWhenTapped` tap has the Mac's speakers muted.
         var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+        /// Total `start()` calls so far (T16, E10) — see `_startCount`.
+        var startCount: Int { lock.withLock { _startCount } }
         /// The last value passed to `setMeteringActive`, `false` until called.
         var meteringActive: Bool { lock.withLock { _meteringActive } }
         /// Fire `onLevel` as the real coordinator would — but only if metering is
@@ -2796,6 +3021,13 @@ final class NativeBackendTests: XCTestCase {
         func fireLevelIfActive(_ rms: Float) {
             let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
             if active { handler?(rms) }
+        }
+        /// Fire `onStateChange` as the real coordinator would on a transition
+        /// (T16, E10) — drives `NativeBackend.handleCaptureCoordinatorStateChange`
+        /// with no real Core Audio tap in the loop.
+        func fireState(_ state: NativeCaptureCoordinator.State) {
+            let handler = lock.withLock { _onStateChange }
+            handler?(state)
         }
     }
 

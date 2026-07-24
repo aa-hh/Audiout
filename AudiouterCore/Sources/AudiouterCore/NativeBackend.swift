@@ -194,6 +194,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // So capture runs ONLY while at least one real AP2 output is selected. The
     // gate keys on INTENT (`expectedSelected`), not availability — see
     // `reconcileCaptureGate`.
+    //
+    // T16/E10: the gate's own `want`/`captureRunning` intent is ALSO what the
+    // whole-system tap's `.failed` retry gates on — see
+    // `handleCaptureCoordinatorStateChange`/`scheduleCaptureRetry`. Before that
+    // fix, a transient `.failed` (TCC lost mid-session, a HAL hiccup building
+    // the aggregate device) had NO recovery path at all: `captureCoordinator.
+    // onStateChange` wasn't wired to anything, so the tap just stayed dead
+    // until the user happened to toggle a Selected Device.
 
     /// Whether the capture coordinator is currently *desired* running. The gate's
     /// last decision, NOT a read of the coordinator's own state machine (which
@@ -445,6 +453,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     private var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
 
+    /// How many whole-system-tap `.failed` retries have already fired in a row
+    /// (T16, E10) — kept ONLY to grow the capped-exponential backoff delay, not
+    /// as a give-up ceiling: unlike the per-app `retryCounts` (keyed per bundle
+    /// ID, one entry per routed app), there is exactly ONE whole-system tap, so
+    /// this is a single counter. Reset to 0 on recovery (`.capturing`) and on a
+    /// deliberate deselect (`reconcileCaptureGate`'s stop branch clears the
+    /// pending timer; `stop()` resets the counter alongside it). Confined to
+    /// `stateQueue`.
+    private var captureRetryCount = 0
+
+    /// The whole-system tap's in-flight bounded retry (T16, E10), so a second
+    /// `.failed` while one is already scheduled REPLACES rather than stacks it —
+    /// the single-flighting requirement — and a recovery (`.capturing`) or a
+    /// deliberate deselect can cancel it before it fires. Best-effort (a work
+    /// item already running when cancelled still completes, same D4 tolerance as
+    /// `pendingRetries`). Confined to `stateQueue`.
+    private var pendingCaptureRetry: DispatchWorkItem?
+
+    /// Base delay before the FIRST whole-system-tap `.failed` retry (T16, E10),
+    /// and the seed of its capped-exponential backoff (doubled per attempt,
+    /// capped at `captureRetryMaxBackoff`) — mirrors
+    /// `processNotYetAudibleRetryDelay`'s shape exactly, but kept as its own
+    /// knob since the whole-system tap and the per-app taps are unrelated
+    /// subsystems with independently tunable recovery timing. `var`-free `let`,
+    /// injectable only through the designated initializer so tests can shrink
+    /// it; production never needs to.
+    private let captureRetryDelay: TimeInterval
+
+    /// Ceiling for the whole-system-tap retry backoff (T16, E10) — mirrors
+    /// `processNotYetAudibleMaxBackoff`: the delay doubles each attempt but
+    /// never exceeds this, so a tap that stays `.failed` (e.g. the TCC grant
+    /// hasn't been (re-)completed yet) is re-probed forever on a bounded
+    /// interval rather than being permanently given up on — matching this
+    /// file's existing indefinite-retry philosophy for a condition the user,
+    /// not a fixed retry count, ultimately resolves.
+    private let captureRetryMaxBackoff: TimeInterval
+
     /// Test-only (`@testable`): whether a `.processNotYetAudible` retry
     /// `DispatchWorkItem` is currently sitting in `pendingRetries` for
     /// `bundleID` — lets a test prove the map doesn't leak a stale reference
@@ -459,6 +504,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reference past a superseding topology-driven `.rebind`.
     func test_hasPendingRebindRecovery(deviceID: String) -> Bool {
         stateQueue.sync { pendingRebindRecoveries[deviceID] != nil }
+    }
+
+    /// Test-only (`@testable`): whether a whole-system-tap `.failed` retry
+    /// `DispatchWorkItem` (T16, E10) is currently sitting in
+    /// `pendingCaptureRetry` — lets a test prove a `.failed` schedules exactly
+    /// one in-flight retry (single-flighting) and that it's cancelled on
+    /// recovery (`.capturing`) or a deliberate deselect.
+    func test_hasPendingCaptureRetry() -> Bool {
+        stateQueue.sync { pendingCaptureRetry != nil }
+    }
+
+    /// Test-only (`@testable`): the whole-system-tap retry attempt counter
+    /// (T16, E10) — lets a test prove the backoff actually grows across
+    /// consecutive failures (rather than resetting or stacking) and resets to 0
+    /// on recovery.
+    func test_captureRetryCount() -> Int {
+        stateQueue.sync { captureRetryCount }
     }
 
     /// Test-only (`@testable`): whether `bundleID` is currently recorded in
@@ -577,6 +639,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `processNotYetAudibleRetryDelay`/`processNotYetAudibleMaxBackoff` (T8) tune
     /// the capped-exponential retry for a `.processNotYetAudible` capture failure;
     /// tests shrink the delay so the retry doesn't cost real wall-clock seconds.
+    /// `captureRetryDelay`/`captureRetryMaxBackoff` (T16, E10) tune the equivalent
+    /// backoff for the WHOLE-SYSTEM tap's `.failed` retry — a separate knob since
+    /// it's an unrelated subsystem; tests shrink it the same way.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
@@ -588,7 +653,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
         processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
         maxRebindRecoveryAttempts: Int = 3,
-        rebindRecoveryRetryDelay: TimeInterval = 0.5
+        rebindRecoveryRetryDelay: TimeInterval = 0.5,
+        captureRetryDelay: TimeInterval = 2.0,
+        captureRetryMaxBackoff: TimeInterval = 10.0
     ) {
         self.engine = engineControl
         self.discovery = discoverySource
@@ -606,6 +673,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
         self.maxRebindRecoveryAttempts = maxRebindRecoveryAttempts
         self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
+        self.captureRetryDelay = captureRetryDelay
+        self.captureRetryMaxBackoff = captureRetryMaxBackoff
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
         // here, never mutated after, so no `stateQueue` synchronization is needed
@@ -868,6 +937,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    wire early: it only fires while the tap is running.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
 
+            // WIRE the whole-system tap's state machine (T16, E10) so a
+            // `.failed` (TCC lost, the aggregate device torn out from under it,
+            // a bad ASBD read) drives a capped-exponential-backoff retry instead
+            // of staying dead until the user happens to toggle a Selected
+            // Device (the only other path that re-invokes `reconcileCaptureGate`).
+            // Harmless to wire this early like `onLevel` — it only fires once
+            // `reconcileCaptureGate` has actually started the tap.
+            self.captureCoordinator?.onStateChange = { [weak self] state in
+                self?.handleCaptureCoordinatorStateChange(state)
+            }
+
             // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
             // Wired here like `onLevel` (the engine is assigned before `start()`);
             // it only fires while metering is active (the engine gates its own RMS
@@ -887,6 +967,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        captureCoordinator?.onStateChange = nil
         captureCoordinator?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
@@ -992,6 +1073,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
+            // T16/E10: the whole-system tap's own retry resets alongside the
+            // per-app one — a later start() re-decides `reconcileCaptureGate`
+            // from a clean slate, with no stale attempt count or dangling timer
+            // left over from a failure right before teardown.
+            self.pendingCaptureRetry?.cancel()
+            self.pendingCaptureRetry = nil
+            self.captureRetryCount = 0
             // T4: drop any in-flight AirPlay-session rebind recovery — the engine
             // sessions are torn down by `engine.stop()` above and `bindTail` is
             // cancelled, so a fresh start() re-binds from scratch.
@@ -1683,6 +1771,106 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.pendingRetries[bundleID] = work
+        }
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + delay, execute: work)
+    }
+
+    /// React to the WHOLE-SYSTEM tap's state transition (T16, E10). Before this,
+    /// `captureCoordinator.onStateChange` was never wired at all — a `.failed`
+    /// tap (TCC lost mid-session, the aggregate device torn out from under it, a
+    /// bad ASBD read) stayed dead forever unless the user happened to toggle a
+    /// Selected Device afterward (the only other path that re-invokes
+    /// `reconcileCaptureGate`, and only because toggling changes `want`). Runs
+    /// off `stateQueue` (callback context from
+    /// `NativeCaptureCoordinator.onStateChange`, wired in `start()`); hops on
+    /// only for the mutation, mirroring `handlePerAppCaptureHealthChange`.
+    ///
+    /// `.capturing` cancels any pending retry and resets the attempt counter —
+    /// recovered. `.failed` schedules an indefinite capped-exponential-backoff
+    /// retry (mirrors T8's `.processNotYetAudible` retry exactly) ONLY when BOTH:
+    ///   - the error is retryable (`NativeCaptureError.isRetryable` — excludes
+    ///     `.osUnsupported`, which no retry can ever fix), and
+    ///   - capture is still actually desired (`captureRunning`, the gate's own
+    ///     "should the tap be running" intent).
+    /// The second guard has no per-app equivalent to reach for: a per-app
+    /// capture's stray `.capturing` for a route nobody wants any more is caught
+    /// CHEAPLY at that landing site (stopped as an orphan). But there is only
+    /// ONE whole-system tap, and it is `.mutedWhenTapped` — blindly restarting
+    /// it while `captureRunning` is false (nothing selected, or the user just
+    /// deselected everything) would silence the Mac's speakers with the audio
+    /// going nowhere, exactly the bug `reconcileCaptureGate`'s own doc comment
+    /// describes. So the desired-ness check has to happen before EVER calling
+    /// `start()` again, not after.
+    private func handleCaptureCoordinatorStateChange(_ state: NativeCaptureCoordinator.State) {
+        switch state {
+        case .capturing:
+            stateQueue.sync {
+                self.pendingCaptureRetry?.cancel()
+                self.pendingCaptureRetry = nil
+                self.captureRetryCount = 0
+            }
+
+        case .failed(let error):
+            let (shouldRetry, attempt): (Bool, Int) = stateQueue.sync {
+                guard self.captureRunning, error.isRetryable else {
+                    // Bookkeeping-hygiene fix (mirrors `handlePerAppCaptureHealthChange`):
+                    // no retry is being scheduled from here — either capture
+                    // isn't desired any more or this is a non-retryable failure
+                    // — so a `pendingCaptureRetry` left over from an earlier
+                    // attempt is now stale and must not linger as a dangling
+                    // `DispatchWorkItem` reference.
+                    self.pendingCaptureRetry?.cancel()
+                    self.pendingCaptureRetry = nil
+                    return (false, 0)
+                }
+                let attempt = self.captureRetryCount + 1
+                self.captureRetryCount = attempt
+                return (true, attempt)
+            }
+            if shouldRetry {
+                scheduleCaptureRetry(attempt: attempt)
+            }
+
+        case .idle, .creatingTap, .stopping:
+            break
+        }
+    }
+
+    /// Schedule the next whole-system-tap retry with capped-exponential backoff
+    /// (T16, E10) — mirrors `scheduleProcessNotYetAudibleRetry`'s exact shape
+    /// (`retryDelay × 2^(attempt-1)`, capped at `captureRetryMaxBackoff`, e.g.
+    /// 2 → 4 → 8 → 10 → 10 … forever) and its single-flighting (replaces any
+    /// retry already pending so N `.failed` events in a row never stack N
+    /// timers, and a `stop()`/deselect can cancel it via `pendingCaptureRetry`).
+    ///
+    /// UNLIKE that retry — which is deliberately left unguarded on the route
+    /// table because a resurrected/orphaned per-app capture is caught cheaply
+    /// at its OWN `.capturing` landing site — this one RE-CHECKS
+    /// `captureRunning` at FIRE time, right before calling `coordinator.start()`.
+    /// There is only one whole-system tap, and it is `.mutedWhenTapped`: if
+    /// capture was deselected during the backoff wait, blindly starting it here
+    /// would mute the Mac's speakers with nowhere for the captured audio to go
+    /// — the exact bug `reconcileCaptureGate` exists to prevent, and worse than
+    /// an orphaned per-app tap (which only affects one app's exclusion
+    /// bookkeeping, not the user's actual listening experience).
+    /// `reconcileCaptureGate`'s own `coordinator.stop()` branch already cancels
+    /// this timer proactively on a deselect, so this re-check is a defensive
+    /// backstop against the (intentionally tolerated, D4-style) race where the
+    /// timer is already past that check when the cancel lands.
+    private func scheduleCaptureRetry(attempt: Int) {
+        let delay = min(
+            captureRetryDelay * pow(2.0, Double(attempt - 1)),
+            captureRetryMaxBackoff)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let stillWanted: Bool = self.stateQueue.sync { self.captureRunning }
+            guard stillWanted, let coordinator = self.captureCoordinator else { return }
+            self.captureControlQueue.async { coordinator.start() }
+        }
+        stateQueue.sync {
+            self.pendingCaptureRetry?.cancel()
+            self.pendingCaptureRetry = work
         }
         DispatchQueue.global().asyncAfter(
             deadline: .now() + delay, execute: work)
@@ -3262,6 +3450,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
+        if !want {
+            // T16/E10 hygiene: capture is no longer desired — cancel any
+            // pending whole-system-tap retry rather than let it fire later.
+            // `scheduleCaptureRetry`'s own fire-time `captureRunning` re-check
+            // would also catch this (calling `coordinator.start()` on a tap
+            // nobody wants would re-mute the Mac's speakers for nothing — the
+            // exact bug this gate exists to prevent), but there's no reason to
+            // let a stale timer linger past the moment its outcome is decided.
+            pendingCaptureRetry?.cancel()
+            pendingCaptureRetry = nil
+        }
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
         }
@@ -3591,6 +3790,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Fired once per captured buffer with its level in 0.0…1.0, from the tap's
     /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
     var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
+    /// Fired once per state transition (T16, E10 — the whole-system-tap
+    /// `.failed` retry) so `NativeBackend` can react to `.failed`/`.capturing`
+    /// the same way it already reacts to `PerAppCaptureCoordinator.onStateChange`.
+    /// See ``NativeCaptureCoordinator/onStateChange``.
+    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? { get set }
     /// Begin capturing system audio. Idempotent.
     ///
     /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers

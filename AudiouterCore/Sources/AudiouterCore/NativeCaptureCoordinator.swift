@@ -729,6 +729,21 @@ public enum NativeCaptureError: Error, Equatable, Sendable {
     /// present at all, so permission advice would be actively wrong.
     case osUnsupported(minimum: String)
 
+    /// Whether a fresh `start()` is expected to be worth retrying without user
+    /// action (T16, E10 — the whole-system-tap `.failed` retry NativeBackend
+    /// drives off `onStateChange`). Mirrors `PerAppCaptureError.isRetryable`'s
+    /// exact split: every case except `.osUnsupported` describes a plausibly
+    /// transient condition (a HAL hiccup building the tap/aggregate, the
+    /// default output device disappearing mid-setup, a bad ASBD read) that a
+    /// bounded backoff retry can recover from once the transient condition
+    /// clears — an OS-version gate never resolves itself no matter how many
+    /// times `start()` is retried, so permission advice (or a retry) would be
+    /// actively wrong there.
+    public var isRetryable: Bool {
+        if case .osUnsupported = self { return false }
+        return true
+    }
+
     /// A human-readable, UI-renderable description of the failure and its remedy.
     public var userMessage: String {
         switch self {

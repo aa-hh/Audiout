@@ -731,6 +731,25 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
+    // MARK: - isRetryable (T16, E10 — the whole-system-tap `.failed` retry
+    // `NativeBackend` drives off `onStateChange`; see `NativeBackendTests`'
+    // "Whole-system capture retry" section for the end-to-end wiring tests).
+
+    /// Every `NativeCaptureError` case is retryable except `.osUnsupported` —
+    /// mirrors `PerAppCaptureError.isRetryable`'s exact split: an OS-version
+    /// gate never resolves itself no matter how many times `start()` is
+    /// retried, while every other failure is a plausible transient HAL hiccup
+    /// (permission not yet re-granted, a device disappearing mid-setup, a bad
+    /// ASBD read) worth chasing with a bounded backoff.
+    func testIsRetryableExcludesOnlyOSUnsupported() {
+        XCTAssertTrue(NativeCaptureError.tapCreationFailed(reason: "x").isRetryable)
+        XCTAssertTrue(NativeCaptureError.aggregateDeviceFailed(reason: "x").isRetryable)
+        XCTAssertTrue(NativeCaptureError.formatReadFailed(reason: "x").isRetryable)
+        XCTAssertTrue(NativeCaptureError.deviceLost(reason: "x").isRetryable)
+        XCTAssertFalse(NativeCaptureError.osUnsupported(minimum: "14.2").isRetryable,
+                       "an OS-version gate can never be fixed by retrying — no backoff should spin on it")
+    }
+
     // MARK: - utils
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {

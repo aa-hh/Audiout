@@ -52,6 +52,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **The whole-system tap's `.failed` now self-heals via a bounded retry (T16,
+  E10).** `CaptureControlling` gained `onStateChange`; `NativeBackend` wires it in
+  `start()` and drives a capped-exponential backoff retry
+  (`handleCaptureCoordinatorStateChange` → `scheduleCaptureRetry`, mirroring the
+  per-app `.processNotYetAudible` retry). Two differences from the per-app path:
+  the retry only arms when `NativeCaptureError.isRetryable` (everything but
+  `.osUnsupported`), and — because there is ONE `.mutedWhenTapped` whole-system
+  tap — it **re-checks `captureRunning` at FIRE time** before calling `start()`,
+  so a deselect during the backoff can't restart the tap and mute the Mac with
+  the audio going nowhere (the bug `reconcileCaptureGate` exists to prevent).
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean

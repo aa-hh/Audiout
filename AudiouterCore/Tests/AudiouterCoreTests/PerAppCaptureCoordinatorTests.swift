@@ -501,6 +501,16 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         func set(_ newValue: [pid_t]) { lock.withLock { value = newValue } }
     }
 
+    /// Records every `FakeProcessTap` a `makeTap` factory mints, in order, so a
+    /// test can tell the OLD instance (torn down by a `stop()`) from the NEW one
+    /// (minted by the following `start()`) after a relaunch.
+    private final class MintedTapBox: @unchecked Sendable {
+        let lock = NSLock()
+        private var taps: [FakeProcessTap] = []
+        func append(_ tap: FakeProcessTap) { lock.withLock { taps.append(tap) } }
+        func tap(at index: Int) -> FakeProcessTap { lock.withLock { taps[index] } }
+    }
+
     /// Bring one bundle ID to `.capturing` with a scripted process set, ready
     /// for a membership diff. Returns the (tap, box, coordinator).
     private func startedCoordinator(
@@ -639,6 +649,60 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(tap.updates, 0, "a non-capturing slot is never membership-updated")
         XCTAssertEqual(tap.creates, createsAfterFail, "no recreate driven from membership diff on a failed slot")
+    }
+
+    /// W1-T4 / W1-T5 integration seam: a membership diff scheduled for the OLD
+    /// instance of a bundle ID must never land on the NEW slot a relaunch
+    /// creates in between. `NativeBackend.handleAppLaunched` (T5) does
+    /// `perAppCapture.start(bundleID:)` after a prior `stop(bundleID:)` tore the
+    /// slot down (`handleAppTerminated`) — this models a browser quitting and
+    /// relaunching (fresh pid, fresh tap) while a debounced membership diff
+    /// from the DEAD instance's process-list notification is still in flight.
+    /// `applyMembershipChange` guards on `slot.tap === tap` (captured before the
+    /// blocking resolve), so it must find the slot has moved on and do nothing
+    /// to the new tap — this proves that guard holds across a real stop/start,
+    /// not just a same-instance race.
+    func testStaleMembershipDiffDoesNotTouchTapAfterRelaunch() {
+        let mintedTaps = MintedTapBox()
+        let box = PidSetBox([4242])
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: {
+                let t = FakeProcessTap()
+                mintedTaps.append(t)
+                return t
+            },
+            resolveProcessSet: { _ in box.get() },
+            muteBehavior: .mutedWhenTapped,
+            membershipDebounceInterval: .milliseconds(150)
+        )
+
+        coordinator.start(bundleID: "com.example.browser")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
+        let oldTap = mintedTaps.tap(at: 0)
+
+        // A tab spawns a new audio child — arms the debounced diff against the
+        // OLD tap/slot, but don't let it settle yet.
+        box.set([4242, 5001])
+        coordinator.handleProcessListChanged()
+
+        // The app quits and relaunches with a fresh pid before the debounce
+        // fires: T5's path is stop() (tears the old slot down) then start()
+        // (mints a brand-new slot + tap), exactly like
+        // `NativeBackend.handleAppTerminated` -> `handleAppLaunched`.
+        coordinator.stop(bundleID: "com.example.browser")
+        box.set([9999])
+        coordinator.start(bundleID: "com.example.browser")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
+        let newTap = mintedTaps.tap(at: 1)
+        XCTAssertNotIdentical(oldTap, newTap, "relaunch must mint a fresh tap for the fresh slot")
+
+        // Let the stale diff's debounce interval elapse.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+
+        XCTAssertEqual(oldTap.updates, 0, "the stale diff must not update the torn-down tap")
+        XCTAssertEqual(newTap.updates, 0, "the stale diff must not bleed into the relaunched tap either")
+        XCTAssertEqual(newTap.lastPids, [9999], "the new slot's tap was built from the post-relaunch pid, untouched by the old diff")
+        coordinator.stop(bundleID: "com.example.browser")
     }
 
     #endif

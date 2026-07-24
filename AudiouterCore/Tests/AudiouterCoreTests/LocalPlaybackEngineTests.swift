@@ -4,6 +4,10 @@
 import XCTest
 @testable import AudiouterCore
 
+#if canImport(AudioToolbox)
+import AudioToolbox
+#endif
+
 /// Tests for ``LocalPlaybackEngine`` — specifically the per-app RMS metering
 /// hook (T10, the Current-Device app-bar meter): ``LocalPlaybackEngine/onAppLevel``
 /// + ``LocalPlaybackEngine/setMeteringActive(_:)``. These drive the REAL

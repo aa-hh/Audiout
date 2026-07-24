@@ -1,6 +1,10 @@
 import XCTest
 @testable import AudiouterCore
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 #if canImport(AudioToolbox)
 import AudioToolbox
 #endif
@@ -25,7 +29,6 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     private final class FakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        var onNominalSampleRateChanged: (@Sendable (UInt32, Double) -> Void)?
 
         let lock = NSLock()
         var format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
@@ -33,10 +36,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         private(set) var createCount = 0
         private(set) var teardownCount = 0
         private(set) var started = false
-        /// The `excludedPIDs` passed to the MOST RECENT `createAndStart` call
-        /// (T4) — lets a test assert the tap was (re)created with the right
-        /// exclusion set without needing a real Core Audio process object.
-        private(set) var lastExcludedPIDs: Set<pid_t> = []
+        /// The `excludedProcessObjectIDs` passed to the MOST RECENT
+        /// `createAndStart` call (T4/leak-fix) — lets a test assert the tap
+        /// was (re)created with the right exclusion set without needing a
+        /// real Core Audio process object.
+        private(set) var lastExcludedProcessObjectIDs: Set<AudioObjectID> = []
 
         /// Test-only hook invoked synchronously at the START of `createAndStart`
         /// (before the scripted `startError`/return), i.e. while the coordinator
@@ -46,8 +50,8 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         /// the caller's thread in this fake. Mirrors ``FakeProcessTap``.
         var onCreateAndStart: (() -> Void)?
 
-        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastExcludedPIDs = excludedPIDs; lock.unlock()
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastExcludedProcessObjectIDs = excludedProcessObjectIDs; lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             lock.lock(); started = true; lock.unlock()
@@ -60,22 +64,10 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
-        func fireNominalSampleRateChanged(deviceID: UInt32, rate: Double) {
-            onNominalSampleRateChanged?(deviceID, rate)
-        }
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
-        var excludedPIDs: Set<pid_t> { lock.withLock { lastExcludedPIDs } }
-    }
-
-    /// Thread-safe fire counter for the `onTapRecreated` signal (Fix A) — the
-    /// coordinator may fire it off its internal queue.
-    private final class RecreateCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _value = 0
-        func increment() { lock.withLock { _value += 1 } }
-        var value: Int { lock.withLock { _value } }
+        var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { lastExcludedProcessObjectIDs } }
     }
 
     /// Records every forwarded (pcm, pts) pair.
@@ -103,32 +95,66 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         var converts: Int { lock.withLock { convertCount } }
     }
 
-    /// Thread-safe bundle-ID → pid map a test can mutate BETWEEN calls (e.g. to
-    /// simulate a relaunch handing out a fresh pid) while still handing a plain
-    /// `@Sendable` closure to `resolveProcessSet` — a captured `var` dictionary
-    /// doesn't compile under strict concurrency (R14 relaunch tests).
-    private final class MutablePIDMap: @unchecked Sendable {
-        private let lock = NSLock()
-        private var map: [String: pid_t]
-        init(_ initial: [String: pid_t]) { self.map = initial }
-        func get(_ bundleID: String) -> pid_t? { lock.withLock { map[bundleID] } }
-        func set(_ bundleID: String, _ pid: pid_t) { lock.withLock { map[bundleID] = pid } }
+    // MARK: Helpers
+
+    /// A scripted ``AudioProcessEnumerating``: hands back a fixed process list
+    /// (and parent-pid map) so an ``AudioProcessResolver`` built on it resolves
+    /// deterministically, with no live Core Audio.
+    private struct FakeProcessEnumerator: AudioProcessEnumerating {
+        let processes: [RawAudioProcess]
+        var parents: [pid_t: pid_t] = [:]
+        func enumerateProcesses() -> [RawAudioProcess] { processes }
+        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
     }
 
-    // MARK: Helpers
+    /// A MUTABLE ``AudioProcessEnumerating`` for the W1-T7 relaunch/membership
+    /// tests: the returned process list can be swapped mid-test (an excluded app
+    /// relaunching with a new pid, or spawning an audio child) so the resolver's
+    /// output genuinely CHANGES across calls, driving a compare-before-rebuild.
+    private final class MutableProcessEnumerator: AudioProcessEnumerating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _processes: [RawAudioProcess]
+        init(_ processes: [RawAudioProcess]) { _processes = processes }
+        func set(_ processes: [RawAudioProcess]) { lock.withLock { _processes = processes } }
+        func enumerateProcesses() -> [RawAudioProcess] { lock.withLock { _processes } }
+        func parentPID(of pid: pid_t) -> pid_t? { nil }
+    }
+
+    /// One process object for bundle `bundleID`, with `pid == objectID` — the same
+    /// shape ``singleProcessResolver`` uses, but as a raw value the mutable
+    /// enumerator can hold and swap.
+    private func rawProcess(_ objectID: AudioObjectID, _ bundleID: String) -> RawAudioProcess {
+        RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+    }
+
+    /// Convenience: an ``AudioProcessResolver`` where each bundle id resolves to
+    /// exactly ONE process object, at `pid = objectID` — the shape every
+    /// pre-multi-process test used before the leak fix.
+    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+        }
+        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+    }
 
     private func makeCoordinator(
         tap: FakeTap,
         sink: SpySink,
         converter: FakeConverter,
-        resolveProcessSet: @escaping AppProcessResolver = { _ in [] }
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { tap },
             sink: sink,
             makeConverter: { _ in converter },
-            resolveProcessSet: resolveProcessSet,
-            muteBehavior: .mutedWhenTapped
+            processResolver: processResolver,
+            muteBehavior: .mutedWhenTapped,
+            membershipDebounceInterval: membershipDebounceInterval,
+            // Hermetic: never register the real HAL process-object-list listener in
+            // tests. Membership diffing is driven directly via
+            // `handleMembershipChange()` / `handleProcessListChanged()`.
+            installsProcessListListener: false
         )
     }
 
@@ -192,6 +218,52 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tap.teardowns, 2)
     }
 
+    // MARK: - onDeviceRateRebuild fires only for a device/rate rebuild, never an
+    //         exclusion-set rebuild (the "connects fast, then long silence" fix).
+
+    /// The whole-system AirPlay session reset must fire ONLY when a device/nominal-
+    /// rate change rebuilt the tap — NOT when the tap was rebuilt because the
+    /// exclusion set changed. Attaching the synced-local sink adds its render pid to
+    /// the exclusion set on EVERY Mac+AirPlay connect, recreating the tap; an
+    /// app-route change does the same. Treating those benign rebuilds as a rate-
+    /// renegotiation recapture fired a redundant removeOutput→addOutput RTP
+    /// re-establish on every connect — the long silence Alec heard after an
+    /// already-fast connect. `recreateTap(cause: .exclusionChange)` must stay silent;
+    /// only `recreateTap(cause: .deviceOrRateChange)` (the device-change/nominal-rate
+    /// listener path) may fire `onDeviceRateRebuild`.
+    func testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1, "first capture — no rebuild yet")
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
+                       "the initial start must NOT fire onDeviceRateRebuild")
+
+        // Exclusion-set change (models the synced-local sink attach on connect / an
+        // app-route change): the tap rebuilds, but the tapped device and its clock
+        // are unchanged, so NO session reset.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        waitFor { tap.creates >= 2 }
+        XCTAssertEqual(coordinator.state, .capturing(tap.format), "the exclusion rebuild lands in .capturing")
+        // Give any erroneous callback a chance to fire before asserting it didn't.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
+                       "an exclusion-set rebuild must NOT fire onDeviceRateRebuild — no AirPlay session reset")
+
+        // A genuine device/nominal-rate change (the default-device / sample-rate
+        // listener path) DOES fire it — the dropout the reset was built for.
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { deviceRateRebuilds } == 1 }
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
+                       "a device/nominal-rate rebuild MUST fire onDeviceRateRebuild exactly once")
+        XCTAssertGreaterThanOrEqual(tap.creates, 3, "the device-change rebuild created a fresh tap")
+    }
+
     // MARK: - A dropped (nil) conversion is not forwarded.
 
     func testDroppedConversionIsNotForwarded() {
@@ -230,7 +302,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableSystemTapSurfacesOSUnsupported() {
         let tap = UnavailableSystemTap()
-        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedPIDs: [])) { error in
+        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedProcessObjectIDs: [])) { error in
             XCTAssertEqual(error as? NativeCaptureError, .osUnsupported(minimum: "14.2"))
         }
     }
@@ -336,27 +408,104 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.stop()
     }
 
+    // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
+    //
+    // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —
+    // e.g. synced-local opening the built-in speakers at a different rate than the
+    // tapped device) leaves the device's UID UNCHANGED, so the identity listener
+    // (`kAudioHardwarePropertyDefaultOutputDevice`) never fires and the coordinator
+    // would otherwise never recover (the tap keeps delivering buffers, but silent
+    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.installSampleRateListener`
+    // (T1) closes that gap by listening on the tapped device's own
+    // `kAudioDevicePropertyNominalSampleRate` and routing the notification onto the
+    // EXACT SAME `onDefaultDeviceChanged` closure `installDefaultDeviceListener` already
+    // uses (see NativeCaptureCoordinator.swift: the listener block calls
+    // `self?.onDefaultDeviceChanged?()`, identical to the identity listener's callback).
+    // That closure is exactly what `FakeTap.fireDeviceChange()` fires — so it is the
+    // correct and only hermetically-fakeable stand-in for "the nominal-rate listener
+    // fired": the real listener registration itself lives on a live `AudioObjectID`
+    // inside `CoreAudioSystemTap` and isn't reachable through the `SystemAudioTap`
+    // seam `NativeCaptureCoordinator` is built against.
+
+    /// A simulated nominal-sample-rate notification (fired through the same seam
+    /// the real listener funnels into) drives a full tap rebuild: `recreateTap`
+    /// tears the stale tap down and creates a fresh one against the new format —
+    /// with NO identity/device-change API involved, mirroring the real bug where
+    /// only the rate changed.
+    func testNominalSampleRateNotificationTriggersTapRecreate() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1)
+        XCTAssertEqual(tap.teardowns, 0)
+
+        // Simulate the device's nominal rate flipping (e.g. 44.1 -> 48kHz) with the
+        // device UID unchanged — the fake models this as just a format change, since
+        // the coordinator only sees it via the shared callback either way.
+        tap.format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // the nominal-sample-rate listener's real callback path
+
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 48000) }
+        XCTAssertEqual(coordinator.state, .capturing(tap.format),
+                       "a nominal-rate renegotiation must rebuild the tap against the new format")
+        XCTAssertEqual(tap.creates, 2, "recreateTap must create a fresh tap")
+        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the stale (silent-PCM) tap must be torn down first")
+
+        coordinator.stop()
+    }
+
+    /// Two back-to-back nominal-rate notifications (a rapid 44.1->48->44.1 bounce,
+    /// e.g. synced-local toggling the local sink on/off quickly) must each drive
+    /// their own rebuild in turn — the C6 `pendingDeviceChange` coalescing guard
+    /// (already covered generically by
+    /// `testDeviceChangeDuringRebuildIsCoalescedAndReplayed`) rides this exact same
+    /// seam, so a rate bounce is never dropped or thrashed into a stuck state.
+    func testRapidNominalSampleRateBounceDrivesSequentialRebuilds() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1)
+
+        tap.format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // 44.1 -> 48
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 48000) }
+
+        tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // 48 -> 44.1, back again
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 44100) }
+
+        XCTAssertEqual(tap.creates, 3, "each rate flip must drive its own rebuild — no bounce dropped")
+        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+
+        coordinator.stop()
+    }
+
     // MARK: - T4: exclusion-list wiring (routed apps + user-excluded apps must
     // not leak into the whole-system mix tap).
 
     /// Changing the routed-apps set recreates the capturing tap with the
-    /// correctly updated exclusion pid list.
-    func testUpdateRoutingRecreatesTapWithUpdatedExclusionPIDs() {
+    /// correctly updated exclusion object-id list.
+    func testUpdateRoutingRecreatesTapWithUpdatedExclusionObjectIDs() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedPIDs, [], "no routes yet — nothing excluded")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "no routes yet — nothing excluded")
 
         let routes = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
         coordinator.updateRouting(appRoutes: routes, excludedBundleIDs: [])
 
         XCTAssertEqual(tap.creates, 2, "a route change while capturing recreates the tap")
-        XCTAssertEqual(tap.excludedPIDs, [111], "the newly-routed app's pid is excluded from the system mix")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the newly-routed app's process object is excluded from the system mix")
         coordinator.stop()
     }
 
@@ -364,16 +513,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// from the exclusion list — it re-enters the system mix.
     func testAppFlippedBackToCurrentDeviceReentersSystemMix() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.excludedPIDs, [111])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
         let createsAfterRoute = tap.creates
 
         // The route flips back to .currentDevice — "no redirect."
@@ -382,20 +530,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             excludedBundleIDs: [])
 
         XCTAssertGreaterThan(tap.creates, createsAfterRoute, "the tap is recreated again on the flip back")
-        XCTAssertEqual(tap.excludedPIDs, [], "an app back on .currentDevice must re-enter the system mix")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "an app back on .currentDevice must re-enter the system mix")
         coordinator.stop()
     }
 
-    /// A `.device`-routed app's pid never appears in the system-mix tap's
-    /// exclusion-blind spot — i.e. it IS present in the exclusion list
-    /// (so it can never double-send: once to its own destination via
-    /// per-app capture, and again via this whole-system mixdown).
-    func testDeviceRoutedAppPIDNeverLeaksIntoSystemMix() {
+    /// A `.device`-routed app's process object never appears in the
+    /// system-mix tap's exclusion-blind spot — i.e. it IS present in the
+    /// exclusion list (so it can never double-send: once to its own
+    /// destination via per-app capture, and again via this whole-system
+    /// mixdown).
+    func testDeviceRoutedAppProcessNeverLeaksIntoSystemMix() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.b": 222]))
 
         coordinator.start()
         coordinator.updateRouting(
@@ -405,49 +553,19 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertTrue(tap.excludedPIDs.contains(111), "the .device-routed app's pid must be excluded (no double-send)")
-        XCTAssertFalse(tap.excludedPIDs.contains(222), ".currentDevice apps stay in the system mix")
-        coordinator.stop()
-    }
-
-    /// W1-T3: a bundle ID that resolves to a FULL process set (main + audio-
-    /// playing children, e.g. a browser's helper processes) must have EVERY
-    /// pid in that set excluded from the whole-system mix — not just the
-    /// first/main pid — or the child's audio leaks into the system tap
-    /// alongside its own per-app-routed destination (R2/R14).
-    func testMultiProcessBundleExcludesEveryPIDFromSystemMix() {
-        let tap = FakeTap()
-        // A fake browser: main pid + two audio-playing helper/child pids.
-        let browserPIDs: [pid_t] = [111, 222, 333]
-        let pids: [String: [pid_t]] = ["com.browser.app": browserPIDs, "com.app.b": [999]]
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid] ?? [] })
-
-        coordinator.start()
-        coordinator.updateRouting(
-            appRoutes: [
-                AppRoute(bundleID: "com.browser.app", displayName: "Browser", destination: .device(id: "speaker-1")),
-                AppRoute(bundleID: "com.app.b", displayName: "App B", destination: .currentDevice),
-            ],
-            excludedBundleIDs: [])
-
-        XCTAssertEqual(tap.excludedPIDs, Set(browserPIDs),
-                       "ALL of the browser's process-set pids (main + both helpers) must be excluded, "
-                       + "not just the first/main pid")
-        XCTAssertFalse(tap.excludedPIDs.contains(999), ".currentDevice apps stay in the system mix")
+        XCTAssertTrue(tap.excludedProcessObjectIDs.contains(111), "the .device-routed app's process must be excluded (no double-send)")
+        XCTAssertFalse(tap.excludedProcessObjectIDs.contains(222), ".currentDevice apps stay in the system mix")
         coordinator.stop()
     }
 
     /// `.noRedirect` (the new default/unset state) is exclusion-equivalent to
     /// `.currentDevice`: neither is ever excluded from the system-wide tap. An
     /// app left "unset" must not be accidentally dropped from the system mix.
-    func testNoRedirectAppPIDStaysInSystemMixJustLikeCurrentDevice() {
+    func testNoRedirectAppStaysInSystemMixJustLikeCurrentDevice() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]))
 
         coordinator.start()
         coordinator.updateRouting(
@@ -458,7 +576,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.excludedPIDs, [111],
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111],
                        "only the .device-routed app is excluded; both local states (.currentDevice AND "
                        + ".noRedirect) stay in the system mix identically")
         coordinator.stop()
@@ -468,21 +586,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// and composes correctly (UNION) with route-based exclusion.
     func testUserExcludedAppsComposeWithRouteBasedExclusion() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.c": 333]))
 
         coordinator.start()
         // Only a user-excluded app, no routes yet.
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedPIDs, [333])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [333])
 
         // Add a routed app on top — the union must include BOTH.
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedPIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
         coordinator.stop()
     }
 
@@ -490,10 +607,9 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// not recreate the tap on every unrelated tick.
     func testUpdateRoutingIsNoOpWhenUnionUnchanged() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         let route = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
@@ -511,10 +627,9 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// the computed exclusion set is applied on the NEXT `start()`.
     func testUpdateRoutingWhileIdleAppliesOnNextStart() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         // Not capturing yet — updateRouting must not create a tap.
         coordinator.updateRouting(
@@ -524,419 +639,67 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedPIDs, [111], "the previously-computed exclusion set is applied on start()")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the previously-computed exclusion set is applied on start()")
         coordinator.stop()
     }
 
-    // MARK: - R14: relaunch correctness (`refreshExcludedProcessSet`)
-
-    /// An EXCLUDED app relaunches (old pid dies, a fresh pid takes its place
-    /// under the same bundle ID) — the bundle-ID union `updateRouting` tracks
-    /// is unchanged, so its own no-op guard would never recreate the tap.
-    /// `refreshExcludedProcessSet` must bypass that guard and pick up the
-    /// fresh pid so the relaunched app doesn't leak back into the system mix.
-    func testRefreshExcludedProcessSetPicksUpRelaunchedExcludedAppPID() {
+    /// THE LEAK FIX (T3): a multi-process app (Firefox-shaped — a silent main
+    /// process plus an audio-emitting child with no bundle id of its own) must
+    /// have BOTH process objects excluded from the whole-system mix. Excluding
+    /// only the main process (the old single-pid behavior) named the wrong
+    /// process and left the real audio leaking into the system mix alongside
+    /// wherever it was redirected to.
+    func testMultiProcessBundleExclusionUnionsAllProcessObjects() {
         let tap = FakeTap()
-        let pids = MutablePIDMap(["com.app.excluded": 111])
+        let mainPID: pid_t = 100
+        let childPID: pid_t = 200
+        let processResolver = AudioProcessResolver(enumerator: FakeProcessEnumerator(
+            processes: [
+                RawAudioProcess(objectID: 1, pid: mainPID, bundleID: "org.mozilla.firefox"),
+                RawAudioProcess(objectID: 2, pid: childPID, bundleID: nil),
+            ],
+            parents: [childPID: mainPID]))
         let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-        let createsAfterExclude = tap.creates
-
-        // The app quits and relaunches with a new pid — same bundle ID.
-        pids.set("com.app.excluded", 456)
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-
-        XCTAssertGreaterThan(tap.creates, createsAfterExclude, "relaunch must recreate the tap")
-        XCTAssertEqual(tap.excludedPIDs, [456], "the relaunched app's FRESH pid is excluded, not the stale one")
-        coordinator.stop()
-    }
-
-    /// A ROUTED (`.device`) app relaunches — its fresh pid must be excluded
-    /// from the system mix too, or it doubles: once via its own target route,
-    /// once via the whole-system mixdown.
-    func testRefreshExcludedProcessSetPicksUpRelaunchedRoutedAppPID() {
-        let tap = FakeTap()
-        let pids = MutablePIDMap(["com.app.routed": 111])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
+            tap: tap, sink: SpySink(), converter: FakeConverter(), processResolver: processResolver)
 
         coordinator.start()
         coordinator.updateRouting(
-            appRoutes: [AppRoute(bundleID: "com.app.routed", displayName: "Routed", destination: .device(id: "speaker-1"))],
+            appRoutes: [AppRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-        let createsAfterRoute = tap.creates
 
-        pids.set("com.app.routed", 777)
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.routed")
-
-        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "relaunch must recreate the tap")
-        XCTAssertEqual(tap.excludedPIDs, [777], "the relaunched routed app's fresh pid is excluded — no doubling")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2],
+            "both the silent main process AND the audio-emitting child must be excluded — "
+            + "excluding only the main process is exactly the leak this primitive exists to fix")
         coordinator.stop()
     }
 
-    /// A bundle ID that ISN'T currently excluded/routed-away must not trigger
-    /// any rebuild — cheap to call on every app launch, routed or not.
-    func testRefreshExcludedProcessSetIsNoOpForUnrelatedBundleID() {
+    /// The multi-process union composes correctly across MULTIPLE excluded
+    /// bundle ids: each bundle's full process set contributes to the union,
+    /// with no cross-bundle bleed.
+    func testMultiProcessUnionAcrossMultipleExcludedBundles() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
+        let processResolver = AudioProcessResolver(enumerator: FakeProcessEnumerator(
+            processes: [
+                RawAudioProcess(objectID: 1, pid: 100, bundleID: "org.mozilla.firefox"),
+                RawAudioProcess(objectID: 2, pid: 200, bundleID: nil),
+                RawAudioProcess(objectID: 3, pid: 300, bundleID: "com.google.Chrome"),
+            ],
+            parents: [200: 100]))
         let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+            tap: tap, sink: SpySink(), converter: FakeConverter(), processResolver: processResolver)
 
         coordinator.start()
         coordinator.updateRouting(
-            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            appRoutes: [
+                AppRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox", destination: .device(id: "speaker-1")),
+                AppRoute(bundleID: "com.google.Chrome", displayName: "Chrome", destination: .device(id: "speaker-2")),
+            ],
             excludedBundleIDs: [])
-        let createsAfterRoute = tap.creates
 
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.unrelated")
-        XCTAssertEqual(tap.creates, createsAfterRoute, "an unrelated bundle ID must not recreate the tap")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2, 3],
+            "the union spans every excluded bundle's full process set")
         coordinator.stop()
     }
-
-    /// Calling `refreshExcludedProcessSet` while not capturing (e.g. no
-    /// device selected yet) must not create a tap — the fresh pid is simply
-    /// picked up on the next real `start()`.
-    func testRefreshExcludedProcessSetWhileIdleIsNoOp() {
-        let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.excluded": 111]
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
-
-        // Excluded set recorded while idle (no start() yet).
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
-    }
-
-    // MARK: - W1-T7 Fix 1: refreshExcludedProcessSet must compare-before-rebuild
-    // (the coreaudiod CPU-storm regression it previously reintroduced)
-
-    /// THE storm-prevention property (W1-T7 Fix 1). `refreshExcludedProcessSet`
-    /// is wired by R9 (`handlePerAppCaptureHealthChange`) to fire on EVERY per-app
-    /// tap `.capturing` transition. With N routed apps re-reaching `.capturing`
-    /// after one output-device sample-rate renegotiation, the OLD unconditional
-    /// `recreateTap()` drove N full whole-system teardown/recreates on an UNCHANGED
-    /// excluded set — the amplified coreaudiod rebuild storm the compare-before-
-    /// rebuild discipline exists to prevent. A refresh whose resolved exclusion set
-    /// is unchanged must now do ZERO Core Audio work, no matter how many fire.
-    func testRefreshOnUnchangedExclusionSetTriggersZeroRebuilds() {
-        let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.excluded": 111]
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-        let createsAfterExclude = tap.creates
-
-        // Simulate the storm: many `.capturing` health-change refreshes for the
-        // excluded bundle, all on the SAME unchanged pid.
-        for _ in 0..<8 {
-            coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        }
-        XCTAssertEqual(tap.creates, createsAfterExclude,
-                       "an unchanged excluded set must do ZERO rebuilds however many refreshes fire — the storm cannot reignite")
-        coordinator.stop()
-    }
-
-    /// A GENUINE pid change (a real relaunch: old pid dead, fresh pid) must still
-    /// rebuild — but EXACTLY ONCE — and a second refresh on the settled pid is a
-    /// no-op. Complements the R14 relaunch tests above by pinning the rebuild count
-    /// to exactly one (the guard must not suppress a real change, nor rebuild
-    /// twice).
-    func testRefreshOnGenuinePIDChangeRebuildsExactlyOnce() {
-        let tap = FakeTap()
-        let pids = MutablePIDMap(["com.app.excluded": 111])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-        let createsAfterExclude = tap.creates
-
-        pids.set("com.app.excluded", 456)
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine pid change rebuilds exactly once")
-        XCTAssertEqual(tap.excludedPIDs, [456], "the relaunched app's fresh pid is excluded")
-
-        // Settled: refresh again on the same pid → no further Core Audio work.
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled pid must not rebuild again")
-        coordinator.stop()
-    }
-
-    /// A FAILED rebuild must not leave a baseline that suppresses the next real
-    /// change (W1-T7 Fix 1 — the baseline is written ONLY on a successful commit).
-    /// A relaunch's rebuild fails mid-flight → the coordinator surfaces `.failed`;
-    /// after recovery via `start()` the compare guard is NOT wedged: an unchanged
-    /// set still no-ops and a genuine later change still rebuilds exactly once.
-    func testFailedRebuildDoesNotSuppressNextRealExclusionChange() {
-        let tap = FakeTap()
-        let pids = MutablePIDMap(["com.app.excluded": 111])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-
-        // The relaunch's rebuild fails (createAndStart throws) → `.failed`.
-        tap.startError = .deviceLost(reason: "gone")
-        pids.set("com.app.excluded", 456)
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        waitFor { if case .failed = coordinator.state { return true }; return false }
-        XCTAssertEqual(coordinator.state, .failed(.deviceLost(reason: "gone")))
-
-        // Recover: app now stable on 456. start() from `.failed` re-derives the
-        // baseline from the LIVE set — proving the failed attempt didn't wedge it.
-        tap.startError = nil
-        coordinator.start()
-        waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.excludedPIDs, [456], "recovery excludes the current pid")
-        let createsAfterRecover = tap.creates
-
-        // Unchanged set after recovery → no rebuild (baseline is correct, not stale).
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterRecover, "settled set after recovery must not rebuild")
-
-        // A genuine NEW change is still applied — the earlier failure did not
-        // permanently suppress future rebuilds.
-        pids.set("com.app.excluded", 789)
-        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterRecover + 1, "a real change after a prior failure still rebuilds once")
-        XCTAssertEqual(tap.excludedPIDs, [789])
-        coordinator.stop()
-    }
-
-    // MARK: - W1-T7 (Gap 1): live exclusion-membership diffing (debounced, compare-before-rebuild)
-
-    #if canImport(AudioToolbox)
-
-    /// Thread-safe mutable process set for the resolver closure, so a test can
-    /// model an EXCLUDED browser spawning/killing an audio child between
-    /// process-list notifications. Mirrors `PerAppCaptureCoordinatorTests.PidSetBox`.
-    private final class PidSetBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: [pid_t]
-        init(_ value: [pid_t]) { self.value = value }
-        func get() -> [pid_t] { lock.withLock { value } }
-        func set(_ newValue: [pid_t]) { lock.withLock { value = newValue } }
-    }
-
-    private func makeCoordinator(
-        tap: FakeTap,
-        sink: SpySink,
-        converter: FakeConverter,
-        resolveProcessSet: @escaping AppProcessResolver,
-        membershipDebounceInterval: DispatchTimeInterval
-    ) -> NativeCaptureCoordinator {
-        NativeCaptureCoordinator(
-            makeTap: { tap },
-            sink: sink,
-            makeConverter: { _ in converter },
-            resolveProcessSet: resolveProcessSet,
-            muteBehavior: .mutedWhenTapped,
-            membershipDebounceInterval: membershipDebounceInterval)
-    }
-
-    /// (a) An EXCLUDED app spawns a new audio-playing child mid-session (no
-    /// relaunch, no bundle-ID change) → the new child pid is picked up and the
-    /// tap is recreated EXACTLY ONCE with the expanded exclusion set, so the new
-    /// child's audio stops leaking into the whole-system mix.
-    func testExcludedAppSpawningChildMidSessionIsAddedToExclusionExactlyOnce() {
-        let tap = FakeTap()
-        let box = PidSetBox([111]) // the excluded browser, main pid only so far
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { _ in box.get() },
-            membershipDebounceInterval: .milliseconds(300))
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
-        XCTAssertEqual(tap.excludedPIDs, [111])
-        let createsAfterExclude = tap.creates
-
-        // A new tab starts playing: a fresh audio child appears under the SAME
-        // bundle ID. No relaunch, no union change — only the live process set grew.
-        box.set([111, 222])
-        coordinator.handleMembershipChange()
-
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
-                       "a genuine membership change recreates the tap exactly once")
-        XCTAssertEqual(tap.excludedPIDs, [111, 222],
-                       "the newly-spawned audio child is now excluded from the system mix")
-
-        // Idempotence: re-diffing the now-settled set does no further work.
-        coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
-                       "the settled set must not trigger a second rebuild")
-        coordinator.stop()
-    }
-
-    /// (b) THE regression-prevention property: an unchanged excluded-pid set — a
-    /// duplicate process-list notification, or churn in some UNRELATED app —
-    /// triggers ZERO rebuilds. A wrong equality check here would reintroduce the
-    /// coreaudiod CPU storm from rebuild thrashing (the loop-breaker invariant).
-    func testUnchangedExclusionSetTriggersZeroRebuilds() {
-        let tap = FakeTap()
-        let box = PidSetBox([111, 222])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { _ in box.get() },
-            membershipDebounceInterval: .milliseconds(300))
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
-        let createsAfterExclude = tap.creates
-
-        // Resolver keeps returning the identical set (including a reorder, which
-        // is NOT a change under set semantics).
-        coordinator.handleMembershipChange()
-        box.set([222, 111]) // same members, different order
-        coordinator.handleMembershipChange()
-
-        XCTAssertEqual(tap.creates, createsAfterExclude,
-                       "no rebuild for an unchanged (or merely reordered) exclusion set")
-        coordinator.stop()
-    }
-
-    /// A membership diff must only ever act while CAPTURING — a diff that lands
-    /// while idle (no tap) does nothing.
-    func testMembershipDiffWhileIdleIsNoOp() {
-        let tap = FakeTap()
-        let box = PidSetBox([111])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { _ in box.get() },
-            membershipDebounceInterval: .milliseconds(300))
-
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
-        box.set([111, 222])
-        coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a membership diff must not create one")
-    }
-
-    /// Rapid spawn/kill/spawn churn within the debounce window coalesces to a
-    /// single settled diff — one rebuild against the FINAL set, not one per Core
-    /// Audio notification. Driven through the real debounced
-    /// `handleProcessListChanged` entry point with a short injected interval.
-    func testRapidExclusionChurnWithinDebounceWindowCoalescesToOneRebuild() {
-        let tap = FakeTap()
-        let box = PidSetBox([111])
-        let coordinator = makeCoordinator(
-            tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolveProcessSet: { _ in box.get() },
-            membershipDebounceInterval: .milliseconds(60))
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
-        let createsAfterExclude = tap.creates
-
-        // A burst of three notifications inside the 60ms window, settling on
-        // [111, 333].
-        box.set([111, 222]); coordinator.handleProcessListChanged()
-        box.set([111]);      coordinator.handleProcessListChanged()
-        box.set([111, 333]); coordinator.handleProcessListChanged()
-
-        waitFor { tap.creates >= createsAfterExclude + 1 }
-        // Give any (erroneously) uncoalesced extra rebuilds a chance to appear.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
-
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
-                       "the burst must coalesce to a single settled rebuild, not one per notification")
-        XCTAssertEqual(tap.excludedPIDs, [111, 333],
-                       "the coalesced diff applies the SETTLED exclusion set")
-        coordinator.stop()
-    }
-
-    // MARK: - W1-T7 Fix 2: react to a pid's TRANSLATABILITY, not just pid-set membership
-
-    /// A translator whose "translatable" pid set the test can grow at will —
-    /// models an EXCLUDED-only app whose main pid is pre-seeded into the exclusion
-    /// union while SILENT (present, but NOT yet translatable to a Core Audio
-    /// process object) and then becomes translatable on the SAME pid when it
-    /// starts playing.
-    private final class TranslatabilityBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var translatable: Set<pid_t>
-        init(_ initial: Set<pid_t>) { self.translatable = initial }
-        func setTranslatable(_ pids: Set<pid_t>) { lock.withLock { translatable = pids } }
-        /// Object id for a pid == its bit pattern, but ONLY if currently
-        /// translatable; an untranslatable pid contributes nothing (mirrors the
-        /// real tap skipping a pid with no audio process object yet).
-        func translate(_ pids: Set<pid_t>) -> Set<UInt32> {
-            lock.withLock { Set(pids.filter { translatable.contains($0) }.map { UInt32(bitPattern: $0) }) }
-        }
-    }
-
-    /// THE Fix 2 leak: an EXCLUDED-ONLY app (denylisted, NOT routed → no per-app
-    /// tap) whose main pid is pre-seeded into the exclusion union while silent. The
-    /// resolved PID SET never changes — the pid was always present — so the OLD
-    /// raw-pid membership compare found no change and never rebuilt, and the app's
-    /// audio leaked into the whole-system mix the moment it became audible. With
-    /// the compare key now the TRANSLATED OBJECT set, the pid becoming translatable
-    /// (silent→audible on the SAME pid) IS a change → the tap rebuilds and the
-    /// app is re-excluded. Steady state (no translatability change) stays a no-op,
-    /// so Fix 1's loop-breaker is preserved.
-    func testUntranslatablePIDBecomingTranslatableReExcludesApp() {
-        let tap = FakeTap()
-        // The excluded-only app's main pid is ALWAYS resolved (the production
-        // NSRunningApplication fallback pre-seeds it even while silent)…
-        let resolvedPIDs = PidSetBox([111])
-        // …but it is NOT translatable to a Core Audio object until it plays.
-        let translate = TranslatabilityBox([]) // 111 present but untranslatable
-        let coordinator = NativeCaptureCoordinator(
-            makeTap: { tap },
-            sink: SpySink(),
-            makeConverter: { _ in FakeConverter() },
-            resolveProcessSet: { _ in resolvedPIDs.get() },
-            translatePIDs: { translate.translate($0) },
-            muteBehavior: .mutedWhenTapped,
-            membershipDebounceInterval: .milliseconds(300))
-
-        coordinator.start()
-        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        // The pid is handed to the tap, but the exclusion OBJECT set (the baseline)
-        // is empty — nothing translates yet, so the app currently leaks.
-        XCTAssertEqual(tap.excludedPIDs, [111], "the pid is passed to the tap, but isn't a translatable object yet")
-        let createsBefore = tap.creates
-
-        // Steady-state churn with NO translatability change → ZERO rebuilds
-        // (Fix 1's loop-breaker must not be defeated by the object-compare key).
-        coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, createsBefore, "no translatability change → zero rebuilds")
-
-        // The app starts playing: the SAME main pid becomes translatable. The
-        // resolved pid set is UNCHANGED ([111]) — the old compare would miss this.
-        translate.setTranslatable([111])
-        coordinator.handleMembershipChange()
-
-        XCTAssertEqual(tap.creates, createsBefore + 1,
-                       "a pid becoming translatable (silent→audible on the same pid) must rebuild exactly once")
-        XCTAssertEqual(tap.excludedPIDs, [111],
-                       "the now-translatable app is (re-)excluded from the system mix")
-
-        // Settled: a further diff with no translatability change is a no-op.
-        coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, createsBefore + 1, "the settled translatable set must not rebuild again")
-        coordinator.stop()
-    }
-
-    #endif
 
     // MARK: - Idempotency: start() while capturing is a no-op; stop() from idle is a no-op.
 
@@ -1060,153 +823,64 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
-    // MARK: - W2-T1: nominal-sample-rate listener (fixes R10)
+    // MARK: - Telemetry (T2): start -> capturing emits captureWS/transition lines.
 
-    /// (a) A nominal-rate change on the tapped device triggers EXACTLY ONE
-    /// guarded rebuild — the silent-buffer recovery path (finding R10: a
-    /// process tap keeps delivering all-zero buffers when the output device
-    /// renegotiates its rate, e.g. a Zoom/FaceTime call grabbing the mic).
-    func testNominalSampleRateChangeTriggersExactlyOneRebuild() {
+    /// Thread-safe capture box for a `Telemetry` test sink: the sink runs on
+    /// Telemetry's own serial writer queue (a different thread than the test
+    /// body), so a plain `[String]` here would race the read after
+    /// `_installTestSink(nil)` drains it. Mirrors `TelemetryTests`' own
+    /// `Locked<Value>`, built on this file's existing `NSLock.withLock`.
+    private final class TelemetryLineBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.withLock { lines.append(line) } }
+        var snapshot: [String] { lock.withLock { lines } }
+    }
+
+    /// A `start()` → `.capturing` sequence must emit `captureWS`/`transition`
+    /// lines for BOTH hops (`idle` → `creatingTap`, `creatingTap` →
+    /// `capturing`), the second carrying the tap's format — the minimum an
+    /// agent needs to reconstruct "capture came up" from the log alone, cold,
+    /// with no repro (PLAN-TELEMETRY-SYSTEM.md §A).
+    ///
+    /// Uses `Telemetry._installTestSink` — the lightweight, no-disk seam —
+    /// rather than `_resetForTesting`; never touches a real directory.
+    /// Cleaned up via `addTeardownBlock` (runs even if an assertion above
+    /// fails) so the sink can never leak forward into whatever test runs next
+    /// in this same process (`swift test --parallel` runs one class's
+    /// methods serially in one process — AGENTS.md / TelemetryTests.swift).
+    func testStartEmitsCaptureWSTransitionTelemetry() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        addTeardownBlock { Telemetry._installTestSink(nil) }
+
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
 
         coordinator.start()
-        let createsAfterStart = tap.creates
-        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
+        XCTAssertEqual(coordinator.state, .capturing(tap.format))
 
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        // `_installTestSink(nil)` is a synchronous barrier on Telemetry's
+        // writer queue (mirrors TelemetryTests' own `drain()`) — guarantees
+        // both lines above are fully written before we inspect them.
+        Telemetry._installTestSink(nil)
 
-        XCTAssertEqual(tap.creates, createsAfterStart + 1,
-                       "a genuine rate change recreates the tap exactly once")
-        XCTAssertEqual(tap.teardowns, 1, "the stale (silent) tap must be torn down")
-        coordinator.stop()
-    }
-
-    /// (b) THE regression-prevention property: an unchanged/repeated identical
-    /// rate notification triggers ZERO rebuilds. A naive listener that rebuilds
-    /// on every notification — even a duplicate for an unchanged rate — is
-    /// exactly the failure mode that caused a confirmed coreaudiod CPU storm
-    /// elsewhere in this codebase; the `(deviceID, nominalRate)`
-    /// compare-before-rebuild guard is the loop-breaker.
-    func testUnchangedNominalSampleRateTriggersZeroRebuilds() {
-        let tap = FakeTap()
-        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
-
-        coordinator.start()
-        let createsAfterStart = tap.creates
-
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        XCTAssertEqual(tap.creates, createsAfterStart + 1)
-        let createsAfterFirstChange = tap.creates
-
-        // Duplicate notification for the SAME device at the SAME rate — must
-        // not trigger a second rebuild.
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-
-        XCTAssertEqual(tap.creates, createsAfterFirstChange,
-                       "no rebuild for a repeated, unchanged rate notification")
-        coordinator.stop()
-    }
-
-    /// (c) A rate change reported for an unrelated/untapped device has no
-    /// effect — the `(deviceID, nominalRate)` key, not the rate alone, gates
-    /// the rebuild, so a notification about some OTHER device's rate can never
-    /// masquerade as a change to the tapped device.
-    func testNominalSampleRateChangeOnUnrelatedDeviceHasNoEffect() {
-        let tap = FakeTap()
-        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
-
-        coordinator.start()
-        let createsAfterStart = tap.creates
-
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        let createsAfterChange = tap.creates
-        XCTAssertEqual(createsAfterChange, createsAfterStart + 1)
-
-        // A DIFFERENT device reporting the SAME rate is still a distinct key —
-        // must still be treated as a change (proves the guard is keyed on the
-        // tuple, not the rate alone)...
-        tap.fireNominalSampleRateChanged(deviceID: 99, rate: 44100)
-        XCTAssertEqual(tap.creates, createsAfterChange + 1,
-                       "a different device id at the same rate is still a genuine change")
-
-        // ...but repeating THAT exact (deviceID, rate) again is a true no-op.
-        let createsAfterSecondDevice = tap.creates
-        tap.fireNominalSampleRateChanged(deviceID: 99, rate: 44100)
-        XCTAssertEqual(tap.creates, createsAfterSecondDevice,
-                       "repeating the same (deviceID, rate) key is a no-op")
-        coordinator.stop()
-    }
-
-    /// A rate notification must only ever act while CAPTURING — one that lands
-    /// while idle (no tap started) does nothing, mirroring the membership-diff
-    /// idle guard.
-    func testNominalSampleRateChangeWhileIdleIsNoOp() {
-        let tap = FakeTap()
-        _ = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
-
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a rate notification must not create one")
-    }
-
-    // MARK: - Fix A (R10, whole-system half): onTapRecreated signals a REBUILD only
-
-    /// The `onTapRecreated` seam (which `NativeBackend` uses to reset the
-    /// whole-system RTP session) fires on a tap REBUILD — a rate change or a
-    /// default-output-device change — but NEVER on the initial `start()` (first
-    /// establishment, whose session is opened out of band by `convergeDevice`, not
-    /// desynced). A duplicate/unchanged rate notification does no rebuild, so it
-    /// fires nothing either.
-    func testTapRecreatedSignalFiresOnRebuildNotFirstStart() {
-        let tap = FakeTap()
-        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
-        let recreated = RecreateCounter()
-        coordinator.onTapRecreated = { recreated.increment() }
-
-        // First establishment must NOT fire the signal.
-        coordinator.start()
-        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
-        XCTAssertEqual(recreated.value, 0, "the initial start() is not a rebuild — no reset signal")
-
-        // A genuine rate change rebuilds → fires exactly once.
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        XCTAssertEqual(tap.creates, 2)
-        XCTAssertEqual(recreated.value, 1, "a rate-change rebuild fires the reset signal exactly once")
-
-        // A duplicate (unchanged) rate notification does no rebuild → fires nothing.
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-        XCTAssertEqual(tap.creates, 2)
-        XCTAssertEqual(recreated.value, 1, "an unchanged rate notification rebuilds nothing — no reset signal")
-
-        // A default-output-device change is also a rebuild → fires again.
-        tap.fireDeviceChange()
-        XCTAssertEqual(tap.creates, 3)
-        XCTAssertEqual(recreated.value, 2, "a device-change rebuild fires the reset signal again")
-
-        coordinator.stop()
-    }
-
-    /// A `NativeCaptureError` scripted rebuild that FAILS lands `.failed` and must
-    /// NOT fire the reset signal — there is no fresh capturing tap to have desynced
-    /// an anchor, and a spurious reset on a dead tap would thrash the engine.
-    func testTapRecreatedSignalNotFiredWhenRebuildFails() {
-        let tap = FakeTap()
-        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
-        let recreated = RecreateCounter()
-        coordinator.onTapRecreated = { recreated.increment() }
-
-        coordinator.start()
-        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
-
-        // The recreation fails (receiver/tap can't be rebuilt).
-        tap.startError = .tapCreationFailed(reason: "scripted")
-        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
-
-        if case .failed = coordinator.state {} else {
-            XCTFail("a failing rebuild must land .failed, got \(coordinator.state)")
+        let lines = capturedLines.snapshot
+        let idleToCreating = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
+                && $0.contains("\"from\":\"idle\"") && $0.contains("\"to\":\"creatingTap\"")
         }
-        XCTAssertEqual(recreated.value, 0, "a failed rebuild has no fresh session to reset — no signal")
+        XCTAssertNotNil(idleToCreating, "expected an idle -> creatingTap captureWS/transition line, got: \(lines)")
+
+        let creatingToCapturing = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
+                && $0.contains("\"from\":\"creatingTap\"") && $0.contains("\"to\":\"capturing\"")
+        }
+        XCTAssertNotNil(creatingToCapturing, "expected a creatingTap -> capturing captureWS/transition line, got: \(lines)")
+        XCTAssertTrue(
+            creatingToCapturing?.contains("\"format\":\"\(tap.format.sampleRate)/\(tap.format.channels)\"") ?? false,
+            "the capturing transition must carry the tap format, got: \(creatingToCapturing ?? "nil")")
+
         coordinator.stop()
     }
 
@@ -1220,6 +894,127 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(NativeCaptureCoordinator.rmsOfS16LE(full), 1.0, accuracy: 0.01)
     }
 
+    // MARK: - Aggregate-rate reconciliation (converter input-rate correctness).
+    //
+    // ROOT CAUSE of the single-AirPlay pitch-shift bug: `CoreAudioSystemTap` reads
+    // `kAudioTapPropertyFormat` off the BARE tap before it joins the aggregate, but
+    // the IOProc then delivers buffers on the AGGREGATE's clock (its main sub-device
+    // = the tapped output device, with sub-tap drift compensation resampling the tap
+    // ONTO that clock). When those rates differ, the converter is built from a stale
+    // rate and reinterprets every buffer — a sustained pitch shift. The fix reads the
+    // aggregate's REAL nominal rate and corrects the format BEFORE the converter is
+    // built (`reconcileFormatWithAggregate`). The reconciliation and compare-before-
+    // rebuild DECISIONS are pure and pinned here; the live-aggregate divergence
+    // itself (real AudioHardwareCreateProcessTap/AggregateDevice) can only be
+    // exercised on real Core Audio, so end-to-end correctness rests on the live
+    // re-test (plan T7). The `FakeTap` above deliberately can't reproduce it — it
+    // returns a format directly with no aggregate — which is exactly why the fix and
+    // its unit coverage live at the pure-decision seam.
+
+    #if canImport(AudioToolbox)
+    /// The bug direction heard live: the bare tap declares 44100 while the aggregate
+    /// actually delivers 48000. `reconciledFormat` must rewrite the rate to the
+    /// aggregate's 48000 so the converter is built on the real delivered rate — NOT
+    /// the stale pre-aggregate 44100 that pitched playback UP ~8.8% (48000/44100).
+    @available(macOS 14.2, *)
+    func testReconciledFormatCorrectsStalePreAggregateRate() {
+        let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        let reconciled = CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000)
+        XCTAssertEqual(reconciled.sampleRate, 48000,
+            "the converter's input rate must follow the aggregate's real delivered rate, not the pre-aggregate tap read")
+        // Every rate-INDEPENDENT field is preserved (drift compensation only resamples).
+        XCTAssertEqual(reconciled.channels, 2)
+        XCTAssertEqual(reconciled.bitsPerSample, 32)
+        XCTAssertTrue(reconciled.isFloat)
+        XCTAssertFalse(reconciled.isInterleaved)
+    }
+
+    /// The reverse divergence (declared 48000, aggregate 44100) is corrected too —
+    /// the fix is symmetric: it always snaps to the aggregate's real rate.
+    @available(macOS 14.2, *)
+    func testReconciledFormatCorrectsEitherDirection() {
+        let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 44100).sampleRate, 44100)
+    }
+
+    /// When the pre-aggregate read already matches the aggregate (the common case),
+    /// the format is returned UNCHANGED — no needless rewrite.
+    @available(macOS 14.2, *)
+    func testReconciledFormatUnchangedWhenRatesMatch() {
+        let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000), declared)
+    }
+
+    /// An unreadable / degenerate aggregate rate must NOT clobber the format — we
+    /// keep the pre-aggregate read (no regression vs. the prior behaviour).
+    @available(macOS 14.2, *)
+    func testReconciledFormatIgnoresUnreadableAggregateRate() {
+        let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: nil), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 0), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: -48000), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .nan), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .infinity), declared)
+    }
+
+    /// Compare-before-rebuild loop-breaker: a nominal-rate notification that
+    /// re-announces the SAME rate the converter already runs at must NOT rebuild.
+    @available(macOS 14.2, *)
+    func testShouldRebuildForNominalRateSkipsNoOpNotification() {
+        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000, currentEffectiveRate: 48000),
+            "a set-to-same-value notification must be a no-op — no teardown+rebuild churn")
+        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000.4, currentEffectiveRate: 48000),
+            "sub-Hz jitter that rounds to the same integer rate is still a no-op")
+    }
+
+    /// A genuinely different notified rate DOES rebuild; an unreadable rate falls
+    /// back to the safe rebuild (can't prove it's a no-op).
+    @available(macOS 14.2, *)
+    func testShouldRebuildForNominalRateRebuildsOnRealChangeOrUnreadable() {
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 44100, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: nil, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 0, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: .nan, currentEffectiveRate: 48000))
+    }
+
+    /// Mechanism proof with the REAL `AVFormatConverter`: the declared input rate is
+    /// exactly the pitch lever. The same captured bytes, converted to the fixed 44100
+    /// output, yield FEWER total frames when declared at 48000 than at 44100 — by the
+    /// 44100/48000 ratio. So a converter left on a stale 44100 while the aggregate
+    /// really delivers 48000 would stretch the audio (shift pitch); feeding it the
+    /// reconciled real rate is what keeps playback at the correct pitch.
+    ///
+    /// Summed over many small buffers rather than one big one: a single
+    /// `AVAudioConverter.convert` caps output at an internal ~4096-frame quantum, so
+    /// one large buffer clips identically for both rates and hides the ratio. Small
+    /// buffers stay under the quantum and the sum converges on the steady-state
+    /// rate ratio (per-call priming latency washes out over the run).
+    @available(macOS 14.2, *)
+    func testConverterOutputLengthScalesWithDeclaredInputRate() {
+        let framesPerBuffer = 2048
+        let iterations = 32
+        let planar = Self.planarFloat32Stereo(frameCount: framesPerBuffer)
+        let buffer = CapturedBuffer(channelData: planar, frameCount: framesPerBuffer, pts: timespec())
+
+        let at44100 = AVFormatConverter(from: TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+        let at48000 = AVFormatConverter(from: TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+
+        var frames44 = 0   // interleaved S16LE stereo = 4 bytes/frame
+        var frames48 = 0
+        for _ in 0..<iterations {
+            if let out = at44100.convertToAirPlayPCM(buffer) { frames44 += out.count / 4 }
+            if let out = at48000.convertToAirPlayPCM(buffer) { frames48 += out.count / 4 }
+        }
+        XCTAssertGreaterThan(frames44, 0)
+        XCTAssertGreaterThan(frames48, 0)
+        XCTAssertLessThan(frames48, frames44,
+            "a higher declared input rate yields fewer 44100 output frames — the exact pitch lever this fix corrects")
+        let ratio = Double(frames48) / Double(frames44)
+        XCTAssertEqual(ratio, 44100.0 / 48000.0, accuracy: 0.01,
+            "total output length must scale by the declared-rate ratio (44100/48000), confirming rate == pitch")
+    }
+    #endif
+
     // MARK: - utils
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {
@@ -1229,6 +1024,297 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     private func stateIsCapturing(_ c: NativeCaptureCoordinator, sampleRate: Int) -> Bool {
         if case .capturing(let f) = c.state { return f.sampleRate == sampleRate }
         return false
+    }
+
+    /// Two planar Float32 stereo channel buffers of `frameCount` frames each (a mild
+    /// sine, so it's non-degenerate signal), for the real-`AVFormatConverter`
+    /// mechanism test. Non-interleaved = one `Data` per channel, matching the tap's
+    /// stereo-mixdown layout.
+    private static func planarFloat32Stereo(frameCount: Int) -> [Data] {
+        var left = [Float](repeating: 0, count: frameCount)
+        var right = [Float](repeating: 0, count: frameCount)
+        for i in 0..<frameCount {
+            let s = Float(sin(Double(i) * 0.05)) * 0.25
+            left[i] = s
+            right[i] = s
+        }
+        return [left.withUnsafeBytes { Data($0) }, right.withUnsafeBytes { Data($0) }]
+    }
+
+    // MARK: - R14: relaunch correctness (`refreshExcludedProcessSet`, W1-T7 Fix 1)
+    //
+    // Ported to the `AudioProcessResolver` (object-based) seam. `refreshExcludedProcessSet`
+    // + the shared compare-before-rebuild core `rebuildIfExclusionObjectsChanged`
+    // are ours-only reliability (main lacked any live exclusion re-resolution for a
+    // relaunched/child-spawning EXCLUDED app while capturing).
+
+    /// An EXCLUDED app relaunches (old process gone, a fresh one under the same
+    /// bundle ID). The bundle-ID union `updateRouting` tracks is unchanged, so its
+    /// own no-op guard would never recreate the tap — `refreshExcludedProcessSet`
+    /// bypasses it and picks up the fresh process so it can't leak back in.
+    func testRefreshExcludedProcessSetPicksUpRelaunchedExcludedAppProcess() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        enumerator.set([rawProcess(456, "com.app.excluded")]) // relaunch: fresh pid
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+
+        XCTAssertGreaterThan(tap.creates, createsAfterExclude, "relaunch must recreate the tap")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [456], "the relaunched app's fresh process is excluded, not the stale one")
+        coordinator.stop()
+    }
+
+    /// A ROUTED (`.device`) app relaunches — its fresh process must be excluded
+    /// from the system mix too, or it doubles: once via its target route, once via
+    /// the whole-system mixdown.
+    func testRefreshExcludedProcessSetPicksUpRelaunchedRoutedAppProcess() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.routed")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.routed", displayName: "Routed", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        let createsAfterRoute = tap.creates
+
+        enumerator.set([rawProcess(777, "com.app.routed")])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.routed")
+
+        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "relaunch must recreate the tap")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [777], "the relaunched routed app's fresh process is excluded — no doubling")
+        coordinator.stop()
+    }
+
+    /// A bundle ID that ISN'T currently excluded/routed-away triggers no rebuild —
+    /// cheap to call on every app launch.
+    func testRefreshExcludedProcessSetIsNoOpForUnrelatedBundleID() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.a")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        let createsAfterRoute = tap.creates
+
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.unrelated")
+        XCTAssertEqual(tap.creates, createsAfterRoute, "an unrelated bundle ID must not recreate the tap")
+        coordinator.stop()
+    }
+
+    /// Calling `refreshExcludedProcessSet` while not capturing must not create a
+    /// tap — the fresh process is picked up on the next real `start()`.
+    func testRefreshExcludedProcessSetWhileIdleIsNoOp() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
+    }
+
+    /// THE storm-prevention property (W1-T7 Fix 1): `refreshExcludedProcessSet` is
+    /// wired (R9) to fire on EVERY per-app tap `.capturing` transition. With N
+    /// routed apps re-reaching `.capturing` after one output-rate renegotiation, an
+    /// unconditional recreate drove N whole-system rebuilds on an UNCHANGED excluded
+    /// set — the amplified coreaudiod storm. A refresh whose resolved object set is
+    /// unchanged must do ZERO Core Audio work however many fire.
+    func testRefreshOnUnchangedExclusionSetTriggersZeroRebuilds() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        for _ in 0..<8 {
+            coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        }
+        XCTAssertEqual(tap.creates, createsAfterExclude,
+                       "an unchanged excluded set must do ZERO rebuilds however many refreshes fire")
+        coordinator.stop()
+    }
+
+    /// A genuine process change rebuilds EXACTLY ONCE; a second refresh on the
+    /// settled set is a no-op.
+    func testRefreshOnGenuineProcessChangeRebuildsExactlyOnce() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        let createsAfterExclude = tap.creates
+
+        enumerator.set([rawProcess(456, "com.app.excluded")])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine process change rebuilds exactly once")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [456])
+
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled set must not rebuild again")
+        coordinator.stop()
+    }
+
+    /// A FAILED rebuild must not leave a baseline that suppresses the next real
+    /// change — the baseline advances ONLY on a successful `.capturing` commit.
+    func testFailedRebuildDoesNotSuppressNextRealExclusionChange() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+
+        // The relaunch's rebuild fails (createAndStart throws) → `.failed`.
+        tap.startError = .deviceLost(reason: "gone")
+        enumerator.set([rawProcess(456, "com.app.excluded")])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+
+        // Recover: start() from `.failed` re-derives the baseline from the LIVE set,
+        // proving the failed attempt didn't wedge it.
+        tap.startError = nil
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [456], "recovery excludes the current process")
+        let createsAfterRecover = tap.creates
+
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterRecover, "settled set after recovery must not rebuild")
+
+        enumerator.set([rawProcess(789, "com.app.excluded")])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterRecover + 1, "a real change after a prior failure still rebuilds once")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [789])
+        coordinator.stop()
+    }
+
+    // MARK: - W1-T7 (Gap 1): live exclusion-membership diffing (debounced, compare-before-rebuild)
+
+    /// An EXCLUDED app spawns a new audio-playing child mid-session (no relaunch,
+    /// no bundle-ID change) → the new child's process object is picked up and the
+    /// tap recreated EXACTLY ONCE with the expanded exclusion set, so the child's
+    /// audio stops leaking into the whole-system mix. (On the object-based resolver
+    /// this also covers Fix 2: a process only appears once it is audible — a
+    /// silent→audible transition is exactly a membership change here.)
+    func testExcludedAppSpawningChildMidSessionIsAddedToExclusionExactlyOnce() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        // A new tab starts playing: a fresh audio child appears under the SAME
+        // bundle ID. No relaunch, no union change — only the live process set grew.
+        enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser")])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine membership change recreates the tap exactly once")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 222], "the newly-spawned audio child is now excluded")
+
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled set must not trigger a second rebuild")
+        coordinator.stop()
+    }
+
+    /// The regression-prevention property: an unchanged excluded object set — a
+    /// duplicate notification, or churn in an UNRELATED app — triggers ZERO
+    /// rebuilds (the CPU-storm loop-breaker).
+    func testUnchangedExclusionMembershipTriggersZeroRebuilds() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([
+            rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser"),
+        ])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        let createsAfterExclude = tap.creates
+
+        coordinator.handleMembershipChange()
+        enumerator.set([rawProcess(222, "com.app.browser"), rawProcess(111, "com.app.browser")]) // reorder = same set
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterExclude, "no rebuild for an unchanged (or reordered) exclusion set")
+        coordinator.stop()
+    }
+
+    /// A membership diff that lands while idle (no tap) does nothing.
+    func testMembershipDiffWhileIdleIsNoOp() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser")])
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a membership diff must not create one")
+    }
+
+    /// Rapid spawn/kill/spawn churn within the debounce window coalesces to a
+    /// single settled diff — one rebuild against the FINAL set, not one per
+    /// notification. Driven through the real debounced `handleProcessListChanged`
+    /// entry point with a short injected interval.
+    func testRapidExclusionChurnWithinDebounceWindowCoalescesToOneRebuild() {
+        let tap = FakeTap()
+        let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(enumerator: enumerator),
+            membershipDebounceInterval: .milliseconds(60))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        let createsAfterExclude = tap.creates
+
+        // A burst of three notifications inside the 60ms window, settling on {111,333}.
+        enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser")]); coordinator.handleProcessListChanged()
+        enumerator.set([rawProcess(111, "com.app.browser")]);                                     coordinator.handleProcessListChanged()
+        enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(333, "com.app.browser")]); coordinator.handleProcessListChanged()
+
+        waitFor { tap.creates >= createsAfterExclude + 1 }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2)) // let any extra (erroneous) rebuilds appear
+
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the burst must coalesce to a single settled rebuild")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 333], "the coalesced diff applies the SETTLED exclusion set")
+        coordinator.stop()
     }
 }
 

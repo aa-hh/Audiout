@@ -33,58 +33,19 @@ func audiouterEmergencyWriteStderr(_ message: String) {
     }
 }
 
-/// Resolve a bundle ID to the FULL set of pids that make up that app — its main
-/// process AND any audio-playing helper/child processes (W1-T1). This is the real
-/// per-app-capture / exclusion resolver the native backend needs: Core can't
-/// import AppKit, so the AppKit layer supplies it via
-/// `makeBackend(resolveProcessSet:)`.
-///
-/// The grouping is done by ``ProcessSetResolver`` over the live Core Audio
-/// process-object list (bundle-ID prefix match — Chrome helpers carry
-/// `com.google.Chrome.helper…`, Firefox children carry the parent identity),
-/// with a responsible-pid walk for helpers whose own bundle ID doesn't
-/// prefix-match. The walk uses the SPI `responsibility_get_pid_for_pid` when
-/// available and is best-effort (returns nil ⇒ prefix match only, which already
-/// covers the common browsers). `NSRunningApplication` supplies a fallback for
-/// the app's own main pid so a not-yet-audible app (no audio process object yet)
-/// still resolves its main process.
-///
-/// A free `@Sendable` closure (not an instance method) so it can be used in
-/// `AppDelegate`'s `backend` property initializer, which runs before `self`.
-///
-/// The responsible-pid SPI is resolved via `dlsym` (RTLD_DEFAULT) rather than
-/// a link-time symbol — it lives in a private library and isn't always
-/// available to link against, so a runtime lookup keeps the app linkable and
-/// simply degrades to prefix-match-only when the symbol is absent. Same pattern
-/// the app uses for other SPIs (`TCCAccessPreflight`).
-private typealias ResponsiblePIDFn = @convention(c) (pid_t) -> pid_t
-private let responsiblePIDForPID: ResponsiblePIDFn? = {
-    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2 /* RTLD_DEFAULT */),
-                          "responsibility_get_pid_for_pid") else { return nil }
-    return unsafeBitCast(sym, to: ResponsiblePIDFn.self)
-}()
-
-private let resolveRunningAppProcessSet: @Sendable (String) -> [pid_t] = { bundleID in
-    let base = ProcessSetResolver(
-        enumerate: ProcessSetResolver.systemEnumerator(),
-        responsiblePID: { pid in
-            guard let fn = responsiblePIDForPID else { return nil }
-            let owner = fn(pid)
-            return (owner > 0 && owner != pid) ? owner : nil
-        })
-    var pids = base.pids(forBundleID: bundleID)
-    // Fallback: an app that hasn't opened an audio stream yet has no process
-    // object in the list, so include its NSRunningApplication main pid(s) too
-    // (deduped, appended after any audio-process pids so `.first` stays the
-    // main process). This preserves the pre-Wave-1 "resolve the main pid"
-    // behaviour for apps that aren't audible yet.
-    let seen = Set(pids)
-    for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
-        let pid = app.processIdentifier
-        if pid > 0 && !seen.contains(pid) { pids.append(pid) }
-    }
-    return pids
-}
+/// The real per-app-capture process resolver the native backend needs: Core
+/// can't import AppKit (`NSRunningApplication`), so the AppKit layer builds it
+/// and supplies it via `makeBackend(resolver:)`. `bundleIDForPID` is the one
+/// AppKit-only step (`AudioProcessResolver`'s own doc comment) — everything
+/// else (enumerating Core Audio process objects, walking parent pids) is pure
+/// Core Audio + Darwin and lives in `AudioProcessResolver` itself. A free
+/// value (not an instance property) so it can be used in `AppDelegate`'s
+/// `backend` property initializer, which runs before `self` exists.
+private let audioProcessResolver = AudioProcessResolver(
+    enumerator: CoreAudioProcessEnumerator(),
+    bundleIDForPID: { pid in
+        NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    })
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
@@ -98,9 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
     /// Everything downstream holds an `OutputBackend`, never a concrete type.
-    /// `resolveProcessSet` threads the real process-set resolver (W1-T1) into
-    /// the native backend's per-app capture + exclusion paths.
-    private let backend: OutputBackend = makeBackend(resolveProcessSet: resolveRunningAppProcessSet)
+    /// `resolver` threads the real `AudioProcessResolver` (AppKit-backed
+    /// `bundleIDForPID`) into the native backend's per-app capture AND
+    /// whole-system-exclusion paths.
+    private let backend: OutputBackend = makeBackend(resolver: audioProcessResolver)
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -303,6 +265,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
+        // "Selected Devices" (not just which AirPlay devices are) to detect
+        // "play everywhere" — `GroupController.applyRouting` always filters the
+        // local device out of what it hands `backend.setOutputSet`, so that call
+        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
+        // existing public read that does; wire it in once, here, right after
+        // both are constructed. `backend as? NativeBackend` is nil for
+        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
+        // `LatencyConfigurable` optional-capability pattern used below.
+        (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
+            self?.groupController?.isSpeakerSelected(id) ?? false
+        }
 
         // Construct the production AppRoutingController explicitly (T-11), using
         // the default store directory so app routes persist to Application Support.
@@ -415,7 +389,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // otherwise the OS dialog would be their first exposure to the ask, which
         // is the exact thing this flow exists to prevent. Every other launch (and
         // every non-native backend) starts immediately.
-        if SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind) {
+        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
+        // T5: the onboarding-presentation gate's decision + the inputs behind
+        // it. `hasCompletedSetup` is the "setup says done/granted" side of
+        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
+        // just below (logged separately) is the "real gate" side — together
+        // they let a reader see the exact moment those two disagree.
+        Telemetry.log(.permission, "onboarding_gate", [
+            "site": "AppDelegate.launch.shouldPresentOnLaunch",
+            "decision": presentOnLaunch ? "present" : "skip",
+            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+            "backendKind": "\(backendKind)",
+        ])
+        if presentOnLaunch {
             log("Audiouter launched (backend: \(type(of: backend))) — first-run setup")
             presentSetup()
         } else {
@@ -434,7 +420,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // which lagged the launch: the user saw the popover first (a menu-bar
             // click, `onboardingWindowController` still nil) and setup flashed in
             // after. Local Network / PTP gaps are still caught by that audit.
-            if onboardingWindowController == nil, !SystemAudioCaptureTCC.isGranted() {
+            let liveAudioGranted = SystemAudioCaptureTCC.isGranted()
+            // T5: the live-permission-triggered half of the gate. Logged
+            // unconditionally (not only when it re-presents) so the common
+            // "still granted" case is on record too, not just the exception —
+            // and `backendKind` is included because this specific check, unlike
+            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
+            Telemetry.log(.permission, "onboarding_gate", [
+                "site": "AppDelegate.launch.liveAudioCaptureCheck",
+                "decision": (onboardingWindowController == nil && !liveAudioGranted) ? "present" : "skip",
+                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+                "backendKind": "\(backendKind)",
+                "liveGranted": "\(liveAudioGranted)",
+            ])
+            if onboardingWindowController == nil, !liveAudioGranted {
                 log("Audio capture not granted at launch — presenting setup")
                 presentSetup(reason: .permissionLost([.audioCapture]))
             }
@@ -967,6 +966,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setSystemAirPlayNoteActive(active)
             log("event: \(describe(event))")
             return
+        case .streamHealth:
+            // Signal-only (T8): a re-capture/rebind was detected on some device
+            // and is in flight (`recovering == true`) or resolved
+            // (`recovering == false`). No UI surfaces this yet — designing that
+            // is an explicit follow-up. Log and return; no device model to repaint.
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -1007,6 +1013,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
         case .systemDefaultIsAirPlayActive(let active):
             return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
+        case .streamHealth(let id, let recovering):
+            return "streamHealth(\(id), recovering: \(recovering))"
         }
     }
 

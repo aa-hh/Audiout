@@ -158,18 +158,17 @@ func run() -> Int32 {
     checks.expect(controller.isSpeakerSelected("office") && controller.isSpeakerSelected("homepod-bed"),
                   "both AirPlay devices selected")
 
-    // --- 5. Local-mix block: re-adding the current device into a mixed set is refused.
-    print("\n[5] Local-mix block")
-    checks.expect(!controller.canSelectLocalSpeaker("local-mac"),
-                  "local can't currently join the mixed set")
-    let refusal = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
+    // --- 5. T-GROUPCTL (Q5): re-adding the current device into a mixed set is now allowed.
+    print("\n[5] Local may join a mixed set")
+    checks.expect(controller.canSelectLocalSpeaker("local-mac"),
+                  "local can now join the mixed set")
+    let rejoin = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
     drain()
-    checks.expect(!refusal.applied, "adding local to a mixed set is refused")
-    checks.expectEqual(refusal.refusalReason, GroupController.localMixRefusalReason,
-                       "refusal carries the reason")
-    checks.expect(!controller.isSpeakerSelected("local-mac"), "local stayed out")
-    checks.expect(popover.test_lastRefusalReason == GroupController.localMixRefusalReason,
-                  "the popover surfaced the refusal reason")
+    checks.expect(rejoin.applied, "adding local to a mixed set is allowed")
+    checks.expect(rejoin.refusalReason == nil, "no refusal")
+    checks.expect(controller.isSpeakerSelected("local-mac"), "local joined")
+    checks.expect(controller.isSpeakerSelected("office") && controller.isSpeakerSelected("homepod-bed"),
+                  "AirPlay members stay — nothing dropped")
 
     // --- 6. Toggles compose the set WITHOUT routing when target is a group.
     print("\n[6] Toggles compose without routing when Main Out targets a group")

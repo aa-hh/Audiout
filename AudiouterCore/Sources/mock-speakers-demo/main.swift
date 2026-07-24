@@ -63,6 +63,9 @@ func describe(_ event: BackendEvent) -> String? {
         // Native-only (the W3-T3 system-AirPlay guard); never under mock. Handled
         // so the switch stays exhaustive.
         return "♪ system-AirPlay note \(active ? "ON (double-path risk)" : "OFF")"
+    case .streamHealth(let id, let recovering):
+        // Also native-only (T8 rebind-recovery signal); never under mock.
+        return "⚠ stream health \(id) recovering:\(recovering)"
     }
 }
 

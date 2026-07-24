@@ -829,15 +829,16 @@ public enum BackendKind {
 /// Pass `nil` (the default) to resolve the backend via
 /// ``BackendKind/resolved(explicit:environment:)`` — explicit arg → the
 /// `AIRPLAY_BACKEND` env var → `.native`.
-/// - Parameter resolveProcessSet: bundle ID → the app's full process set (main +
-///   audio-playing children), for per-app capture and exclusion (W1-T1,
-///   ``AppProcessResolver``). Core can't enumerate `NSRunningApplication`, so
-///   this is threaded in from the AppKit layer (`AppDelegate`). Defaults to
-///   "nothing resolves", which keeps the per-app path inert (empty set ⇒ no tap)
-///   for callers that don't supply it — every non-native backend ignores it.
+/// - Parameter resolver: resolves a bundle ID to the FULL set of live Core Audio
+///   process objects it owns (main + child/helper processes — the
+///   multi-process-browser leak/silence fix). Core can't import AppKit
+///   (`NSRunningApplication`), so this is threaded in from the AppKit layer
+///   (`AppDelegate`). Defaults to a resolver that resolves nothing, which keeps
+///   the per-app path inert for callers that don't supply it — every non-native
+///   backend ignores it entirely.
 public func makeBackend(
     _ kind: BackendKind? = nil,
-    resolveProcessSet: @escaping AppProcessResolver = { _ in [] }
+    resolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses())
 ) -> OutputBackend {
     switch BackendKind.resolved(explicit: kind) {
     case .mock:
@@ -878,18 +879,51 @@ public func makeBackend(
         let startBufferMs = nativeStartBufferMs()
         let engine = AirPlayEngine(
             config: EngineConfig(startBufferMs: startBufferMs))
-        // Bundle ID → the app's full process set, supplied by the caller
-        // (`AppDelegate` passes a `ProcessSetResolver`-backed resolver; other
+        // Bundle ID → full process-object set, supplied by the caller
+        // (`AppDelegate` passes an `NSRunningApplication`-backed resolver; other
         // callers get the "nothing resolves" default). Shared by BOTH the per-app
         // capture (owned by NativeBackend) and the whole-system tap so their
         // exclusion/capture views agree.
-        let nativeBackend = NativeBackend(engine: engine, resolveProcessSet: resolveProcessSet)
+        let nativeBackend = NativeBackend(engine: engine, processResolver: resolver)
         nativeBackend.seedStartBufferMs(startBufferMs)
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(
-            engine: engine, resolveProcessSet: resolveProcessSet)
+            engine: engine, processResolver: resolver)
         // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
+        // T-BACKEND: builds the delayed local sink ("play everywhere") the first
+        // time the selection is Mac + ≥1 AirPlay device. Rendered at the DEFAULT
+        // OUTPUT DEVICE's own native rate (T3 Part B), read here at construction so
+        // opening the sink's `AVAudioEngine` never renegotiates the device between
+        // 48 and 44.1 kHz — the renegotiation that silenced AirPlay when the Mac
+        // was added to a Mac+AirPlay set. `NativeCaptureCoordinator` base-resamples
+        // the 44.1 kHz airplay feed UP to this rate once before the ring. The read
+        // uses `kAudioHardwarePropertyDefaultOutputDevice` (never
+        // `DefaultSystemOutput`); if it fails we fall back to the sink's own
+        // 48 kHz default (the common built-in rate). Read ONCE per sink
+        // construction — a later default-device change is handled by the sink's
+        // own lifecycle rebuild, not a live rate follow (deferred).
+        // `presentationDelayMs` reads the backend's OWN live `startBufferMs`
+        // (T-ENGINE-DELAY / R4) so a later buffer-size change moves local playback
+        // with it, rather than a stale copy of the value at launch.
+        // userOffsetMs: T-OFFSET-UI's manual ms bias (Settings › Audio ›
+        // Advanced), read LIVE from `AppSettings` on every (re)anchor/rebuild —
+        // never a stale copy captured at launch — so a change takes effect on
+        // the next connect or lifecycle rebuild.
+        nativeBackend.syncedLocalSinkFactory = {
+            let deviceNativeRate: Double
+            if let rate = try? LocalOutputLatency.defaultOutputDeviceNominalSampleRate(),
+               rate.isFinite, rate > 0 {
+                deviceNativeRate = rate
+            } else {
+                deviceNativeRate = 48_000
+            }
+            return SyncedLocalSink(
+                renderSampleRate: deviceNativeRate,
+                channelCount: 2,
+                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs },
+                userOffsetMs: { AppSettings().syncOffsetMs })
+        }
         return nativeBackend
     }
 }

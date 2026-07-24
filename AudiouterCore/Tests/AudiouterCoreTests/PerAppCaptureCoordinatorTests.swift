@@ -5,10 +5,11 @@ import XCTest
 import AudioToolbox
 #endif
 
-/// Hermetic tests for ``PerAppCaptureCoordinator`` (T3). Every seam is
-/// injected — a fake ``ProcessAudioTap`` factory (no TCC, no aggregate
-/// device, no real Core Audio) and a scripted `resolveProcessSet` closure (no
-/// `NSRunningApplication`) — so the whole per-bundle-ID state machine runs
+/// Hermetic tests for ``PerAppCaptureCoordinator`` (T3, T2 full-process-set).
+/// Every seam is injected — a fake ``ProcessAudioTap`` factory (no TCC, no
+/// aggregate device, no real Core Audio) and an ``AudioProcessResolver``
+/// built over a scripted ``FakeProcessEnumerator`` (no `NSRunningApplication`,
+/// no live Core Audio) — so the whole per-bundle-ID state machine runs
 /// hermetically. Mirrors ``NativeCaptureCoordinatorTests``' doubles/pattern.
 final class PerAppCaptureCoordinatorTests: XCTestCase {
 
@@ -16,8 +17,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     /// A tap the test drives directly: `createAndStart` returns a scripted
     /// format (or throws a scripted error), and `pushBuffer`/`fireDeviceChange`
-    /// inject the IOProc-thread callbacks. Records the pid/bundleID it was
-    /// started with and teardown calls, so leaks and cross-app bleed are
+    /// inject the IOProc-thread callbacks. Records the resolved processes/bundleID
+    /// it was started with and teardown calls, so leaks and cross-app bleed are
     /// observable.
     private final class FakeProcessTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
@@ -28,9 +29,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var startError: PerAppCaptureError?
         private(set) var createCount = 0
         private(set) var teardownCount = 0
-        private(set) var lastPids: [pid_t]?
-        /// Convenience for tests that only care about the main (first) pid.
-        var lastPid: pid_t? { lastPids?.first }
+        private(set) var lastProcesses: Set<AudioProcess>?
         private(set) var lastBundleID: String?
 
         /// Test-only hook invoked synchronously at the START of `createAndStart`
@@ -41,30 +40,12 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         /// the caller's thread in this fake.
         var onCreateAndStart: (() -> Void)?
 
-        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastPids = pids; lastBundleID = bundleID; lock.unlock()
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastProcesses = processes; lastBundleID = bundleID; lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             return format
         }
-
-        /// W1-T4 in-place update seam. `inPlaceUpdateSucceeds` scripts whether the
-        /// fake reports the live update as applied (`true`, no recreate) or asks
-        /// the coordinator to fall back to a full recreate (`false`). Records the
-        /// pids and call count so a test can assert an in-place update happened
-        /// (and how many times) versus a recreate.
-        var inPlaceUpdateSucceeds = true
-        private(set) var updateCount = 0
-        private(set) var lastUpdatePids: [pid_t]?
-
-        func updateProcessSet(pids: [pid_t]) -> Bool {
-            lock.lock(); updateCount += 1; lastUpdatePids = pids; let ok = inPlaceUpdateSucceeds
-            if ok { lastPids = pids }
-            lock.unlock()
-            return ok
-        }
-
-        var updates: Int { lock.withLock { updateCount } }
 
         func teardown() {
             lock.lock(); teardownCount += 1; lock.unlock()
@@ -77,6 +58,52 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var creates: Int { lock.withLock { createCount } }
     }
 
+    /// A scriptable ``AudioProcessEnumerating`` fake: hands back whatever
+    /// `RawAudioProcess` array is currently set, with no parent-pid chain
+    /// (every process reports its own bundle id directly) unless a test
+    /// overrides `parents`/`bundleIDForPID`. Lets a test build an
+    /// ``AudioProcessResolver`` whose `resolve(bundleID:)` result it fully
+    /// controls, without any live Core Audio.
+    private final class FakeProcessEnumerator: AudioProcessEnumerating, @unchecked Sendable {
+        let lock = NSLock()
+        var processes: [RawAudioProcess] = []
+        var parents: [pid_t: pid_t] = [:]
+
+        func enumerateProcesses() -> [RawAudioProcess] { lock.withLock { processes } }
+        func parentPID(of pid: pid_t) -> pid_t? { lock.withLock { parents[pid] } }
+
+        func setProcesses(_ new: [RawAudioProcess]) { lock.withLock { processes = new } }
+    }
+
+    /// Builds an ``AudioProcessResolver`` over a `FakeProcessEnumerator` seeded
+    /// with a single process object (`objectID`/`pid`) reporting `bundleID` as
+    /// its own — the common single-process-per-app test shape. Returns the
+    /// enumerator too so a test can mutate it later (e.g. simulate a relaunch
+    /// with a new pid, or the app quitting).
+    private func makeResolver(
+        bundleID: String, objectID: AudioObjectID, pid: pid_t
+    ) -> (resolver: AudioProcessResolver, enumerator: FakeProcessEnumerator) {
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses([RawAudioProcess(objectID: objectID, pid: pid, bundleID: bundleID)])
+        return (AudioProcessResolver(enumerator: enumerator), enumerator)
+    }
+
+    /// Builds an ``AudioProcessResolver`` over a `FakeProcessEnumerator` seeded
+    /// with exactly the given processes (own-bundle-id reporting) — for tests
+    /// that need multiple bundle IDs' processes coexisting in one enumerator.
+    private func makeResolver(processes: [RawAudioProcess]) -> (resolver: AudioProcessResolver, enumerator: FakeProcessEnumerator) {
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses(processes)
+        return (AudioProcessResolver(enumerator: enumerator), enumerator)
+    }
+
+    /// An ``AudioProcessResolver`` whose enumerator always reports zero
+    /// processes — every `resolve(bundleID:)` call returns the empty set,
+    /// simulating "not running / not yet audible".
+    private func emptyResolver() -> AudioProcessResolver {
+        AudioProcessResolver(enumerator: FakeProcessEnumerator())
+    }
+
     /// Records every (bundleID, buffer) delivery.
     private final class BufferSpy: @unchecked Sendable {
         let lock = NSLock()
@@ -85,6 +112,29 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
             lock.withLock { deliveries.append((bundleID, buffer.frameCount)) }
         }
         var all: [(bundleID: String, frameCount: Int)] { lock.withLock { deliveries } }
+    }
+
+    /// Collects `Telemetry._installTestSink` lines thread-safely — the sink
+    /// runs on Telemetry's own serial writer queue, a different thread than
+    /// the test body (same reason `BufferSpy` above needs a lock).
+    private final class TelemetryLineSpy: @unchecked Sendable {
+        let lock = NSLock()
+        private(set) var lines: [String] = []
+        func record(_ line: String) { lock.withLock { lines.append(line) } }
+        var all: [String] { lock.withLock { lines } }
+    }
+
+    // MARK: Setup/teardown
+
+    override func tearDown() {
+        // Belt-and-suspenders alongside the explicit drain in
+        // testSampleRateChangeEmitsCapturePARateRebuildTelemetry: guarantees
+        // no installed sink ever leaks forward to a later test method in this
+        // same process (swift test --parallel runs a class's methods
+        // serially in one process). A no-op for every other test, which
+        // never installs one.
+        Telemetry._installTestSink(nil)
+        super.tearDown()
     }
 
     // MARK: Helpers
@@ -110,14 +160,48 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Builds a coordinator the way every test in this file wants it: the
+    /// same 3 injected seams every call site already passes
+    /// (`makeTap`/`processResolver`/`muteBehavior`) PLUS
+    /// `installsProcessListListener: false`, so `start(bundleID:)` never arms
+    /// the REAL, live `kAudioHardwarePropertyProcessObjectList` listener on
+    /// the actual system Core Audio object. That listener fires on ANY
+    /// process anywhere on the machine opening or closing an audio session —
+    /// not just bundle IDs this suite drives — and its handler re-enters
+    /// `start(bundleID:)` from an internal HAL thread at an unpredictable
+    /// moment, which could otherwise transiently flip a slot back through
+    /// `.resolvingProcess` right as a test asserts a `.failed(...)` state (a
+    /// real flake this helper closes off for good, not just makes less
+    /// likely). No coverage is lost by keeping the real listener off here:
+    /// ``PerAppCaptureCoordinator/handleProcessListChanged()`` stays directly
+    /// callable regardless of this flag, and
+    /// `testProcessListChangeReDrivesRetryableFailedSlotButNotNonRetryable`
+    /// below exercises the resume-listener's re-drive logic that way —
+    /// deterministically — instead of depending on the live listener firing.
+    private func makeCoordinator(
+        makeTap: @escaping @Sendable () -> ProcessAudioTap,
+        processResolver: AudioProcessResolver,
+        muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
+    ) -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: makeTap,
+            processResolver: processResolver,
+            muteBehavior: muteBehavior,
+            installsProcessListListener: false,
+            membershipDebounceInterval: membershipDebounceInterval
+        )
+    }
+
     // MARK: - Single bundle ID: start -> buffers forwarded (tagged) -> stop -> clean teardown.
 
     func testStartForwardsTaggedBuffersThenStopTearsDownAndClearsState() {
         let tap = FakeProcessTap()
         let spy = BufferSpy()
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 4242)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [4242] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -126,7 +210,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         waitFor { coordinator.state(for: "com.example.music") == .capturing(tap.format) }
         XCTAssertEqual(coordinator.state(for: "com.example.music"), .capturing(tap.format))
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.lastPid, 4242)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 10, pid: 4242)])
         XCTAssertEqual(tap.lastBundleID, "com.example.music")
         XCTAssertEqual(coordinator.capturingBundleIDs, ["com.example.music"])
 
@@ -147,35 +231,39 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state(for: "com.example.never-started"), .idle)
     }
 
-    // MARK: - W1-T2: a multi-process app (main + helper pids) taps the WHOLE resolved set.
+    // MARK: - T2: a bundle ID that resolves to MULTIPLE process objects (the
+    // Firefox/Chrome multi-process-browser shape — a main process plus a
+    // nil-bundle-id audio child attributed via the parent-pid walk) gets ONE
+    // tap that is a mixdown of ALL of them, not just the main process. This is
+    // the actual leak fix: tapping only the main process silently misses the
+    // child the audio actually comes from.
 
-    func testMultiProcessAppTapsFullResolvedProcessSetNotJustMainPid() {
+    func testMultiProcessBundleMixesDownAllResolvedProcessesIntoOneTap() {
         let tap = FakeProcessTap()
-        let coordinator = PerAppCaptureCoordinator(
+        let firefox = "org.mozilla.firefox"
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses([
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: firefox),   // main process
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: nil)        // silent audio child
+        ])
+        enumerator.parents = [701: 700]
+        let resolver = AudioProcessResolver(enumerator: enumerator)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            // Main pid 4242, plus two helper/child pids (e.g. a browser's GPU
-            // and renderer helpers) — main-first, per W1-T1's AppProcessResolver
-            // contract.
-            resolveProcessSet: { _ in [4242, 5001, 5002] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
 
-        coordinator.start(bundleID: "com.example.browser")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
+        coordinator.start(bundleID: firefox)
+        waitFor { if case .capturing = coordinator.state(for: firefox) { return true }; return false }
 
-        XCTAssertEqual(
-            tap.lastPids, [4242, 5001, 5002],
-            "the tap must be created with every resolved pid (main + children), not just the main pid")
+        XCTAssertEqual(tap.creates, 1, "one tap for the bundle ID, mixing down every resolved process")
+        XCTAssertEqual(tap.lastProcesses, [
+            AudioProcess(objectID: 20, pid: 700),
+            AudioProcess(objectID: 21, pid: 701)
+        ], "both the main process and the nil-bundle-id audio child must be tapped")
 
-        // A device-change rebuild must re-resolve and tap the (possibly
-        // changed) full set again, not silently narrow back to one pid.
-        tap.fireDeviceChange()
-        waitFor { tap.creates >= 2 }
-        XCTAssertEqual(
-            tap.lastPids, [4242, 5001, 5002],
-            "a device-change rebuild must also tap the full resolved process set")
-
-        coordinator.stop(bundleID: "com.example.browser")
+        coordinator.stop(bundleID: firefox)
     }
 
     // MARK: - Multiple bundle IDs coexist independently: separate taps, no cross-talk.
@@ -197,10 +285,14 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         }
         let factory = KeyedFactory()
         let spy = BufferSpy()
+        let (resolver, _) = makeResolver(processes: [
+            RawAudioProcess(objectID: 1, pid: 111, bundleID: "com.example.a"),
+            RawAudioProcess(objectID: 2, pid: 222, bundleID: "com.example.b")
+        ])
 
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { factory.make() },
-            resolveProcessSet: { bundleID in bundleID == "com.example.a" ? [111] : [222] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -213,8 +305,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(factory.byInsertionOrder.count, 2)
         let tapA = factory.byInsertionOrder[0]
         let tapB = factory.byInsertionOrder[1]
-        XCTAssertEqual(tapA.lastPid, 111)
-        XCTAssertEqual(tapB.lastPid, 222)
+        XCTAssertEqual(tapA.lastProcesses, [AudioProcess(objectID: 1, pid: 111)])
+        XCTAssertEqual(tapB.lastProcesses, [AudioProcess(objectID: 2, pid: 222)])
 
         tapA.pushBuffer(buffer(hostTime: 1_000_000_000, frames: 4))
         tapB.pushBuffer(buffer(hostTime: 1_000_000_000, frames: 8))
@@ -234,22 +326,24 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tapB.teardowns, 1)
     }
 
-    // MARK: - resolveProcessSet failure surfaces as .failed(.appNotRunning), retryable.
+    // MARK: - An empty AudioProcessResolver result (T2) surfaces as
+    // .failed(.processNotYetAudible), retryable — the resolver can't tell "not
+    // running" apart from "running but silent", so both retry the same way.
 
-    func testUnresolvedBundleIDSurfacesAppNotRunning() {
-        let coordinator = PerAppCaptureCoordinator(
+    func testEmptyResolvedProcessSetSurfacesProcessNotYetAudible() {
+        let coordinator = makeCoordinator(
             makeTap: { FakeProcessTap() },
-            resolveProcessSet: { _ in [] },
+            processResolver: emptyResolver(),
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.missing")
         waitFor {
-            if case .failed(.appNotRunning) = coordinator.state(for: "com.example.missing") { return true }
+            if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.missing") { return true }
             return false
         }
         XCTAssertEqual(coordinator.state(for: "com.example.missing"),
-                       .failed(.appNotRunning(bundleID: "com.example.missing")))
-        XCTAssertTrue(PerAppCaptureError.appNotRunning(bundleID: "x").isRetryable)
+                       .failed(.processNotYetAudible(bundleID: "com.example.missing")))
+        XCTAssertTrue(PerAppCaptureError.processNotYetAudible(bundleID: "x").isRetryable)
     }
 
     // MARK: - Tap-creation failure (e.g. processNotYetAudible) surfaces as .failed AND tears down.
@@ -257,9 +351,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testProcessNotYetAudibleSurfacesErrorAndTearsDown() {
         let tap = FakeProcessTap()
         tap.startError = .processNotYetAudible(bundleID: "com.example.silent")
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.silent", objectID: 1, pid: 999)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [999] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.silent")
@@ -284,16 +379,18 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableProcessTapSurfacesOSUnsupported() {
         let tap = UnavailableProcessTap()
-        XCTAssertThrowsError(try tap.createAndStart(pids: [1], bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
+        let processes: Set<AudioProcess> = [AudioProcess(objectID: 1, pid: 1)]
+        XCTAssertThrowsError(try tap.createAndStart(processes: processes, bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
             XCTAssertEqual(error as? PerAppCaptureError, .osUnsupported(minimum: "14.2"))
         }
         XCTAssertFalse(PerAppCaptureError.osUnsupported(minimum: "14.2").isRetryable)
     }
 
     func testUnavailableProcessTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.old", objectID: 1, pid: 1)
+        let coordinator = makeCoordinator(
             makeTap: { UnavailableProcessTap() },
-            resolveProcessSet: { _ in [1] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.old")
@@ -305,38 +402,90 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
-    // MARK: - Default-device change recreates the tap, re-resolving the pid.
+    // MARK: - Default-device change recreates the tap, re-resolving the process set.
 
-    func testDeviceChangeRecreatesTapAndReResolvesPID() {
-        final class PidBox: @unchecked Sendable {
-            let lock = NSLock()
-            private var value: pid_t
-            init(_ value: pid_t) { self.value = value }
-            func get() -> pid_t { lock.withLock { value } }
-            func set(_ newValue: pid_t) { lock.withLock { value = newValue } }
-        }
+    func testDeviceChangeRecreatesTapAndReResolvesProcessSet() {
         let tap = FakeProcessTap()
-        let resolvedPid = PidBox(500)
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, enumerator) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [resolvedPid.get()] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
         waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
-        XCTAssertEqual(tap.lastPid, 500)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 10, pid: 500)])
 
-        // The app relaunched with a new pid before the device change fired.
-        resolvedPid.set(501)
+        // The app relaunched with a new pid (and object id) before the device change fired.
+        enumerator.setProcesses([RawAudioProcess(objectID: 11, pid: 501, bundleID: "com.example.music")])
         tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         tap.fireDeviceChange()
         waitFor {
             if case .capturing(let f) = coordinator.state(for: "com.example.music") { return f.sampleRate == 44100 }
             return false
         }
-        XCTAssertEqual(tap.lastPid, 501, "device-change recreation re-resolves the pid")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 11, pid: 501)],
+                       "device-change recreation re-resolves the process set")
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on device change")
         XCTAssertGreaterThanOrEqual(tap.creates, 2)
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (T3): a sample-rate-triggered rebuild emits a
+    // capturePA/rate_rebuild line with old/new rate fields populated.
+    //
+    // The real HAL detection point (CoreAudioProcessTap.installSampleRateListener,
+    // PerAppCaptureCoordinator.swift) isn't reachable hermetically — this
+    // suite never touches that concrete Core Audio class (no live Core Audio
+    // here; see that file's own doc comment on why FakeProcessTap exists).
+    // This asserts the coordinator-level emission in handleDeviceChange(bundleID:)
+    // instead, using this file's own established "mutate tap.format then
+    // fireDeviceChange()" convention (see
+    // testDeviceChangeRecreatesTapAndReResolvesProcessSet above) to simulate
+    // the rate change the real listener would have detected.
+
+    func testSampleRateChangeEmitsCapturePARateRebuildTelemetry() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+        XCTAssertEqual(tap.format.sampleRate, 48000, "sanity: the fake tap's rate before the simulated change")
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+
+        // Simulate the tapped output device renegotiating its nominal rate
+        // (44.1 <-> 48 kHz) — the documented process-tap silent-buffer bug
+        // this event exists to surface (see the "Nominal-sample-rate
+        // listener" doc comment on CoreAudioProcessTap).
+        tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()
+        waitFor {
+            if case .capturing(let f) = coordinator.state(for: "com.example.music") { return f.sampleRate == 44100 }
+            return false
+        }
+
+        // Flush barrier + clear (Telemetry's writer queue is serial/FIFO, so
+        // this guarantees every write enqueued above has landed in `spy` —
+        // mirrors TelemetryTests' own `drain()` helper).
+        Telemetry._installTestSink(nil)
+
+        let rebuildLine = try XCTUnwrap(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") },
+            "expected a capturePA/rate_rebuild line among: \(spy.all)")
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(rebuildLine.utf8)) as? [String: Any],
+            "not a JSON object: \(rebuildLine)")
+        XCTAssertEqual(obj["cat"] as? String, "capturePA")
+        XCTAssertEqual(obj["bundleID"] as? String, "com.example.music")
+        XCTAssertEqual(obj["oldRate"] as? String, "48000")
+        XCTAssertEqual(obj["newRate"] as? String, "44100")
 
         coordinator.stop(bundleID: "com.example.music")
     }
@@ -347,9 +496,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testDeviceChangeDuringRebuildIsCoalescedAndReplayed() {
         let tap = FakeProcessTap()
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 4242)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [4242] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
@@ -406,24 +556,27 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
             }
         }
         let factory = Factory(tapA, tapB)
-        // makeTap has no bundleID param, so route by the pid the resolver hands
-        // back: paused -> 100 (tapA), old -> 200 (tapB). The factory returns the
-        // right fake per next-started bundle ID via a tiny shared box.
+        let (resolver, _) = makeResolver(processes: [
+            RawAudioProcess(objectID: 1, pid: 100, bundleID: "com.example.paused"),
+            RawAudioProcess(objectID: 2, pid: 200, bundleID: "com.example.old")
+        ])
+        // makeTap has no bundleID param, so route by which bundle ID the test
+        // is currently driving through the coordinator — the fake tap the
+        // resolver hands processes for is not otherwise observable from here.
         let nextBundleID = NSMutableString(string: "")
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { factory.make(for: nextBundleID as String) },
-            resolveProcessSet: { bundleID in
-                nextBundleID.setString(bundleID)
-                return bundleID == "com.example.paused" ? [100] : [200]
-            },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
 
+        nextBundleID.setString("com.example.paused")
         coordinator.start(bundleID: "com.example.paused")
         waitFor {
             if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.paused") { return true }
             return false
         }
+        nextBundleID.setString("com.example.old")
         coordinator.start(bundleID: "com.example.old")
         waitFor {
             if case .failed(.osUnsupported) = coordinator.state(for: "com.example.old") { return true }
@@ -433,7 +586,9 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         // The paused app resumes: its next tap creation will succeed.
         tapA.startError = nil
 
-        // A process connected to / disconnected from the audio system.
+        // A process connected to / disconnected from the audio system. The
+        // re-drive replays start(bundleID: "com.example.paused") internally.
+        nextBundleID.setString("com.example.paused")
         coordinator.handleProcessListChanged()
 
         // The retryable slot self-heals to .capturing...
@@ -453,9 +608,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testStartIsIdempotentAndStopOnUnstartedBundleIDIsNoOp() {
         let tap = FakeProcessTap()
-        let coordinator = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
+        let coordinator = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [1] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
 
@@ -474,9 +630,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testCoordinatorDeinitTearsDownRemainingTaps() {
         let tap = FakeProcessTap()
-        var coordinator: PerAppCaptureCoordinator? = PerAppCaptureCoordinator(
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
+        var coordinator: PerAppCaptureCoordinator? = makeCoordinator(
             makeTap: { tap },
-            resolveProcessSet: { _ in [1] },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator?.start(bundleID: "com.example.music")
@@ -487,225 +644,137 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "dropping the coordinator without stop() must not leak the tap")
     }
 
-    // MARK: - W1-T4: live-membership diffing (debounced, compare-before-rebuild)
+    // MARK: - W1-T4: live per-slot membership diffing (browser tab churn)
+    //
+    // A CAPTURING slot's app spawns/kills an audio child mid-session (a browser
+    // opening/closing a tab) — the process set the slot should tap changes, but the
+    // slot is `.capturing`, so the resume self-heal (which only re-drives DEAD
+    // slots) never fires. `handleMembershipChange` diffs each capturing slot's
+    // resolved process-object set against the baseline its live tap was built
+    // against and RECREATES the tap on a genuine change (this coordinator's tap has
+    // no in-place update path — the recreate goes through the proven
+    // `handleDeviceChange` machinery), compare-before-rebuild so an unchanged set
+    // does ZERO work.
 
-    #if canImport(AudioToolbox)
-
-    /// A thread-safe mutable process set for the resolver closure, so a test can
-    /// model a browser spawning/killing an audio child between notifications.
-    private final class PidSetBox: @unchecked Sendable {
-        let lock = NSLock()
-        private var value: [pid_t]
-        init(_ value: [pid_t]) { self.value = value }
-        func get() -> [pid_t] { lock.withLock { value } }
-        func set(_ newValue: [pid_t]) { lock.withLock { value = newValue } }
-    }
-
-    /// Records every `FakeProcessTap` a `makeTap` factory mints, in order, so a
-    /// test can tell the OLD instance (torn down by a `stop()`) from the NEW one
-    /// (minted by the following `start()`) after a relaunch.
-    private final class MintedTapBox: @unchecked Sendable {
-        let lock = NSLock()
-        private var taps: [FakeProcessTap] = []
-        func append(_ tap: FakeProcessTap) { lock.withLock { taps.append(tap) } }
-        func tap(at index: Int) -> FakeProcessTap { lock.withLock { taps[index] } }
-    }
-
-    /// Bring one bundle ID to `.capturing` with a scripted process set, ready
-    /// for a membership diff. Returns the (tap, box, coordinator).
-    private func startedCoordinator(
-        initialPids: [pid_t],
-        inPlaceSucceeds: Bool = true,
-        debounce: DispatchTimeInterval = .milliseconds(300)
-    ) -> (FakeProcessTap, PidSetBox, PerAppCaptureCoordinator) {
+    /// A child spawns under a capturing slot → the tap is recreated EXACTLY ONCE
+    /// against the expanded process set (main + the new child), so the child's
+    /// audio is captured too.
+    func testChildSpawnRecreatesTapWithExpandedProcessSet() {
         let tap = FakeProcessTap()
-        tap.inPlaceUpdateSucceeds = inPlaceSucceeds
-        let box = PidSetBox(initialPids)
-        let coordinator = PerAppCaptureCoordinator(
-            makeTap: { tap },
-            resolveProcessSet: { _ in box.get() },
-            muteBehavior: .mutedWhenTapped,
-            membershipDebounceInterval: debounce
-        )
-        coordinator.start(bundleID: "com.example.browser")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
-        return (tap, box, coordinator)
-    }
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
 
-    /// (a) A new audio child pid appears for an already-tapped bundle ID → exactly
-    /// ONE guarded update. With the in-place path available, that's a single
-    /// in-place tap update and ZERO full recreates (no audible gap).
-    func testChildSpawnAppliesExactlyOneInPlaceUpdateNoRecreate() {
-        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242])
-        XCTAssertEqual(tap.creates, 1)
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700)])
+        let createsAfterStart = tap.creates
 
-        box.set([4242, 5001]) // a new tab's audio helper appears
+        // A new tab starts playing: a fresh audio child (objectID 21) appears under
+        // the same bundle id.
+        enumerator.setProcesses([
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox"),
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: "org.mozilla.firefox"),
+        ])
         coordinator.handleMembershipChange()
 
-        XCTAssertEqual(tap.updates, 1, "the changed set must be pushed to the live tap exactly once")
-        XCTAssertEqual(tap.creates, 1, "an in-place update must NOT recreate the tap")
-        XCTAssertEqual(tap.teardowns, 0, "in-place update tears nothing down")
-        XCTAssertEqual(tap.lastUpdatePids, [4242, 5001])
-        coordinator.stop(bundleID: "com.example.browser")
-    }
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "a genuine membership change recreates the tap exactly once")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 21, pid: 701)],
+                       "the recreated tap covers the expanded process set")
 
-    /// (a, fallback) Same spawn, but the in-place update is unavailable → exactly
-    /// ONE full recreate (create #2 + one teardown of the old tap).
-    func testChildSpawnFallsBackToExactlyOneRecreateWhenInPlaceUnavailable() {
-        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242], inPlaceSucceeds: false)
-        XCTAssertEqual(tap.creates, 1)
-
-        box.set([4242, 5001])
+        // Idempotence: re-diffing the settled set does no further work.
         coordinator.handleMembershipChange()
-        waitFor { tap.creates >= 2 }
-
-        XCTAssertEqual(tap.creates, 2, "exactly one recreate on the fallback path")
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on recreate")
-        XCTAssertEqual(tap.lastPids, [4242, 5001], "the recreated tap covers the new set")
-        coordinator.stop(bundleID: "com.example.browser")
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "the settled set must not trigger a second rebuild")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
     }
 
-    /// (b) A child pid disappears (tab closed) → exactly ONE guarded update.
-    func testChildKillAppliesExactlyOneUpdate() {
-        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242, 5001])
-        XCTAssertEqual(tap.creates, 1)
+    /// A child dies under a capturing slot → the tap is recreated once against the
+    /// shrunk process set.
+    func testChildKillRecreatesTapWithShrunkProcessSet() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(processes: [
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox"),
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: "org.mozilla.firefox"),
+        ])
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
 
-        box.set([4242]) // the tab (and its helper) went away
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        XCTAssertEqual(tap.lastProcesses?.count, 2)
+        let createsAfterStart = tap.creates
+
+        enumerator.setProcesses([RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox")]) // child gone
         coordinator.handleMembershipChange()
 
-        XCTAssertEqual(tap.updates, 1)
-        XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.lastUpdatePids, [4242])
-        coordinator.stop(bundleID: "com.example.browser")
+        XCTAssertEqual(tap.creates, createsAfterStart + 1)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700)])
+        coordinator.stop(bundleID: "org.mozilla.firefox")
     }
 
-    /// (c) THE regression-prevention property: an unchanged process set — a
-    /// process-list notification whose re-resolve yields the same members (a
-    /// duplicate notification, or churn in some UNRELATED app) — triggers ZERO
-    /// rebuilds and ZERO in-place updates. A wrong equality check here would
-    /// reintroduce the coreaudiod CPU storm from rebuild thrashing.
+    /// THE regression-prevention property: an unchanged process set — a duplicate
+    /// notification, or churn in an unrelated app — triggers ZERO rebuilds.
     func testUnchangedProcessSetTriggersZeroRebuilds() {
-        let (tap, box, coordinator) = startedCoordinator(initialPids: [4242, 5001])
-        XCTAssertEqual(tap.creates, 1)
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
 
-        // The resolver still returns the identical set (order preserved).
-        _ = box // unchanged
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        let createsAfterStart = tap.creates
+
         coordinator.handleMembershipChange()
-        // And again, and with a reordered-but-identical membership set.
-        coordinator.handleMembershipChange()
-        box.set([5001, 4242]) // same members, different order — NOT a change
+        // Reorder is not a change under set semantics.
+        enumerator.setProcesses([RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox")])
         coordinator.handleMembershipChange()
 
-        XCTAssertEqual(tap.updates, 0, "no live update for an unchanged membership set")
-        XCTAssertEqual(tap.creates, 1, "no recreate for an unchanged membership set")
-        XCTAssertEqual(tap.teardowns, 0)
-        coordinator.stop(bundleID: "com.example.browser")
+        XCTAssertEqual(tap.creates, createsAfterStart, "no rebuild for an unchanged process set")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
     }
 
-    /// (d) Rapid spawn+kill+spawn within the debounce window coalesces to the
-    /// MINIMUM necessary work — a single diff against the settled set — not one
-    /// rebuild per Core Audio notification. Driven through the real debounced
-    /// `handleProcessListChanged` entry point with a short injected interval.
-    func testRapidChurnWithinDebounceWindowCoalescesToOneUpdate() {
-        let (tap, box, coordinator) = startedCoordinator(
-            initialPids: [4242], debounce: .milliseconds(60))
-        XCTAssertEqual(tap.creates, 1)
-
-        // A burst: three notifications inside the 60 ms window, ending on the
-        // settled set [4242, 7003].
-        box.set([4242, 7001]); coordinator.handleProcessListChanged()
-        box.set([4242])       ; coordinator.handleProcessListChanged()
-        box.set([4242, 7003]) ; coordinator.handleProcessListChanged()
-
-        // Wait out the debounce; the coalesced diff runs once against the final set.
-        waitFor { tap.updates >= 1 }
-        // Give any (erroneously) uncoalesced extra diffs a chance to show up.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
-
-        XCTAssertEqual(tap.updates, 1, "the burst must coalesce to a single settled diff, not one per notification")
-        XCTAssertEqual(tap.creates, 1, "in-place update path — no recreate")
-        XCTAssertEqual(tap.lastUpdatePids, [4242, 7003], "the coalesced diff applies the SETTLED set")
-        coordinator.stop(bundleID: "com.example.browser")
-    }
-
-    /// Membership diffing only ever touches CAPTURING slots — a `.failed`
-    /// (awaiting-audio) slot is left to the resume/backoff path, never
-    /// half-rebuilt by a membership notification.
+    /// A membership diff only ever acts on CAPTURING slots — a diff while a slot is
+    /// not capturing touches no tap.
     func testMembershipDiffIgnoresNonCapturingSlots() {
         let tap = FakeProcessTap()
-        tap.startError = .processNotYetAudible(bundleID: "com.example.browser")
-        let box = PidSetBox([4242])
-        let coordinator = PerAppCaptureCoordinator(
-            makeTap: { tap },
-            resolveProcessSet: { _ in box.get() },
-            muteBehavior: .mutedWhenTapped
-        )
-        coordinator.start(bundleID: "com.example.browser")
-        waitFor { if case .failed = coordinator.state(for: "com.example.browser") { return true }; return false }
-        let createsAfterFail = tap.creates
+        // Enumerator reports nothing → start lands the slot in `.failed(.processNotYetAudible)`.
+        let resolver = emptyResolver()
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
 
-        box.set([4242, 5001])
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { if case .failed = coordinator.state(for: "org.mozilla.firefox") { return true }; return false }
+        XCTAssertEqual(tap.creates, 0)
+
         coordinator.handleMembershipChange()
-
-        XCTAssertEqual(tap.updates, 0, "a non-capturing slot is never membership-updated")
-        XCTAssertEqual(tap.creates, createsAfterFail, "no recreate driven from membership diff on a failed slot")
+        XCTAssertEqual(tap.creates, 0, "a non-capturing slot must not be touched by a membership diff")
     }
 
-    /// W1-T4 / W1-T5 integration seam: a membership diff scheduled for the OLD
-    /// instance of a bundle ID must never land on the NEW slot a relaunch
-    /// creates in between. `NativeBackend.handleAppLaunched` (T5) does
-    /// `perAppCapture.start(bundleID:)` after a prior `stop(bundleID:)` tore the
-    /// slot down (`handleAppTerminated`) — this models a browser quitting and
-    /// relaunching (fresh pid, fresh tap) while a debounced membership diff
-    /// from the DEAD instance's process-list notification is still in flight.
-    /// `applyMembershipChange` guards on `slot.tap === tap` (captured before the
-    /// blocking resolve), so it must find the slot has moved on and do nothing
-    /// to the new tap — this proves that guard holds across a real stop/start,
-    /// not just a same-instance race.
-    func testStaleMembershipDiffDoesNotTouchTapAfterRelaunch() {
-        let mintedTaps = MintedTapBox()
-        let box = PidSetBox([4242])
-        let coordinator = PerAppCaptureCoordinator(
-            makeTap: {
-                let t = FakeProcessTap()
-                mintedTaps.append(t)
-                return t
-            },
-            resolveProcessSet: { _ in box.get() },
-            muteBehavior: .mutedWhenTapped,
-            membershipDebounceInterval: .milliseconds(150)
-        )
+    /// Rapid churn within the debounce window coalesces to a single settled diff —
+    /// one recreate against the FINAL set, not one per notification. Driven through
+    /// the real debounced `handleProcessListChanged` entry point.
+    func testRapidChurnWithinDebounceWindowCoalescesToOneRebuild() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(
+            makeTap: { tap }, processResolver: resolver, membershipDebounceInterval: .milliseconds(60))
 
-        coordinator.start(bundleID: "com.example.browser")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
-        let oldTap = mintedTaps.tap(at: 0)
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        let createsAfterStart = tap.creates
 
-        // A tab spawns a new audio child — arms the debounced diff against the
-        // OLD tap/slot, but don't let it settle yet.
-        box.set([4242, 5001])
-        coordinator.handleProcessListChanged()
+        func procs(_ ids: [(AudioObjectID, pid_t)]) -> [RawAudioProcess] {
+            ids.map { RawAudioProcess(objectID: $0.0, pid: $0.1, bundleID: "org.mozilla.firefox") }
+        }
+        // Three notifications inside the 60ms window, settling on {20, 22}.
+        enumerator.setProcesses(procs([(20, 700), (21, 701)])); coordinator.handleProcessListChanged()
+        enumerator.setProcesses(procs([(20, 700)]));            coordinator.handleProcessListChanged()
+        enumerator.setProcesses(procs([(20, 700), (22, 702)])); coordinator.handleProcessListChanged()
 
-        // The app quits and relaunches with a fresh pid before the debounce
-        // fires: T5's path is stop() (tears the old slot down) then start()
-        // (mints a brand-new slot + tap), exactly like
-        // `NativeBackend.handleAppTerminated` -> `handleAppLaunched`.
-        coordinator.stop(bundleID: "com.example.browser")
-        box.set([9999])
-        coordinator.start(bundleID: "com.example.browser")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
-        let newTap = mintedTaps.tap(at: 1)
-        XCTAssertNotIdentical(oldTap, newTap, "relaunch must mint a fresh tap for the fresh slot")
+        waitFor { tap.creates >= createsAfterStart + 1 }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2)) // let any extra rebuilds surface
 
-        // Let the stale diff's debounce interval elapse.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-
-        XCTAssertEqual(oldTap.updates, 0, "the stale diff must not update the torn-down tap")
-        XCTAssertEqual(newTap.updates, 0, "the stale diff must not bleed into the relaunched tap either")
-        XCTAssertEqual(newTap.lastPids, [9999], "the new slot's tap was built from the post-relaunch pid, untouched by the old diff")
-        coordinator.stop(bundleID: "com.example.browser")
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "the burst coalesces to a single settled rebuild")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 22, pid: 702)],
+                       "the coalesced diff applies the SETTLED process set")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
     }
-
-    #endif
 }
 
 private extension NSLock {

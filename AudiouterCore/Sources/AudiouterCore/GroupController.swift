@@ -194,8 +194,12 @@ public final class GroupController {
         }
     }
 
-    /// The user-facing reason the Mac's own output is blocked from a mixed
-    /// Selected Devices set (SPEC §9 Phase-1 local rule).
+    /// Legacy user-facing string for the (now-lifted) local-mix block. Retained
+    /// only because out-of-tree callers still reference the symbol
+    /// (`AudiouterPopoverUI.PopoverController`, popover-harness); with the synced
+    /// local sink the Mac may now join a mixed Selected Devices set, so nothing in
+    /// this type ever emits it as a refusal any more (T-GROUPCTL / Q5). The popover
+    /// wiring is retired separately in T-UI-ALLOW.
     public static let localMixRefusalReason =
         "Synced everywhere-audio arrives with the new engine"
 
@@ -206,43 +210,42 @@ public final class GroupController {
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
 
-    /// Would adding `id` mix the local Mac with AirPlay devices in the set?
-    private func wouldMixLocalWithAirPlay(adding id: String) -> Bool {
-        guard let d = device(id) else { return false }
-        if d.isLocalDevice {
-            return selectedDeviceIDs.contains { device($0)?.isLocalDevice == false }
-        } else {
-            return selectedDeviceIDs.contains { device($0)?.isLocalDevice == true }
-        }
-    }
-
     /// Add or remove a device from "Selected Devices" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
     /// `.selectedDevices`.
     ///
-    /// Two Phase-1 rules apply when ADDING:
-    /// - **Auto-swap:** turning ON an AirPlay device while the current (local)
-    ///   device is the ONLY selected member auto-untoggles the current device
-    ///   (switching to AirPlay implies moving the audio there). Fires only when
-    ///   local is the sole member.
-    /// - **Local-mix block:** turning ON the local device into a set that already
-    ///   holds an AirPlay device is REFUSED with a reason (pre-engine sync limit).
+    /// One rule applies when ADDING:
+    /// - **Auto-swap (first-time AirPlay from Mac-only):** turning ON an AirPlay
+    ///   device while the current (local) device is the ONLY selected member
+    ///   auto-untoggles the current device (switching to AirPlay implies moving
+    ///   the audio there). Fires ONLY when local is the sole member — so once the
+    ///   Mac already coexists with ≥1 AirPlay device (the mixed set below), a
+    ///   further AirPlay add is a plain insert and the Mac stays.
     ///
-    /// Removing is always allowed, with the auto-swap's mirror image:
-    /// - **Reverse auto-swap:** removing the LAST AirPlay device restores the
-    ///   local passthrough default ({local}) instead of leaving the set empty.
-    ///   Physically the audio moves back to the Mac either way (an empty output
-    ///   set IS passthrough at the backend), so an empty set is a fiction the UI
-    ///   then renders as nonsense: the Main Out master averages an empty member
-    ///   set to 0 — the slider slams to zero on disconnect — and the volume keys
-    ///   have no member to visibly drive (ahh, live session 2026-07-17b: "when I
-    ///   disconnect an airplay device, system audio out just goes straight down
-    ///   to zero … when nothing is selected … only current device changes").
-    ///   With {local} restored, the master tracks the Mac's own volume — which is
-    ///   what is actually playing — and the keys move it via the two-way sync.
-    ///   Fires only when the REMOVED device was an AirPlay one: toggling the
-    ///   local device itself off is a deliberate act on that row, not a
-    ///   disconnect, and re-adding it would make its toggle a no-op.
+    /// The Mac may now join a MIXED Selected Devices set (Q5 / synced local sink):
+    /// adding the local device is always allowed and drops nothing ⇒ `S ∪ {L}`.
+    /// (The old pre-engine "local-mix block" refusal is gone.)
+    ///
+    /// Removing is always allowed, flooring the set at the local passthrough
+    /// default:
+    /// - **Current-device floor / reverse auto-swap:** removing the LAST AirPlay
+    ///   device from an AirPlay-only set restores the local passthrough default
+    ///   ({local}) instead of leaving the set empty. Physically the audio moves
+    ///   back to the Mac either way (an empty output set IS passthrough at the
+    ///   backend), so an empty set is a fiction the UI then renders as nonsense:
+    ///   the Main Out master averages an empty member set to 0 — the slider slams
+    ///   to zero on disconnect — and the volume keys have no member to visibly
+    ///   drive (ahh, live session 2026-07-17b: "when I disconnect an airplay
+    ///   device, system audio out just goes straight down to zero … when nothing
+    ///   is selected … only current device changes"). With {local} restored, the
+    ///   master tracks the Mac's own volume — which is what is actually playing —
+    ///   and the keys move it via the two-way sync.
+    ///   Fires only when the REMOVED device was an AirPlay one AND the set is left
+    ///   empty: toggling the local device itself off is a deliberate act on that
+    ///   row, not a disconnect, and re-adding it would make its toggle a no-op.
+    ///   In the newly-reachable mixed set {L, A, …} this restore is SUBSUMED —
+    ///   removing the last AirPlay device naturally leaves {L} (non-empty), so the
+    ///   floor never fires and needs no special case for that path.
     ///
     /// No-op (`.ok`) if unknown / already in state.
     @discardableResult
@@ -251,13 +254,9 @@ public final class GroupController {
         if selected {
             guard !selectedDeviceIDs.contains(id) else { return .ok }
 
-            // Local-mix block (manual re-add of the Mac into a mixed set).
-            if d.isLocalDevice, wouldMixLocalWithAirPlay(adding: id) {
-                return .refused(Self.localMixRefusalReason)
-            }
-
             // Auto-swap: an AirPlay device turning ON while the local device is
-            // the sole selected member drops the local device.
+            // the sole selected member drops the local device. Once the Mac is
+            // already mixed with AirPlay, this guard is false and the Mac stays.
             var autoSwapped = false
             if !d.isLocalDevice, let local = localDeviceID,
                selectedDeviceIDs == [local] {
@@ -334,14 +333,12 @@ public final class GroupController {
         return setDeviceSelected(id, true)
     }
 
-    /// Whether the local Mac may currently be toggled ON — false when it would
-    /// mix with AirPlay devices (so the UI can disable its toggle with a
-    /// tooltip). Removing an already-selected local device is always fine.
-    public func canSelectLocalSpeaker(_ id: String) -> Bool {
-        guard let d = device(id), d.isLocalDevice else { return true }
-        if selectedDeviceIDs.contains(id) { return true }
-        return !wouldMixLocalWithAirPlay(adding: id)
-    }
+    /// Whether the local Mac may currently be toggled ON. Always `true` now: with
+    /// the synced local sink the Mac may join any (including mixed) Selected
+    /// Devices set (Q5 / T-GROUPCTL), so the pre-engine local-mix block is gone.
+    /// Retained as a stable predicate for the popover row (its greying-out is
+    /// retired separately in T-UI-ALLOW).
+    public func canSelectLocalSpeaker(_ id: String) -> Bool { true }
 
     // MARK: Legacy on/off shims (kept for callers not yet migrated)
 

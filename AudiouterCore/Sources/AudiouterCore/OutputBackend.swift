@@ -156,6 +156,29 @@ public enum BackendEvent: Sendable, Equatable {
     /// gate and a system-output-transport query; `MockBackend`/`OwnToneBackend`
     /// never do.
     case systemDefaultIsAirPlayActive(Bool)
+
+    /// A whole-system or per-app AirPlay stream's health, derived from the same
+    /// recapture/rebind detection ``NativeBackend`` already runs to self-heal a
+    /// tap rebuild (T2's `onDeviceRateRebuild`-driven whole-system reset /
+    /// `handlePerAppCaptureHealthChange`) — this is a signal-only echo of that
+    /// detection, not a new receiver-side probe. `id` is the affected device's
+    /// ID (the granularity `enqueueRebindRecovery`/`rebindRecoveryGen` already
+    /// key their rebind chains on) for both scopes: whole-system (stream 0) and
+    /// a per-app redirect's dedicated stream alike.
+    ///
+    /// `recovering == true` fires the moment a re-capture is detected and the
+    /// RTP session rebind (removeOutput → addOutput) is enqueued — the receiver
+    /// is known-silent from here until the rebind lands. `recovering == false`
+    /// fires once that rebind SUCCEEDS. A rebind that exhausts
+    /// `maxRebindRecoveryAttempts` never emits `false` — the device is left
+    /// unbound-in-engine and the last known state honestly stays "recovering"
+    /// until the next topology change re-binds it.
+    ///
+    /// Signal-only (T8): no UI surfaces this yet. Designing how to show a
+    /// recovering/silent stream to the user is an explicit follow-up, not part
+    /// of this event's scope. Only ``NativeBackend`` emits it; `MockBackend`/
+    /// `OwnToneBackend` never do (no rebind-recovery machinery to observe).
+    case streamHealth(id: String, recovering: Bool)
 }
 
 /// The seam between the app and wherever audio actually goes.

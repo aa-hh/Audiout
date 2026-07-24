@@ -72,8 +72,18 @@ public protocol PTPHelperManaging {
 public struct SMAppServicePTPHelper: PTPHelperManaging {
 
     /// Mirrors `scripts/make-app.sh`'s `HELPER_LABEL` + ".plist" and
-    /// `scripts/ptp-helper.plist`'s `Label`.
-    public static let plistName = "com.audiouter.Audiouter.ptphelper.plist"
+    /// `scripts/ptp-helper.plist`'s `Label` — BOTH are `${BUNDLE_ID}.ptphelper`
+    /// at build time, so this reads the RUNNING bundle's own identifier rather
+    /// than a hardcoded default. Without this, a side-by-side dev build under a
+    /// distinct `BUNDLE_ID` override would ask `SMAppService` for a DIFFERENT
+    /// app's already-claimed daemon identity, and `register()` would silently
+    /// no-op instead of registering its own (2026-07-24 live-testing bug — see
+    /// `scripts/ptp-helper.plist`'s comment for the full story). Falls back to
+    /// the shipped default only if `Bundle.main.bundleIdentifier` is somehow
+    /// unavailable (never true for a real app bundle).
+    public static var plistName: String {
+        "\(Bundle.main.bundleIdentifier ?? "com.audiouter.Audiouter").ptphelper.plist"
+    }
 
     private let service: SMAppService
 

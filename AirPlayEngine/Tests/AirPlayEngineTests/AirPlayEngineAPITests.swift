@@ -411,20 +411,6 @@ final class AirPlayEngineAPITests: XCTestCase {
         XCTAssertNil(desc.parsedID)
     }
 
-    // MARK: - localOutput placeholder surface (SPEC §8.1).
-
-    func testLocalOutputPlaceholder() async {
-        let engine = AirPlayEngine()
-        var sink = await engine.localOutput
-        XCTAssertFalse(sink.isEnabled)
-        XCTAssertFalse(sink.isImplemented)
-
-        await engine.setLocalOutputEnabled(true)
-        sink = await engine.localOutput
-        XCTAssertTrue(sink.isEnabled)
-        XCTAssertFalse(sink.isImplemented, "still a placeholder in T-API-1")
-    }
-
     // MARK: - hashClientName is stable + non-zero (libhash seed), and differs
     // per-install (T-ENG-LIBHASH-1, first-light backlog #5.1).
 

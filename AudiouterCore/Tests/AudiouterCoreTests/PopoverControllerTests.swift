@@ -1825,6 +1825,31 @@ final class PopoverControllerTests: XCTestCase {
         let airplay = try XCTUnwrap(row.test_destinationPopUpMenuItem(forDestinationID: "office"))
         XCTAssertNil(airplay.toolTip, "AirPlay device entries carry no subtitle tooltip")
     }
+
+    // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
+
+    /// `setLocalFallbackActive(true)` shows the "Speakers unreachable" banner with
+    /// the exact plan copy; `false` clears it. The banner also survives a rebuild
+    /// (it's re-pinned above the cards each `rebuild()`).
+    func testLocalFallbackBannerShowsAndClears() async throws {
+        let (popover, _, backend) = try await makePopover()
+
+        XCTAssertNil(popover.test_localFallbackBannerText, "no banner by default")
+
+        popover.setLocalFallbackActive(true)
+        XCTAssertEqual(popover.test_localFallbackBannerText,
+                       "Speakers unreachable — playing on this Mac. Will resume automatically.",
+                       "the banner shows the verbatim plan copy")
+
+        // A rebuild (e.g. a device-set change) must keep the banner pinned.
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_localFallbackBannerText,
+                       "Speakers unreachable — playing on this Mac. Will resume automatically.",
+                       "the banner survives a rebuild while the fallback is active")
+
+        popover.setLocalFallbackActive(false)
+        XCTAssertNil(popover.test_localFallbackBannerText, "reconnect clears the banner")
+    }
 }
 
 private actor PopoverTestCountBox {

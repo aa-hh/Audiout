@@ -482,6 +482,35 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
+    // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
+
+    /// The exact banner copy from PLAN-RELIABILITY Wave 2.
+    static let localFallbackBannerText = "Speakers unreachable — playing on this Mac. Will resume automatically."
+
+    /// Whether the generalized silence watchdog (R11) has fallen back to local
+    /// playback because zero desired devices stayed connected. Drives the banner;
+    /// re-applied on every `rebuild()` so a rebuild mid-fallback keeps it pinned.
+    private var localFallbackActive = false
+
+    /// Show or clear the "Speakers unreachable" banner (`BackendEvent.localFallbackActive`).
+    /// Called by the host (`AppDelegate`) directly — a whole-app condition with no home
+    /// on `Device`. Idempotent: a repeat of the current state is a no-op.
+    public func setLocalFallbackActive(_ active: Bool) {
+        guard active != localFallbackActive else { return }
+        localFallbackActive = active
+        if isEffectivelyShown {
+            // Update the banner in place and re-fit; not a full rebuild — the cards are
+            // unchanged, only the pinned banner appears/disappears.
+            panel.setBanner(active ? Self.localFallbackBannerText : nil)
+            panel.panelContentDidChangeHeight(animated: true)
+        }
+        // When not shown, the next `rebuildForOpen()` re-applies it from
+        // `localFallbackActive` (see the tail of `rebuild()`).
+    }
+
+    /// Test-only: whether the fallback banner is currently reflected in the panel.
+    var test_localFallbackBannerText: String? { panel.test_bannerText }
+
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
     public var statusMasterVolume: Double {
@@ -686,6 +715,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // (brief §7.3 — a failure that arrived while the popover was closed goes
         // through this path). Un-animated: the whole panel is being (re)built.
         reconcileDiagnosisPanels(animated: false)
+
+        // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
+        // above dropped it with everything else, so a rebuild that happens WHILE the
+        // fallback is active (e.g. a device set change) must restore it.
+        panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
     }
 
     private func orderedDevices() -> [Device] {

@@ -116,6 +116,23 @@ public enum BackendEvent: Sendable, Equatable {
     /// Mac media key and the frontmost player (Music, Spotify, a browser, …)
     /// responds. Only ``NativeBackend`` emits it.
     case remoteTransport(RemoteTransportCommand)
+
+    /// The generalized silence watchdog (Wave 2, R11) flipped the local-playback
+    /// fallback. `active: true` means: the capture gate WANTED to stream to at
+    /// least one AirPlay device, but none of the desired devices stayed
+    /// `.connected` for the fallback window, so the backend un-gated whole-system
+    /// capture — the Mac itself is now audible — **without clearing the user's
+    /// selection intent**. `active: false` means a desired device reconnected (or
+    /// the intent cleared) and the gate re-engaged: audio has moved back to the
+    /// real device(s) and the Mac is muted again.
+    ///
+    /// This is the *only* signal for the "Speakers unreachable — playing on this
+    /// Mac" popover banner; it is not a `Device` field because it's a whole-app
+    /// condition, not a per-device one (a dead GROUP has zero connected members,
+    /// so no single device could carry it). Only ``NativeBackend`` emits it — it's
+    /// the only backend with a real capture gate; `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case localFallbackActive(Bool)
 }
 
 /// The seam between the app and wherever audio actually goes.

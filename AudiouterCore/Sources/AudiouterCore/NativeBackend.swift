@@ -212,7 +212,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// them in that same order, off the hot path.
     private let captureControlQueue = DispatchQueue(label: "NativeBackend.captureControl")
 
-    // MARK: Sleep/wake (B6b — all confined to `stateQueue`)
+    // MARK: Sleep/wake + generalized silence watchdog (B6b + Wave 2 W2-T2 / R11 —
+    // all confined to `stateQueue`)
     //
     // Sleep severs the RTSP/PTP sockets. `handleSystemWillSleep()` tears the engine
     // outputs down cleanly (graceful TEARDOWN) but KEEPS `expectedSelected` /
@@ -221,6 +222,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // emits NO `deviceUpdated`: GroupController's reverse auto-swap (which restores
     // {local} and clears the Selected Devices intent) is event-driven, so emitting
     // nothing means it can't fire.
+    //
+    // The SILENCE WATCHDOG generalizes the original wake-only fallback to EVERY path
+    // (Wave 2, closes R11 — a group whose speakers all fail/offline used to leave the
+    // Mac muted in total silence forever). The rule is path-agnostic: whenever the
+    // capture gate WANTS to stream (a non-local device is desired) but ZERO desired
+    // devices are `.connected`, a countdown arms; if it elapses with nothing
+    // connected, capture un-gates so the Mac becomes audible — WITHOUT clearing
+    // intent — and a banner is shown. Any desired device reconnecting (or the intent
+    // clearing) re-engages the gate and clears the banner. Wake-from-sleep is now
+    // just one trigger of this: `handleSystemDidWake` re-converges (nothing connected
+    // yet) and lets the shared reconcile arm the same countdown.
 
     /// Whether the backend is currently suspended for system sleep. While true the
     /// capture gate is forced off (`reconcileCaptureGate`) and no converge/discovery
@@ -228,26 +240,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it and re-drives convergence.
     private var suspended = false
 
-    /// The wake fallback watchdog's override on the capture gate. When the watchdog
-    /// fires (no desired-on device reconnected in time), this flips true and the
-    /// gate computes `want == false` even though `expectedSelected` is non-empty —
-    /// un-muting the Mac WITHOUT clearing intent. A later reconnect
-    /// (`noteWakeReconnect`) clears it and re-reconciles, cleanly re-engaging the gate.
-    private var wakeCaptureOverride = false
+    /// The silence watchdog's override on the capture gate. When the watchdog fires
+    /// (no desired non-local device is `.connected`), this flips true and the gate
+    /// computes `want == false` even though `expectedSelected` is non-empty —
+    /// un-muting the Mac WITHOUT clearing intent (R11: a dead group falls back to
+    /// local playback instead of silence). A later reconnect / intent clear
+    /// (`reconcileSilenceWatchdog`) clears it and re-reconciles, re-engaging the gate.
+    private var silenceCaptureOverride = false
 
-    /// True between `handleSystemDidWake()` and the first post-wake reconnect (or the
-    /// watchdog firing). Gates `noteWakeReconnect` so the reconnect hook is inert
-    /// during ordinary operation.
-    private var awaitingWakeReconnect = false
-
-    /// The post-wake fallback delay in seconds (Settings › Audio), or `nil` for
-    /// "Never". Pushed by the app layer via ``setWakeAudioRestoreDelay(_:)``; read
-    /// when arming the watchdog on wake. Confined to `stateQueue`.
+    /// The fallback delay in seconds (Settings › Audio wake-restore family), or `nil`
+    /// for "Never". Pushed by the app layer via ``setWakeAudioRestoreDelay(_:)``; read
+    /// when arming the watchdog. Reused verbatim for the generalized silence watchdog
+    /// (PLAN-RELIABILITY Wave 2: "same settings family as the wake-restore delay") so
+    /// there is ONE user-facing control, not two. Confined to `stateQueue`.
     private var wakeAudioRestoreDelay: TimeInterval?
 
-    /// The armed post-wake watchdog, scheduled on `stateQueue`. Cancelled on the
-    /// first reconnect, on a new sleep/wake cycle, or on `stop()`.
-    private var wakeWatchdog: DispatchWorkItem?
+    /// The armed silence-watchdog countdown. Cancelled when a desired device
+    /// reconnects, the intent clears, on a sleep/wake cycle, or on `stop()`.
+    private var silenceWatchdog: SilenceWatchdogToken?
+
+    /// Injectable timer seam for the silence watchdog so hermetic tests fire the
+    /// countdown deterministically. Defaults to a real `DispatchQueue.asyncAfter`
+    /// wrapper (see the designated initializer). Never mutated after init.
+    private let watchdogScheduler: SilenceWatchdogScheduling
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -559,8 +574,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
         processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
         maxRebindRecoveryAttempts: Int = 3,
-        rebindRecoveryRetryDelay: TimeInterval = 0.5
+        rebindRecoveryRetryDelay: TimeInterval = 0.5,
+        watchdogScheduler: SilenceWatchdogScheduling? = nil
     ) {
+        // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
+        // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
+        // so this queue only needs to time the delay — a plain serial queue is fine.
+        self.watchdogScheduler = watchdogScheduler
+            ?? DispatchSilenceWatchdogScheduler(queue: DispatchQueue(label: "NativeBackend.silenceWatchdog"))
         self.engine = engineControl
         self.discovery = discoverySource
         self.systemVolume = systemVolume
@@ -911,12 +932,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
             self.captureRunning = false
-            // B6b: drop any pending wake watchdog + reset sleep/wake flags so a stop
-            // mid-wait can't leave capture wedged off (override) or suspended.
-            self.wakeWatchdog?.cancel()
-            self.wakeWatchdog = nil
-            self.awaitingWakeReconnect = false
-            self.wakeCaptureOverride = false
+            // B6b / R11: drop any pending silence watchdog + reset sleep/wake flags so
+            // a stop mid-wait can't leave capture wedged off (override) or suspended.
+            self.silenceWatchdog?.cancel()
+            self.silenceWatchdog = nil
+            self.silenceCaptureOverride = false
             self.suspended = false
             // `captureControlQueue` gets the last word — and, since the eager
             // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
@@ -1133,6 +1153,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
+            // Intent changed: re-evaluate the silence watchdog. Selecting a device (or
+            // activating a group) with nothing yet `.connected` arms the countdown;
+            // deselecting everything (or dropping to a local-only selection) clears any
+            // active fallback and cancels the countdown. (R11: a group of dead speakers
+            // is exactly "non-local intent, zero connected" the moment it's activated.)
+            self.reconcileSilenceWatchdog()
             return kicks
         }
 
@@ -1908,7 +1934,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // `connectVolumeSeed`.
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
-                        if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
@@ -1916,7 +1941,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         }
                         // Engine confirmed the add — connecting → connected. (An
                         // interim out-of-band `.failed` already returned above and
-                        // left connectionState `.failed` via `applyEngineState`.)
+                        // left connectionState `.failed` via `applyEngineState`.) The
+                        // `→ .connected` transition drives `reconcileSilenceWatchdog`
+                        // (hooked in `setConnectionState`), which disarms/clears any
+                        // silence fallback for this genuine reconnect.
                         self.setConnectionState(.connected, for: id)
                     }
                 } catch {
@@ -2237,6 +2265,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// failed reconnect legitimately deselects the model row.
     var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
 
+    /// Test-only (`@testable`): whether the silence watchdog has un-gated capture
+    /// (the Mac is audible as a fallback because zero desired devices are connected).
+    var test_silenceFallbackActive: Bool { stateQueue.sync { silenceCaptureOverride } }
+
+    /// Test-only (`@testable`): whether a silence-watchdog countdown is currently
+    /// armed (awaiting either a reconnect or its own fire).
+    var test_silenceWatchdogArmed: Bool { stateQueue.sync { silenceWatchdog != nil } }
+
     /// System will sleep: proactively remove every streaming engine output so the
     /// receivers get a clean RTSP TEARDOWN before sleep severs the sockets, while
     /// PRESERVING the selection intent (`expectedSelected` / `desiredOn`) so
@@ -2253,11 +2289,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let toRemove: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, !self.suspended else { return [] }
             self.suspended = true
-            // Abandon any in-flight wake bookkeeping from a prior cycle.
-            self.wakeWatchdog?.cancel()
-            self.wakeWatchdog = nil
-            self.awaitingWakeReconnect = false
-            self.wakeCaptureOverride = false
+            // Abandon any in-flight silence-watchdog bookkeeping from a prior cycle:
+            // sleep re-decides everything on wake, and `suspended` already forces the
+            // gate off, so a fallback override must not linger across the sleep.
+            self.silenceWatchdog?.cancel()
+            self.silenceWatchdog = nil
+            self.silenceCaptureOverride = false
             // Stop the whole-system tap (ordered on `captureControlQueue`, like every
             // other gate decision) so the Mac isn't left muted by a tap streaming into
             // dead sockets. `expectedSelected` is untouched.
@@ -2281,15 +2318,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// System woke: re-converge every still-desired device (intent survived sleep)
-    /// and arm the fallback watchdog. A wake reconnect is a genuine reconnect, so
-    /// `convergeDevice`'s add path reseeds the volume as documented (the `added`
-    /// false→true edge).
+    /// System woke: re-converge every still-desired device (intent survived sleep).
+    /// A wake reconnect is a genuine reconnect, so `convergeDevice`'s add path
+    /// reseeds the volume as documented (the `added` false→true edge). The fallback
+    /// watchdog is no longer armed here directly — `reconcileSilenceWatchdog()` (run
+    /// as part of re-deciding the capture gate below) arms it because, post-wake,
+    /// every desired device is `.connecting` and none is yet `.connected`.
     public func handleSystemDidWake() {
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, self.suspended else { return [] }
             self.suspended = false
-            self.wakeCaptureOverride = false
+            self.silenceCaptureOverride = false
 
             var kicks: [(String, OutputID)] = []
             let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
@@ -2305,11 +2344,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
             // Re-decide the capture gate now that `suspended` is lifted (re-mute if a
-            // streaming selection is still in force).
+            // streaming selection is still in force), then re-evaluate the silence
+            // watchdog: with a streaming selection and nothing yet `.connected`, this
+            // arms the same countdown the wake path used to arm by hand.
             self.reconcileCaptureGate()
-            // Arm the fallback watchdog only if we're actually waiting on a reconnect.
-            self.awaitingWakeReconnect = !desiredIDs.isEmpty
-            if self.awaitingWakeReconnect { self.armWakeWatchdog() }
+            self.reconcileSilenceWatchdog()
             return kicks
         }
         for (id, outputID) in toKick {
@@ -2320,44 +2359,81 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // (sibling task B9 makes discovery self-healing) — noted, not forced here.
     }
 
-    /// Called on the `added` false→true edge (both add-success sites) — inert unless
-    /// we're waiting on a post-wake reconnect. The first reconnect disarms the
-    /// watchdog; if the watchdog had already un-gated capture, this re-engages the
-    /// gate (re-muting the Mac for the recovered stream). Intent is never touched.
+    // MARK: Generalized silence watchdog (Wave 2 W2-T2, closes R11)
+
+    /// The single evaluation point for the silence fallback, driven from every path
+    /// that can change "is any desired device audible": connection-state transitions
+    /// (`setConnectionState`), out-of-band engine transitions (`applyEngineState`),
+    /// intent changes (`setOutputSet`), and wake (`handleSystemDidWake`). It is the
+    /// generalization of the old wake-only `noteWakeReconnect`/`armWakeWatchdog` pair
+    /// into one path-agnostic reconcile.
+    ///
+    /// The condition is "stranded": the capture gate WANTS to stream (at least one
+    /// non-local device is in `expectedSelected`) yet ZERO of those desired non-local
+    /// devices are `.connected` — and we're not suspended for sleep. Note the
+    /// deliberate "zero connected" test, not "any unavailable": a partly-connected
+    /// selection is still audible, so it never trips the watchdog.
+    ///
+    /// - Stranded and not already fallen back → arm the countdown once (a repeat
+    ///   stranded evaluation while armed leaves the running countdown alone, so a
+    ///   burst of transitions can't keep resetting it).
+    /// - Not stranded (a desired device is `.connected`, the intent cleared, or
+    ///   we're suspended) → cancel any countdown and, if we had fallen back, clear
+    ///   the override, re-engage the capture gate (audio moves back to the device,
+    ///   Mac re-mutes) and clear the banner.
+    ///
     /// On `stateQueue`.
-    private func noteWakeReconnect() {   // on stateQueue
-        guard self.awaitingWakeReconnect else { return }
-        self.awaitingWakeReconnect = false
-        self.wakeWatchdog?.cancel()
-        self.wakeWatchdog = nil
-        if self.wakeCaptureOverride {
-            self.wakeCaptureOverride = false
-            self.reconcileCaptureGate()
+    private func reconcileSilenceWatchdog() {   // on stateQueue
+        let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
+        let wantsStream = !desiredNonLocal.isEmpty
+        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
+        let stranded = !suspended && wantsStream && !anyConnected
+
+        if stranded {
+            if silenceCaptureOverride { return }        // already audible on this Mac
+            if silenceWatchdog == nil { armSilenceWatchdog() }
+        } else {
+            silenceWatchdog?.cancel()
+            silenceWatchdog = nil
+            if silenceCaptureOverride {
+                silenceCaptureOverride = false
+                reconcileCaptureGate()                  // re-mute; stream resumes to device
+                emit(.localFallbackActive(false))
+            }
         }
     }
 
-    /// Arm the fallback watchdog on `stateQueue`. A `nil`/non-positive delay ("Never")
-    /// arms nothing. On `stateQueue`.
-    private func armWakeWatchdog() {   // on stateQueue
-        self.wakeWatchdog?.cancel()
-        self.wakeWatchdog = nil
-        guard let delay = self.wakeAudioRestoreDelay, delay > 0 else { return }
-        let work = DispatchWorkItem { [weak self] in self?.fireWakeWatchdog() }
-        self.wakeWatchdog = work
-        // Scheduled ON `stateQueue`, so the body runs serialized with every other
-        // state mutation; a cancel before it fires simply drops it.
-        self.stateQueue.asyncAfter(deadline: .now() + delay, execute: work)
+    /// Arm the silence-watchdog countdown on `stateQueue`. A `nil`/non-positive delay
+    /// ("Never") arms nothing — the intent-keyed gate holds and un-muting is deferred,
+    /// exactly as the wake watchdog behaved. The scheduled body hops back onto
+    /// `stateQueue` so it stays serialized with every other state mutation regardless
+    /// of which thread the injected scheduler fires it on. On `stateQueue`.
+    private func armSilenceWatchdog() {   // on stateQueue
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
+        guard let delay = wakeAudioRestoreDelay, delay > 0 else { return }
+        silenceWatchdog = watchdogScheduler.schedule(after: delay) { [weak self] in
+            guard let self else { return }
+            self.stateQueue.async { self.fireSilenceWatchdog() }
+        }
     }
 
-    /// The watchdog fired: no desired-on device reconnected in time. Un-gate capture
-    /// so the Mac un-mutes, leaving the selection intent intact — a later reconnect
-    /// clears the override (`noteWakeReconnect`) and re-mutes. On `stateQueue`.
-    private func fireWakeWatchdog() {   // on stateQueue (scheduled there)
-        guard self.awaitingWakeReconnect, self.wakeWatchdog != nil else { return }
-        self.wakeWatchdog = nil
-        self.awaitingWakeReconnect = false
-        self.wakeCaptureOverride = true
-        self.reconcileCaptureGate()
+    /// The countdown elapsed with no desired device `.connected`: un-gate capture so
+    /// the Mac becomes audible, leaving the selection intent intact, and announce the
+    /// fallback so the popover shows its banner. A later reconnect / intent clear
+    /// re-engages the gate (`reconcileSilenceWatchdog`). The condition is re-checked
+    /// here because state may have changed between arming and firing (a cancelled but
+    /// already-dispatched fire, or a reconnect that raced this), so a late fire is
+    /// inert. On `stateQueue`.
+    private func fireSilenceWatchdog() {   // on stateQueue (hopped here by the scheduler body)
+        guard silenceWatchdog != nil else { return }   // cancelled but already dispatched
+        silenceWatchdog = nil
+        let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
+        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
+        guard !suspended, !desiredNonLocal.isEmpty, !anyConnected else { return }
+        silenceCaptureOverride = true
+        reconcileCaptureGate()                          // un-gate → Mac becomes audible
+        emit(.localFallbackActive(true))
     }
 
     // MARK: Discovery → app model (all on stateQueue)
@@ -2611,7 +2687,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 device.isSelected = true
                 device.connectionState = .connected
                 self.added.insert(id)
-                if !wasAdded { self.noteWakeReconnect() }   // B6b: first post-wake reconnect disarms the watchdog
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
                 self.failedGate.remove(id)
@@ -2657,6 +2732,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             guard device != before else { return nil }   // de-dupe the completion echo
             self.known[id] = device
             self.emit(.deviceUpdated(device))
+            // This out-of-band transition set `connectionState` DIRECTLY on the device
+            // (bypassing `setConnectionState`), so drive the silence-watchdog reconcile
+            // here too — a `→ .connected` re-engages the gate, a `→ .failed`/`.off`
+            // arms the countdown. Runs after the commit so `known[id]` reflects the new
+            // state the reconcile reads.
+            self.reconcileSilenceWatchdog()
             return nil
         }
         if let rekick {
@@ -3016,6 +3097,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func setConnectionState(_ state: ConnectionState, for id: String) {   // on stateQueue
         guard connectionState(of: id) != state else { return }
         applyLocal(id) { $0.connectionState = state }
+        // Every connection-lifecycle edge can change "is any desired device audible":
+        // a `→ .connected` re-engages the gate (clearing a silence fallback), a
+        // `→ .failed`/`.off` for the last connected member arms the countdown (R11).
+        reconcileSilenceWatchdog()
     }
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band
@@ -3137,12 +3222,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// start/stop/start/… in exactly the decided order and settle on the last one.
     private func reconcileCaptureGate() {   // on stateQueue
         guard let coordinator = captureCoordinator else { return }
-        // Two B6b overrides force the tap OFF regardless of selection: while
+        // Two overrides force the tap OFF regardless of selection: while
         // `suspended` (system sleep — nothing to send, and a later didWake re-decides)
-        // and while the wake watchdog has un-gated capture (`wakeCaptureOverride` —
-        // no receiver came back, so un-mute the Mac). Neither touches the selection
-        // intent, so the gate re-engages the moment both clear.
-        let want = !suspended && !wakeCaptureOverride
+        // and while the silence watchdog has un-gated capture (`silenceCaptureOverride`
+        // — no desired device is connected, so un-mute the Mac; R11). Neither touches
+        // the selection intent, so the gate re-engages the moment both clear.
+        let want = !suspended && !silenceCaptureOverride
             && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want

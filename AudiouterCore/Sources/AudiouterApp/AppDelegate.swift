@@ -949,6 +949,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mediaKeyController.handle(command)
             log("event: \(describe(event))")
             return
+        case .localFallbackActive(let active):
+            // The generalized silence watchdog (R11) un-gated (or re-gated) whole-system
+            // capture: nothing the user selected stayed connected, so the Mac fell back
+            // to local playback (or a device reconnected and audio moved back). Show or
+            // clear the popover banner; the selection intent is untouched, so no device
+            // model changed — handle it and return.
+            popoverController.setLocalFallbackActive(active)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -985,6 +994,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         case .remoteTransport(let command):
             return "remoteTransport(\(command)) — driving Mac media playback"
+        case .localFallbackActive(let active):
+            return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
         }
     }
 

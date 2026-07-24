@@ -378,7 +378,8 @@ final class NativeBackendTests: XCTestCase {
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
         resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
-        injectedMeteringCapture: PerAppCaptureCoordinator? = nil
+        injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
+        watchdogScheduler: SilenceWatchdogScheduling? = nil
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
@@ -386,7 +387,8 @@ final class NativeBackendTests: XCTestCase {
             engineControl: engine, discoverySource: discovery,
             systemVolume: systemVolume, connectVolume: connectVolume, resolveProcessSet: resolveProcessSet,
             injectedPerAppCapture: injectedPerAppCapture,
-            injectedMeteringCapture: injectedMeteringCapture)
+            injectedMeteringCapture: injectedMeteringCapture,
+            watchdogScheduler: watchdogScheduler)
         return (backend, engine, discovery)
     }
 
@@ -486,6 +488,7 @@ final class NativeBackendTests: XCTestCase {
     private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onNominalSampleRateChanged: (@Sendable (UInt32, Double) -> Void)?
         private let lock = NSLock()
         private var _excludedPIDs: Set<pid_t> = []
         private var _createCount = 0
@@ -2769,7 +2772,199 @@ final class NativeBackendTests: XCTestCase {
                        "Never must arm no watchdog — no extra un-gate stop after wake")
     }
 
+    // MARK: Generalized silence watchdog (Wave 2 W2-T2, closes R11)
+    //
+    // These drive the fallback deterministically through an injected manual
+    // scheduler (`ManualWatchdogScheduler`) — the "T seconds elapsed" step is a
+    // single `fireAll()` call, never a real `sleep` on the countdown. The scenarios
+    // are the four the plan calls out: (a) all desired devices unavailable →
+    // un-gate + banner + intent kept; (b) reconnect → re-gate + banner clears + no
+    // intent change; (c) only SOME unavailable → never fires; (d) reconnect before
+    // T → the armed countdown cancels and never fires.
+
+    /// (a) A streaming device goes offline (dead-group / R11 case): after the
+    /// countdown elapses, capture UN-GATES (the Mac becomes audible), the fallback
+    /// banner is announced, and the selection intent is untouched.
+    func testSilenceWatchdogUnGatesWhenAllDesiredGoOffline() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "R11 Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)   // any positive value; the manual scheduler ignores the magnitude
+
+        // The speaker fails/powers off — an out-of-band engine `.failed`. Intent
+        // (desiredOn / expectedSelected) is preserved by design, so the gate still
+        // WANTS to stream but nothing is connected → the countdown arms.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertTrue(capture.isCapturing,
+                      "before the countdown fires, capture stays gated (the silent-Mac bug window)")
+
+        // T seconds elapse (subscribe first so the banner event is observed).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } }
+        } after: { scheduler.fireAll() }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } },
+                      "the fallback must announce the banner")
+
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(capture.isCapturing, "watchdog must un-gate capture so the Mac becomes audible (R11)")
+        XCTAssertTrue(backend.test_silenceFallbackActive)
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id),
+                      "the fallback must NOT clear the user's selection intent")
+    }
+
+    /// (b) After the fallback is active, a desired device reconnecting RE-GATES
+    /// capture (audio moves back to the device, the Mac re-mutes), clears the
+    /// banner, and never touches the intent.
+    func testSilenceWatchdogReEngagesOnReconnect() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Resume Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand, then fire → fallback active (capture off, Mac audible).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id))
+
+        // The speaker comes back — an out-of-band `.connected`. The gate re-engages,
+        // and the clear event is announced (subscribe first so it's observed).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } }
+        } after: { engine.pushState(device.outputID, .connected) }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } },
+                      "a reconnect must announce the banner clearing")
+
+        await pollUntil { capture.isCapturing }
+        XCTAssertFalse(backend.test_silenceFallbackActive, "a reconnect must clear the fallback")
+        XCTAssertTrue(capture.isCapturing, "a reconnect must re-gate capture (Mac re-muted, streaming to the device)")
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id),
+                      "intent must be unchanged throughout the fall-back / resume cycle")
+    }
+
+    /// (c) With only SOME desired devices unavailable (one still connected), the
+    /// watchdog must NOT fire — it keys on "ZERO connected", not "any unavailable".
+    func testSilenceWatchdogDoesNotFireWhenSomeStillConnected() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        backend.setWakeAudioRestoreDelay(600)
+
+        let good = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Good Speaker")
+        let bad = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Bad Speaker")
+        for d in [good, bad] {
+            _ = await collect(from: backend) { events in
+                events.contains { if case .deviceAdded(let x) = $0 { return x.id == d.id } else { return false } }
+            } after: { discovery.fire(.appeared(d)) }
+        }
+        engine.addFailures = [bad.outputID.rawValue]   // `bad` never reaches .connected
+
+        backend.setOutputSet([good.id, bad.id])
+        await pollUntil { backend.devices.first { $0.id == good.id }?.connectionState == .connected }
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == bad.id })?.connectionState { return true }
+            return false
+        }
+
+        // One member is connected → not stranded. Any transient countdown from the
+        // initial (both-connecting) moment must be disarmed, and firing whatever is
+        // pending must NOT trip the fallback (the fire re-checks the condition).
+        scheduler.fireAll()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_silenceFallbackActive,
+                       "a partly-connected selection is still audible — the watchdog must not fall back")
+        XCTAssertFalse(backend.test_silenceWatchdogArmed,
+                       "with a device connected, no countdown should be armed")
+        XCTAssertTrue(capture.isCapturing, "capture stays gated — the connected member is streaming")
+    }
+
+    /// (d) A reconnect BEFORE the countdown elapses cancels the armed watchdog, so
+    /// it never fires and the Mac never falls back.
+    func testSilenceWatchdogCancelsOnReconnectBeforeTimeout() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:74", name: "Flap Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand → the countdown arms (but we do NOT fire it yet).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertTrue(backend.test_silenceWatchdogArmed)
+
+        // The device recovers before the countdown elapses → the armed timer cancels.
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { !backend.test_silenceWatchdogArmed }
+        XCTAssertFalse(scheduler.hasPending, "a reconnect before T must cancel the armed countdown")
+
+        // Even if the (cancelled) timer somehow still fired, the re-check keeps it inert.
+        scheduler.fireAll()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_silenceFallbackActive, "the watchdog must never fire once cancelled")
+        XCTAssertTrue(capture.isCapturing, "capture stayed gated the whole time — no fallback")
+    }
+
     // MARK: Helpers
+
+    /// A hermetic silence-watchdog timer: records every scheduled countdown instead
+    /// of running a real `asyncAfter`, so a test fires "T seconds elapsed"
+    /// deterministically via `fireAll()` — no wall-clock wait on the countdown.
+    private final class ManualWatchdogScheduler: SilenceWatchdogScheduling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [(id: Int, body: @Sendable () -> Void)] = []
+        private var nextID = 0
+        private var _armCount = 0
+
+        func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
+            lock.lock(); defer { lock.unlock() }
+            let id = nextID; nextID += 1; _armCount += 1
+            pending.append((id, body))
+            return Token(id: id, scheduler: self)
+        }
+
+        fileprivate func cancel(id: Int) {
+            lock.withLock { pending.removeAll { $0.id == id } }
+        }
+
+        /// Total number of countdowns ever armed (for asserting "never armed").
+        var armCount: Int { lock.withLock { _armCount } }
+        /// Whether any countdown is currently armed (scheduled, not fired/cancelled).
+        var hasPending: Bool { lock.withLock { !pending.isEmpty } }
+
+        /// Fire (and consume) every pending countdown — the deterministic "T elapsed".
+        func fireAll() {
+            let bodies = lock.withLock { () -> [@Sendable () -> Void] in
+                let b = pending.map(\.body); pending.removeAll(); return b
+            }
+            for body in bodies { body() }
+        }
+
+        private final class Token: SilenceWatchdogToken {
+            let id: Int
+            weak var scheduler: ManualWatchdogScheduler?
+            init(id: Int, scheduler: ManualWatchdogScheduler) { self.id = id; self.scheduler = scheduler }
+            func cancel() { scheduler?.cancel(id: id) }
+        }
+    }
 
     /// Records the gate's capture ops in order, with no Core Audio tap / TCC prompt.
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {

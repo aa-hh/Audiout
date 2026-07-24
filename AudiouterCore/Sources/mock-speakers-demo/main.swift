@@ -55,6 +55,10 @@ func describe(_ event: BackendEvent) -> String? {
     case .remoteTransport(let command):
         // Also native-only (a key pressed on the speaker itself); never under mock.
         return "▶ remote key  \(command) (from a speaker)"
+    case .localFallbackActive(let active):
+        // Native-only (the R11 silence watchdog); never under mock. Handled so the
+        // switch stays exhaustive.
+        return "♪ local fallback \(active ? "ON (speakers unreachable)" : "OFF (resumed)")"
     }
 }
 

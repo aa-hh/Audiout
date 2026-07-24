@@ -164,8 +164,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never an env var), non-blocking, and must never call back into a caller. Never
   call it from the IOProc/render path — only from the (non-realtime) decision
   points around it. It auto-neutralizes under tests; don't add a per-suite
-  workaround, and don't reach for its `_resetForTesting`/`_installTestSink` seams
-  outside `TelemetryTests`.
+  workaround. `_resetForTesting(directory:)` (real disk I/O against an injected
+  directory — rotation, size-bound, fail-safe) stays exclusive to
+  `TelemetryTests`; a call-site suite (e.g. `SetupModelTests`) may use
+  `_installTestSink(_:)` ONLY to assert that ITS OWN instrumentation emitted the
+  expected line, removing the sink (`_installTestSink(nil)`, also the flush
+  barrier) before the test returns so it never bleeds into the next test method
+  in the same process.
 
 ## Map
 

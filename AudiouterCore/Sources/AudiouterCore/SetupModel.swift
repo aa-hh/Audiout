@@ -45,6 +45,22 @@ public enum PermissionStatus: Equatable, Sendable {
     case unsupported
 }
 
+extension PermissionStatus {
+    /// Stable field value for ``Telemetry`` (T5) — an explicit, exhaustive
+    /// mapping rather than relying on Swift's default enum description, so a
+    /// future added case is a compile error here rather than a silently
+    /// unlabeled log line.
+    var telemetryDescription: String {
+        switch self {
+        case .unknown: return "unknown"
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .requested: return "requested"
+        case .unsupported: return "unsupported"
+        }
+    }
+}
+
 /// The OS permissions the first-run flow covers. (The PTP/firewall step is
 /// deliberately NOT here — a Developer ID + notarized build is auto-allowed by
 /// the macOS Application Firewall's default "allow downloaded signed software",
@@ -340,6 +356,26 @@ public final class SetupModel {
         onChange?()
     }
 
+    /// T5: emits the exact "setup says X, the live TCC-backed read says Y"
+    /// comparison at every audio reconciliation point (``refreshStatuses()``,
+    /// ``auditRequiredPermissions()``) — the evidence tonight's live bug had
+    /// none of, where the app's own UI showed a permission as connected/granted
+    /// while the real system grant was denied and nothing afterward could
+    /// explain why. `reported` is the status as SetupModel/the UI currently
+    /// hold it; `silent` is what ``AudioCapturePermissionProbing/currentStatusSilently()``
+    /// just read live. `diverged` is computed explicitly (not left for a log
+    /// reader to infer by comparing two other fields) so a single line is
+    /// unambiguous on its own, and is logged on EVERY reconciliation — a match
+    /// is useful positive evidence too, not just a mismatch.
+    private func logReportedVsActual(site: String, reported: PermissionStatus, silent: PermissionStatus) {
+        Telemetry.log(.permission, "reported_vs_actual", [
+            "site": site,
+            "reported": reported.telemetryDescription,
+            "silent": silent.telemetryDescription,
+            "diverged": reported == silent ? "false" : "true",
+        ])
+    }
+
     /// Re-derive every permission's status from its CURRENT real state, so the
     /// screen reflects reality rather than a stale "requested." Safe to call on
     /// every window focus/reactivate — deliberately never SPRINGS a prompt on a
@@ -378,6 +414,7 @@ public final class SetupModel {
         // — that stays reserved for `requestAudioCapture()`.
         if audioStatus == .denied || audioStatus == .requested,
            let silentAudio = audioProbe.currentStatusSilently() {
+            logReportedVsActual(site: "SetupModel.refreshStatuses", reported: audioStatus, silent: silentAudio)
             audioStatus = silentAudio
         }
 
@@ -543,9 +580,12 @@ public final class SetupModel {
     public func auditRequiredPermissions() async -> [RequiredPermission] {
         var changed = false
 
-        if let silentAudio = audioProbe.currentStatusSilently(), silentAudio != audioStatus {
-            audioStatus = silentAudio
-            changed = true
+        if let silentAudio = audioProbe.currentStatusSilently() {
+            logReportedVsActual(site: "SetupModel.auditRequiredPermissions", reported: audioStatus, silent: silentAudio)
+            if silentAudio != audioStatus {
+                audioStatus = silentAudio
+                changed = true
+            }
         }
 
         if localNetworkGated, localNetworkStatus != .unknown {

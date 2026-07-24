@@ -804,6 +804,12 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try createTapAndReadFormat(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
             try createAggregate(bundleID: bundleID)
             try startIOProc()
+            // Correct the converter's input rate to the aggregate's REAL rate
+            // BEFORE the format is returned (the converter is built from it) and
+            // before the rate listener is installed (its compare-before-rebuild
+            // guard reads `format.sampleRate`). Mirrors the whole-system tap's
+            // ordering exactly — see `reconcileFormatWithAggregate`.
+            reconcileFormatWithAggregate(bundleID: bundleID)
             installDefaultDeviceListener()
             installSampleRateListener(bundleID: bundleID)
         } catch {
@@ -1057,6 +1063,49 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         }
         guard err == noErr, let cf = name, !(cf as String).isEmpty else { return "device #\(deviceID)" }
         return cf as String
+    }
+
+    /// Correct `format`/`asbd` to the AGGREGATE's real nominal rate (the per-app
+    /// port of the whole-system tap's identical fix — see
+    /// `CoreAudioSystemTap.reconcileFormatWithAggregate`).
+    ///
+    /// `createTapAndReadFormat` reads `kAudioTapPropertyFormat` off the BARE
+    /// process tap, before it joins the aggregate device. With sub-tap drift
+    /// compensation on, the aggregate resamples the tap's audio onto ITS OWN
+    /// clock (the tapped output device's nominal rate) — so a tap that read back
+    /// 44100 pre-aggregate can actually deliver 48000-rate buffers once
+    /// aggregated. Building the `AVAudioConverter` from the stale pre-aggregate
+    /// rate makes it reinterpret every 48000 buffer as 44100: a sustained ~8.8%
+    /// pitch-UP with judder, exactly the live symptom on a per-app redirect.
+    ///
+    /// This ALSO repairs the rate listener's compare-before-rebuild guard: that
+    /// guard compares the notified device rate against `format.sampleRate`, so
+    /// while `format` held the unreconciled pre-aggregate rate the two could
+    /// never match and EVERY notification rebuilt the tap (the observed per-app
+    /// rebuild storm). Reconciling here makes both comparisons apples-to-apples.
+    ///
+    /// The aggregate's nominal rate (not a second `kAudioTapPropertyFormat`
+    /// re-read) is authoritative precisely because drift compensation resamples
+    /// the sub-tap ONTO the aggregate clock — that is the cadence the IOProc
+    /// sees. If the aggregate rate can't be read we keep the pre-aggregate
+    /// format (no regression vs. the prior behaviour).
+    private func reconcileFormatWithAggregate(bundleID: String) {
+        guard aggregateID != kAudioObjectUnknown else { return }
+        let aggregateRate = CoreAudioSystemTap.readNominalSampleRate(aggregateID)
+        let reconciled = CoreAudioSystemTap.reconciledFormat(
+            declared: format, aggregateRate: aggregateRate)
+        guard reconciled != format else { return }
+        AudioDiag.log(
+            "PAC \(bundleID): pre-aggregate tap format declared \(format.sampleRate) Hz but the "
+            + "aggregate device actually delivers \(reconciled.sampleRate) Hz — correcting the "
+            + "converter's input rate to the aggregate's real rate (prevents a sustained pitch shift)")
+        Telemetry.log(.capturePA, "rate_reconciled", [
+            "bundleID": bundleID,
+            "declaredRate": String(format.sampleRate),
+            "aggregateRate": String(reconciled.sampleRate),
+        ])
+        self.asbd.mSampleRate = Double(reconciled.sampleRate)
+        self.format = reconciled
     }
 
     /// Best-effort CURRENT nominal sample rate of `deviceID`

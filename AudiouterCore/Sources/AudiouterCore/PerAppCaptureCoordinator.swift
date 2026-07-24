@@ -382,7 +382,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// processes, since capture started) and recreate the tap + aggregate
     /// against the new device.
     private func handleDeviceChange(bundleID: String) {
-        AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FIRED (default output device changed)")
+        Telemetry.log(.capturePA, "device_change_fired", ["bundleID": bundleID])
         // STABILITY(C6) (per-app port of NativeCaptureCoordinator's fix sketch,
         // dev/notes/stability-audit-2026-07-18.md §C6): if this notification
         // arrives while the slot is already mid-rebuild (`.creatingTap`), don't
@@ -412,7 +412,6 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // "replaying coalesced pending device change" log below) or
             // simply discarded (no slot / not capturing and not rebuilding).
             let pendingNow = queue.sync { slots[bundleID]?.pendingDeviceChange ?? false }
-            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) SKIPPED (not capturing) — coalesced=\(pendingNow)")
             Telemetry.log(.capturePA, "device_change_coalesced", ["bundleID": bundleID, "pending": String(pendingNow)])
             return
         }
@@ -420,7 +419,9 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         let processes = processResolver.resolve(bundleID: bundleID)
         guard !processes.isEmpty else {
-            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FAILED: no live process objects resolved")
+            // The subsequent .failed(.processNotYetAudible) transition below
+            // already carries this reason in its "transition"/"error" telemetry
+            // field (see `transition(_:bundleID:to:)`).
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
                 transition(slot, bundleID: bundleID, to: .failed(.processNotYetAudible(bundleID: bundleID)))
@@ -434,7 +435,8 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try newTap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
-            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATED ok, new format \(format.sampleRate)/\(format.channels)ch")
+            // The subsequent .capturing(format) transition below already carries
+            // the new format in its "transition"/"format" telemetry field.
             // The single highest-value event in PLAN-TELEMETRY-SYSTEM.md's T3:
             // the tapped output device silently renegotiating its nominal
             // sample rate (see the "Nominal-sample-rate listener" doc comment
@@ -471,14 +473,15 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 return true
             }
             if replay {
-                AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) replaying coalesced pending device change")
+                Telemetry.log(.capturePA, "device_change_replay", ["bundleID": bundleID])
                 handleDeviceChange(bundleID: bundleID)
             }
         } catch {
             newTap.teardown()
             let mapped: PerAppCaptureError = (error as? PerAppCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
-            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATE FAILED: \(mapped)")
+            // The subsequent .failed(mapped) transition below already carries
+            // this error in its "transition"/"error" telemetry field.
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
                 slot.tap = nil
@@ -533,11 +536,11 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         let err = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
         guard err == noErr else {
-            AudioDiag.log("PAC resume-listener install FAILED (\(err)) — relying on T2 backoff only")
+            Telemetry.log(.capturePA, "resume_listener_install_failed", ["err": "\(err)"])
             return
         }
         processListBlock = block
-        AudioDiag.log("PAC resume-listener armed (process-object-list)")
+        Telemetry.log(.capturePA, "resume_listener_armed")
     }
 
     /// Symmetric removal. MUST hold ``queue`` (or run in `deinit`, where no
@@ -583,7 +586,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             }
         }
         guard !toRetry.isEmpty else { return }
-        AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
+        Telemetry.log(.capturePA, "resume_listener_fired", [
+            "count": "\(toRetry.count)",
+            "bundleIDs": toRetry.joined(separator: ","),
+        ])
         for bundleID in toRetry { start(bundleID: bundleID) }
     }
     #endif
@@ -1084,14 +1090,12 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            AudioDiag.log("PAC nominal-sample-rate changed on tapped device — triggering rebuild")
-            // Upgrades the AudioDiag line above with a structured event
-            // (PLAN-TELEMETRY-SYSTEM.md T3) — this is the real HAL detection
-            // point, so it carries the richest fields (device name, and a
-            // fresh HAL read of the NEW rate rather than waiting for the
-            // rebuilt tap's ASBD). Never exercised by the hermetic suite (no
-            // live Core Audio) — see the coordinator-level emission in
-            // `handleDeviceChange(bundleID:)`, which is.
+            // The Telemetry call below is the real HAL detection point, so it
+            // carries the richest fields (device name, and a fresh HAL read of
+            // the NEW rate rather than waiting for the rebuilt tap's ASBD).
+            // Never exercised by the hermetic suite (no live Core Audio) — see
+            // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
+            // which is.
             guard let self else { return }
             let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
             Telemetry.log(.capturePA, "rate_rebuild", [

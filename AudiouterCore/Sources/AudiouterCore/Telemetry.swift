@@ -39,11 +39,14 @@ public enum Telemetry {
     /// `permission` (TCC gate checks + reported-vs-actual divergence),
     /// `captureWS` (whole-system capture state transitions), `capturePA`
     /// (per-app capture transitions + sample-rate rebuilds), `airplay`
-    /// (bind/rebind/session-reset + device-selection decisions), and
-    /// `lifecycle` (process/session boundaries — currently just the launch
-    /// banner emitted below).
+    /// (bind/rebind/session-reset + device-selection decisions),
+    /// `localPlayback` (the local `AVAudioEngine` sink: engine start/config-
+    /// change recovery, per-app player attach, and the synced-local session
+    /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), and `lifecycle`
+    /// (process/session boundaries — currently just the launch banner
+    /// emitted below).
     public enum Category: String, Sendable {
-        case permission, captureWS, capturePA, airplay, lifecycle
+        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,

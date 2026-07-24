@@ -1217,11 +1217,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if previous != wantOn, !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
-                    // Connect-latency diagnosis (temporary — see AudioDiag): T0 for
-                    // "click to first audio," read alongside the addOutput
-                    // start/resolve timestamps in convergeDevice below.
+                    // Connect-latency diagnosis: T0 for "click to first audio," read
+                    // alongside the "connect_addoutput_*" timestamps in
+                    // convergeDevice below.
                     if wantOn {
-                        AudioDiag.log("CONNECT requested device=\(id)")
+                        Telemetry.log(.airplay, "connect_requested", ["device": id])
                     }
                 }
             }
@@ -1651,14 +1651,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
                     self.rebindRecoveryGen[deviceID] = gen
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
-                    AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
                     self.emit(.streamHealth(id: deviceID, recovering: true))
                     // T4: the trigger + generation bump for the rebind-recovery
                     // chain `enqueueRebindRecovery` is about to start (attempt 1)
                     // for this device. `scope` is the routed app whose per-app tap
                     // rebuild caused this — the one fact the attempt trail below
-                    // can't otherwise carry. Non-blocking, same critical section as
-                    // the `AudioDiag.log` call directly above it.
+                    // can't otherwise carry.
                     Telemetry.log(.airplay, "session_reset", [
                         "device": deviceID,
                         "scope": bundleID,
@@ -1707,15 +1705,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // settle the device into whatever state is currently desired —
                 // the next topology change re-binds/re-syncs it idempotently.
                 guard !self.converging.contains(deviceID) else {
-                    AudioDiag.log(
-                        "SKIP whole-system rebind: device=\(deviceID) already converging")
+                    Telemetry.log(.airplay, "whole_system_rebind_skipped", [
+                        "device": deviceID, "reason": "already_converging",
+                    ])
                     continue
                 }
                 self.converging.insert(deviceID)
                 let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
                 self.rebindRecoveryGen[deviceID] = gen
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
-                AudioDiag.log("RESET AirPlay session (whole-system): device=\(deviceID) stream=0 (tap rebuilt)")
+                Telemetry.log(.airplay, "session_reset", [
+                    "device": deviceID,
+                    "scope": "wholeSystem",
+                    "stream": "0",
+                    "gen": "\(gen)",
+                    "trigger": "recapture",
+                ])
                 self.emit(.streamHealth(id: deviceID, recovering: true))
                 self.enqueueRebindRecovery(
                     deviceID: deviceID, outputID: outputID, scope: .wholeSystem,
@@ -1764,7 +1769,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// serialized against every other per-device engine op (a topology change's
     /// bind/rebind/unbind for the same device never overlaps this). On failure it
     /// reschedules with a small capped-doubling backoff up to
-    /// `maxRebindRecoveryAttempts`, then gives up LOUDLY (`AudioDiag.log`) and
+    /// `maxRebindRecoveryAttempts`, then gives up LOUDLY (a `"gave_up"` Telemetry
+    /// outcome below) and
     /// leaves the device unbound-in-engine — a receiver that keeps refusing the
     /// rebind is genuinely gone, and infinite removeOutput/addOutput would thrash a
     /// real device; the next topology change re-binds it idempotently anyway.
@@ -1786,8 +1792,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // than threaded as a parameter — keeps this purely additive). Both call
         // sites already hold `stateQueue` (see their own `// on stateQueue`
         // markers), so this is just a format + non-blocking hand-off, same as the
-        // `AudioDiag.log` calls already in this chain — no new locking, no new
-        // await, no reordering of what follows.
+        // other `Telemetry.log` calls already in this chain — no new locking, no
+        // new await, no reordering of what follows.
         Telemetry.log(.airplay, "rebind", [
             "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
             "trigger": "recapture", "outcome": "scheduled",
@@ -1830,7 +1836,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                     return nil
                 }
-                let label = Self.rebindScopeLabel(scope)
                 if ok {
                     Telemetry.log(.airplay, "rebind", [
                         "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
@@ -1849,10 +1854,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
                         "trigger": "recapture", "outcome": "gave_up",
                     ])
-                    AudioDiag.log(
-                        "RESET AirPlay session GAVE UP after \(attempt) attempts: "
-                        + "device=\(deviceID) \(label) — receiver likely gone; "
-                        + "left unbound-in-engine (re-binds on next topology change)")
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     if case .wholeSystem = scope {
@@ -1872,9 +1873,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     "trigger": "recapture", "outcome": "retry_scheduled",
                     "delayMs": "\(Int(delay * 1000))",
                 ])
-                AudioDiag.log(
-                    "RESET AirPlay session retry \(attempt + 1)/\(self.maxRebindRecoveryAttempts) "
-                    + "in \(delay)s: device=\(deviceID) \(label)")
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
                     self.stateQueue.sync {
@@ -1919,7 +1917,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// exact op `convergeDevice` used); per-app uses `addOutput(_:streamId:)`.
     private func performRebindRecovery(outputID: OutputID, scope: RebindScope) async -> Bool {
         let label = Self.rebindScopeLabel(scope)
-        AudioDiag.log("engine REBIND(recover) output=\(outputID) \(label)")
+        Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
         try? await engine.removeOutput(outputID)
         do {
             switch scope {
@@ -1928,8 +1926,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             return true
         } catch {
-            AudioDiag.log(
-                "engine REBIND(recover) FAILED output=\(outputID) \(label): \(error)")
+            Telemetry.log(.airplay, "rebind_recover_failed", [
+                "output": "\(outputID)", "scope": label, "error": "\(error)",
+            ])
             return false
         }
     }
@@ -2166,14 +2165,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func performBindOp(_ op: StreamBindOp) async {
         switch op {
         case .bind(let outputID, let stream):
-            AudioDiag.log("engine BIND output=\(outputID) stream=\(stream)")
+            Telemetry.log(.airplay, "engine_bind", ["output": "\(outputID)", "stream": "\(stream)"])
             try? await engine.addOutput(outputID, streamId: stream)
         case .rebind(let outputID, let stream):
-            AudioDiag.log("engine REBIND output=\(outputID) stream=\(stream)")
+            Telemetry.log(.airplay, "engine_rebind", ["output": "\(outputID)", "stream": "\(stream)"])
             try? await engine.removeOutput(outputID)
             try? await engine.addOutput(outputID, streamId: stream)
         case .unbind(let outputID):
-            AudioDiag.log("engine UNBIND output=\(outputID) (AirPlay session torn down)")
+            Telemetry.log(.airplay, "engine_unbind", ["output": "\(outputID)"])
             try? await engine.removeOutput(outputID)
         }
     }
@@ -2246,14 +2245,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         try await engine.updateDiscovery(descriptor)
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
-                    // Connect-latency diagnosis (temporary — see AudioDiag): brackets
-                    // the real RTSP/negotiate handshake `addOutput` awaits (device_start
-                    // through the STREAMING completion) — the gap between these two
-                    // lines is the AirPlay receiver's own negotiation time, not
-                    // anything this app controls.
-                    AudioDiag.log("CONNECT addOutput starting device=\(id) output=\(outputID)")
+                    // Connect-latency diagnosis: brackets the real RTSP/negotiate
+                    // handshake `addOutput` awaits (device_start through the STREAMING
+                    // completion) — the gap between these two events is the AirPlay
+                    // receiver's own negotiation time, not anything this app controls.
+                    Telemetry.log(.airplay, "connect_addoutput_start", ["device": id, "output": "\(outputID)"])
                     try await engine.addOutput(outputID)
-                    AudioDiag.log("CONNECT addOutput RESOLVED (streaming) device=\(id) output=\(outputID)")
+                    Telemetry.log(.airplay, "connect_addoutput_resolved", ["device": id, "output": "\(outputID)"])
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success

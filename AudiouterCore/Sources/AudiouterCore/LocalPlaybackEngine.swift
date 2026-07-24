@@ -283,11 +283,13 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         do {
             try engine.start()
         } catch {
-            AudioDiag.log("LPE.start FAILED: \(error)")
+            Telemetry.log(.localPlayback, "start_failed", ["error": "\(error)"])
             throw error
         }
         stateLock.withLock { engineRunning = engine.isRunning }
-        AudioDiag.log("LPE.start done isRunning=\(engine.isRunning) configuredDevice=\(configuredDevice)")
+        Telemetry.log(.localPlayback, "start_done", [
+            "isRunning": String(engine.isRunning), "configuredDevice": String(configuredDevice),
+        ])
     }
 
     /// Recover from an `AVAudioEngineConfigurationChange` (the engine has already
@@ -303,7 +305,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             stateLock.withLock { engineRunning = false }
             return
         }
-        AudioDiag.log("LPE.configChange FIRED — engine stopped; reconnecting \(snapshot.count) player(s)")
+        Telemetry.log(.localPlayback, "config_change_fired", ["playerCount": "\(snapshot.count)"])
         stateLock.withLock { engineRunning = false }
 
         // Re-establish each player→mixer connection (the config change reset them).
@@ -319,7 +321,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                     engine.connect(node.player, to: engine.mainMixerNode, format: node.connectionFormat)
                 }
             } catch {
-                AudioDiag.log("LPE.configChange reconnect FAILED: \(error)")
+                Telemetry.log(.localPlayback, "config_change_reconnect_failed", ["error": "\(error)"])
                 return
             }
         }
@@ -328,13 +330,13 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         do {
             try engine.start()
         } catch {
-            AudioDiag.log("LPE.configChange restart FAILED: \(error)")
+            Telemetry.log(.localPlayback, "config_change_restart_failed", ["error": "\(error)"])
             return
         }
         let running = engine.isRunning
         stateLock.withLock { engineRunning = running }
         guard running else {
-            AudioDiag.log("LPE.configChange restart: engine still not running")
+            Telemetry.log(.localPlayback, "config_change_restart_not_running")
             return
         }
         // Re-play each player (a stopped engine stops its player nodes). Wrapped
@@ -350,12 +352,12 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             do {
                 try catchingObjCException { node.player.play() }
             } catch {
-                AudioDiag.log("LPE.configChange replay FAILED: \(error)")
+                Telemetry.log(.localPlayback, "config_change_replay_failed", ["error": "\(error)"])
                 stateLock.withLock { engineRunning = false }
                 return
             }
         }
-        AudioDiag.log("LPE.configChange recovered — engine running, \(snapshot.count) player(s) replaying")
+        Telemetry.log(.localPlayback, "config_change_recovered", ["playerCount": "\(snapshot.count)"])
     }
 
     public func stop() {
@@ -430,7 +432,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                 ? nil
                 : AVAudioConverter(from: sourceFormat, to: connectionFormat)
 
-            AudioDiag.log("LPE.addApp bundle=\(bundleID) source=\(sourceFormat.sampleRate)/\(sourceFormat.channelCount)ch il=\(sourceFormat.isInterleaved) conn=\(connectionFormat.sampleRate) needsConv=\(converter != nil)")
+            Telemetry.log(.localPlayback, "add_app", [
+                "bundleID": bundleID,
+                "sourceRate": "\(sourceFormat.sampleRate)",
+                "sourceChannels": "\(sourceFormat.channelCount)",
+                "interleaved": String(sourceFormat.isInterleaved),
+                "connRate": "\(connectionFormat.sampleRate)",
+                "needsConv": String(converter != nil),
+            ])
 
             // Attach + connect the player into the graph BEFORE starting the
             // engine (canonical order): a first app builds the full graph while
@@ -451,7 +460,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                     engine.connect(player, to: engine.mainMixerNode, format: connectionFormat)
                 }
             } catch {
-                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: connect raised \(error)")
+                Telemetry.log(.localPlayback, "add_app_connect_failed", ["bundleID": bundleID, "error": "\(error)"])
                 engine.detach(player)
                 throw LocalPlaybackError.engineNotRunning
             }
@@ -466,11 +475,11 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             // fail soft: local playback for this app just doesn't start, the app
             // stays alive, and a later route/capture edit retries.
             guard engine.isRunning else {
-                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: engine not running after start")
+                Telemetry.log(.localPlayback, "add_app_engine_not_running", ["bundleID": bundleID])
                 engine.detach(player)
                 throw LocalPlaybackError.engineNotRunning
             }
-            AudioDiag.log("LPE.addApp bundle=\(bundleID) OK: engine running, player playing")
+            Telemetry.log(.localPlayback, "add_app_ok", ["bundleID": bundleID])
             stateLock.withLock {
                 nodes[bundleID] = AppNode(
                     player: player, sourceFormat: sourceFormat,
@@ -487,7 +496,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             do {
                 try catchingObjCException { player.play() }
             } catch {
-                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: play() raised \(error)")
+                Telemetry.log(.localPlayback, "add_app_play_failed", ["bundleID": bundleID, "error": "\(error)"])
                 _ = stateLock.withLock { nodes.removeValue(forKey: bundleID) }
                 engine.detach(player)
                 throw LocalPlaybackError.engineNotRunning
@@ -692,14 +701,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         configuredDevice = true
         #if canImport(AudioToolbox)
         guard let deviceID = Self.resolveOutputDeviceID() else {
-            AudioDiag.log("LPE.configureOutputDevice: NO followable/built-in device found; using engine default")
+            Telemetry.log(.localPlayback, "output_device_none_found")
             return
         }
         do {
             try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
-            AudioDiag.log("LPE.configureOutputDevice: pinned to device \(deviceID)")
+            Telemetry.log(.localPlayback, "output_device_pinned", ["device": "\(deviceID)"])
         } catch {
-            AudioDiag.log("LPE.configureOutputDevice: setDeviceID(\(deviceID)) FAILED: \(error)")
+            Telemetry.log(.localPlayback, "output_device_set_failed", ["device": "\(deviceID)", "error": "\(error)"])
         }
         #endif
     }

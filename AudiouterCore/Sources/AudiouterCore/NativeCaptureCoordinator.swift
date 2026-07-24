@@ -1255,12 +1255,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     deinit { teardown() }
 
     func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
-        // Connect-latency diagnosis (temporary — see AudioDiag): brackets whole-
-        // system capture setup (tap + aggregate + IOProc + rate reconciliation) —
-        // read alongside NativeBackend's CONNECT logs to see whether this app's own
-        // setup, vs. the AirPlay receiver's negotiation, vs. the sync pre-roll, is
-        // where a slow connect's time actually goes.
-        AudioDiag.log("CAPTURE createAndStart begin")
+        // Connect-latency diagnosis: brackets whole-system capture setup (tap +
+        // aggregate + IOProc + rate reconciliation) — read alongside NativeBackend's
+        // "connect_requested"/"connect_addoutput_*" telemetry to see whether this
+        // app's own setup, vs. the AirPlay receiver's negotiation, vs. the sync
+        // pre-roll, is where a slow connect's time actually goes.
+        Telemetry.log(.captureWS, "create_and_start_begin")
         do {
             try createTapAndReadFormat(muteBehavior: muteBehavior, excludedProcessObjectIDs: excludedProcessObjectIDs)
             try createAggregate()
@@ -1282,7 +1282,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             teardown()
             throw error
         }
-        AudioDiag.log("CAPTURE createAndStart done, rate=\(format.sampleRate)")
+        Telemetry.log(.captureWS, "create_and_start_done", ["rate": "\(format.sampleRate)"])
         return format
     }
 
@@ -1503,10 +1503,10 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let aggregateRate = Self.readNominalSampleRate(aggregateID)
         let reconciled = Self.reconciledFormat(declared: format, aggregateRate: aggregateRate)
         guard reconciled != format else { return }
-        AudioDiag.log(
-            "System tap: pre-aggregate tap format declared \(format.sampleRate) Hz but the "
-            + "aggregate device actually delivers \(reconciled.sampleRate) Hz — correcting the "
-            + "converter's input rate to the aggregate's real rate (prevents a sustained pitch shift)")
+        Telemetry.log(.captureWS, "format_reconciled", [
+            "declaredRate": "\(format.sampleRate)",
+            "aggregateRate": "\(reconciled.sampleRate)",
+        ])
         self.asbd.mSampleRate = Double(reconciled.sampleRate)
         self.format = reconciled
     }
@@ -1630,14 +1630,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             let notified = Self.readNominalSampleRate(self.tappedOutputDeviceID)
             guard Self.shouldRebuildForNominalRate(
                 notifiedRate: notified, currentEffectiveRate: self.format.sampleRate) else {
-                AudioDiag.log(
-                    "System tap: nominal-rate notification but rate unchanged "
-                    + "(\(self.format.sampleRate) Hz) — skipping rebuild")
+                Telemetry.log(.captureWS, "rate_notification_no_op", [
+                    "rate": "\(self.format.sampleRate)",
+                ])
                 return
             }
-            AudioDiag.log(
-                "System tap: nominal-sample-rate changed on tapped device (now "
-                + "\(notified.map { String(Int($0.rounded())) } ?? "unreadable") Hz) — triggering rebuild")
+            Telemetry.log(.captureWS, "rate_changed_rebuild_triggered", [
+                "oldRate": "\(self.format.sampleRate)",
+                "newRate": notified.map { String(Int($0.rounded())) } ?? "unreadable",
+            ])
             self.onDefaultDeviceChanged?()
         }
         self.sampleRateBlock = block

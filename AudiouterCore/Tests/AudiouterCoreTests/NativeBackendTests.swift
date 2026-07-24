@@ -379,7 +379,8 @@ final class NativeBackendTests: XCTestCase {
         resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
-        watchdogScheduler: SilenceWatchdogScheduling? = nil
+        watchdogScheduler: SilenceWatchdogScheduling? = nil,
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
@@ -388,7 +389,8 @@ final class NativeBackendTests: XCTestCase {
             systemVolume: systemVolume, connectVolume: connectVolume, resolveProcessSet: resolveProcessSet,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture,
-            watchdogScheduler: watchdogScheduler)
+            watchdogScheduler: watchdogScheduler,
+            silenceFallbackDelay: silenceFallbackDelay)
         return (backend, engine, discovery)
     }
 
@@ -3002,6 +3004,134 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(capture.isCapturing, "capture stayed gated the whole time — no fallback")
     }
 
+    // MARK: Fix B — the fallback banner never strands ON (invariant 4)
+
+    /// The exact stranding sequence that used to leave the "playing on this Mac"
+    /// banner ON forever: watchdog fires (banner true) → SLEEP clears the override
+    /// WITHOUT emitting → WAKE → the desired device reconnects → reconcile's
+    /// else-branch runs but the override is already false, so its `false` emit is
+    /// skipped. With the clear centralized through `clearSilenceOverride()`, the
+    /// `.localFallbackActive(false)` is emitted on the genuine true→false edge (at
+    /// sleep), so the banner is retracted and never strands ON.
+    func testFallbackBannerClearsAcrossSleepWakeReconnectCycle() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Banner Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand + fire → fallback active (banner true).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive }
+
+        // Subscribe, then run the FULL sleep → wake → reconnect cycle. A banner-clear
+        // (`false`) must be emitted somewhere in it, and the fallback must end cleared.
+        let events = await collect(from: backend, timeout: 4) {
+            $0.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } }
+        } after: {
+            backend.handleSystemWillSleep()
+            backend.handleSystemDidWake()
+            engine.pushState(device.outputID, .connected)
+        }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } },
+                      "the banner-clear must be emitted on the true→false edge — the banner must never strand ON")
+        await pollUntil { !backend.test_silenceFallbackActive }
+        XCTAssertFalse(backend.test_silenceFallbackActive, "the fallback must end cleared, not stuck on")
+    }
+
+    /// Fix B idempotency: a sleep/wake cycle with the override NEVER active must emit
+    /// NO `.localFallbackActive` at all — `clearSilenceOverride()` never fires a
+    /// spurious `false` that would flap the banner off when it was never on.
+    func testNoSpuriousFallbackClearWhenOverrideWasNeverActive() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "No-Spurious Speaker")
+        await connectAP2(backend, engine, discovery, device)   // connected; fallback never activated
+        await pollUntil { capture.isCapturing }
+
+        // Manually record any fallback events across a sleep/wake cycle (no
+        // expectation, so a legitimately empty result doesn't fail on timeout).
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream { if case .localFallbackActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+        backend.handleSystemWillSleep()
+        backend.handleSystemDidWake()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        let fallbackEvents = await box.snapshot()
+        XCTAssertTrue(fallbackEvents.isEmpty,
+                      "no fallback event may be emitted when the override was never active (\(fallbackEvents.count) seen)")
+    }
+
+    // MARK: Fix C — dead-group fallback has its OWN always-on short delay
+
+    /// The dead-group / stranded fallback during NORMAL operation arms on the
+    /// dedicated always-on `silenceFallbackDelay` — NOT the user's wake-restore
+    /// preference — so a "Never" wake-restore setting can never reopen R11's
+    /// indefinite silence. The fallback still fires and un-gates.
+    func testSilenceFallbackArmsOnAlwaysOnDelayEvenWhenWakeRestoreNever() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler, silenceFallbackDelay: 7)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Dead Group Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(nil)   // "Never" — must NOT disable the dead-group fallback
+
+        // The group dies during NORMAL operation (an out-of-band `.failed`, not a
+        // sleep/wake) → the countdown arms on the always-on delay, not the wake pref.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertEqual(scheduler.lastDelay, 7,
+                       "a normal-operation dead group arms on the ALWAYS-ON silence delay, not the (Never) wake pref")
+
+        // ...and it still fires: "Never" can't disable the dead-group fallback (R11).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } }
+        } after: { scheduler.fireAll() }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } },
+                      "'Never' on wake-restore must NOT disable the dead-group silence fallback (R11)")
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+    }
+
+    /// No regression: the wake-from-sleep restore path keeps using the user's
+    /// `wakeAudioRestoreDelay` preference (a separate, possibly-longer grace after a
+    /// sleep), distinct from the always-on dead-group delay.
+    func testWakeRestoreHonorsWakePreferenceNotAlwaysOnDelay() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler, silenceFallbackDelay: 7)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Wake Pref Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(123)   // a distinct wake preference
+        engine.addFailures = [device.outputID.rawValue]   // post-wake, nothing reconnects → arms
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !capture.isCapturing }
+        backend.handleSystemDidWake()
+
+        // The post-wake arm uses the WAKE preference (123), not the always-on 7.
+        await pollUntil { scheduler.hasPending }
+        XCTAssertEqual(scheduler.lastDelay, 123,
+                       "the post-wake restore path must keep honoring wakeAudioRestoreDelay (no regression)")
+    }
+
     // MARK: Helpers
 
     /// A hermetic silence-watchdog timer: records every scheduled countdown instead
@@ -3012,10 +3142,12 @@ final class NativeBackendTests: XCTestCase {
         private var pending: [(id: Int, body: @Sendable () -> Void)] = []
         private var nextID = 0
         private var _armCount = 0
+        private var _delays: [TimeInterval] = []
 
         func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
             lock.lock(); defer { lock.unlock() }
             let id = nextID; nextID += 1; _armCount += 1
+            _delays.append(delay)
             pending.append((id, body))
             return Token(id: id, scheduler: self)
         }
@@ -3028,6 +3160,10 @@ final class NativeBackendTests: XCTestCase {
         var armCount: Int { lock.withLock { _armCount } }
         /// Whether any countdown is currently armed (scheduled, not fired/cancelled).
         var hasPending: Bool { lock.withLock { !pending.isEmpty } }
+        /// The delay of the MOST RECENT `schedule` call (Fix C: lets a test assert
+        /// which delay — the always-on silence delay vs the wake-restore preference —
+        /// an arm used). `nil` before anything was scheduled.
+        var lastDelay: TimeInterval? { lock.withLock { _delays.last } }
 
         /// Fire (and consume) every pending countdown — the deterministic "T elapsed".
         func fireAll() {
@@ -3049,6 +3185,7 @@ final class NativeBackendTests: XCTestCase {
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _onTapRecreated: (@Sendable () -> Void)?
         private var _ops: [String] = []
         private var _meteringActive = false
 
@@ -3056,6 +3193,14 @@ final class NativeBackendTests: XCTestCase {
             get { lock.withLock { _onLevel } }
             set { lock.withLock { _onLevel = newValue } }
         }
+        var onTapRecreated: (@Sendable () -> Void)? {
+            get { lock.withLock { _onTapRecreated } }
+            set { lock.withLock { _onTapRecreated = newValue } }
+        }
+        /// Fire the tap-rebuild signal as the real coordinator would after a
+        /// sample-rate/device/exclusion recreate (Fix A / R10) — the whole-system
+        /// analogue of `RebindTriggerTap.fireDeviceChange()`.
+        func fireTapRecreated() { onTapRecreated?() }
         private var _refreshedBundleIDs: [String] = []
 
         func start() { lock.withLock { _ops.append("start") } }
@@ -3986,6 +4131,76 @@ final class NativeBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, countAtCeiling,
                        "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
+    }
+
+    // MARK: Fix A (R10, whole-system half): whole-system RTP session reset
+
+    /// When the whole-system capture tap is REBUILT (`onTapRecreated`, e.g. a
+    /// nominal-sample-rate renegotiation forced by another app grabbing the mic),
+    /// `NativeBackend` resets the whole-system AirPlay/stream-0 session for every
+    /// streaming Selected Device by rebinding it in place (removeOutput → addOutput)
+    /// — the stream-0 analog of `resetAirPlaySessionForRoutedApp`. Without this the
+    /// tap delivers non-zero PCM again but every speaker stays silent on the stale
+    /// RTP anchor (R10). First establishment must NOT reset, and the rebind is
+    /// bookkeeping-transparent (the device stays `.connected`/selected — no flicker).
+    func testWholeSystemTapRecreateResetsAirPlaySession() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "R10 Whole-System Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        // Let the connect fully release its converging slot so the reset acts on it
+        // (a device still mid-converge is skipped — its own fresh add re-anchors it).
+        await pollUntil { !backend.test_isConverging }
+
+        let raw = device.outputID.rawValue
+        // First establishment: a single addOutput, no removeOutput — NOT a reset.
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 1,
+                       "connecting is one addOutput; the reset must not fire on first establishment")
+        XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, 0)
+
+        // The tap rebuilds (rate renegotiation). The whole-system session resets:
+        // one removeOutput then one fresh addOutput for the streaming device.
+        capture.fireTapRecreated()
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count == 2 }
+        XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, 1,
+                       "the reset rebinds in place: removeOutput then a fresh addOutput, exactly once")
+
+        // The remove precedes the fresh add (barrier: a re-add can't rejoin the
+        // stale-anchor master session).
+        let deviceOps = engine.ops.filter { $0 == "remove:\(raw)" || $0 == "add:\(raw)" }
+        XCTAssertEqual(deviceOps, ["add:\(raw)", "remove:\(raw)", "add:\(raw)"],
+                       "op order: the connect add, then the reset's remove→add")
+
+        // Bookkeeping-transparent: the device never flaps off — it stays connected
+        // and selected throughout the in-place reset.
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected, "an in-place reset must not flap the connection state")
+        XCTAssertEqual(d?.isSelected, true, "an in-place reset must not deselect the device")
+
+        // Idempotent: one recreate → one reset; nothing more appears unprompted.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 2,
+                       "a single recreate resets exactly once — no spurious repeats")
+    }
+
+    /// The reset is guarded: a tap recreate with NO whole-system device streaming
+    /// (nothing selected) issues zero engine ops — it never fires spuriously on an
+    /// empty/unchanged topology.
+    func testWholeSystemTapRecreateWithNothingSelectedIsNoOp() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Idle Speaker")
+        await startAndDiscover(backend, engine, discovery, device)   // discovered, NOT selected
+
+        capture.fireTapRecreated()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(engine.addedIDs.isEmpty, "nothing is streaming whole-system — the reset must be a no-op")
+        XCTAssertTrue(engine.removedIDs.isEmpty)
     }
 
     /// T8 edge case 2 (device disappears while routed), driven through the REAL

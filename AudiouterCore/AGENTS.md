@@ -107,6 +107,33 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   inside `updateAppRoutes` whenever routes/excluded change, and an app that
   becomes excluded has its metering tap stopped immediately. The metering-only
   taps NEVER start/stop the primary routing coordinators' taps.
+- **A whole-system capture-tap REBUILD must reset the stream-0 AirPlay session
+  (R10).** When the tap is recreated (a sample-rate renegotiation — another app
+  grabbing the mic — a default-output-device change, or an exclusion change) it
+  delivers fresh PCM but the whole-system RTP timeline anchor is left desynced, so
+  every Selected-Devices speaker goes permanently silent. `NativeCaptureCoordinator`
+  signals this via `onTapRecreated` (fired only on a `recreateTap()`, NEVER on the
+  first `start()`); `NativeBackend.resetWholeSystemAirPlaySession()` responds by
+  rebinding each streaming device in place (removeOutput → addOutput, barrier: all
+  removed before any re-add, so a re-add can't rejoin the stale-anchor master
+  session). It is BOOKKEEPING-TRANSPARENT — `added`/`desiredOn`/`connectionState`
+  are untouched (no UI flicker, no silence-watchdog churn), serialized against
+  `convergeDevice` via the per-device `converging` slot, self-coalescing across a
+  rate bounce, and a no-op when nothing streams whole-system. This is the stream-0
+  analog of the per-app `resetAirPlaySessionForRoutedApp` (the `.currentDevice`/
+  routed half of the same R10 fix).
+- **The silence fallback (R11) has its OWN always-on delay, decoupled from the
+  wake-restore preference.** `armSilenceWatchdog` uses the always-on
+  `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be
+  disabled) for a dead-group/stranded condition during normal operation, and the
+  user's `wakeAudioRestoreDelay` (Settings › Audio, `nil` = "Never") ONLY while
+  `awaitingWakeReconnect` (the post-wake window `handleSystemDidWake` opens). So a
+  "Never" wake setting can't reopen R11's indefinite silence during normal use,
+  while the post-wake grace still honors the user's preference. The fallback's
+  banner-clear (`.localFallbackActive(false)`) is emitted from ONE helper,
+  `clearSilenceOverride()`, on the genuine true→false edge — every path that ends
+  the fallback (reconcile, `stop`, sleep, wake) routes through it so the banner
+  never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
   Saved groups still persist and re-apply.

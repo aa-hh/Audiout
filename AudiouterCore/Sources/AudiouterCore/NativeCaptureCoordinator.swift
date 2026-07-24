@@ -221,6 +221,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
 
+    /// Fired ONCE each time the live tap is REBUILT — i.e. `recreateTap()` tore the
+    /// current tap down and successfully landed a fresh `.capturing` (a
+    /// default-output-device change, a nominal-sample-rate renegotiation, or an
+    /// exclusion/membership change). Deliberately NOT fired on the initial
+    /// `start()` (first establishment), only on a re-creation of an
+    /// already-capturing tap. `NativeBackend` uses this to reset the whole-system
+    /// AirPlay/stream-0 RTP session, whose timeline anchor is left desynced by a
+    /// rebuild even though PCM keeps flowing (R10, whole-system half) — the
+    /// whole-system analog of the per-app `.capturing` recapture signal that drives
+    /// `resetAirPlaySessionForRoutedApp`. Called on the coordinator's internal
+    /// queue; the handler must not block it (hop off, as `NativeBackend` does).
+    public var onTapRecreated: (@Sendable () -> Void)?
+
     /// Fired once per converted buffer with the buffer's peak/RMS level in
     /// 0.0...1.0, so a caller (``NativeBackend``) can plumb it straight into
     /// `BackendEvent.level` without recomputing it. Called from the tap's IOProc
@@ -849,7 +862,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // lock and recorded only on the SUCCESS commit so a failed rebuild
             // never advances it.
             let committedObjects = translatePIDs(claim.excludedPIDs)
-            let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
+            let commit: (orphan: SystemAudioTap?, replay: Bool, recreated: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
                 guard case .creatingTap = _state else {
@@ -858,7 +871,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // takes `queue`, so teardown() — which blocks on in-flight IO —
                     // would deadlock if run inside queue.sync (the file's one rule:
                     // "teardown OUTSIDE the state lock").
-                    return (newTap, false)
+                    return (newTap, false, false)
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
@@ -869,9 +882,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // many were dropped into a single retry.
                 let replay = pendingDeviceChange
                 pendingDeviceChange = false
-                return (nil, replay)
+                return (nil, replay, true)
             }
             commit.orphan?.teardown()
+            // The tap was REBUILT (this is `recreateTap`, never the initial
+            // `start()`): its RTP anchor is now desynced, so signal the whole-system
+            // session reset (R10). Fired OUTSIDE `queue` so the handler can't block
+            // the coordinator. If a coalesced rebuild is about to replay, the reset
+            // still fires here and again on the replay's own settle — `NativeBackend`
+            // self-serializes and coalesces those into one trailing reset.
+            if commit.recreated { onTapRecreated?() }
             if commit.replay {
                 recreateTap()
             }

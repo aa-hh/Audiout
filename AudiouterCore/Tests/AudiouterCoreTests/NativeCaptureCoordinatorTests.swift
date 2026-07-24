@@ -69,6 +69,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         var excludedPIDs: Set<pid_t> { lock.withLock { lastExcludedPIDs } }
     }
 
+    /// Thread-safe fire counter for the `onTapRecreated` signal (Fix A) — the
+    /// coordinator may fire it off its internal queue.
+    private final class RecreateCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = 0
+        func increment() { lock.withLock { _value += 1 } }
+        var value: Int { lock.withLock { _value } }
+    }
+
     /// Records every forwarded (pcm, pts) pair.
     private final class SpySink: PCMSink, @unchecked Sendable {
         let lock = NSLock()
@@ -1139,6 +1148,66 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
         XCTAssertEqual(tap.creates, 0, "no tap exists yet — a rate notification must not create one")
+    }
+
+    // MARK: - Fix A (R10, whole-system half): onTapRecreated signals a REBUILD only
+
+    /// The `onTapRecreated` seam (which `NativeBackend` uses to reset the
+    /// whole-system RTP session) fires on a tap REBUILD — a rate change or a
+    /// default-output-device change — but NEVER on the initial `start()` (first
+    /// establishment, whose session is opened out of band by `convergeDevice`, not
+    /// desynced). A duplicate/unchanged rate notification does no rebuild, so it
+    /// fires nothing either.
+    func testTapRecreatedSignalFiresOnRebuildNotFirstStart() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let recreated = RecreateCounter()
+        coordinator.onTapRecreated = { recreated.increment() }
+
+        // First establishment must NOT fire the signal.
+        coordinator.start()
+        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
+        XCTAssertEqual(recreated.value, 0, "the initial start() is not a rebuild — no reset signal")
+
+        // A genuine rate change rebuilds → fires exactly once.
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        XCTAssertEqual(tap.creates, 2)
+        XCTAssertEqual(recreated.value, 1, "a rate-change rebuild fires the reset signal exactly once")
+
+        // A duplicate (unchanged) rate notification does no rebuild → fires nothing.
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        XCTAssertEqual(tap.creates, 2)
+        XCTAssertEqual(recreated.value, 1, "an unchanged rate notification rebuilds nothing — no reset signal")
+
+        // A default-output-device change is also a rebuild → fires again.
+        tap.fireDeviceChange()
+        XCTAssertEqual(tap.creates, 3)
+        XCTAssertEqual(recreated.value, 2, "a device-change rebuild fires the reset signal again")
+
+        coordinator.stop()
+    }
+
+    /// A `NativeCaptureError` scripted rebuild that FAILS lands `.failed` and must
+    /// NOT fire the reset signal — there is no fresh capturing tap to have desynced
+    /// an anchor, and a spurious reset on a dead tap would thrash the engine.
+    func testTapRecreatedSignalNotFiredWhenRebuildFails() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let recreated = RecreateCounter()
+        coordinator.onTapRecreated = { recreated.increment() }
+
+        coordinator.start()
+        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
+
+        // The recreation fails (receiver/tap can't be rebuilt).
+        tap.startError = .tapCreationFailed(reason: "scripted")
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+
+        if case .failed = coordinator.state {} else {
+            XCTFail("a failing rebuild must land .failed, got \(coordinator.state)")
+        }
+        XCTAssertEqual(recreated.value, 0, "a failed rebuild has no fresh session to reset — no signal")
+        coordinator.stop()
     }
 
     // MARK: - RMS metering (pure).

@@ -246,14 +246,47 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// un-muting the Mac WITHOUT clearing intent (R11: a dead group falls back to
     /// local playback instead of silence). A later reconnect / intent clear
     /// (`reconcileSilenceWatchdog`) clears it and re-reconciles, re-engaging the gate.
+    ///
+    /// Fix B (invariant 4, "UI never lies"): every path that clears this back to
+    /// false — `reconcileSilenceWatchdog`, `stop`, sleep, wake — MUST go through
+    /// ``clearSilenceOverride()`` so the `.localFallbackActive(false)` banner-clear
+    /// is emitted on the genuine true→false edge. A bare `= false` here strands the
+    /// popover banner "playing on this Mac" forever.
     private var silenceCaptureOverride = false
 
-    /// The fallback delay in seconds (Settings › Audio wake-restore family), or `nil`
-    /// for "Never". Pushed by the app layer via ``setWakeAudioRestoreDelay(_:)``; read
-    /// when arming the watchdog. Reused verbatim for the generalized silence watchdog
-    /// (PLAN-RELIABILITY Wave 2: "same settings family as the wake-restore delay") so
-    /// there is ONE user-facing control, not two. Confined to `stateQueue`.
+    /// Fix C (R11): whether we are in the immediate post-wake reconnection window,
+    /// set by ``handleSystemDidWake()`` and cleared once a desired device reconnects,
+    /// the user re-selects, the watchdog fires, or we sleep/stop. It selects which
+    /// delay ``armSilenceWatchdog()`` uses: the user's ``wakeAudioRestoreDelay``
+    /// preference while awaiting a wake reconnect, versus the always-on
+    /// ``silenceFallbackDelay`` for a dead-group / stranded condition during normal
+    /// operation. Confined to `stateQueue`.
+    private var awaitingWakeReconnect = false
+
+    /// The POST-WAKE restore delay in seconds (Settings › Audio, B6b), or `nil` for
+    /// "Never". Pushed by the app layer via ``setWakeAudioRestoreDelay(_:)``; read by
+    /// ``armSilenceWatchdog()`` ONLY while ``awaitingWakeReconnect`` — a separate user
+    /// preference for how long to wait after a sleep/wake before un-muting the Mac.
+    /// It no longer gates the dead-group/stranded fallback (Fix C): that uses the
+    /// always-on ``silenceFallbackDelay`` so "Never" can't reopen R11's indefinite
+    /// silence during normal operation. Confined to `stateQueue`.
     private var wakeAudioRestoreDelay: TimeInterval?
+
+    /// Fix C (R11): the ALWAYS-ON silence-fallback delay in seconds for a dead-group /
+    /// stranded condition during normal operation — decoupled from the user's
+    /// wake-restore preference so it can never be disabled ("Never" only affects the
+    /// post-wake window). A short default (``defaultSilenceFallbackDelay``) so a dead
+    /// group falls back to local playback within seconds, not the up-to-2-minutes the
+    /// wake-restore delay allowed. Injectable so tests shrink it; never mutated after
+    /// init.
+    private let silenceFallbackDelay: TimeInterval
+
+    /// The default always-on silence-fallback delay (seconds). ~10 s: long enough to
+    /// ride out a brief drop/reconnect, short enough that a genuinely dead group
+    /// doesn't leave the user in silence (R11). Deliberately fixed (no UI): it is a
+    /// safety net, not a preference — the preference is the post-wake
+    /// ``wakeAudioRestoreDelay``.
+    public static let defaultSilenceFallbackDelay: TimeInterval = 10
 
     /// The armed silence-watchdog countdown. Cancelled when a desired device
     /// reconnects, the intent clears, on a sleep/wake cycle, or on `stop()`.
@@ -263,6 +296,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// countdown deterministically. Defaults to a real `DispatchQueue.asyncAfter`
     /// wrapper (see the designated initializer). Never mutated after init.
     private let watchdogScheduler: SilenceWatchdogScheduling
+
+    /// Fix A (R10, whole-system half): serialize ``resetWholeSystemAirPlaySession()``
+    /// so two tap recreates in quick succession never run overlapping teardown/re-add
+    /// passes. A recreate that arrives while a reset is in flight sets
+    /// ``wholeSystemResetPending`` and the loop re-runs once when the current reset
+    /// finishes, so the trailing reset re-establishes sessions against the LATEST tap
+    /// format. Both confined to `stateQueue`.
+    private var wholeSystemResetInFlight = false
+    private var wholeSystemResetPending = false
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -575,13 +617,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
         maxRebindRecoveryAttempts: Int = 3,
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
-        watchdogScheduler: SilenceWatchdogScheduling? = nil
+        watchdogScheduler: SilenceWatchdogScheduling? = nil,
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay
     ) {
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
         // so this queue only needs to time the delay — a plain serial queue is fine.
         self.watchdogScheduler = watchdogScheduler
             ?? DispatchSilenceWatchdogScheduler(queue: DispatchQueue(label: "NativeBackend.silenceWatchdog"))
+        self.silenceFallbackDelay = silenceFallbackDelay
         self.engine = engineControl
         self.discovery = discoverySource
         self.systemVolume = systemVolume
@@ -860,6 +904,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    wire early: it only fires while the tap is running.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
 
+            // R10 (whole-system half): the tap being REBUILT (a sample-rate/device/
+            // exclusion recreate) leaves the whole-system AirPlay session's RTP
+            // timeline anchor desynced — the tap delivers non-zero PCM again but every
+            // Selected-Devices speaker stays silent — until the session is reset. Wire
+            // the signal here alongside `onLevel` (both only fire while the tap is
+            // live); `handleWholeSystemTapRecreated` self-serializes the reset.
+            self.captureCoordinator?.onTapRecreated = { [weak self] in
+                self?.handleWholeSystemTapRecreated()
+            }
+
             // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
             // Wired here like `onLevel` (the engine is assigned before `start()`);
             // it only fires while metering is active (the engine gates its own RMS
@@ -936,8 +990,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // a stop mid-wait can't leave capture wedged off (override) or suspended.
             self.silenceWatchdog?.cancel()
             self.silenceWatchdog = nil
-            self.silenceCaptureOverride = false
+            self.awaitingWakeReconnect = false          // Fix C
+            self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
             self.suspended = false
+            // Fix A (R10): a stop mid-reset must not leave the whole-system reset
+            // serialization wedged so a later start()'s first recreate is dropped.
+            self.wholeSystemResetInFlight = false
+            self.wholeSystemResetPending = false
             // `captureControlQueue` gets the last word — and, since the eager
             // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
             // caller-thread stop would be unordered against a start still queued from
@@ -1101,6 +1160,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             self.expectedSelected = ids
+            // Fix C: an explicit (re)selection is a fresh normal-operation context, not
+            // a post-wake reconnection — so a stranding from THIS selection falls back
+            // on the always-on silence delay, not the wake-restore preference.
+            self.awaitingWakeReconnect = false
 
             // Only ids we can actually stream to — a known discovered receiver
             // (AP1 or AP2) with an engine handle — can be desired-on. The local Mac
@@ -1520,6 +1583,162 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         gen: gen, attempt: 1)
                 }
             }
+        }
+    }
+
+    // MARK: Whole-system RTP-session reset (Fix A / R10, whole-system half)
+
+    /// React to the whole-system capture tap being REBUILT (``CaptureControlling``'s
+    /// `onTapRecreated`, e.g. a nominal-sample-rate renegotiation forced by another
+    /// app grabbing the mic). W2-T1 recreates the tap so it delivers non-zero PCM
+    /// again, but the whole-system AirPlay/stream-0 session keeps its now-desynced
+    /// RTP timeline anchor — so every Selected-Devices speaker stays permanently
+    /// silent until the session is reset. This is the whole-system analog of the
+    /// per-app `.capturing` recapture → ``resetAirPlaySessionForRoutedApp`` path.
+    ///
+    /// Self-serialized: a reset does real teardown/re-add work, so a second recreate
+    /// arriving mid-reset just marks a re-run pending (``wholeSystemResetPending``)
+    /// and the loop re-establishes sessions once more against the LATEST tap format,
+    /// coalescing a 44.1→48→44.1 bounce into at most one trailing reset. Called on
+    /// the coordinator's internal queue; hops straight to a `Task` so it never blocks
+    /// it.
+    private func handleWholeSystemTapRecreated() {
+        let proceed: Bool = stateQueue.sync {
+            guard self.started else { return false }
+            if self.wholeSystemResetInFlight {
+                self.wholeSystemResetPending = true
+                return false
+            }
+            self.wholeSystemResetInFlight = true
+            return true
+        }
+        guard proceed else { return }
+        Task { [weak self] in await self?.runWholeSystemResetLoop() }
+    }
+
+    /// Drain the whole-system reset request(s): run one reset, then re-run once more
+    /// iff another recreate landed while it was in flight, then release the in-flight
+    /// slot. On `stateQueue` only for the bookkeeping flips.
+    private func runWholeSystemResetLoop() async {
+        while true {
+            await resetWholeSystemAirPlaySession()
+            let again: Bool = stateQueue.sync {
+                if self.wholeSystemResetPending {
+                    self.wholeSystemResetPending = false
+                    return true
+                }
+                self.wholeSystemResetInFlight = false
+                return false
+            }
+            if !again { return }
+        }
+    }
+
+    /// Reset the whole-system (stream-0 / default-stream) AirPlay session for every
+    /// currently-streaming Selected Device by rebinding it in place
+    /// (removeOutput → addOutput, no `streamId`) — the stream-0 analog of
+    /// ``resetAirPlaySessionForRoutedApp``. BOOKKEEPING-TRANSPARENT: `added` /
+    /// `desiredOn` / `connectionState` are left untouched, so the device stays
+    /// `.connected` throughout — no UI flicker, and no `setConnectionState`-driven
+    /// silence-watchdog churn (a plain `convergeToTarget(off)`→`(on)` would flap the
+    /// dot through `.off`/`.connecting` and arm the fallback for the reset's
+    /// duration). Only the engine session is re-established.
+    ///
+    /// Barrier (mirrors ``applyStartBuffer``): a shared stream-0 master session
+    /// survives a partial removal, so ALL whole-system outputs are removed before ANY
+    /// re-add — otherwise a re-add would rejoin the stale-anchor session. Serialized
+    /// against ``convergeDevice`` via the per-device `converging` slot (claimed under
+    /// the lock, released on return with the same requeue handoff `convergeDevice`'s
+    /// `defer` performs), so a concurrent user toggle / wake can't race the rebind.
+    ///
+    /// Idempotent / guarded: a no-op when nothing is streaming whole-system (empty
+    /// snapshot), so a recreate during a per-app-only selection, a fallback override,
+    /// or sleep never fires it spuriously. Per-app-bound devices are skipped (that
+    /// path resets via ``resetAirPlaySessionForRoutedApp``).
+    private func resetWholeSystemAirPlaySession() async {
+        // Phase 0: snapshot the whole-system streaming set + CLAIM each converging
+        // slot under the lock. Skip a device already mid-converge (its own fresh add
+        // re-anchors it) and any per-app-bound device.
+        let devices: [(id: String, outputID: OutputID)] = stateQueue.sync {
+            guard self.started, !self.suspended else { return [] }
+            var claimed: [(String, OutputID)] = []
+            for id in self.added where self.streamBindings[id] == nil {
+                guard self.desiredOn[id] == true,
+                      !self.converging.contains(id),
+                      let outputID = self.outputIDs[id] else { continue }
+                self.converging.insert(id)
+                claimed.append((id, outputID))
+            }
+            return claimed
+        }
+        guard !devices.isEmpty else { return }
+        AudioDiag.log("RESET whole-system AirPlay session for \(devices.count) device(s) (tap rebuilt)")
+
+        // Phase 1: remove ALL first (barrier). Every output must detach before any
+        // re-add so a re-add can't rejoin the surviving stale-anchor master session.
+        await withTaskGroup(of: Void.self) { group in
+            for d in devices {
+                group.addTask { [weak self] in try? await self?.engine.removeOutput(d.outputID) }
+            }
+        }
+        // Phase 2: re-add ALL against the fresh tap stream (clean RTP anchor),
+        // recording which re-adds failed (D4 best-effort partial-failure).
+        var failed: Set<String> = []
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for d in devices {
+                group.addTask { [weak self] in
+                    guard let self else { return (d.id, false) }
+                    do { try await self.engine.addOutput(d.outputID); return (d.id, true) }
+                    catch { return (d.id, false) }
+                }
+            }
+            for await (id, ok) in group where !ok { failed.insert(id) }
+        }
+
+        // Phase 3: release the slots (+ requeue anything whose intent moved under us,
+        // the same handoff `convergeDevice`'s defer performs), re-push each surviving
+        // device's in-session volume (a fresh master session starts at the engine
+        // default — this is a transparent reset, NOT a reconnect, so the user's level
+        // must survive), and give a failed re-add the terminal handling
+        // `convergeDevice` uses on an add-throw.
+        let (toPush, requeues): ([(OutputID, Double)], [(String, OutputID)]) = stateQueue.sync {
+            var pushes: [(OutputID, Double)] = []
+            var requeue: [(String, OutputID)] = []
+            for d in devices {
+                if failed.contains(d.id) {
+                    // The re-add failed: the engine session is gone. Release the slot,
+                    // reflect it, and park (root cause 5) so we don't keep issuing
+                    // sessions post-failure; a later discovery/toggle re-enables it.
+                    // `enterFailure` drives `reconcileSilenceWatchdog`, so an all-failed
+                    // reset still trips the fallback correctly.
+                    self.converging.remove(d.id)
+                    self.added.remove(d.id)
+                    self.failedGate.insert(d.id)
+                    self.applyLocal(d.id) { $0.isSelected = false; $0.isAvailable = false }
+                    self.enterFailure(d.id)
+                    continue
+                }
+                // Intent moved to OFF while we held the slot (a setOutputSet that
+                // couldn't kick converge because we owned the slot): KEEP the slot
+                // claimed and hand off to `convergeDevice`, whose entry invariant is
+                // that the caller already owns the slot. It settles the new target
+                // (incl. volume), so we skip the re-push here.
+                if let want = self.desiredOn[d.id], want != self.added.contains(d.id) {
+                    requeue.append((d.id, d.outputID))
+                    continue
+                }
+                // Reset done for this device: release the slot and re-push its
+                // in-session volume onto the fresh master session.
+                self.converging.remove(d.id)
+                let intended = self.stashedVolume[d.id] ?? self.known[d.id]?.volume ?? 0
+                let effective = self.muted.contains(d.id) ? 0 : intended
+                pushes.append((d.outputID, self.engineVolume(forID: d.id, uiVolume: effective)))
+            }
+            return (pushes, requeue)
+        }
+        for (outputID, value) in toPush { try? await engine.setVolume(outputID, value) }
+        for (id, outputID) in requeues {
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
     }
 
@@ -2292,6 +2511,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// armed (awaiting either a reconnect or its own fire).
     var test_silenceWatchdogArmed: Bool { stateQueue.sync { silenceWatchdog != nil } }
 
+    /// Test-only (`@testable`): whether any per-device converge is still in flight —
+    /// lets a Fix A test wait until a connect has fully released its `converging`
+    /// slot before firing the whole-system tap-recreate reset (which skips a device
+    /// still mid-converge, since that device's own fresh add re-anchors it).
+    var test_isConverging: Bool { stateQueue.sync { !converging.isEmpty } }
+
     /// System will sleep: proactively remove every streaming engine output so the
     /// receivers get a clean RTSP TEARDOWN before sleep severs the sockets, while
     /// PRESERVING the selection intent (`expectedSelected` / `desiredOn`) so
@@ -2313,7 +2538,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // gate off, so a fallback override must not linger across the sleep.
             self.silenceWatchdog?.cancel()
             self.silenceWatchdog = nil
-            self.silenceCaptureOverride = false
+            self.awaitingWakeReconnect = false          // Fix C: sleep ends any post-wake window
+            self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
             // Stop the whole-system tap (ordered on `captureControlQueue`, like every
             // other gate decision) so the Mac isn't left muted by a tap streaming into
             // dead sockets. `expectedSelected` is untouched.
@@ -2347,7 +2573,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, self.suspended else { return [] }
             self.suspended = false
-            self.silenceCaptureOverride = false
+            self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
+            // Fix C: entering the post-wake reconnection window. A stranding evaluated
+            // below (every desired device is `.connecting`, none yet `.connected`)
+            // therefore arms with the user's wakeAudioRestoreDelay preference; the
+            // reconcile's not-stranded branch clears this flag the instant one
+            // reconnects (or if there was nothing to reconnect at all).
+            self.awaitingWakeReconnect = true
 
             var kicks: [(String, OutputID)] = []
             let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
@@ -2414,23 +2646,50 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         } else {
             silenceWatchdog?.cancel()
             silenceWatchdog = nil
+            // Fix C: a desired device connected, the intent cleared, or we're
+            // suspended — whichever, the post-wake reconnection window is over, so a
+            // LATER stranding falls back on the always-on delay, not the wake pref.
+            awaitingWakeReconnect = false
             if silenceCaptureOverride {
-                silenceCaptureOverride = false
+                // Fix B: clear + emit the banner-clear BEFORE re-reconciling the gate
+                // (`reconcileCaptureGate` reads `silenceCaptureOverride`, so it must
+                // already be false for the gate to re-engage).
+                clearSilenceOverride()
                 reconcileCaptureGate()                  // re-mute; stream resumes to device
-                emit(.localFallbackActive(false))
             }
         }
     }
 
-    /// Arm the silence-watchdog countdown on `stateQueue`. A `nil`/non-positive delay
-    /// ("Never") arms nothing — the intent-keyed gate holds and un-muting is deferred,
-    /// exactly as the wake watchdog behaved. The scheduled body hops back onto
-    /// `stateQueue` so it stays serialized with every other state mutation regardless
-    /// of which thread the injected scheduler fires it on. On `stateQueue`.
+    /// Fix B: clear the silence-fallback override on a genuine true→false edge and
+    /// announce `.localFallbackActive(false)` so the popover retracts its "playing on
+    /// this Mac" banner. EVERY path that ends the fallback — reconcile, `stop`, sleep,
+    /// wake — routes the clear through here instead of a bare `silenceCaptureOverride
+    /// = false`, so the banner can never strand ON (invariant 4: the UI never lies).
+    /// Idempotent: a no-op with no emit when the override was already false, so it
+    /// never fires a spurious clear. Returns whether it actually cleared. On
+    /// `stateQueue`.
+    @discardableResult
+    private func clearSilenceOverride() -> Bool {   // on stateQueue
+        guard silenceCaptureOverride else { return false }
+        silenceCaptureOverride = false
+        emit(.localFallbackActive(false))
+        return true
+    }
+
+    /// Arm the silence-watchdog countdown on `stateQueue`. Fix C: the delay is the
+    /// user's ``wakeAudioRestoreDelay`` preference ONLY while awaiting a post-wake
+    /// reconnect (``awaitingWakeReconnect``), and otherwise the always-on
+    /// ``silenceFallbackDelay`` — so a dead-group / stranded condition during normal
+    /// operation always falls back within seconds and can never be disabled by a
+    /// "Never" wake-restore setting (R11). A `nil`/non-positive wake delay in the
+    /// post-wake window still arms nothing ("Never" defers un-muting after a sleep,
+    /// exactly as before). The scheduled body hops back onto `stateQueue` so it stays
+    /// serialized with every other state mutation. On `stateQueue`.
     private func armSilenceWatchdog() {   // on stateQueue
         silenceWatchdog?.cancel()
         silenceWatchdog = nil
-        guard let delay = wakeAudioRestoreDelay, delay > 0 else { return }
+        let chosen: TimeInterval? = awaitingWakeReconnect ? wakeAudioRestoreDelay : silenceFallbackDelay
+        guard let delay = chosen, delay > 0 else { return }
         silenceWatchdog = watchdogScheduler.schedule(after: delay) { [weak self] in
             guard let self else { return }
             self.stateQueue.async { self.fireSilenceWatchdog() }
@@ -2447,6 +2706,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func fireSilenceWatchdog() {   // on stateQueue (hopped here by the scheduler body)
         guard silenceWatchdog != nil else { return }   // cancelled but already dispatched
         silenceWatchdog = nil
+        // Fix C: the restore decision has been made — the post-wake window is over.
+        awaitingWakeReconnect = false
         let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
         let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
         guard !suspended, !desiredNonLocal.isEmpty, !anyConnected else { return }
@@ -3579,6 +3840,14 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Fired once per captured buffer with its level in 0.0…1.0, from the tap's
     /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
     var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
+
+    /// Fired when the live tap is REBUILT (not on first establishment) so
+    /// ``NativeBackend`` can reset the whole-system AirPlay/stream-0 RTP session,
+    /// whose timeline anchor a rebuild leaves desynced (R10). See
+    /// ``NativeCaptureCoordinator/onTapRecreated``. A `get set` requirement, so
+    /// every conformer stores it — the real coordinator supplies the signal; a fake
+    /// that doesn't exercise the reset path simply never sets it.
+    var onTapRecreated: (@Sendable () -> Void)? { get set }
     /// Begin capturing system audio. Idempotent.
     ///
     /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers

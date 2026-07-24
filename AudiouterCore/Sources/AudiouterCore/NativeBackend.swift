@@ -77,6 +77,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// so it is safe to invoke from `stateQueue`. See ``connectVolumeSeed``.
     private let connectVolumeProvider: @Sendable () -> Int
 
+    /// Whether the macOS SYSTEM default output device is itself AirPlay-class
+    /// (Wave 3 W3-T3) — read live so a mid-session Sound-menu switch is picked up
+    /// on the next ``reconcileSystemAirPlayGuard()`` with no re-wiring. Defaults
+    /// to the real Core Audio query (``currentDefaultOutputIsAirPlayClass()``);
+    /// tests inject a scripted provider so the guard is exercisable with no audio
+    /// hardware in the loop. `@Sendable`, safe to invoke from `stateQueue`. See
+    /// ``reconcileSystemAirPlayGuard()``.
+    private let systemDefaultOutputIsAirPlayClassProvider: @Sendable () -> Bool
+
     /// The in-process capture pipeline (T-NB-CAPTURE-1). When present (the real
     /// path wired by ``makeBackend(_:)``), the backend GATES it on selection
     /// (``reconcileCaptureGate()``) and plumbs its per-buffer RMS into
@@ -253,6 +262,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// is emitted on the genuine true→false edge. A bare `= false` here strands the
     /// popover banner "playing on this Mac" forever.
     private var silenceCaptureOverride = false
+
+    /// W3-T3 (System-AirPlay guard, PLAN-RELIABILITY.md Wave 3): whether the
+    /// double-path/echo note is currently active — the whole-system capture tap
+    /// is actually running (`captureRunning`) AND the macOS SYSTEM default output
+    /// is ALSO AirPlay-class. Purely a UI signal: unlike `silenceCaptureOverride`,
+    /// setting this never itself changes the capture gate or any audio path.
+    ///
+    /// Every path that flips this back to false MUST go through
+    /// ``clearSystemAirPlayGuard()`` (mirrors Fix B / ``clearSilenceOverride()``)
+    /// so `.systemDefaultIsAirPlayActive(false)` is emitted on the genuine
+    /// true→false edge and the popover note can never strand ON. Confined to
+    /// `stateQueue`.
+    private var systemAirPlayGuardActive = false
 
     /// Fix C (R11): whether we are in the immediate post-wake reconnection window,
     /// set by ``handleSystemDidWake()`` and cleared once a desired device reconnects,
@@ -618,7 +640,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         maxRebindRecoveryAttempts: Int = 3,
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
-        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass
     ) {
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
@@ -630,6 +653,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.discovery = discoverySource
         self.systemVolume = systemVolume
         self.connectVolumeProvider = connectVolume
+        self.systemDefaultOutputIsAirPlayClassProvider = systemDefaultOutputIsAirPlayClass
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolveProcessSet: resolveProcessSet)
         // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
         // built `.unmuted` and with a distinct aggregate-device name so it never
@@ -837,6 +861,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !defaultDeviceChanged, let volume, volume != previousVolume {
                     self.emit(.systemVolumeChanged(volume: volume))
                 }
+
+                // 1d. W3-T3: the default output device itself may have just BECOME (or
+                //     stopped being) AirPlay-class — re-evaluate the double-path guard.
+                //     A same-device volume/mute gesture (`defaultDeviceChanged == false`)
+                //     can't change the transport type, so skip the query on that far more
+                //     frequent path.
+                if defaultDeviceChanged {
+                    self.reconcileSystemAirPlayGuard()
+                }
             }
         }
         systemVolume.start()
@@ -992,6 +1025,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.silenceWatchdog = nil
             self.awaitingWakeReconnect = false          // Fix C
             self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
+            // W3-T3: capture just stopped (above) — clear the double-path guard too,
+            // on the true→false edge, so a stop mid-note can't strand the popover note.
+            self.clearSystemAirPlayGuard()
             self.suspended = false
             // Fix A (R10): a stop mid-reset must not leave the whole-system reset
             // serialization wedged so a later start()'s first recreate is dropped.
@@ -2349,6 +2385,45 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return str.isEmpty ? fallback : str
     }
 
+    /// Whether the macOS SYSTEM default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice`) is itself AirPlay-class
+    /// (`kAudioDeviceTransportTypeAirPlay`) — i.e. the user pointed the Mac's OWN
+    /// Sound output at an AirPlay receiver (Sound menu / System Settings),
+    /// independently of this app's Selected Devices (W3-T3, PLAN-RELIABILITY.md
+    /// Wave 3 "System-AirPlay guard"). The production default for
+    /// ``systemDefaultOutputIsAirPlayClassProvider`` — combined with
+    /// `captureRunning` in ``reconcileSystemAirPlayGuard()``, this is the
+    /// double-path/echo condition that bullet calls out.
+    ///
+    /// Same two-step HAL read ``currentOutputDeviceName(fallback:)`` uses
+    /// (resolve the default device, then read one property on it) — reused
+    /// deliberately rather than re-derived, so there is exactly one place that
+    /// resolves "the current default output device". Falls back to `false` on
+    /// any query failure: an unreadable transport type is not evidence of a
+    /// conflict.
+    static func currentDefaultOutputIsAirPlayClass() -> Bool {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let devErr = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID)
+        guard devErr == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return false }
+
+        var transportAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var transportType: UInt32 = 0
+        var transportSize = UInt32(MemoryLayout<UInt32>.size)
+        let transportErr = AudioObjectGetPropertyData(
+            deviceID, &transportAddr, 0, nil, &transportSize, &transportType)
+        guard transportErr == noErr else { return false }
+        return transportType == kAudioDeviceTransportTypeAirPlay
+    }
+
     // MARK: LatencyConfigurable (PLAN-LATENCY-SETTING.md)
 
     /// The sender start buffer currently in force (ms). Seeded by
@@ -2510,6 +2585,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Test-only (`@testable`): whether a silence-watchdog countdown is currently
     /// armed (awaiting either a reconnect or its own fire).
     var test_silenceWatchdogArmed: Bool { stateQueue.sync { silenceWatchdog != nil } }
+
+    /// Test-only (`@testable`): whether the system-AirPlay double-path/echo note
+    /// (W3-T3) is currently active.
+    var test_systemAirPlayGuardActive: Bool { stateQueue.sync { systemAirPlayGuardActive } }
 
     /// Test-only (`@testable`): whether any per-device converge is still in flight —
     /// lets a Fix A test wait until a connect has fully released its `converging`
@@ -2714,6 +2793,52 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         silenceCaptureOverride = true
         reconcileCaptureGate()                          // un-gate → Mac becomes audible
         emit(.localFallbackActive(true))
+    }
+
+    // MARK: System-AirPlay guard (Wave 3 W3-T3, PLAN-RELIABILITY.md)
+    //
+    // "If the user sets an AirPlay device as the *system* default output while we
+    // stream, surface a note (double-path audio / echo risk) rather than silently
+    // capturing an AirPlay-bound mix." Purely informational — this never touches
+    // the capture gate or any audio path, unlike the silence watchdog above.
+
+    /// Re-evaluate the double-path/echo note. Active exactly when BOTH hold:
+    /// `captureRunning` (the whole-system capture tap is actually running — we're
+    /// streaming a captured mix to at least one AirPlay device) AND the macOS
+    /// SYSTEM default output is ALSO AirPlay-class
+    /// (``systemDefaultOutputIsAirPlayClassProvider``). Neither alone is a
+    /// conflict: not streaming means there's nothing to double up, and a
+    /// non-AirPlay system default means there's only one path.
+    ///
+    /// Mirrors ``reconcileSilenceWatchdog()``'s edge-triggered emit — a repeat
+    /// evaluation at unchanged state is a no-op, so a burst of unrelated
+    /// `reconcileCaptureGate()` calls can't storm the event stream. Call sites:
+    /// the end of `reconcileCaptureGate()` (streaming started/stopped) and the
+    /// `systemVolume.onExternalChange` handler's `defaultDeviceChanged` branch
+    /// (the system default output itself switched). On `stateQueue`.
+    private func reconcileSystemAirPlayGuard() {   // on stateQueue
+        let active = captureRunning && systemDefaultOutputIsAirPlayClassProvider()
+        if active {
+            guard !systemAirPlayGuardActive else { return }
+            systemAirPlayGuardActive = true
+            emit(.systemDefaultIsAirPlayActive(true))
+        } else {
+            clearSystemAirPlayGuard()
+        }
+    }
+
+    /// Clear the guard on a genuine true→false edge, mirroring Fix B's
+    /// ``clearSilenceOverride()`` (invariant 4): every path that can end the
+    /// condition — a normal reconcile, `stop()` — routes through here rather than
+    /// a bare `= false`, so `.systemDefaultIsAirPlayActive(false)` is emitted
+    /// exactly once per genuine edge and the popover note can never strand ON.
+    /// Idempotent: a no-op with no emit when already false. On `stateQueue`.
+    @discardableResult
+    private func clearSystemAirPlayGuard() -> Bool {   // on stateQueue
+        guard systemAirPlayGuardActive else { return false }
+        systemAirPlayGuardActive = false
+        emit(.systemDefaultIsAirPlayActive(false))
+        return true
     }
 
     // MARK: Discovery → app model (all on stateQueue)
@@ -3511,6 +3636,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
+        // W3-T3: streaming just started or stopped — re-evaluate the double-path
+        // guard (it also depends on the system default output, which didn't
+        // necessarily change here, but `captureRunning` — the other half of its
+        // condition — just did).
+        reconcileSystemAirPlayGuard()
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
         }

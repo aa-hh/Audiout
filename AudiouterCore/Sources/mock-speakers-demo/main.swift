@@ -59,6 +59,10 @@ func describe(_ event: BackendEvent) -> String? {
         // Native-only (the R11 silence watchdog); never under mock. Handled so the
         // switch stays exhaustive.
         return "♪ local fallback \(active ? "ON (speakers unreachable)" : "OFF (resumed)")"
+    case .systemDefaultIsAirPlayActive(let active):
+        // Native-only (the W3-T3 system-AirPlay guard); never under mock. Handled
+        // so the switch stays exhaustive.
+        return "♪ system-AirPlay note \(active ? "ON (double-path risk)" : "OFF")"
     }
 }
 

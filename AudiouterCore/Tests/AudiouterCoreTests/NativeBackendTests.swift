@@ -380,7 +380,8 @@ final class NativeBackendTests: XCTestCase {
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
-        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
@@ -390,7 +391,8 @@ final class NativeBackendTests: XCTestCase {
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture,
             watchdogScheduler: watchdogScheduler,
-            silenceFallbackDelay: silenceFallbackDelay)
+            silenceFallbackDelay: silenceFallbackDelay,
+            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass)
         return (backend, engine, discovery)
     }
 
@@ -3130,6 +3132,139 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { scheduler.hasPending }
         XCTAssertEqual(scheduler.lastDelay, 123,
                        "the post-wake restore path must keep honoring wakeAudioRestoreDelay (no regression)")
+    }
+
+    // MARK: System-AirPlay guard (Wave 3 W3-T3, PLAN-RELIABILITY.md)
+    //
+    // "If the user sets an AirPlay device as the *system* default output while we
+    // stream, surface a note (double-path audio / echo risk)." These drive the
+    // guard deterministically through the injected `systemDefaultOutputIsAirPlayClass`
+    // provider — no real Core Audio transport-type query in the loop.
+
+    /// A thread-safe `Bool` box so a test can script the injected
+    /// `systemDefaultOutputIsAirPlayClass` provider's answer AFTER construction —
+    /// simulating the system default output switching to/from AirPlay-class
+    /// between the provider being wired and it being read.
+    private final class LockedBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ v: Bool) { value = v }
+        func get() -> Bool { lock.withLock { value } }
+        func set(_ v: Bool) { lock.withLock { value = v } }
+    }
+
+    /// (a) The system default output IS AirPlay-class and we ARE streaming
+    /// (whole-system capture running): the note fires.
+    func testSystemAirPlayGuardFiresWhenSystemDefaultIsAirPlayWhileStreaming() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A0", name: "Guard Speaker A")
+
+        // Subscribe BEFORE connecting: the guard's edge-triggered emit fires
+        // synchronously inside `setOutputSet` (as soon as the capture gate wants
+        // on), which can land before `connectAP2`'s own polls return — a
+        // subscription started afterward could miss it (`makeEventStream()` only
+        // replays `.deviceAdded`, not historical events).
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream {
+                if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.contains { if case .systemDefaultIsAirPlayActive(true) = $0 { return true } else { return false } },
+                      "the double-path note must fire once streaming starts with an AirPlay-class system default")
+        XCTAssertTrue(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (b) The system default output is NOT AirPlay-class (built-in/BT) while we
+    /// ARE streaming: no note.
+    func testSystemAirPlayGuardDoesNotFireWhenSystemDefaultIsNotAirPlay() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { false })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Guard Speaker B")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        // Give any (wrongly-firing) note event a beat to arrive.
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.isEmpty,
+                      "no note may fire while the system default is not AirPlay-class (\(noteEvents.count) seen)")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (c1) The note clears when STREAMING STOPS, even though the system default
+    /// is still AirPlay-class — there's nothing left to double up.
+    func testSystemAirPlayGuardClearsWhenStreamingStops() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A2", name: "Guard Speaker C")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }
+        XCTAssertTrue(capture.isCapturing)
+
+        // Deselect everything → streaming stops → the gate un-runs capture.
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: { backend.setOutputSet([]) }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "the note must clear the instant streaming stops")
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (c2) The note clears when the system default output CHANGES AWAY from
+    /// AirPlay-class, even though streaming continues uninterrupted.
+    func testSystemAirPlayGuardClearsWhenDefaultOutputChangesAwayFromAirPlay() async {
+        let isAirPlay = LockedBool(true)
+        let systemVolume = FakeSystemVolume()
+        let (backend, engine, discovery) = makeBackend(
+            systemVolume: systemVolume,
+            systemDefaultOutputIsAirPlayClass: { isAirPlay.get() })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A3", name: "Guard Speaker D")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }
+        XCTAssertTrue(capture.isCapturing)
+
+        // The system default output switches to something non-AirPlay (BT
+        // headphones, built-in speakers, …) — simulated via the same
+        // `defaultDeviceChanged` signal a real Sound-menu switch fires.
+        isAirPlay.set(false)
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: {
+            systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true)
+        }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "the note must clear when the default output changes away from AirPlay-class")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+        // Streaming itself is untouched — this is a UI note, not an audio-path change.
+        XCTAssertTrue(capture.isCapturing, "the guard note must never itself alter the capture gate")
+        XCTAssertTrue(backend.devices.first { $0.id == device.id }?.isSelected == true)
     }
 
     // MARK: Helpers

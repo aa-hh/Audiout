@@ -1862,6 +1862,33 @@ final class PopoverControllerTests: XCTestCase {
         popover.setLocalFallbackActive(false)
         XCTAssertNil(popover.test_localFallbackBannerText, "reconnect clears the banner")
     }
+
+    // MARK: System-AirPlay guard note (Wave 3 W3-T3)
+
+    /// `setSystemAirPlayNoteActive(true)` shows the "double-path audio" note with
+    /// the exact plan copy; `false` clears it. Mirrors
+    /// `testLocalFallbackBannerShowsAndClears` — the note also survives a rebuild
+    /// (it's re-pinned above the cards each `rebuild()`), and is independent of
+    /// the silence-fallback banner (each has its own pinned slot).
+    func testSystemAirPlayNoteShowsAndClears() async throws {
+        let (popover, _, backend) = try await makePopover()
+
+        XCTAssertNil(popover.test_systemAirPlayNoteText, "no note by default")
+
+        popover.setSystemAirPlayNoteActive(true)
+        XCTAssertEqual(popover.test_systemAirPlayNoteText,
+                       "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo.",
+                       "the note shows the verbatim plan copy")
+
+        // A rebuild (e.g. a device-set change) must keep the note pinned.
+        popover.update(devices: backend.devices)
+        XCTAssertEqual(popover.test_systemAirPlayNoteText,
+                       "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo.",
+                       "the note survives a rebuild while the guard is active")
+
+        popover.setSystemAirPlayNoteActive(false)
+        XCTAssertNil(popover.test_systemAirPlayNoteText, "the note clears once the guard ends")
+    }
 }
 
 private actor PopoverTestCountBox {

@@ -511,6 +511,41 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Test-only: whether the fallback banner is currently reflected in the panel.
     var test_localFallbackBannerText: String? { panel.test_bannerText }
 
+    // MARK: System-AirPlay guard note (Wave 3 W3-T3)
+
+    /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
+    /// bullet: non-blocking, informational — this never changes what's actually
+    /// streaming, it only tells the user why they might hear an echo.
+    static let systemAirPlayNoteText =
+        "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo."
+
+    /// Whether the system-AirPlay double-path guard (W3-T3) is currently active:
+    /// this app is streaming a whole-system capture AND the macOS system default
+    /// output is itself AirPlay-class. Drives the note; re-applied on every
+    /// `rebuild()` so a rebuild mid-condition keeps it pinned.
+    private var systemAirPlayNoteActive = false
+
+    /// Show or clear the "double-path audio" note
+    /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
+    /// (`AppDelegate`) directly — a whole-app condition with no home on `Device`,
+    /// same shape as ``setLocalFallbackActive(_:)``. Idempotent: a repeat of the
+    /// current state is a no-op.
+    public func setSystemAirPlayNoteActive(_ active: Bool) {
+        guard active != systemAirPlayNoteActive else { return }
+        systemAirPlayNoteActive = active
+        if isEffectivelyShown {
+            // Update the note in place and re-fit; not a full rebuild — the cards
+            // are unchanged, only the pinned note appears/disappears.
+            panel.setSystemAirPlayNote(active ? Self.systemAirPlayNoteText : nil)
+            panel.panelContentDidChangeHeight(animated: true)
+        }
+        // When not shown, the next `rebuildForOpen()` re-applies it from
+        // `systemAirPlayNoteActive` (see the tail of `rebuild()`).
+    }
+
+    /// Test-only: whether the system-AirPlay note is currently reflected in the panel.
+    var test_systemAirPlayNoteText: String? { panel.test_systemAirPlayNoteText }
+
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
     public var statusMasterVolume: Double {
@@ -720,6 +755,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // above dropped it with everything else, so a rebuild that happens WHILE the
         // fallback is active (e.g. a device set change) must restore it.
         panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
+        // Re-pin the system-AirPlay guard note (W3-T3) the same way — mutually
+        // exclusive with the banner above (see `setSystemAirPlayNoteActive`'s doc),
+        // but re-applied independently so either one restores correctly on its own.
+        panel.setSystemAirPlayNote(systemAirPlayNoteActive ? Self.systemAirPlayNoteText : nil)
     }
 
     private func orderedDevices() -> [Device] {

@@ -133,6 +133,29 @@ public enum BackendEvent: Sendable, Equatable {
     /// the only backend with a real capture gate; `MockBackend`/`OwnToneBackend`
     /// never do.
     case localFallbackActive(Bool)
+
+    /// The "system-AirPlay guard" (Wave 3 W3-T3, PLAN-RELIABILITY.md). `active:
+    /// true` means: this app's whole-system capture tap is actively streaming a
+    /// captured mix to at least one AirPlay device (``NativeBackend``'s capture
+    /// gate is on) **and** the macOS *system* default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice`) is ITSELF AirPlay-class —
+    /// i.e. the user pointed the Mac's own Sound output at an AirPlay receiver
+    /// (Sound menu / System Settings), independently of this app's Selected
+    /// Devices. Both conditions together are the double-path/echo risk: the SAME
+    /// mix would go out over AirPlay twice — once through this app's
+    /// capture-then-stream path, once through the system's own send — so this is
+    /// purely an informational note, never a block: no audio path is altered
+    /// because of it.
+    ///
+    /// `active: false` means either condition ended (streaming stopped, or the
+    /// system default output changed away from AirPlay-class). This is the
+    /// *only* signal for the popover's "double-path audio" note, for the same
+    /// reason ``localFallbackActive(_:)`` is the only signal for its banner: a
+    /// whole-app condition with no home on a single `Device`. Only
+    /// ``NativeBackend`` emits it — it's the only backend with a real capture
+    /// gate and a system-output-transport query; `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case systemDefaultIsAirPlayActive(Bool)
 }
 
 /// The seam between the app and wherever audio actually goes.

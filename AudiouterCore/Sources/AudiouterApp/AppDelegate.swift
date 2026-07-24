@@ -958,6 +958,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setLocalFallbackActive(active)
             log("event: \(describe(event))")
             return
+        case .systemDefaultIsAirPlayActive(let active):
+            // W3-T3: the macOS system default output is (or stopped being)
+            // AirPlay-class while we're actively streaming — double-path/echo
+            // risk. Purely informational: show or clear the popover note; no
+            // device model changed, no audio path is altered — handle it and
+            // return.
+            popoverController.setSystemAirPlayNoteActive(active)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -996,6 +1005,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "remoteTransport(\(command)) — driving Mac media playback"
         case .localFallbackActive(let active):
             return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
+        case .systemDefaultIsAirPlayActive(let active):
+            return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
         }
     }
 

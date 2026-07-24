@@ -341,4 +341,209 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         XCTAssertEqual(tap.creates, 2, "attaching a sink while capturing recreates the tap")
         XCTAssertTrue(tap.excludes(pid: sinkRenderPID))
     }
+
+    // MARK: - T3 Part B: base-rate resample (44.1 kHz airplay feed → device-native rate)
+
+    /// Goertzel single-bin power on raw Float samples (no Int16 decode) — same
+    /// math as `goertzelPowerS16LE` above, for asserting directly on
+    /// ``SyncedLocalBaseResampler``'s Float output.
+    private func goertzelPowerFloat(_ samples: [Float], freq: Double, sampleRate: Double) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let k = 2.0 * Double.pi * freq / sampleRate
+        let coeff = 2.0 * cos(k)
+        var s1 = 0.0, s2 = 0.0
+        for x in samples {
+            let s0 = Double(x) + coeff * s1 - s2
+            s2 = s1
+            s1 = s0
+        }
+        let power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+        return power / Double(samples.count)
+    }
+
+    /// Identity ratio (input rate == output rate, e.g. a 44.1 kHz output device):
+    /// the base resampler must pass every sample through bit-for-bit — no
+    /// interpolation, no priming lag — mirroring the engine converter's own
+    /// "resample only when the rate differs from 44100" discipline (T3 Part B).
+    func test_baseResampler_identityRatio_isBitExactPassthrough() {
+        let resampler = SyncedLocalBaseResampler(inputRate: 44_100, outputRate: 44_100, channelCount: 2)
+        XCTAssertTrue(resampler.isIdentity)
+        XCTAssertEqual(resampler.ratio, 1.0, accuracy: 1e-12)
+
+        let input: [Float] = (0..<40).map { Float($0) * 0.01 - 0.2 }
+        let out = input.withUnsafeBufferPointer { buf in
+            resampler.resample(input: buf.baseAddress!, frameCount: 20)
+        }
+        XCTAssertEqual(out, input, "identity ratio must be a bit-exact passthrough")
+    }
+
+    /// Upsampling 44.1 kHz → 48 kHz must produce a frame count matching the rate
+    /// ratio (never a hardcoded assumption) — the frame-count half of T5's
+    /// "correct frame counts, no pitch shift" check.
+    func test_baseResampler_upsample44_1to48_producesRateScaledFrameCount() {
+        let inputRate = 44_100.0, outputRate = 48_000.0
+        let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
+        XCTAssertFalse(resampler.isIdentity)
+        XCTAssertEqual(resampler.ratio, inputRate / outputRate, accuracy: 1e-12)
+
+        let durationSeconds = 1.0
+        let frameCount = Int(inputRate * durationSeconds)
+        var input = [Float](repeating: 0, count: frameCount)
+        for i in 0..<frameCount {
+            input[i] = Float(sin(2.0 * Double.pi * 440.0 * Double(i) / inputRate))
+        }
+        let out = input.withUnsafeBufferPointer { buf in
+            resampler.resample(input: buf.baseAddress!, frameCount: frameCount)
+        }
+        // One second of audio in ⇒ ~one second out at the OUTPUT rate — 48,000
+        // frames, not 44,100 — proving the frame math is keyed off the real
+        // rates, never a hardcoded 44100 (plan T3 verify step).
+        XCTAssertEqual(Double(out.count), outputRate, accuracy: 8,
+                       "1 s of 44.1 kHz input must resample to ~1 s of 48 kHz output frames")
+    }
+
+    /// The pitch half: resampling 44.1 kHz → 48 kHz must NOT shift the tone's
+    /// frequency. A naive "play the 44.1 kHz samples out at 48 kHz with no rate
+    /// conversion" bug (the diagnosed dropout symptom: "AirPlay plays pitched up
+    /// ~+8.8%" = 48000/44100) would leave a 440 Hz input sounding like ~479 Hz once
+    /// played back at 48 kHz. Goertzel at both frequencies over the ACTUAL
+    /// resampled output proves the tone landed at 440 Hz, not the pitched one.
+    func test_baseResampler_upsample_doesNotPitchShift_goertzel() {
+        let inputRate = 44_100.0, outputRate = 48_000.0, freq = 440.0
+        let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
+
+        let frameCount = Int(inputRate * 0.5) // 0.5 s
+        var input = [Float](repeating: 0, count: frameCount)
+        for i in 0..<frameCount {
+            input[i] = Float(sin(2.0 * Double.pi * freq * Double(i) / inputRate))
+        }
+        let out = input.withUnsafeBufferPointer { buf in
+            resampler.resample(input: buf.baseAddress!, frameCount: frameCount)
+        }
+        XCTAssertFalse(out.isEmpty)
+
+        let correctPower = goertzelPowerFloat(out, freq: freq, sampleRate: outputRate)
+        let pitchedFreq = freq * outputRate / inputRate // ~479 Hz — the un-resampled bug's symptom
+        let pitchedPower = goertzelPowerFloat(out, freq: pitchedFreq, sampleRate: outputRate)
+
+        XCTAssertGreaterThan(correctPower, 0.05,
+                             "the resampled output must retain the original 440 Hz tone")
+        XCTAssertLessThan(pitchedPower, correctPower / 50.0,
+                          "the output must not show the ~+8.8% pitched-up frequency a missing base resample would produce")
+    }
+
+    /// Downsampling direction too (a device running SLOWER than 44.1 kHz is rare
+    /// but not impossible): ratio > 1, still no pitch shift, frame count still
+    /// rate-scaled — proves the resampler isn't secretly only correct in the
+    /// up-sample direction the dropout bug exercises.
+    func test_baseResampler_downsample48to44_1_producesRateScaledFrameCount_noPitchShift() {
+        let inputRate = 48_000.0, outputRate = 44_100.0, freq = 440.0
+        let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
+        XCTAssertFalse(resampler.isIdentity)
+        XCTAssertEqual(resampler.ratio, inputRate / outputRate, accuracy: 1e-12)
+
+        let frameCount = Int(inputRate * 0.5)
+        var input = [Float](repeating: 0, count: frameCount)
+        for i in 0..<frameCount {
+            input[i] = Float(sin(2.0 * Double.pi * freq * Double(i) / inputRate))
+        }
+        let out = input.withUnsafeBufferPointer { buf in
+            resampler.resample(input: buf.baseAddress!, frameCount: frameCount)
+        }
+        XCTAssertEqual(Double(out.count), outputRate * 0.5, accuracy: 8)
+
+        let correctPower = goertzelPowerFloat(out, freq: freq, sampleRate: outputRate)
+        let pitchedFreq = freq * outputRate / inputRate
+        let pitchedPower = goertzelPowerFloat(out, freq: pitchedFreq, sampleRate: outputRate)
+        XCTAssertGreaterThan(correctPower, 0.05)
+        XCTAssertLessThan(pitchedPower, correctPower / 50.0)
+    }
+
+    /// Full pipeline (fan-out resample → `SyncedLocalSink`) at a NON-identity
+    /// device rate (48 kHz, resampled up from the 44.1 kHz airplay feed): the
+    /// base resample's Catmull-Rom interpolation has NO whole-sample group delay
+    /// (`output[0] == input[0]` exactly — the class doc's anchor property), so
+    /// `SyncTiming`'s `totalDelayNanos` needs no extra term to compensate for it.
+    /// The release must still land within about a frame of the SAME computed
+    /// target as the identity-rate case (`SyncedLocalSinkTests`'s
+    /// `test_rampReleasesAtComputedHostTime_withinOneFrame`) — the "latency folds
+    /// into the sync budget" half of T5, not just the pitch check above.
+    #if canImport(AVFoundation)
+    func test_fanOutThroughResample_thenSink_releasesAtComputedTarget_noExtraDelay() throws {
+        let inputRate = 44_100.0
+        let outputRate = 48_000.0
+        let baseResampler = SyncedLocalBaseResampler(
+            inputRate: inputRate, outputRate: outputRate, channelCount: 1)
+
+        // A real S16LE ramp (mono) — every real sample strictly increasing and
+        // non-zero, so "first non-silence" is unambiguous, same discipline as
+        // the identity-rate ramp test.
+        let rampCount = 20_000
+        var s16 = [Int16](repeating: 0, count: rampCount)
+        for i in 0..<rampCount { s16[i] = Int16(clamping: i + 1) }
+        let s16le = s16.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        // Widen S16LE → Float and base-resample 44.1 → 48 kHz — the same two
+        // steps `NativeCaptureCoordinator.fanOutToSyncedLocal` performs (mono here
+        // to keep the ramp math simple; the coordinator's own stereo path is
+        // covered by the Goertzel self-exclude tests above).
+        var floats = [Float](repeating: 0, count: rampCount)
+        let scale: Float = 1.0 / 32768.0
+        s16le.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<rampCount { floats[i] = Float(Int16(littleEndian: p[i])) * scale }
+        }
+        let resampled = floats.withUnsafeBufferPointer { buf in
+            baseResampler.resample(input: buf.baseAddress!, frameCount: rampCount)
+        }
+        XCTAssertFalse(resampled.isEmpty)
+
+        // 100 ms presentation − 10 ms measured latency − 3 ms safety = 87 ms —
+        // the SAME formula/constants as the identity-rate sink test, with no
+        // extra term for the base resample.
+        let latency = LocalOutputLatencyMeasurement(
+            safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+            bufferFrameSizeFrames: 0, nominalSampleRate: outputRate) // 480/48000 = 10 ms
+        let sink = SyncedLocalSink(
+            renderSampleRate: outputRate, channelCount: 1, safetyMarginMs: 3,
+            presentationDelayMs: { 100 }, localOutputLatency: { latency })
+
+        let anchorPtsSec = 2_000
+        let anchorNanos = Int64(anchorPtsSec) * 1_000_000_000
+        resampled.withUnsafeBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                        pts: timespec(tv_sec: anchorPtsSec, tv_nsec: 0))
+        }
+
+        let expectedTargetNanos = anchorNanos + 87_000_000
+        let nsPerFrame = 1_000_000_000.0 / outputRate
+        let framesPerCycle = 512
+        var firstNonSilenceHostTime: Int64?
+        var firstRealSample: Float?
+        var out = [Float](repeating: .nan, count: framesPerCycle)
+
+        for cycle in 0..<80 {
+            let cycleStart = anchorNanos + Int64((Double(cycle * framesPerCycle) * nsPerFrame).rounded())
+            _ = out.withUnsafeMutableBufferPointer { ob in
+                sink.renderInterleaved(into: ob, frameCount: framesPerCycle, cycleStartMonotonicNanos: cycleStart)
+            }
+            if firstNonSilenceHostTime == nil, let idx = out.firstIndex(where: { $0 != 0 }) {
+                firstNonSilenceHostTime = cycleStart + Int64((Double(idx) * nsPerFrame).rounded())
+                firstRealSample = out[idx]
+            }
+        }
+
+        let hostTime = try XCTUnwrap(firstNonSilenceHostTime, "audio was never released")
+        XCTAssertLessThanOrEqual(abs(hostTime - expectedTargetNanos), Int64(nsPerFrame.rounded()) * 2,
+                                 "resampled fan-out must still release within ~1 output frame of the SAME "
+                                 + "computed target — the base resample must not need its own delay term")
+        // The anchor property: the Catmull-Rom kernel collapses to input[0] at
+        // frac 0 in BOTH resample stages (base resample, then the sink's own
+        // ppm-correction resampler at its initial ratio ≈ 1), so the very first
+        // released sample is exactly the base resampler's own output[0] — no
+        // reordering, no dropped lead-in.
+        let realSample = try XCTUnwrap(firstRealSample, "a non-silent sample must have been captured")
+        XCTAssertEqual(realSample, resampled[0], accuracy: 1e-6)
+    }
+    #endif
 }

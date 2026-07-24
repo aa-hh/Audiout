@@ -136,6 +136,62 @@ final class SyncedLocalSinkTests: IsolatedTestCase {
         XCTAssertEqual(plan, SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true))
     }
 
+    /// T3 Part B: `plan(...)`'s frame math must be keyed off the LIVE
+    /// `renderSampleRate` (`SyncedLocalSink.renderSampleRate`, never a hardcoded
+    /// 44100 — the plan's verify step). The delay in TIME is identical whatever
+    /// the device runs at, but the number of silent FRAMES needed to reach it
+    /// scales up proportionally with the sample rate: the same 20 ms gap is 882
+    /// frames at 44.1 kHz and 960 frames at 48 kHz — exactly the
+    /// 48000/44100 ratio, and neither a fixed frame count nor a fixed 44.1 kHz
+    /// assumption would produce that.
+    func test_plan_silentFrameOffset_scalesWithRenderSampleRate() {
+        let cycleStart: Int64 = 1_000_000_000
+        let deltaNanos: Int64 = 20_000_000 // 20 ms
+        let target = cycleStart &+ deltaNanos
+
+        let at44_1 = SyncTiming.plan(
+            cycleStartMonotonicNanos: cycleStart, frameCount: 4_096,
+            sampleRate: 44_100, targetReleaseMonotonicNanos: target)
+        let at48 = SyncTiming.plan(
+            cycleStartMonotonicNanos: cycleStart, frameCount: 4_096,
+            sampleRate: 48_000, targetReleaseMonotonicNanos: target)
+
+        XCTAssertEqual(at44_1.silentFrames, 882, "20 ms @ 44.1 kHz = 882 frames")
+        XCTAssertEqual(at48.silentFrames, 960, "20 ms @ 48 kHz = 960 frames")
+        XCTAssertTrue(at44_1.releasesThisCycle)
+        XCTAssertTrue(at48.releasesThisCycle)
+
+        let ratio = Double(at48.silentFrames) / Double(at44_1.silentFrames)
+        XCTAssertEqual(ratio, 48_000.0 / 44_100.0, accuracy: 1e-6,
+                       "the frame-offset ratio between rates must equal the sample-rate ratio")
+    }
+
+    /// Same property at the boundary: a gap wider than one cycle's worth of
+    /// frames at the SLOWER rate must still fit within one cycle at the FASTER
+    /// rate purely because more frames fit in the same wall-clock span — proof
+    /// `plan` never silently assumes a fixed frame-count-per-cycle/rate pairing.
+    func test_plan_releaseWithinCycle_dependsOnRateNotJustFrameCount() {
+        let cycleStart: Int64 = 0
+        // A gap that is exactly 8 ms — 353 frames at 44.1 kHz (fits in a 400-frame
+        // cycle) and 384 frames at 48 kHz (also fits) — but scaled differently.
+        let deltaNanos: Int64 = 8_000_000
+        let target = cycleStart &+ deltaNanos
+
+        let at44_1 = SyncTiming.plan(
+            cycleStartMonotonicNanos: cycleStart, frameCount: 400,
+            sampleRate: 44_100, targetReleaseMonotonicNanos: target)
+        let at48 = SyncTiming.plan(
+            cycleStartMonotonicNanos: cycleStart, frameCount: 400,
+            sampleRate: 48_000, targetReleaseMonotonicNanos: target)
+
+        XCTAssertTrue(at44_1.releasesThisCycle)
+        XCTAssertTrue(at48.releasesThisCycle)
+        XCTAssertEqual(at44_1.silentFrames, 353)
+        XCTAssertEqual(at48.silentFrames, 384)
+        XCTAssertGreaterThan(at48.silentFrames, at44_1.silentFrames,
+                             "the same time gap costs more frames at the higher rate")
+    }
+
     func test_plan_silentBeforeTarget_thenReleasesAtFrameOffset() {
         let sampleRate = 48_000.0
         let target: Int64 = 1_000_000_000 + 87_000_000

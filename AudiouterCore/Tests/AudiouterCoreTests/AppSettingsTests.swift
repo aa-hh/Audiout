@@ -141,4 +141,52 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions, AppSettings.wakeRestoreMinuteOptions.sorted())
         XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions.first, 0)
     }
+
+    // MARK: Sync offset (T-OFFSET-UI)
+
+    func testSyncOffsetDefaultsToZeroWhenUnset() {
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.defaultSyncOffsetMs)
+        XCTAssertEqual(AppSettings.defaultSyncOffsetMs, 0)
+    }
+
+    func testSyncOffsetRoundTripsPositiveAndNegative() {
+        let settings = AppSettings(defaults: defaults)
+        settings.syncOffsetMs = 120
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, 120)
+
+        settings.syncOffsetMs = -75
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, -75)
+    }
+
+    func testSyncOffsetExplicitZeroIsDistinctFromUnsetButReadsTheSame() {
+        // Explicitly choosing 0 must persist and read back as 0 (same value as
+        // unset, but exercised via the write path this time).
+        let settings = AppSettings(defaults: defaults)
+        settings.syncOffsetMs = 0
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, 0)
+    }
+
+    func testSyncOffsetClampsToBounds() {
+        let settings = AppSettings(defaults: defaults)
+        settings.syncOffsetMs = 10_000
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.maxSyncOffsetMs)
+
+        settings.syncOffsetMs = -10_000
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.minSyncOffsetMs)
+    }
+
+    func testSyncOffsetOutOfRangeStoredValueFallsBackToClamp() {
+        // A value outside the offered range (a newer/older build, or hand-edited
+        // defaults) resolves to the clamped bound rather than leaking through.
+        defaults.set(9_999, forKey: "audio.syncOffsetMs")
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.maxSyncOffsetMs)
+        defaults.set(-9_999, forKey: "audio.syncOffsetMs")
+        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.minSyncOffsetMs)
+    }
+
+    func testSyncOffsetBoundsStraddleZero() {
+        XCTAssertLessThan(AppSettings.minSyncOffsetMs, 0)
+        XCTAssertGreaterThan(AppSettings.maxSyncOffsetMs, 0)
+        XCTAssertTrue((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
+    }
 }

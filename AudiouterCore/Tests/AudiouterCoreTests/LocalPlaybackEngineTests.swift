@@ -315,47 +315,52 @@ final class LocalPlaybackEngineTests: XCTestCase {
                        "delays and coalesces, it must never indefinitely postpone recovery")
     }
 
-    // MARK: - shouldFollowRealDefault (pure device-selection decision, Q2 fix)
+    // MARK: - Anti-feedback follow guard (transport type)
 
-#if canImport(AudioToolbox)
-    /// The pure decision behind ``LocalPlaybackEngine/resolveLocalOutputDeviceID()``
-    /// (the Q2 Bluetooth/USB fix): given the transport type of the Mac's real
-    /// default output, local playback FOLLOWS every real LOCAL transport — the
-    /// whole point of the fix is that a Bluetooth headset or USB DAC set as the
-    /// Mac's default is no longer wrongly forced onto the built-in speakers. This
-    /// mirrors the pure-decision-vs-live-read split of `TapRebuildDecision`, so it
-    /// is tested directly with no live Core Audio, no real default device, and no
-    /// (un-synthesizable) real AirPlay endpoint.
-    func testShouldFollowRealDefaultFollowsEveryLocalTransport() {
+    #if canImport(AudioToolbox)
+
+    /// Real local-hardware transports are FOLLOWED: "Current Device" plays out
+    /// wherever the user is actually listening (built-in, Bluetooth headphones,
+    /// USB, HDMI, Thunderbolt, …), which is the whole point of the bug fix.
+    func testFollowableTransportsAreFollowed() {
         for transport in [
             kAudioDeviceTransportTypeBuiltIn,
             kAudioDeviceTransportTypeBluetooth,
             kAudioDeviceTransportTypeBluetoothLE,
             kAudioDeviceTransportTypeUSB,
-            kAudioDeviceTransportTypeThunderbolt,
             kAudioDeviceTransportTypeHDMI,
+            kAudioDeviceTransportTypeThunderbolt,
             kAudioDeviceTransportTypeDisplayPort,
             kAudioDeviceTransportTypePCI,
             kAudioDeviceTransportTypeFireWire,
-            kAudioDeviceTransportTypeAVB,
-            kAudioDeviceTransportTypeAggregate,
-            kAudioDeviceTransportTypeVirtual,
-            kAudioDeviceTransportTypeUnknown,
         ] {
-            XCTAssertTrue(
-                LocalPlaybackEngine.shouldFollowRealDefault(transportType: transport),
-                "transport \(transport) is a real local output — local playback must FOLLOW the real default there")
+            XCTAssertTrue(LocalPlaybackEngine.isFollowableTransport(transport),
+                          "transport \(transport) is real local hardware — must be followed")
         }
     }
 
-    /// The single refusal: an AirPlay default output is the genuine feedback-loop
-    /// case, so local playback must NOT follow it (the resolver falls back to
-    /// built-in instead). This is the anti-feedback guard, and AirPlay is the ONLY
-    /// transport it rejects.
-    func testShouldFollowRealDefaultRefusesAirPlay() {
-        XCTAssertFalse(
-            LocalPlaybackEngine.shouldFollowRealDefault(transportType: kAudioDeviceTransportTypeAirPlay),
-            "an AirPlay default output must NOT be followed — the feedback-loop guard falls back to built-in")
+    /// The anti-feedback guard: AirPlay and virtual/aggregate defaults are REFUSED
+    /// (local playback stays on the built-in speakers), because this app may be
+    /// streaming the whole-system mix into exactly that device — following it would
+    /// loop local playback back into the capture.
+    func testFeedbackRiskTransportsAreRefused() {
+        for transport in [
+            kAudioDeviceTransportTypeAirPlay,
+            kAudioDeviceTransportTypeVirtual,
+            kAudioDeviceTransportTypeAggregate,
+            kAudioDeviceTransportTypeAutoAggregate,
+        ] {
+            XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(transport),
+                           "transport \(transport) is AirPlay/virtual — must be refused (anti-feedback)")
+        }
     }
-#endif
+
+    /// An unreadable transport (`nil`) is treated conservatively as not-followable,
+    /// so the safe built-in fallback is used rather than risking a feedback loop.
+    func testUnreadableTransportIsNotFollowed() {
+        XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(nil),
+                       "an unreadable transport must fall back to the safe built-in target")
+    }
+
+    #endif
 }

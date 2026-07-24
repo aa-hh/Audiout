@@ -151,14 +151,171 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.selectedDeviceIDs, ["office", "homepod-bed"])
     }
 
-    func testLocalMixBlockRefusesWithReason() async throws {
+    // MARK: Q5 / T-GROUPCTL — synced local sink: the Mac may join a mixed set.
+    // Exhaustive transition matrix. S = selectedDeviceIDs BEFORE the change;
+    // L = "local-mac"; A = an AirPlay/non-local id. Default S from
+    // ensureDefaultSelection()/makeController is {L}.
+
+    // --- ADD an AirPlay device A ---
+
+    // ADD A, S == {L} (Mac sole member) → auto-drop L, insert A ⇒ {A}, autoSwapped.
+    // (Also covered by testAutoSwapDropsLocalWhenSoleMember; asserted here as the
+    // canonical first row of the matrix.)
+    func testAddAirPlay_whenMacIsSoleMember_autoDropsMac() async throws {
         let (controller, _) = try await makeController()
-        _ = controller.setDeviceSelected("office", true)          // mixed AirPlay set, no local
-        XCTAssertFalse(controller.canSelectLocalSpeaker("local-mac"))
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"])
+        let r = controller.setDeviceSelected("office", true)
+        XCTAssertTrue(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office"], "Mac dropped, AirPlay in")
+    }
+
+    // ADD A, S already mixed {L, A1} → NO drop, insert A2 ⇒ {L, A1, A2}, Mac stays.
+    // This is the newly-reachable mixed state; the substance of Q5.
+    func testAddAirPlay_whenMacAlreadyMixed_macStaysNoDrop() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        // Reach the mixed set {local-mac, office} by adding the Mac back in.
+        _ = controller.setDeviceSelected("office", true)          // auto-swap → {office}
+        let addMac = controller.setDeviceSelected("local-mac", true)
+        XCTAssertTrue(addMac.applied)
+        XCTAssertFalse(addMac.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office", "local-mac"], "mixed set reached")
+
+        // Now add a SECOND AirPlay device — the Mac must NOT be dropped.
+        let r = controller.setDeviceSelected("homepod-bed", true)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice, "auto-swap fires only when Mac is sole member")
+        XCTAssertEqual(controller.selectedDeviceIDs,
+                       ["office", "local-mac", "homepod-bed"],
+                       "Mac stays in the mixed set")
+    }
+
+    // ADD A, S contains only AirPlay device(s) → plain insert, no drop.
+    func testAddAirPlay_whenAirPlayOnly_plainInsert() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("office", true)          // → {office} (Mac auto-dropped)
+        let r = controller.setDeviceSelected("homepod-bed", true)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office", "homepod-bed"])
+    }
+
+    // ADD A, S empty → plain insert, no drop.
+    func testAddAirPlay_whenSelectionEmpty_plainInsert() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("local-mac", false)      // → {} (deliberate Mac-off)
+        XCTAssertTrue(controller.selectedDeviceIDs.isEmpty)
+        let r = controller.setDeviceSelected("office", true)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice, "no sole Mac member ⇒ no auto-swap")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office"])
+    }
+
+    // --- ADD the local device L (refusal lifted) ---
+
+    // ADD L into an AirPlay-only set → allowed now, drops nothing ⇒ S ∪ {L}.
+    // (Previously refused; supersedes testLocalMixBlockRefusesWithReason.)
+    func testAddLocal_intoAirPlaySet_isAllowedAndMixes() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("office", true)          // → {office}
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"),
+                      "the Mac is selectable into a mixed set now")
         let r = controller.setDeviceSelected("local-mac", true)
-        XCTAssertFalse(r.applied)
-        XCTAssertEqual(r.refusalReason, GroupController.localMixRefusalReason)
-        XCTAssertFalse(controller.isSpeakerSelected("local-mac"))
+        XCTAssertTrue(r.applied)
+        XCTAssertNil(r.refusalReason)
+        XCTAssertFalse(r.autoSwappedCurrentDevice, "adding the Mac never drops anything")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office", "local-mac"])
+    }
+
+    // ADD L into a multi-AirPlay set → allowed, no drop ⇒ all three present.
+    func testAddLocal_intoMultiAirPlaySet_isAllowed() async throws {
+        let (controller, _) = try await makeController()
+        _ = controller.setDeviceSelected("office", true)          // → {office}
+        _ = controller.setDeviceSelected("homepod-bed", true)     // → {office, homepod-bed}
+        let r = controller.setDeviceSelected("local-mac", true)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office", "homepod-bed", "local-mac"])
+    }
+
+    // ADD L when already present (mixed set) → no-op .ok, set unchanged.
+    func testAddLocal_whenAlreadyMixed_isNoOp() async throws {
+        let (controller, _) = try await makeController()
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("local-mac", true)       // → {office, local-mac}
+        let r = controller.setDeviceSelected("local-mac", true)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office", "local-mac"])
+    }
+
+    // canSelectLocalSpeaker is unconditionally true (block lifted), in every state.
+    func testCanSelectLocalSpeakerAlwaysTrue() async throws {
+        let (controller, _) = try await makeController()
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"))      // S == {L}
+        _ = controller.setDeviceSelected("office", true)                 // S == {office}
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"),
+                      "the pre-engine local-mix block is gone")
+        _ = controller.setDeviceSelected("local-mac", true)              // S == {office, local-mac}
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"))
+    }
+
+    // --- REMOVE: current-device floor + subsumed reverse auto-swap ---
+
+    // REMOVE the last AirPlay from a MIXED set {L, A} → naturally leaves {L}; the
+    // floor is SUBSUMED (does NOT fire, autoSwapped=false), the Mac just stays.
+    func testRemoveLastAirPlay_fromMixedSet_leavesMacNoReverseSwap() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("office", true)          // → {office}
+        _ = controller.setDeviceSelected("local-mac", true)       // → {office, local-mac} (mixed)
+        let r = controller.setDeviceSelected("office", false)     // remove the only AirPlay
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice,
+                       "floor is subsumed — Mac was already present, no restore needed")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"])
+    }
+
+    // REMOVE one AirPlay from {L, A1, A2} → {L, A2}; floor does not fire.
+    func testRemoveOneAirPlay_fromMixedMultiSet_keepsRest() async throws {
+        let (controller, _) = try await makeController()
+        _ = controller.setDeviceSelected("office", true)          // → {office}
+        _ = controller.setDeviceSelected("homepod-bed", true)     // → {office, homepod-bed}
+        _ = controller.setDeviceSelected("local-mac", true)       // → {office, homepod-bed, local-mac}
+        let r = controller.setDeviceSelected("office", false)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice)
+        XCTAssertEqual(controller.selectedDeviceIDs, ["homepod-bed", "local-mac"])
+    }
+
+    // REMOVE the Mac from a MIXED set {L, A} → deliberate; leaves {A}, no floor.
+    func testRemoveMac_fromMixedSet_leavesAirPlayOnly() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("office", true)          // → {office}
+        _ = controller.setDeviceSelected("local-mac", true)       // → {office, local-mac}
+        let r = controller.setDeviceSelected("local-mac", false)
+        XCTAssertTrue(r.applied)
+        XCTAssertFalse(r.autoSwappedCurrentDevice,
+                       "removing the Mac itself is deliberate, never re-restored")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["office"])
+    }
+
+    // REMOVE the last AirPlay from an AirPlay-ONLY set {A} → floor restores {L}.
+    // (Also covered by testReverseAutoSwapRestoresLocalWhenLastAirPlayRemoved;
+    // kept here to complete the matrix — this is the one remove case that floors.)
+    func testRemoveLastAirPlay_fromAirPlayOnlySet_floorsToMac() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        _ = controller.setDeviceSelected("office", true)          // → {office} (Mac auto-dropped)
+        let r = controller.setDeviceSelected("office", false)
+        XCTAssertTrue(r.applied)
+        XCTAssertTrue(r.autoSwappedCurrentDevice, "empty result floors back to {local}")
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"])
     }
 
     func testPassthroughDerivedOnlyForLocalOnlySet() async throws {

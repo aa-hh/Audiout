@@ -62,6 +62,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   tap — it **re-checks `captureRunning` at FIRE time** before calling `start()`,
   so a deselect during the backoff can't restart the tap and mute the Mac with
   the audio going nowhere (the bug `reconcileCaptureGate` exists to prevent).
+- **Resolving a bundle ID for per-app capture or whole-system exclusion MUST
+  resolve to the FULL set of Core Audio processes, not a single pid.** Multi-process
+  browsers emit audio from child/helper processes whose pids differ from the main
+  app, and Core Audio reports no bundle id for those children. Shortcutting to
+  single-pid resolution misses the real audio source — the routed app becomes
+  inaudible and its audio leaks into the system mix. Both coordinators inject
+  `AudioProcessResolver` for this reason.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -70,6 +77,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `.currentDevice` to mean "is redirected"; use `AppRouteDestination.isDeviceRoute`
   (true only for `.device`), the single source of truth for "actually routed
   away."
+- **`.currentDevice` local playback follows the Mac's real default output device
+  (Bluetooth, USB, HDMI, built-in, etc.), re-resolved on each cold start.**
+  ANTI-FEEDBACK GUARD: it refuses to follow a default whose transport is AirPlay
+  or virtual/aggregate — those are exactly the transports this app may be streaming
+  the whole-system mix INTO, so following them loops local playback straight back
+  into the capture. If no safe default exists, it falls back to built-in speakers.
+  Don't hardcode built-in (wrong when Bluetooth is selected), but don't blindly
+  follow any default (creates feedback loops).
 - **Every real (re)connect must reseed the engine volume from the Mac's current
   system level** (0% when unreadable): the engine's volume field is
   zero-initialized and 0 maps to ≈ −30 dB (silent), so a connect that pushes no
@@ -134,12 +149,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
   change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full pre-commit run is `swift test --parallel`** (~70s vs ~124s for a
-  bare serial `swift test`). It parallelizes at the test-CLASS level: each
-  suite runs in its own process, so tests must not race on cross-process shared
-  state.
+- **The full pre-commit run is `swift test --parallel --num-workers 4`**
+  (capped to 4 concurrent test processes to keep CPU/fan load reasonable on
+  an 8-core machine; ~70s warm vs ~124s for a bare serial `swift test`, only
+  marginally slower than an uncapped `--parallel`). It parallelizes at the
+  test-CLASS level: each suite runs in its own process, so tests must not
+  race on cross-process shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
-  Guard 4 runs the full `swift test --parallel` whenever a commit's staged
+  Guard 4 runs the full `swift test --parallel --num-workers 4` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
   fails. So a too-narrow filter in the loop can never ship a regression — it
   only costs one extra fix cycle at commit. Everything that reaches `main` was
@@ -155,6 +172,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   write `.standard`) instead of the shared globals. `.githooks/pre-commit`
   Guard 3 warns when a newly added test line reaches those globals; a line that
   genuinely must touch one takes a trailing `isolation-ok` comment.
+- **`Telemetry.log(...)` is always-on** (gated only by `HeadlessRuntime.isActive`,
+  never an env var), non-blocking, and must never call back into a caller. Never
+  call it from the IOProc/render path — only from the (non-realtime) decision
+  points around it. It auto-neutralizes under tests; don't add a per-suite
+  workaround. `_resetForTesting(directory:)` (real disk I/O against an injected
+  directory — rotation, size-bound, fail-safe) stays exclusive to
+  `TelemetryTests`. `_installTestSink(_:)` is lighter-weight (no filesystem) and
+  is also the intended seam for each instrumented subsystem's OWN suite to
+  assert its emissions (e.g. `PerAppCaptureCoordinatorTests`' `capturePA`/
+  `rate_rebuild` assertion) — install it, drive the real code path, read back
+  what was captured, then call it again with `nil` (also a synchronous flush
+  barrier) before the test returns so it never bleeds into the next test method
+  in the same process.
 
 ## Map
 
@@ -176,6 +206,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
@@ -187,3 +218,4 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
 | `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) shared by `CoreAudioProcessTap`'s and `CoreAudioSystemTap`'s default-device/nominal-rate listener blocks: fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
+| `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |

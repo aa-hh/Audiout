@@ -63,7 +63,18 @@ final class PopoverControllerTests: XCTestCase {
             }
         }
         backend.start()
-        await fulfillment(of: [expectation], timeout: 2)
+        // 2s was comfortable for a lone `swift test` run but not under
+        // `swift test --parallel` (every other suite is a concurrent sibling
+        // process competing for CPU) — this fixture runs up to 3x in one test
+        // (`testApplicationsCardExpandedOnOpenIffAnyRouteExists` builds three
+        // separate popovers), tripling the exposure to a single marginal
+        // timeout. `fulfillment` returns as soon as the expectation is met, so
+        // a wider ceiling costs nothing in the fast path — it only buys
+        // headroom under load. (2026-07-24: "Asynchronous wait failed:
+        // Exceeded timeout of 2 seconds, with unfulfilled expectations: 'fleet
+        // discovered'" observed intermittently under --parallel, never in
+        // isolation across 10 clean runs.)
+        await fulfillment(of: [expectation], timeout: 10)
         task.cancel()
     }
 
@@ -182,19 +193,53 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertFalse(result.autoSwappedCurrentDevice, "no auto-swap when local isn't the sole member")
     }
 
-    func testLocalMixBlockRefusesAndSurfacesReason() async throws {
+    func testAddingLocalIntoAMixedSetIsAllowed() async throws {
+        // T-GROUPCTL (Q5): the synced local sink lifted the old pre-engine
+        // local-mix block. The Mac may now join a mixed Selected Devices set.
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
-        XCTAssertFalse(controller.canSelectLocalSpeaker("local-mac"))
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"))
         let result = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
-        XCTAssertFalse(result.applied, "adding local into a mixed set is refused")
-        XCTAssertEqual(result.refusalReason, GroupController.localMixRefusalReason)
-        XCTAssertFalse(controller.isSpeakerSelected("local-mac"))
-        XCTAssertEqual(popover.test_lastRefusalReason, GroupController.localMixRefusalReason,
-                       "the popover surfaced the refusal reason")
-        // The local row's toggle is presented disabled (blocked) with the reason.
+        XCTAssertTrue(result.applied, "adding local into a mixed set is now allowed")
+        XCTAssertNil(result.refusalReason)
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"))
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "AirPlay member stays — Mac joins, nothing drops")
+        // The local row's toggle is presented enabled (not blocked).
         let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        XCTAssertTrue(row.test_isEnabledOn)
+    }
+
+    /// T-UI-ALLOW: the sibling of `testAddingLocalIntoAMixedSetIsAllowed` above,
+    /// but driven through the row's REAL AppKit dispatch path
+    /// (`enableCheckbox.performClick(_:)` via `test_performEnableClick()`)
+    /// instead of `test_toggleDeviceEnabled`, which calls
+    /// `GroupController.setDeviceSelected` directly and never touches the
+    /// checkbox or its target/action wiring at all. Per the repo's own
+    /// documented lesson (row selection tests bypassing AppKit dispatch let a
+    /// real `MainOutRowView` regression through green tests), a delegate
+    /// shortcut can't catch a checkbox that's actually left disabled/greyed —
+    /// `performClick` is a no-op on a disabled `NSControl`, so if the local row
+    /// were still blocked (a T-GROUPCTL/T-UI-ALLOW regression) this test would
+    /// fail because the click would silently do nothing.
+    func testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "starts out of the set")
+
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        row.test_performEnableClick()   // real enableCheckbox.performClick(_:) dispatch
+
+        XCTAssertTrue(row.test_isEnabledOn, "the checkbox itself flips ON via its own action")
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"),
+                      "a real click joins the Mac into the mixed Selected Devices set")
+        XCTAssertTrue(controller.isSpeakerSelected("office"),
+                      "the AirPlay member stays selected — nothing drops when the Mac joins")
+
+        // Click again (real dispatch) to remove it — same path, both directions.
+        row.test_performEnableClick()
         XCTAssertFalse(row.test_isEnabledOn)
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "a second real click removes it again")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "removing local never touches the AirPlay member")
     }
 
     func testMainOutMasterReflectsCurrentTarget() async throws {
@@ -558,16 +603,29 @@ final class PopoverControllerTests: XCTestCase {
 
     /// A retry while a SECOND device is still connecting: the retry must not
     /// disturb the in-flight device, and both resolve independently.
+    ///
+    /// The `.connecting` checks below read `backend.devices`/the row
+    /// synchronously right after a `tapRetry`/`update()` call — there's no
+    /// event to wait on for "hasn't transitioned yet", so the only lever is
+    /// giving the intervening test/AppKit work (NOT wall-clock bounded — an
+    /// `update()` rebuilds the whole popover, Applications card included) a
+    /// wide margin before each device's scripted timer fires. A prior 0.5s/1.0s
+    /// margin (comfortable for a lone `swift test` run) flaked intermittently
+    /// under `swift test --parallel`'s CPU contention (every other suite is a
+    /// concurrent sibling process) — 2026-07-24: both "connected" observed
+    /// where "connecting" was asserted, on different runs, never in isolation.
+    /// Widening these delays doesn't weaken what's being tested (still-in-
+    /// flight vs. disturbed), only the wall-clock tolerance of the checkpoint.
     func testRetryWhileSecondDeviceConnecting() async throws {
         let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
             "office": ConnectScript(attempts: [
                 .fail(after: 0.05, ConnectionFailure(cause: .refusedOrBusy)),
-                // Retry connects after a comfortable delay so the transient
-                // `.connecting` state is observable after `update()` (which now
-                // rebuilds the Applications card too, taking longer wall-clock).
-                .connect(after: 0.5),
+                // Retry connects after a wide margin so the transient
+                // `.connecting` state stays observable after `update()` even
+                // under `--parallel` contention (see the doc comment above).
+                .connect(after: 3.0),
             ]),
-            "homepod-bed": ConnectScript(attempts: [.connect(after: 1.0)]),
+            "homepod-bed": ConnectScript(attempts: [.connect(after: 6.0)]),
         ])
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -589,8 +647,11 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(homepodDevice.connectionState, .connecting,
                        "the in-flight device was not disturbed by the retry's setOutputSet")
 
-        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
-        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
+        // Timeouts widened to stay above the new 3.0s/6.0s scripted delays
+        // (plus contention headroom) — these calls poll every 20ms until the
+        // predicate holds, so a bigger ceiling is free in the fast path.
+        try await waitForConnectionState(backend, id: "office", timeout: 8) { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed", timeout: 12) { $0 == .connected }
         popover.update(devices: backend.devices)
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connected)
         XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connected)

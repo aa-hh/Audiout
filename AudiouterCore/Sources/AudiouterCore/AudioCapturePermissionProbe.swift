@@ -119,6 +119,28 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
 
     public init() {}
 
+    /// T5: logs the final granted/denied/... verdict this file's audible
+    /// ``probe()`` or silent ``currentStatusSilently()`` produced, and HOW it
+    /// was determined. `site` distinguishes the two callers; `method`
+    /// distinguishes a direct `TCCAccessPreflight` read (fast, no tone, no
+    /// tap beyond a possible cold prompt) from the audible self-tap tone
+    /// fallback (`functionalGrantProbe()`) and from the older CoreGraphics
+    /// Screen-Recording read (`currentStatusSilently()`'s fallback for an
+    /// `.undetermined`/unreadable TCC decision). These are genuinely
+    /// different checks of "is audio capture allowed" that are not
+    /// guaranteed to agree — logging which one answered is exactly the kind
+    /// of asymmetry T5 exists to make visible, alongside
+    /// ``SetupModel``'s reported-vs-actual comparison and the real
+    /// `SystemAudioCaptureTCC.isGranted()` gate the capture coordinators
+    /// actually key tap creation on.
+    private func logVerdict(site: String, _ status: PermissionStatus, method: String) {
+        Telemetry.log(.permission, "probe_verdict", [
+            "site": site,
+            "verdict": status.telemetryDescription,
+            "method": method,
+        ])
+    }
+
     public func probe() async -> PermissionStatus {
         // All Core Audio + the observation sleep run off the main actor.
         await withCheckedContinuation { (continuation: CheckedContinuation<PermissionStatus, Never>) in
@@ -136,11 +158,15 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     private func runProbe() -> PermissionStatus {
         switch SystemAudioCaptureTCC.preflight() {
         case .granted?:
+            logVerdict(site: "CoreAudioTonePermissionProbe.probe", .granted, method: "tcc_preflight")
             return .granted
         case .denied?:
+            logVerdict(site: "CoreAudioTonePermissionProbe.probe", .denied, method: "tcc_preflight")
             return .denied
         case .undetermined?, nil:
-            return functionalGrantProbe()
+            let result = functionalGrantProbe()
+            logVerdict(site: "CoreAudioTonePermissionProbe.probe", result, method: "self_tap_tone")
+            return result
         }
     }
 
@@ -213,13 +239,36 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// which reports the wrong permission on macOS 14.4+ (see the detailed note on
     /// `currentStatusSilently()` below).
     public func currentStatusSilently() -> PermissionStatus? {
+        let site = "CoreAudioTonePermissionProbe.currentStatusSilently"
         switch SystemAudioCaptureTCC.preflight() {
-        case .granted: return .granted
-        case .denied:  return .denied
-        case .undetermined, .none:
-            // Not yet decided, or the private symbol/service is unavailable
-            // (pre-14.4, where the tap grant still lived under Screen Recording).
-            return CGPreflightScreenCaptureAccess() ? .granted : .denied
+        case .granted:
+            logVerdict(site: site, .granted, method: "tcc_preflight")
+            return .granted
+        case .denied:
+            logVerdict(site: site, .denied, method: "tcc_preflight")
+            return .denied
+        case .undetermined:
+            // NOTE (T5 divergence risk): unlike `SystemAudioCaptureTCC.isGranted()`
+            // — the REAL gate the capture coordinators key tap creation on —
+            // which treats a live `.undetermined` TCC decision as flatly
+            // not-granted, THIS silent read falls back to the older
+            // CoreGraphics Screen-Recording check even when the real
+            // `kTCCServiceAudioCapture` decision is merely undetermined
+            // (not unreadable). A stale/unrelated Screen-Recording grant
+            // could make this report `.granted` while `isGranted()` still
+            // reports `false` for the exact same instant — the `method`
+            // field below makes that gap legible instead of silently assumed
+            // away.
+            let verdict: PermissionStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
+            logVerdict(site: site, verdict, method: "cg_screen_recording_fallback_undetermined")
+            return verdict
+        case .none:
+            // The private TCC symbol/service is unavailable (pre-14.4, where
+            // the tap grant lived under Screen Recording only) — this is the
+            // one fallback branch with no live TCC read to disagree with.
+            let verdict: PermissionStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
+            logVerdict(site: site, verdict, method: "cg_screen_recording_fallback_no_tcc_symbol")
+            return verdict
         }
     }
 

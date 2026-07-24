@@ -45,6 +45,21 @@ import AirPlayEngine
 /// an AP1 receiver because it means "no perfect multi-room sync", which is still
 /// true. That flag is no longer an "unsupported" gate; it only advertises the
 /// missing-sync fact, and AP1 devices are free to join mixed groups with AP2.
+
+/// A no-op ``AudioProcessEnumerating`` that reports zero live Core Audio process
+/// objects — the harmless default ``AudioProcessResolver`` behind both
+/// ``PerAppCaptureCoordinator`` and ``NativeCaptureCoordinator`` until an
+/// AppKit-importing layer (`AppDelegate`) supplies the real
+/// `CoreAudioProcessEnumerator`-backed resolver. Mirrors the old
+/// `resolvePID: { _ in nil }` default: no Core Audio call happens, so every
+/// existing test that doesn't pass a resolver explicitly stays exactly as inert
+/// as before.
+public struct NoAudioProcesses: AudioProcessEnumerating {
+    public init() {}
+    public func enumerateProcesses() -> [RawAudioProcess] { [] }
+    public func parentPID(of pid: pid_t) -> pid_t? { nil }
+}
+
 public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringControlling, AppRouteConfiguring, @unchecked Sendable {
 
     // MARK: Injected dependencies (protocols so tests are hermetic)
@@ -110,6 +125,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// mutated after wiring, so no synchronization on the reference is needed.
     public var localPlaybackEngine: LocalPlaybackControlling?
 
+    /// Supplies whether `id` is currently a member of "Selected Devices" — the
+    /// signal T-BACKEND needs to detect "Mac + ≥1 AirPlay" ("play everywhere"),
+    /// since `GroupController.applyRouting` always filters the local device out
+    /// of the `ids` this backend's `setOutputSet` receives (the local Mac is
+    /// never a real engine output). `GroupController` already exposes exactly
+    /// this via its public `isSpeakerSelected(_:)`; `AppDelegate` wires it in
+    /// once both are constructed. Assigned once, before any selection change —
+    /// same discipline as `captureCoordinator`/`localPlaybackEngine` — so no
+    /// synchronization is needed on the reference itself. `nil` in tests / the
+    /// UI-only smoke path, in which case "play everywhere" never activates
+    /// (read as "Mac not selected").
+    public var selectedDevicesQuery: ((String) -> Bool)?
+
+    /// Builds the real delayed-local-sink instance the first time "play
+    /// everywhere" activates (T-BACKEND). `makeBackend(_:)` wires the production
+    /// closure — constructed at 44.1 kHz / 2ch to match the AirPlay engine's own
+    /// format, since T-FANOUT feeds the sink the SAME already-converted PCM it
+    /// hands the engine rather than running a second resample pass. Tests inject
+    /// a spy conforming to ``SyncedLocalSinkControlling``. `nil` in the UI-only
+    /// smoke path, in which case "play everywhere" is inert (same posture as a
+    /// `nil` `captureCoordinator`).
+    public var syncedLocalSinkFactory: (() -> SyncedLocalSinkControlling)?
+
+    /// The constructed sink (real or test spy), built lazily on first enable and
+    /// reused across later disable/re-enable cycles rather than rebuilt every
+    /// time. Confined to `captureControlQueue` — the same serial queue every
+    /// attach/start/stop below runs on.
+    private var syncedLocalSink: SyncedLocalSinkControlling?
+
+    /// Whether "play everywhere" is currently enabled — the last decision made
+    /// by `setOutputSet`'s synced-local-sink reconciliation. Confined to
+    /// `stateQueue` like every other selection-derived flag (`captureRunning`,
+    /// `expectedSelected`); the actual attach/start/stop work it triggers runs
+    /// on `captureControlQueue`.
+    private var syncedLocalSinkEnabled = false
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -126,10 +177,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // `updateAppRoutes(_:excludedBundleIDs:)` is the single external entry point that
     // feeds a fresh routing table in (T7 calls it from AppRoutingController changes).
 
-    /// One process tap per app currently routed to a specific device. `resolvePID`
-    /// is injected (Core can't import AppKit / `NSRunningApplication`); it defaults
-    /// to "nothing resolves", so until T7 threads a real resolver in, `start` lands
-    /// each bundle ID in `.failed(.appNotRunning)` without touching Core Audio.
+    /// One process tap per app currently routed to a specific device. Its
+    /// ``AudioProcessResolver`` is injected (Core can't import AppKit /
+    /// `NSRunningApplication`); the default resolves nothing, so `start` lands
+    /// each bundle ID in `.failed(.appNotRunning)` without touching Core Audio
+    /// until an AppKit-importing layer (`AppDelegate`) supplies the real one.
     private let perAppCapture: PerAppCaptureCoordinator
 
     /// Combines the per-app captures into per-destination mixed streams and owns the
@@ -366,7 +418,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //     (a per-process tap on a dead pid doesn't error or EOF) — the only
     //     detection is `NSWorkspace.didTerminateApplicationNotification`, which
     //     Core can't call itself. `handleAppTerminated(bundleID:)` is the AppKit
-    //     boundary's forwarding target (mirrors the `resolvePID` injection).
+    //     boundary's forwarding target (mirrors the `processResolver` injection).
     //  2. The DEVICE a route targets disappears. Already flows end-to-end through
     //     the existing generic pipeline — `AppRoutingController.handleDeviceUnavailable`
     //     (fired from `PopoverController.update(devices:)`, PLAN decision 7) resets
@@ -598,21 +650,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `DiscoverySource` stay internal-facing (tests inject doubles); no engine or
     /// OwnTone type leaks into the public surface.
     ///
-    /// `resolvePID` maps a bundle ID to the running app's pid (for per-app capture,
-    /// T6). It defaults to "nothing resolves" because Core can't import AppKit; the
-    /// AppKit-importing layer (T7's `AppDelegate`) threads the real
-    /// `NSRunningApplication`-backed resolver in. It flows to BOTH the per-app
-    /// capture coordinator (owned here) and the whole-system `NativeCaptureCoordinator`
-    /// (wired by `makeBackend`, which uses the same closure).
+    /// `processResolver` maps a bundle ID to the FULL set of live Core Audio
+    /// process objects it owns — main process plus every child/helper
+    /// (media/RDD/utility) process a multi-process browser like Firefox actually
+    /// emits audio from (the leak/silence fix). It defaults to a resolver that
+    /// resolves nothing because Core can't import AppKit; the AppKit-importing
+    /// layer (`AppDelegate`) threads the real `NSRunningApplication`-backed one
+    /// in. It flows to BOTH the per-app capture coordinator (owned here) and the
+    /// whole-system `NativeCaptureCoordinator` (wired by `makeBackend`, which
+    /// uses the same resolver).
     public convenience init(
         engine: AirPlayEngine,
         discovery: NativeDiscovery = NativeDiscovery(),
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses())
     ) {
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
-            resolvePID: resolvePID)
+            processResolver: processResolver)
     }
 
     /// Injectable designated initializer (internal — tests pass a spy engine and an
@@ -623,22 +678,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// init (and `makeBackend`) stay unchanged; tests inject a fake and drive the
     /// local row with no audio hardware in the loop.
     ///
-    /// `resolvePID` is threaded into the per-app capture coordinator constructed
-    /// here (T6). Its default (`{ _ in nil }`) keeps the per-app path inert for
-    /// every existing test: with no pid ever resolving, `perAppCapture.start` fails
-    /// fast (`.appNotRunning`) and never opens a Core Audio tap — so the routing
+    /// `processResolver` is threaded into the per-app capture coordinator
+    /// constructed here. Its default (an ``AudioProcessResolver`` over
+    /// ``NoAudioProcesses``) keeps the per-app path inert for every existing
+    /// test: with no process ever resolving, `perAppCapture.start` fails fast
+    /// (`.appNotRunning`) and never opens a Core Audio tap — so the routing
     /// TOPOLOGY (`addOutput(_:streamId:)` bindings + `.routedApps` events), which is
     /// derived purely from the route table, still exercises fully.
     ///
-    /// `perAppCapture` is normally built internally from `resolvePID` (production
-    /// shape); tests that need to script per-app tap behavior (T8: a quit mid-stream,
-    /// a `.processNotYetAudible` failure/recovery) instead construct a
-    /// ``PerAppCaptureCoordinator`` over a fake ``ProcessAudioTap`` themselves and
-    /// pass it in here, bypassing the real Core Audio path entirely — mirrors how
-    /// `engineControl`/`discoverySource` are always doubles in this init.
-    /// `processNotYetAudibleRetryDelay`/`processNotYetAudibleMaxBackoff` (T8) tune
-    /// the capped-exponential retry for a `.processNotYetAudible` capture failure;
-    /// tests shrink the delay so the retry doesn't cost real wall-clock seconds.
+    /// `perAppCapture` is normally built internally from `processResolver`
+    /// (production shape); tests that need to script per-app tap behavior (T8: a
+    /// quit mid-stream, a `.processNotYetAudible` failure/recovery) instead
+    /// construct a ``PerAppCaptureCoordinator`` over a fake ``ProcessAudioTap``
+    /// themselves and pass it in here, bypassing the real Core Audio path
+    /// entirely — mirrors how `engineControl`/`discoverySource` are always
+    /// doubles in this init. `processNotYetAudibleRetryDelay`/
+    /// `processNotYetAudibleMaxBackoff` (T8) tune the capped-exponential retry
+    /// for a `.processNotYetAudible` capture failure; tests shrink the delay so
+    /// the retry doesn't cost real wall-clock seconds.
     /// `captureRetryDelay`/`captureRetryMaxBackoff` (T16, E10) tune the equivalent
     /// backoff for the WHOLE-SYSTEM tap's `.failed` retry — a separate knob since
     /// it's an unrelated subsystem; tests shrink it the same way.
@@ -647,7 +704,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discoverySource: DiscoverySource,
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
@@ -661,13 +718,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.discovery = discoverySource
         self.systemVolume = systemVolume
         self.connectVolumeProvider = connectVolume
-        self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
+        self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(processResolver: processResolver)
         // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
         // built `.unmuted` and with a distinct aggregate-device name so it never
-        // collides with `perAppCapture`. Same injected `resolvePID`. Tests can
+        // collides with `perAppCapture`. Same injected `processResolver`. Tests can
         // script it via `injectedMeteringCapture` (mirrors `injectedPerAppCapture`).
         self.meteringCapture = injectedMeteringCapture
-            ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudiouterMeter", muteBehavior: .unmuted)
+            ?? PerAppCaptureCoordinator(processResolver: processResolver, name: "AudiouterMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
@@ -947,6 +1004,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.captureCoordinator?.onStateChange = { [weak self] state in
                 self?.handleCaptureCoordinatorStateChange(state)
             }
+            // Whole-system capture health (T2). A nominal-sample-rate renegotiation
+            // (opening the Mac's built-in speakers in a Mac+AirPlay synced-local
+            // selection flips the tapped device 44.1↔48 kHz) rebuilds the tap, after
+            // which the process tap keeps delivering buffers but the stream-0 AirPlay
+            // sessions stay pinned to a now-stale RTP timeline and the receivers go
+            // silent forever (Apple-unresolved, Dev Forums 825780). The coordinator
+            // fires `onDeviceRateRebuild` ONLY for that device/rate-caused rebuild —
+            // NOT for a benign exclusion-set rebuild (the synced-local sink attach on
+            // every connect, or an app-route change), which leaves the receivers'
+            // timeline intact. Resetting on the benign rebuild too (the earlier
+            // `.capturing`-count heuristic) fired a redundant removeOutput→addOutput
+            // on every Mac+AirPlay connect — "connects fast, then a long silence
+            // before audio." Wired here like `onLevel` (the coordinator is assigned
+            // before `start()`); it fires from the coordinator's own queue and
+            // `resetAirPlaySessionForWholeSystem` hops to `stateQueue` for the mutation.
+            self.captureCoordinator?.onDeviceRateRebuild = { [weak self] in
+                self?.resetAirPlaySessionForWholeSystem()
+            }
 
             // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
             // Wired here like `onLevel` (the engine is assigned before `start()`);
@@ -968,6 +1043,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
         captureCoordinator?.onStateChange = nil
+        // T2: stop observing the whole-system tap's device/rate rebuilds so the
+        // ordered `captureControlQueue` stop below (which tears the tap down) can't
+        // fire a spurious session reset during teardown.
+        captureCoordinator?.onDeviceRateRebuild = nil
         captureCoordinator?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
@@ -1189,6 +1268,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
+    /// prefers the human-readable ``Device/name`` when the id is currently known
+    /// (falls back to the raw id for a vanished/unknown one), sorted for
+    /// deterministic output (Q6: names in cleartext are the point — a local-only
+    /// diagnostic file, not uploaded anywhere). Pure formatting over an
+    /// already-captured snapshot — takes no lock of its own, so it's safe to call
+    /// from inside any existing critical section.
+    private static func telemetryDeviceList(_ ids: Set<String>, known: [String: Device]) -> String {
+        "[" + ids.sorted().map { known[$0]?.name ?? $0 }.joined(separator: ",") + "]"
+    }
+
     public func setOutputSet(_ ids: Set<String>) {
         // Record the intent and update the per-device coalescing target under the
         // state lock, then kick a per-device converge loop for anything whose
@@ -1196,7 +1286,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // flips for one device overwrite `desiredOn[id]` N times but issue at most
         // one op at a time (root cause 1) — intermediate flips are simply dropped.
         // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
-        let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
+        let (toKick, syncedLocalTransition): ([(id: String, outputID: OutputID)], Bool?) = stateQueue.sync {
+            // T4: captured BEFORE the overwrite below so the Telemetry line at the
+            // end of this critical section can log the actual added/removed diff.
+            let previouslySelected = self.expectedSelected
             self.expectedSelected = ids
 
             // Only ids we can actually stream to — a known discovered receiver
@@ -1235,6 +1328,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if previous != wantOn, !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
+                    // Connect-latency diagnosis (temporary — see AudioDiag): T0 for
+                    // "click to first audio," read alongside the addOutput
+                    // start/resolve timestamps in convergeDevice below.
+                    if wantOn {
+                        AudioDiag.log("CONNECT requested device=\(id)")
+                    }
                 }
             }
             // Ids that vanished from the model but were desired-on: drop their
@@ -1250,7 +1349,61 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
-            return kicks
+
+            // T-BACKEND: "play everywhere" is Mac + ≥1 AirPlay device. `ids` here
+            // IS the AirPlay-only side of that set (`GroupController` never hands
+            // the local device through); the Mac's own membership comes from
+            // `selectedDevicesQuery`, wired externally (AppDelegate). Decided in
+            // this SAME critical section as the capture gate above so a burst of
+            // rapid selection changes settles on the LAST decision only, exactly
+            // like `reconcileCaptureGate` — `nil` below means "no change," so a
+            // repeat decision (e.g. Mac+AirPlay → Mac+2×AirPlay) never re-kicks
+            // the attach/start work.
+            let macSelected = self.selectedDevicesQuery?(Self.localDeviceID) ?? false
+            let wantSyncedLocal = macSelected && !ids.isEmpty
+            var syncedLocalDecision: Bool?
+            if wantSyncedLocal != self.syncedLocalSinkEnabled {
+                self.syncedLocalSinkEnabled = wantSyncedLocal
+                syncedLocalDecision = wantSyncedLocal
+                // Metering fix: re-emit the local device's combined `.level`
+                // immediately on this transition, mirroring the per-app "a
+                // torn-down stream gets a final combined .level" discipline
+                // (`updateRoutedSets`'s `unboundDevices` loop, below). Turning
+                // OFF must push a zero-system-contribution reading right away —
+                // `isMeterable` now returns false for the local device the
+                // instant `syncedLocalSinkEnabled` flips, so this is a genuine
+                // clear, not a stale nonzero value — so the row's meter can't
+                // stick at its last reading after the Mac (or the last AirPlay
+                // device) leaves the mix. Turning ON gets its first real
+                // reading a whole tap-buffer-interval sooner than waiting for
+                // the next `emitLevel` callback. Unconditional (not metering-
+                // gated), matching that same precedent.
+                self.emitCombinedLevel(forDevice: Self.localDeviceID)
+            }
+
+            // T4: log the selection diff + the resulting per-device convergence
+            // target. Read-only over state already captured above, then a single
+            // non-blocking `Telemetry.log` call (formats + hands off to its own
+            // queue, never blocks/calls back) — purely additive, no new locking
+            // and no change to the decisions or their order above.
+            Telemetry.log(.airplay, "set_output_set", [
+                "added": Self.telemetryDeviceList(ids.subtracting(previouslySelected), known: self.known),
+                "removed": Self.telemetryDeviceList(previouslySelected.subtracting(ids), known: self.known),
+                "desiredOn": Self.telemetryDeviceList(
+                    Set(self.order.filter { self.desiredOn[$0] == true }), known: self.known),
+            ])
+
+            return (kicks, syncedLocalDecision)
+        }
+
+        // Runs on `captureControlQueue` — the same serial queue the capture
+        // gate's start/stop above was just enqueued on — so a tap recreate
+        // triggered by `attachSyncedLocalSink` (self-exclude pid change, T-FANOUT)
+        // never races a capture-gate start/stop for the same tap.
+        if let enable = syncedLocalTransition {
+            captureControlQueue.async { [weak self] in
+                self?.applySyncedLocalSinkTransition(enable: enable)
+            }
         }
 
         for (id, outputID) in toKick {
@@ -1258,6 +1411,42 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard let self else { return }
                 await self.convergeDevice(id: id, outputID: outputID)
             }
+        }
+    }
+
+    /// Execute the "play everywhere" enable/disable transition decided by
+    /// `setOutputSet` above (T-BACKEND). Must run on `captureControlQueue`.
+    ///
+    /// Enable order (plan T-BACKEND): construct-if-needed → attach (wires the
+    /// fan-out + tap self-exclude, T-FANOUT) → start → observe lifecycle events
+    /// (T-LIFECYCLE then picks up default-device changes / sleep / wake).
+    /// Disable is the mirror image — stop → stop observing → detach — so the
+    /// sink is fully quiesced before its self-exclude is lifted. Either way, the
+    /// whole-system tap's `.mutedWhenTapped` mode (`NativeCaptureCoordinator`'s
+    /// default) is what actually keeps the Mac's raw output muted whenever ≥1
+    /// AirPlay device is selected (`reconcileCaptureGate`'s `captureRunning`) —
+    /// that mechanism is entirely independent of this sink's own on/off state,
+    /// so disabling "play everywhere" while AirPlay devices stay selected
+    /// correctly leaves the raw system mix muted.
+    private func applySyncedLocalSinkTransition(enable: Bool) {
+        if enable {
+            let sink: SyncedLocalSinkControlling
+            if let existing = syncedLocalSink {
+                sink = existing
+            } else if let factory = syncedLocalSinkFactory {
+                sink = factory()
+                syncedLocalSink = sink
+            } else {
+                return   // no factory wired (tests / UI-only smoke) — inert
+            }
+            attachSyncedLocalSink(sink)
+            try? sink.start()
+            sink.startObservingLifecycleEvents()
+        } else {
+            guard let sink = syncedLocalSink else { return }
+            sink.stop()
+            sink.stopObservingLifecycleEvents()
+            attachSyncedLocalSink(nil)
         }
     }
 
@@ -1634,11 +1823,109 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.rebindRecoveryGen[deviceID] = gen
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
+                    self.emit(.streamHealth(id: deviceID, recovering: true))
+                    // T4: the trigger + generation bump for the rebind-recovery
+                    // chain `enqueueRebindRecovery` is about to start (attempt 1)
+                    // for this device. `scope` is the routed app whose per-app tap
+                    // rebuild caused this — the one fact the attempt trail below
+                    // can't otherwise carry. Non-blocking, same critical section as
+                    // the `AudioDiag.log` call directly above it.
+                    Telemetry.log(.airplay, "session_reset", [
+                        "device": deviceID,
+                        "scope": bundleID,
+                        "stream": "\(stream)",
+                        "gen": "\(gen)",
+                        "trigger": "recapture",
+                    ])
                     self.enqueueRebindRecovery(
-                        deviceID: deviceID, outputID: outputID, stream: streamU,
+                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
                         gen: gen, attempt: 1)
                 }
             }
+        }
+    }
+
+    /// Reset the WHOLE-SYSTEM (stream-0) AirPlay RTP session for every currently
+    /// streaming Selected Device by rebinding it (removeOutput → addOutput = a fresh
+    /// RTSP/RTP session with a clean timeline anchor) — the stream-0 analogue of
+    /// `resetAirPlaySessionForRoutedApp` (T2). Called when the whole-system tap was
+    /// rebuilt (a nominal-sample-rate renegotiation), which leaves every receiver on
+    /// the whole-system mix desynced and permanently silent even though real PCM
+    /// keeps flowing. Iterates `added` (the devices actually streaming stream 0),
+    /// not `expectedSelected`/`desiredOn` — only a device with a live engine session
+    /// has a session to reset. Runs on `stateQueue`.
+    ///
+    /// Single-flight: bumps each device's `rebindRecoveryGen` (shared per-deviceID
+    /// with the per-app path — a device is either whole-system or per-app, never
+    /// both, so one recovery chain per device is exactly right) and cancels any
+    /// pending backoff before enqueuing attempt 1. A rapid rate bounce
+    /// (44.1→48→44.1) fires this again; the second bump supersedes the first
+    /// chain's bookkeeping, so recovery never thrashes.
+    private func resetAirPlaySessionForWholeSystem() {
+        stateQueue.sync {
+            for deviceID in self.added {
+                guard let outputID = self.outputIDs[deviceID] else { continue }
+                // Finding 1: claim the SAME `converging` slot `convergeDevice`
+                // claims for a user-driven select/deselect (see `setOutputSet`'s
+                // `!self.converging.contains(id)` gate) so the recovery's
+                // removeOutput→addOutput can never interleave with a concurrent
+                // convergeDevice op for this device — the two used to be
+                // independent serialization domains touching the same OutputID,
+                // which could leave the engine streaming a device the backend
+                // had already deselected (or silent on a device just selected).
+                // If a real convergeDevice is already running for this device,
+                // bow out: that loop owns the engine ops right now and will
+                // settle the device into whatever state is currently desired —
+                // the next topology change re-binds/re-syncs it idempotently.
+                guard !self.converging.contains(deviceID) else {
+                    AudioDiag.log(
+                        "SKIP whole-system rebind: device=\(deviceID) already converging")
+                    continue
+                }
+                self.converging.insert(deviceID)
+                let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
+                self.rebindRecoveryGen[deviceID] = gen
+                self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                AudioDiag.log("RESET AirPlay session (whole-system): device=\(deviceID) stream=0 (tap rebuilt)")
+                self.emit(.streamHealth(id: deviceID, recovering: true))
+                self.enqueueRebindRecovery(
+                    deviceID: deviceID, outputID: outputID, scope: .wholeSystem,
+                    gen: gen, attempt: 1)
+            }
+        }
+    }
+
+    /// Which AirPlay session a rebind-recovery chain is restoring (T2/T4). Both
+    /// kinds share `rebindRecoveryGen`/`pendingRebindRecoveries` (keyed by deviceID,
+    /// so one device never runs two chains at once) but differ in the engine op they
+    /// issue and the "do we still own this device?" ownership check they use to bow
+    /// out the moment the device is de-routed/deselected.
+    private enum RebindScope: Equatable {
+        /// A per-app redirect's dedicated stream (≥ 1). Ownership:
+        /// `streamBindings[deviceID] == stream`. Re-added via `addOutput(_:streamId:)`.
+        case perApp(stream: UInt32)
+        /// The whole-system "Selected Devices" output set (stream 0). Ownership:
+        /// `added.contains(deviceID)`. Re-added via the single-stream `addOutput(_:)`
+        /// — the exact op `convergeDevice` used to bind it.
+        case wholeSystem
+    }
+
+    /// Whether `deviceID` still owns the session `scope` describes — the guard both
+    /// the completion handler and the backoff re-check use to bow out the moment a
+    /// device is de-routed (per-app) or deselected (whole-system). Must hold
+    /// `stateQueue`.
+    private func stillOwnsRebind(deviceID: String, scope: RebindScope) -> Bool {
+        switch scope {
+        case .perApp(let stream): return self.streamBindings[deviceID] == stream
+        case .wholeSystem:        return self.added.contains(deviceID)
+        }
+    }
+
+    /// A short label for `scope` used in the recovery diagnostics.
+    private static func rebindScopeLabel(_ scope: RebindScope) -> String {
+        switch scope {
+        case .perApp(let stream): return "stream=\(stream)"
+        case .wholeSystem:        return "stream=0 (whole-system)"
         }
     }
 
@@ -1655,75 +1942,165 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// Single-flighted per device via `rebindRecoveryGen`: a newer reset bumps the
     /// gen, so this chain — checking its captured `gen` still matches on completion
-    /// — bows out the moment it is superseded, de-routed, or the device leaves
-    /// per-app routing (`streamBindings[deviceID] != stream`). Called on
+    /// — bows out the moment it is superseded, or the device stops owning the
+    /// session `scope` describes (per-app: `streamBindings[deviceID] != stream`;
+    /// whole-system: `!added.contains(deviceID)`, i.e. deselected). Called on
     /// `stateQueue` (the async body hops back onto `stateQueue` only for the
     /// bookkeeping mutation, never holding it across the engine op).
     private func enqueueRebindRecovery(
-        deviceID: String, outputID: OutputID, stream: UInt32, gen: Int, attempt: Int
+        deviceID: String, outputID: OutputID, scope: RebindScope, gen: Int, attempt: Int
     ) {   // on stateQueue
+        // T4: every call into this function — attempt 1 from
+        // `resetAirPlaySessionForRoutedApp`, or a later attempt recursing from the
+        // backoff `DispatchWorkItem` below — traces back to a tap-rebuild
+        // recapture (the only call site today, so `trigger` is hardcoded rather
+        // than threaded as a parameter — keeps this purely additive). Both call
+        // sites already hold `stateQueue` (see their own `// on stateQueue`
+        // markers), so this is just a format + non-blocking hand-off, same as the
+        // `AudioDiag.log` calls already in this chain — no new locking, no new
+        // await, no reordering of what follows.
+        Telemetry.log(.airplay, "rebind", [
+            "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+            "trigger": "recapture", "outcome": "scheduled",
+        ])
         let prev = self.bindTail
         self.bindTail = Task { [weak self] in
             await prev.value
             guard let self else { return }
-            let ok = await self.performRebindRecovery(outputID: outputID, stream: stream)
-            self.stateQueue.sync {
-                // Superseded by a newer reset, or the device left per-app routing
-                // (unbind / teardown cleared the binding): we no longer own it.
+            let ok = await self.performRebindRecovery(outputID: outputID, scope: scope)
+            // Finding 1: for whole-system scope, every TERMINAL exit of this chain
+            // (bailed-because-superseded/deselected, succeeded, or gave-up) must
+            // release the `converging` slot claimed in
+            // `resetAirPlaySessionForWholeSystem` — and, mirroring
+            // `convergeDevice`'s own defer, immediately re-kick a real
+            // `convergeDevice` if the desired state moved while the slot was
+            // held (e.g. the user re-selected/deselected mid-recovery). The
+            // in-flight backoff-retry path deliberately does NOT release the
+            // slot — the recovery chain is still in progress, and releasing
+            // early would let a concurrent convergeDevice op interleave with
+            // the next attempt's removeOutput/addOutput, reopening the race.
+            let requeue: OutputID? = self.stateQueue.sync {
+                // Superseded by a newer reset, or the device stopped owning this
+                // session (per-app unbind/teardown cleared the binding, or a
+                // whole-system deselect dropped it from `added`): we no longer own it.
                 guard self.rebindRecoveryGen[deviceID] == gen,
-                      self.streamBindings[deviceID] == stream else { return }
+                      self.stillOwnsRebind(deviceID: deviceID, scope: scope) else {
+                    // T4: which guard failed — a newer reset already bumped (or an
+                    // unbind/deselect cleared) `gen`, or ownership of this device's
+                    // session moved elsewhere (a topology change, or — for
+                    // whole-system scope — a concurrent convergeDevice claimed it).
+                    // Read-only over state already under this `stateQueue.sync`; no
+                    // extra locking.
+                    let reason = self.rebindRecoveryGen[deviceID] != gen ? "gen_superseded" : "ownership_changed"
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "superseded", "reason": reason,
+                    ])
+                    if case .wholeSystem = scope {
+                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                    }
+                    return nil
+                }
+                let label = Self.rebindScopeLabel(scope)
                 if ok {
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "succeeded",
+                    ])
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
-                    return
+                    self.emit(.streamHealth(id: deviceID, recovering: false))
+                    if case .wholeSystem = scope {
+                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                    }
+                    return nil
                 }
                 guard attempt < self.maxRebindRecoveryAttempts else {
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "gave_up",
+                    ])
                     AudioDiag.log(
                         "RESET AirPlay session GAVE UP after \(attempt) attempts: "
-                        + "device=\(deviceID) stream=\(stream) — receiver likely gone; "
+                        + "device=\(deviceID) \(label) — receiver likely gone; "
                         + "left unbound-in-engine (re-binds on next topology change)")
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
-                    return
+                    if case .wholeSystem = scope {
+                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                    }
+                    return nil
                 }
                 let delay = self.rebindRecoveryRetryDelay * pow(2.0, Double(attempt - 1))
+                // T4: an explicit 5th outcome beyond the task's four named ones
+                // (scheduled/succeeded/gave-up/superseded) — this attempt failed
+                // but hasn't hit the ceiling, so a backed-off retry is queued.
+                // Without it the trail would jump straight from this attempt's
+                // `scheduled` line to the next attempt's, with no record that this
+                // one failed or why the next is delayed.
+                Telemetry.log(.airplay, "rebind", [
+                    "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                    "trigger": "recapture", "outcome": "retry_scheduled",
+                    "delayMs": "\(Int(delay * 1000))",
+                ])
                 AudioDiag.log(
                     "RESET AirPlay session retry \(attempt + 1)/\(self.maxRebindRecoveryAttempts) "
-                    + "in \(delay)s: device=\(deviceID) stream=\(stream)")
+                    + "in \(delay)s: device=\(deviceID) \(label)")
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
                     self.stateQueue.sync {
                         // Re-check under the lock: still the same generation, still
-                        // bound to this stream, device still discovered.
+                        // owns this session, device still discovered.
                         guard self.rebindRecoveryGen[deviceID] == gen,
-                              self.streamBindings[deviceID] == stream,
-                              let out = self.outputIDs[deviceID] else { return }
+                              self.stillOwnsRebind(deviceID: deviceID, scope: scope),
+                              let out = self.outputIDs[deviceID] else {
+                            // T4: the backed-off retry for `attempt + 1` never got
+                            // to run — state moved on while it was waiting out the
+                            // delay. Without this line the trail goes silent after
+                            // `retry_scheduled` with no explanation.
+                            Telemetry.log(.airplay, "rebind", [
+                                "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt + 1)",
+                                "trigger": "recapture", "outcome": "superseded",
+                                "reason": "state_changed_before_retry_fired",
+                            ])
+                            return
+                        }
                         self.enqueueRebindRecovery(
-                            deviceID: deviceID, outputID: out, stream: stream,
+                            deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1)
                     }
                 }
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 self.pendingRebindRecoveries[deviceID] = work
                 DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+                return nil // still in progress — keep the `converging` slot held
+            }
+            if let requeue {
+                Task { [weak self] in await self?.convergeDevice(id: deviceID, outputID: requeue) }
             }
         }
     }
 
-    /// The observable rebind: stop the device's session then re-add it on `stream`,
-    /// returning whether the re-add SUCCEEDED (T4). The `removeOutput` throw is
-    /// tolerated (the device may not currently be added — a no-op teardown is fine);
-    /// only the `addOutput` result determines success, since that is what actually
-    /// re-establishes the RTP session with a clean timeline anchor.
-    private func performRebindRecovery(outputID: OutputID, stream: UInt32) async -> Bool {
-        AudioDiag.log("engine REBIND(recover) output=\(outputID) stream=\(stream)")
+    /// The observable rebind: stop the device's session then re-add it on the stream
+    /// `scope` selects, returning whether the re-add SUCCEEDED (T4). The
+    /// `removeOutput` throw is tolerated (the device may not currently be added — a
+    /// no-op teardown is fine); only the `addOutput` result determines success, since
+    /// that is what actually re-establishes the RTP session with a clean timeline
+    /// anchor. Whole-system uses the single-stream `addOutput(_:)` (stream 0, the
+    /// exact op `convergeDevice` used); per-app uses `addOutput(_:streamId:)`.
+    private func performRebindRecovery(outputID: OutputID, scope: RebindScope) async -> Bool {
+        let label = Self.rebindScopeLabel(scope)
+        AudioDiag.log("engine REBIND(recover) output=\(outputID) \(label)")
         try? await engine.removeOutput(outputID)
         do {
-            try await engine.addOutput(outputID, streamId: stream)
+            switch scope {
+            case .perApp(let stream): try await engine.addOutput(outputID, streamId: stream)
+            case .wholeSystem:        try await engine.addOutput(outputID)
+            }
             return true
         } catch {
             AudioDiag.log(
-                "engine REBIND(recover) FAILED output=\(outputID) stream=\(stream): \(error)")
+                "engine REBIND(recover) FAILED output=\(outputID) \(label): \(error)")
             return false
         }
     }
@@ -1881,7 +2258,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// app's process quits mid-stream). `AppDelegate` observes
     /// `NSWorkspace.didTerminateApplicationNotification` and calls this with the
     /// terminated app's bundle ID — Core can't observe AppKit notifications itself,
-    /// mirroring the `resolvePID` injection.
+    /// mirroring the `processResolver` injection.
     ///
     /// A no-op unless `bundleID` currently has an active `.device(id:)` route OR is
     /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, which meant a
@@ -1934,7 +2311,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// same fix extended to a relaunched `.currentDevice`-routed app). `AppDelegate`
     /// observes `NSWorkspace.didLaunchApplicationNotification` and calls this; Core
     /// can't observe AppKit notifications itself, mirroring the
-    /// `handleAppTerminated` / `resolvePID` injection pattern.
+    /// `handleAppTerminated` / `processResolver` injection pattern.
     ///
     /// Only acts when `bundleID` currently has an active `.device(id:)` route OR is
     /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, so a "play on this
@@ -2139,6 +2516,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
     /// and stops the loop; the park is cleared by a later discovery/state update or
     /// a user re-toggle (root cause 4).
+    /// Release the `converging` slot for `id` and, if the coalesced target moved
+    /// while the slot was held (a toggle — or a whole-system rebind recovery,
+    /// below — landed mid-op), reclaim the slot and return the output id to kick
+    /// a fresh `convergeDevice` loop for. Shared by `convergeDevice`'s own defer
+    /// AND `enqueueRebindRecovery`'s whole-system completion (Finding 1): both
+    /// hold `converging` as the single serialization domain for a device's
+    /// engine ops, so both release through the same requeue check. Must run on
+    /// `stateQueue`.
+    private func releaseConvergingAndRequeueIfNeeded(id: String) -> OutputID? {
+        self.converging.remove(id)
+        guard !self.failedGate.contains(id),
+              let want = self.desiredOn[id],
+              let out = self.outputIDs[id],
+              want != self.added.contains(id) else { return nil }
+        self.converging.insert(id)
+        return out
+    }
+
     private func convergeDevice(id: String, outputID: OutputID) async {
         defer {
             // Release the in-flight slot. If the target moved again while we were
@@ -2146,13 +2541,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // held), re-kick so we chase it — the release + re-check is atomic under
             // stateQueue so a concurrent setOutputSet can't slip a kick past us.
             let requeue: OutputID? = stateQueue.sync {
-                self.converging.remove(id)
-                guard !self.failedGate.contains(id),
-                      let want = self.desiredOn[id],
-                      let out = self.outputIDs[id],
-                      want != self.added.contains(id) else { return nil }
-                self.converging.insert(id)
-                return out
+                self.releaseConvergingAndRequeueIfNeeded(id: id)
             }
             if let requeue {
                 Task { [weak self] in await self?.convergeDevice(id: id, outputID: requeue) }
@@ -2181,7 +2570,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         try await engine.updateDiscovery(descriptor)
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
+                    // Connect-latency diagnosis (temporary — see AudioDiag): brackets
+                    // the real RTSP/negotiate handshake `addOutput` awaits (device_start
+                    // through the STREAMING completion) — the gap between these two
+                    // lines is the AirPlay receiver's own negotiation time, not
+                    // anything this app controls.
+                    AudioDiag.log("CONNECT addOutput starting device=\(id) output=\(outputID)")
                     try await engine.addOutput(outputID)
+                    AudioDiag.log("CONNECT addOutput RESOLVED (streaming) device=\(id) output=\(outputID)")
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
@@ -2247,6 +2643,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // interim event (e.g. a park) had moved it to `.failed`
                         // while this removal was in flight.
                         self.setConnectionState(.off, for: id)
+                        // Finding 2: the device is leaving the whole-system output
+                        // set — abandon any pending whole-system rebind recovery for
+                        // it, mirroring the per-app precedent (`updateRoutedSets`'s
+                        // unbind path above). Not load-bearing on its own (a surviving
+                        // retry re-checks `stillOwnsRebind`/`added.contains(id)` and
+                        // bows out), but keeps the bookkeeping symmetric and avoids a
+                        // dangling scheduled retry outliving the deselect.
+                        self.rebindRecoveryGen.removeValue(forKey: id)
+                        self.pendingRebindRecoveries.removeValue(forKey: id)?.cancel()
                     }
                 } catch {
                     // Removal failed — best-effort: surface unavailable but do NOT
@@ -2614,6 +3019,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Arm the fallback watchdog only if we're actually waiting on a reconnect.
             self.awaitingWakeReconnect = !desiredIDs.isEmpty
             if self.awaitingWakeReconnect { self.armWakeWatchdog() }
+
+            // T4: log the wake re-converge — which still-desired devices are being
+            // re-kicked. Only reached past the guard above (a real, in-force
+            // suspension being lifted), so this never fires for a stray/duplicate
+            // wake notification with nothing to re-converge. Non-blocking, added
+            // after every decision above with no reordering.
+            Telemetry.log(.airplay, "wake_reconverge", [
+                "desiredOn": Self.telemetryDeviceList(Set(desiredIDs), known: self.known),
+                "kicked": Self.telemetryDeviceList(Set(kicks.map(\.0)), known: self.known),
+            ])
             return kicks
         }
         for (id, outputID) in toKick {
@@ -3501,6 +3916,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         applyMeteringTapDiff(diff)
     }
 
+    // MARK: Synced local sink (T-FANOUT / "play everywhere")
+
+    /// Attach (or detach, with `nil`) the delayed local sink used in "play
+    /// everywhere" mode (T-FANOUT). The whole-system tap fans the SAME captured
+    /// audio it sends the AirPlay engine to this sink, which plays a PTP-delayed
+    /// copy on the Mac's own speakers phase-aligned with the receivers.
+    ///
+    /// CRITICAL (R2 / brief §8): the sink renders through THIS app's own
+    /// `AVAudioEngine`, so the whole-system tap attributes its output to our
+    /// process. We hand the coordinator our own pid (`getpid()`) as the
+    /// render-process identity to EXCLUDE from the tap — otherwise the tap
+    /// re-captures the delayed output and "play everywhere" becomes "play
+    /// everywhere, with a delayed echo of itself." Because the tap is
+    /// `.mutedWhenTapped`, excluding our process also leaves the delayed output
+    /// audible while the raw system mix stays muted — exactly the intent.
+    ///
+    /// T-BACKEND drives WHEN this is called (the selection includes the Mac plus
+    /// ≥1 AirPlay device); this method just wires the sink + self-exclude through
+    /// the capture seam. No-op when no real capture coordinator is wired
+    /// (tests / UI-only smoke).
+    public func attachSyncedLocalSink(_ sink: SyncedLocalPCMSink?) {
+        let renderProcessPID: pid_t? = (sink == nil) ? nil : getpid()
+        captureCoordinator?.setSyncedLocalSink(sink, renderProcessPID: renderProcessPID)
+    }
+
     // MARK: Metering-only tap reconcile (T3, `.noRedirect` source)
 
     /// Compute the metering-only tap start/stop diff and COMMIT the new target set
@@ -3539,16 +3979,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Level emission (T3 — combined per-device MAX)
 
+    /// Whether `device` is genuinely streaming the whole-system mix right now,
+    /// for METERING purposes — the fact `emitLevel`/`emitCombinedLevel` need to
+    /// decide whether `latestSystemRMS` belongs in this device's bar. For every
+    /// AirPlay device this is exactly `Device.isSelected` (a live engine
+    /// session — see `applyEngineState`/`convergeDevice`). The LOCAL device is
+    /// structurally EXCLUDED from that mechanism: `setOutputSet` never adds it
+    /// to `ids`/`outputIDs`/`added` (see "MARK: Current (local) output device
+    /// (BUG B)" above — it has no engine session at all), so
+    /// `known[localDeviceID].isSelected` never becomes true even while the
+    /// synced-local sink is genuinely rendering the same mix to the Mac's own
+    /// speakers (the "Mac + AirPlay" scenario) — the local row's meter was
+    /// permanently silent. Its real "streaming now" fact lives in
+    /// `syncedLocalSinkEnabled` instead, flipped by the SAME "Mac + ≥1 AirPlay"
+    /// decision in `setOutputSet` that starts/stops the sink — and the sink
+    /// renders the identical already-captured PCM this RMS was measured from
+    /// (T-FANOUT), so reusing it is exact, not an approximation. This was a
+    /// pre-existing gap (the synced-local sink and per-device metering shipped
+    /// in separate phases; neither retrofitted the other), not a regression
+    /// from the T1-T3 dropout fixes. Must run on `stateQueue`, like every caller.
+    private func isMeterable(_ device: Device) -> Bool {
+        device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
+    }
+
     /// A whole-system-tap RMS sample (stream_id 0). Store it and re-emit the
-    /// combined `.level` for every Selected + unmuted device (its system
-    /// contribution just changed). On `stateQueue`; gated on metering (belt-and-
-    /// suspenders — the coordinator already only fires `onLevel` while active).
+    /// combined `.level` for every device currently streaming it (``isMeterable``)
+    /// and unmuted (its system contribution just changed). On `stateQueue`; gated
+    /// on metering (belt-and-suspenders — the coordinator already only fires
+    /// `onLevel` while active).
     private func emitLevel(_ rms: Float) {
         stateQueue.async {
             guard self.meteringActive else { return }
             self.latestSystemRMS = rms
             for id in self.order {
-                guard let device = self.known[id], device.isSelected, !device.isMuted else { continue }
+                guard let device = self.known[id], self.isMeterable(device), !device.isMuted else { continue }
                 self.emitCombinedLevel(forDevice: id)
             }
         }
@@ -3578,7 +4042,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Emit `.level` for `id` as the MAX of its whole-system contribution
-    /// (`latestSystemRMS`, only if it's a Selected Device + unmuted) and its SOURCE
+    /// (`latestSystemRMS`, only while ``isMeterable`` + unmuted) and its SOURCE
     /// contribution — the loudest PRE-volume level among the apps `.device`-routed
     /// to it (`latestAppLevel`). A device fed by both shows the larger. Every input
     /// is a source/program level, so no routing/output volume ever attenuates the
@@ -3586,7 +4050,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private func emitCombinedLevel(forDevice id: String) {
         guard let device = known[id] else { return }
-        let systemContribution: Float = (device.isSelected && !device.isMuted) ? latestSystemRMS : 0
+        let systemContribution: Float = (isMeterable(device) && !device.isMuted) ? latestSystemRMS : 0
         var sourceContribution: Float = 0
         for route in lastRoutes where !deadBundleIDs.contains(route.bundleID) {
             if case .device(let deviceID) = route.destination, deviceID == id,
@@ -3795,6 +4259,18 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// the same way it already reacts to `PerAppCaptureCoordinator.onStateChange`.
     /// See ``NativeCaptureCoordinator/onStateChange``.
     var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? { get set }
+
+    /// Fired when the whole-system tap was rebuilt specifically because the tapped
+    /// output device changed or renegotiated its nominal sample rate (T2), so
+    /// ``NativeBackend`` can reset the AirPlay RTP sessions that rebuild leaves
+    /// desynced. Deliberately NOT fired for a benign exclusion-set rebuild (the
+    /// synced-local sink attach on every Mac+AirPlay connect, or an app-route
+    /// change) — resetting there added a redundant RTP re-establish to every
+    /// connect ("connects fast, then a long silence"). See
+    /// ``NativeCaptureCoordinator/onDeviceRateRebuild``. Default get-nil/set-noop
+    /// (below) so a fake that only exercises the capture gate compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real stored property.
+    var onDeviceRateRebuild: (@Sendable () -> Void)? { get set }
     /// Begin capturing system audio. Idempotent.
     ///
     /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers
@@ -3814,13 +4290,48 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// that only exercises the capture gate compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real implementation.
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)
+
+    /// Attach/detach the delayed local sink fan-out (T-FANOUT) and the pid of the
+    /// process that renders its output. A non-nil sink turns the fan-out on and
+    /// adds `renderProcessPID` to the whole-system tap's exclusion set so the
+    /// sink's own output isn't re-captured as an echo (R2); `nil` turns both off.
+    /// Default no-op so a capture-gate-only fake compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
 }
 
 extension CaptureControlling {
+    /// Default no-op (T2) so a fake that doesn't exercise the whole-system tap's
+    /// lifecycle compiles unchanged; ``NativeCaptureCoordinator`` provides the real
+    /// stored property. A conformer that never fires it (get returns `nil`, set is
+    /// dropped) is a faithful stand-in for a test that only drives the capture gate.
+    var onDeviceRateRebuild: (@Sendable () -> Void)? {
+        get { nil }
+        set { }
+    }
+
     /// Default no-op (T-GATE) so a fake that doesn't exercise the metering gate
     /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setMeteringActive(_ active: Bool) {}
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {}
+    /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
+    /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
+    func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
+
+/// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
+/// fan-out target itself (``SyncedLocalPCMSink``, T-FANOUT) plus start/stop and
+/// the T-LIFECYCLE device-change/sleep-wake observers. Lets ``NativeBackend``
+/// own WHEN "play everywhere" (Mac + ≥1 AirPlay device) turns on/off against
+/// either the real ``SyncedLocalSink`` or a test spy, with no `AVAudioEngine`
+/// in the loop for the enable/disable unit tests.
+public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
+    func start() throws
+    func stop()
+    func startObservingLifecycleEvents()
+    func stopObservingLifecycleEvents()
+}
+
+extension SyncedLocalSink: SyncedLocalSinkControlling {}

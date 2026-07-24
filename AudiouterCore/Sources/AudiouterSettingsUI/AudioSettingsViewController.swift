@@ -117,6 +117,11 @@ public final class AudioSettingsViewController: NSViewController {
 
     // Advanced › Audio buffer state (all nil/untouched when `latency` is nil).
     private let bufferPopup = NSPopUpButton()
+    // Advanced › Sync offset state (T-OFFSET-UI; mounts alongside the buffer
+    // control — same `latency != nil` native-backend gate, since the offset only
+    // feeds `SyncedLocalSink`, a native-only feature).
+    private let syncOffsetSlider = NSSlider()
+    private let syncOffsetValueLabel = NSTextField(labelWithString: "")
     private let applyButton = NSButton()
     private let applySpinner = NSProgressIndicator()
     private let applyStatusLabel = NSTextField(labelWithString: "")
@@ -331,6 +336,16 @@ public final class AudioSettingsViewController: NSViewController {
         "\(msFormatter.string(from: NSNumber(value: ms)) ?? String(ms)) ms"
     }
 
+    /// Format a signed offset as a bare, locale-aware "+N ms" / "−N ms" / "0 ms"
+    /// (numeric by design, same house rule as ``msLabel(_:)`` — no named preset
+    /// text). Unlike ``msLabel(_:)`` this can be negative, so the sign is made
+    /// explicit rather than relying on the formatter's default minus glyph.
+    private static func syncOffsetLabel(_ ms: Int) -> String {
+        let magnitude = msFormatter.string(from: NSNumber(value: abs(ms))) ?? String(abs(ms))
+        let sign = ms > 0 ? "+" : (ms < 0 ? "\u{2212}" : "")
+        return "\(sign)\(magnitude) ms"
+    }
+
     /// The Advanced sub-section's stacked views: hairline + "Advanced" label +
     /// the Audio buffer row (+ env-override note, or the Apply CTA row).
     private func makeAdvancedSectionViews() -> [NSView] {
@@ -372,6 +387,8 @@ public final class AudioSettingsViewController: NSViewController {
             subtitle: "A smaller buffer reacts faster to play and pause. "
                 + "A larger buffer resists Wi-Fi hiccups and dropouts.",
             control: bufferPopup))
+
+        views.append(contentsOf: makeSyncOffsetSectionViews())
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
@@ -491,6 +508,52 @@ public final class AudioSettingsViewController: NSViewController {
         if !isApplying {
             applyStatusLabel.isHidden = true
         }
+    }
+
+    // MARK: Advanced › Sync offset (T-OFFSET-UI)
+
+    /// The sync-offset sub-row: a slider (matching ``AppSettings/minSyncOffsetMs``…
+    /// ``AppSettings/maxSyncOffsetMs``) + a bare "±N ms" value label, same layout
+    /// idiom as the connect-volume row above. Applies IMMEDIATELY on change
+    /// (persist only) — no CTA, unlike the Audio buffer control: this is a static
+    /// bias `SyncedLocalSink` re-reads live at its next connect/rebuild, not a
+    /// value that requires tearing down a live session to take effect.
+    private func makeSyncOffsetSectionViews() -> [NSView] {
+        syncOffsetSlider.translatesAutoresizingMaskIntoConstraints = false
+        syncOffsetSlider.minValue = Double(AppSettings.minSyncOffsetMs)
+        syncOffsetSlider.maxValue = Double(AppSettings.maxSyncOffsetMs)
+        syncOffsetSlider.integerValue = settings.syncOffsetMs
+        syncOffsetSlider.isContinuous = true
+        syncOffsetSlider.target = self
+        syncOffsetSlider.action = #selector(syncOffsetChanged)
+        syncOffsetSlider.setAccessibilityLabel("Local speaker sync offset")
+        syncOffsetSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+
+        syncOffsetValueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        syncOffsetValueLabel.textColor = .secondaryLabelColor
+        syncOffsetValueLabel.alignment = .right
+        syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(settings.syncOffsetMs)
+        // Fixed width so the row doesn't shift as sign/digit count changes.
+        syncOffsetValueLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+
+        let control = NSStackView(views: [syncOffsetSlider, syncOffsetValueLabel])
+        control.orientation = .horizontal
+        control.alignment = .centerY
+        control.spacing = 8
+        control.translatesAutoresizingMaskIntoConstraints = false
+
+        return [SettingsForm.row(
+            title: "Local speaker sync offset",
+            subtitle: "Fine-tune the delay on this Mac's own speakers when playing "
+                + "in sync with AirPlay devices. Raise it if the Mac plays ahead of "
+                + "your speakers, lower it if it plays behind.",
+            control: control)]
+    }
+
+    @objc private func syncOffsetChanged() {
+        let ms = syncOffsetSlider.integerValue
+        syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(ms)
+        settings.syncOffsetMs = ms
     }
 
     // MARK: List
@@ -769,6 +832,41 @@ public final class AudioSettingsViewController: NSViewController {
     public func test_apply() async {
         _ = view
         await performApply()
+    }
+
+    // MARK: Test-support hooks (Advanced › Sync offset — T-OFFSET-UI)
+
+    /// Whether the sync-offset section mounted (mirrors ``test_hasLatencySection``
+    /// — same native-backend gate).
+    public var test_hasSyncOffsetSection: Bool {
+        _ = view
+        return latency != nil
+    }
+
+    /// The slider's current ms value (mirrors the persisted setting).
+    public var test_syncOffsetMs: Int {
+        _ = view
+        return syncOffsetSlider.integerValue
+    }
+
+    /// The trailing "±N ms" label text.
+    public var test_syncOffsetValueLabel: String {
+        _ = view
+        return syncOffsetValueLabel.stringValue
+    }
+
+    /// The slider's `[min, max]` bounds — the UI can never select outside these.
+    public var test_syncOffsetBounds: (min: Int, max: Int) {
+        _ = view
+        return (Int(syncOffsetSlider.minValue), Int(syncOffsetSlider.maxValue))
+    }
+
+    /// Simulate the user dragging the sync-offset slider to `ms` (persists
+    /// immediately, same as a real drag).
+    public func test_setSyncOffset(ms: Int) {
+        _ = view
+        syncOffsetSlider.integerValue = ms
+        syncOffsetChanged()
     }
 }
 

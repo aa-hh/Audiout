@@ -385,7 +385,13 @@ let package = Package(
         .executableTarget(
             name: "engine-probe",
             dependencies: ["AirPlayEngine", "EngineProbeParsing"],
-            path: "Sources/engine-probe"
+            path: "Sources/engine-probe",
+            // Restated for the same reason the AirPlayEngine target below needs
+            // it: a C target's cSettings.unsafeFlags don't propagate to a
+            // dependent Swift target's own module resolution.
+            swiftSettings: [
+                .unsafeFlags(swiftClangImporterFlags),
+            ]
         ),
 
         // The privileged root PTP helper's executable (T2,
@@ -440,7 +446,11 @@ let package = Package(
         .testTarget(
             name: "AirPlayEngineTests",
             dependencies: ["AirPlayEngine", "EngineProbeParsing", "PTPHelperTestSupport"],
-            path: "Tests/AirPlayEngineTests"
+            path: "Tests/AirPlayEngineTests",
+            // Same restatement as engine-probe above.
+            swiftSettings: [
+                .unsafeFlags(swiftClangImporterFlags),
+            ]
         ),
     ]
 )

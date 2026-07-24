@@ -58,6 +58,26 @@ public struct EngineConfig: Sendable {
     /// Default matches OwnTone's 2250 ms. See docs/latency-analysis.md.
     public var startBufferMs: Int
 
+    /// Mirrors the vendored sender's `AIRPLAY_AUDIO_LATENCY_MS`
+    /// (`sender/airplay.c:94`, applied at `airplay.c:1229` as
+    /// `output_buffer_samples = (buffer_duration_ms − AIRPLAY_AUDIO_LATENCY_MS) *
+    /// sample_rate / 1000`) — the fixed receiver-side minimum latency baked into
+    /// every AirPlay 2 session. Not configurable from the Swift side; kept here
+    /// as a named constant so `presentationDelayMs` below isn't a bare `250`
+    /// duplicated from the C source (T-ENGINE-DELAY, R4).
+    public static let airplayAudioLatencyMs = 250
+
+    /// The effective presentation delay — how long after a sample's `pts` it
+    /// actually plays out — derived from `startBufferMs` the SAME way the
+    /// vendored sender derives `output_buffer_samples` (`airplay.c:1229`):
+    /// `startBufferMs − airplayAudioLatencyMs`. A future local-output sink
+    /// should read this (or ``AirPlayEngine/currentPresentationDelayMs()`` for
+    /// the live, possibly-adjusted value) rather than hardcoding its own copy
+    /// of the 250 ms constant.
+    public var presentationDelayMs: Int {
+        startBufferMs - EngineConfig.airplayAudioLatencyMs
+    }
+
     /// A per-install stable value that seeds the device id / PTP clock-id hash
     /// (`libhash`), so two installs on one LAN with the same `clientName`
     /// advertise distinct ids (first-light backlog #5.1). Callers should pass
@@ -179,10 +199,6 @@ public actor AirPlayEngine {
     /// `start()`/`enterHeadlessTestMode`, cancelled by `stop()`.
     private var stateReconcileTask: Task<Void, Never>?
 
-    /// Placeholder for the synced local Core Audio sink (SPEC §8.1). Not
-    /// implemented in T-API-1 — see ``localOutput``.
-    private var localOutputEnabled = false
-
     // Write-cadence deficit/overrun tracker (T-ENG-CADENCE-1, first-light
     // backlog #4). Lives off the actor so the hot `write(pcm:pts:)` path (which
     // is `nonisolated` on purpose, see below) can update it without an actor
@@ -283,6 +299,18 @@ public actor AirPlayEngine {
         let apply: () -> Void = { outputs_set_buffer_duration_ms(UInt64(max(0, ms))) }
         if issueOverride != nil { apply() }
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
+    }
+
+    /// The presentation delay actually in force right now —
+    /// ``currentStartBufferMs`` (which tracks ``setStartBufferMs(_:)``, not
+    /// just the original `config`) minus the vendored sender's fixed
+    /// `AIRPLAY_AUDIO_LATENCY_MS` (``EngineConfig/airplayAudioLatencyMs``).
+    /// This is the SAME value the vendored sender uses to schedule playout
+    /// (`airplay.c:1229`) — a future consumer (e.g. a synced local-output
+    /// sink) should read it here rather than duplicating the formula against
+    /// a stale `config.startBufferMs` snapshot.
+    public func currentPresentationDelayMs() -> Int {
+        currentStartBufferMs - EngineConfig.airplayAudioLatencyMs
     }
 
     // MARK: Backward-compatible scaffold probe (kept so T-BUILD-1 tests pass)
@@ -1197,26 +1225,6 @@ public actor AirPlayEngine {
         cadence.reset()
     }
 
-    // MARK: - localOutput placeholder (SPEC §8.1)
-
-    /// The synced local Core Audio endpoint (SPEC §8.1): a local sink that plays
-    /// the same audio in lock-step with the AirPlay receivers. NOT implemented in
-    /// T-API-1 — this is the API surface + TODO so a later task can fill it in
-    /// without redesigning the engine.
-    ///
-    /// TODO(later task): implement a Core Audio output unit driven off the same
-    /// PTP-derived clock the AirPlay sessions use, so local + remote stay in
-    /// sync. For now this only toggles a flag; no audio is produced locally.
-    public var localOutput: LocalOutputSink {
-        LocalOutputSink(isEnabled: localOutputEnabled)
-    }
-
-    /// Enable/disable the (not-yet-implemented) local sink. Records intent only.
-    public func setLocalOutputEnabled(_ enabled: Bool) {
-        localOutputEnabled = enabled
-        // TODO(later task): start/stop the Core Audio unit here.
-    }
-
     // MARK: - Shared op driver (arm -> issue -> await completion)
 
     /// The common "issue a device_* op and await its single deferred completion"
@@ -1459,15 +1467,6 @@ public actor AirPlayEngine {
         knownOutputs[id] = .stopped
         return id
     }
-}
-
-/// The synced local Core Audio sink placeholder (SPEC §8.1). Surface only.
-public struct LocalOutputSink: Sendable {
-    /// Whether the app has asked for local output. Always reflects intent;
-    /// actual audio is not produced until the later Core Audio task lands.
-    public let isEnabled: Bool
-    /// Always false in T-API-1 — the sink is a placeholder.
-    public var isImplemented: Bool { false }
 }
 
 /// Fans the C device-state hook (`outputs_engine_state`, shims/outputs.c) out to

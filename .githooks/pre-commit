@@ -69,7 +69,7 @@ fi
 # ---------------------------------------------------------------------------
 # GUARD 3 (WARN-ONLY): new test code must not reach cross-process shared state.
 #
-# `swift test --parallel` (the default full-run command — see
+# `swift test --parallel --num-workers 4` (the default full-run command — see
 # AudiouterCore/AGENTS.md) runs each test CLASS in its own process. Processes
 # share nothing in memory, but they DO share `UserDefaults.standard` (one
 # on-disk plist) and a fixed `FileManager.default.temporaryDirectory` path. Two
@@ -133,8 +133,8 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     echo "" >&2
     echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
-    echo "  (swift test --parallel) before commit. ~70s warm; --no-verify to skip." >&2
-    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel >&2 ); then
+    echo "  (swift test --parallel --num-workers 4) before commit. ~70s warm; --no-verify to skip." >&2
+    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel --num-workers 4 >&2 ); then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2

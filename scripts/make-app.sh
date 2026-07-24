@@ -51,8 +51,17 @@ LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network 
 # the AirPlayEngine package, not AudiouterCore — a separate `swift build`
 # invocation below. Label MUST equal the LaunchDaemons plist's own filename
 # (SMAppService.daemon(plistName:) resolves it by exact name match).
+#
+# BUNDLE_ID-derived (not hardcoded): PTPHelperService.swift's default
+# plistName mirrors this exact derivation (Bundle.main.bundleIdentifier +
+# ".ptphelper.plist"), so a side-by-side dev build under a distinct
+# BUNDLE_ID registers its OWN daemon identity instead of colliding with
+# another Audiouter copy that already claimed "com.audiouter.Audiouter.ptphelper"
+# (2026-07-24 live-testing bug: the loser's SMAppService.register() silently
+# no-ops instead of throwing, so the daemon never shows up in Login Items at
+# all for the losing copy). Default BUNDLE_ID unset ⇒ identical to before.
 HELPER_EXECUTABLE="ptp-helper"
-HELPER_LABEL="com.audiouter.Audiouter.ptphelper"
+HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
@@ -130,8 +139,17 @@ if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
 fi
 
 echo "==> Building $EXECUTABLE (release)"
-swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
-BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
+# --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
+# default for `swift build`, but it doesn't forward a C target's cSettings
+# unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths for libevent/
+# libsodium/libgcrypt/libplist) into the clang module dependency scan used by
+# Swift targets that `import CAirPlayEngine` — so <event2/thread.h> fails to
+# resolve and the build errors out with "could not build module
+# 'CAirPlayEngine'". The deprecated native engine still merges those flags
+# correctly. Pin it explicitly until Package.swift's header search paths are
+# restructured to survive the new engine (or SwiftPM fixes the propagation).
+swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
+BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
@@ -146,9 +164,9 @@ echo "==> Building $HELPER_EXECUTABLE (release)"
 # carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
 # it, which is fine — the section only matters to SMAppService registration.
 test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
-swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
+swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
-HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
+HELPER_BIN_DIR="$(swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
 
@@ -165,14 +183,15 @@ cp "$BUILT_HELPER" "$MACOS_DIR/$HELPER_EXECUTABLE"
 chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 
 # --- SMAppService launchd daemon plist -------------------------------------
-# Ships from scripts/ptp-helper.plist verbatim (see that file for the SMAppService
-# shape rationale — ptp-helper-design.md §2.2). The filename here MUST equal
-# Label + ".plist"; SMAppService.daemon(plistName:) resolves the plist by that
-# exact name, not by content.
+# Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
+# real BUNDLE_ID (see that file for the SMAppService shape rationale —
+# ptp-helper-design.md §2.2, and the BUNDLE_ID-derivation rationale). The
+# filename here MUST equal Label + ".plist"; SMAppService.daemon(plistName:)
+# resolves the plist by that exact name, not by content.
 echo "==> Installing LaunchDaemons plist"
 test -f "$HELPER_PLIST_SOURCE" || { echo "error: helper plist not found at $HELPER_PLIST_SOURCE" >&2; exit 1; }
 mkdir -p "$LAUNCH_DAEMONS_DIR"
-cp "$HELPER_PLIST_SOURCE" "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
+sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$HELPER_PLIST_SOURCE" > "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
 
 # --- Bundle Homebrew dylibs (opt-in) ---------------------------------------
 # The executable currently links Homebrew dylibs (libevent, libsodium,

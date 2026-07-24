@@ -18,10 +18,17 @@ enum AudioDiag {
     private static let queue = DispatchQueue(label: "AudioDiag")
     /// Enabled flag read once; lets hot paths skip the closure allocation.
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["AIRPLAY_AUDIO_DIAG"] != nil
+    /// Reference instant every line's `[+N.NNNs]` prefix is measured from (first
+    /// touch of this enum, i.e. effectively process start) — lets two log lines
+    /// be subtracted by eye to read an elapsed duration between pipeline stages
+    /// (e.g. connect-latency diagnosis) without threading explicit timers through
+    /// call sites.
+    private static let startUptimeNanos = DispatchTime.now().uptimeNanoseconds
 
     static func log(_ message: @autoclosure () -> String) {
         guard isEnabled, let handle else { return }
-        let line = message() + "\n"
+        let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - startUptimeNanos) / 1_000_000_000
+        let line = String(format: "[+%8.3fs] ", elapsedSeconds) + message() + "\n"
         queue.async { handle.write(Data(line.utf8)) }
     }
 

@@ -12,8 +12,8 @@ import AudioToolbox
 #endif
 
 /// The seam ``NativeBackend`` drives to play a `.currentDevice`-routed app's
-/// audio locally on the Mac's real default output device as an INDEPENDENT
-/// stream with its own volume (Bug T2). It is the local-playback analogue of
+/// audio locally on the Mac's built-in speakers as an INDEPENDENT stream with
+/// its own volume (Bug T2). It is the local-playback analogue of
 /// ``AppRouteMixer`` + ``EngineControlling``: where the mixer sums per-app
 /// captures into AirPlay streams and the engine sends them to a receiver, this
 /// takes the SAME per-app captured buffers and renders them to the Mac's own
@@ -98,92 +98,39 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 
 /// The concrete ``LocalPlaybackControlling``: an `AVAudioEngine` graph with one
 /// ``AVAudioPlayerNode`` per `.currentDevice` app, each connected to the engine's
-/// main mixer, playing to the Mac's real default output device (with the one
+/// main mixer, playing to the Mac's real default output device (subject to the
 /// anti-feedback guard below).
 ///
-/// ## Follow the real default output — EXCEPT when it's an AirPlay endpoint
-/// A "Current Device" pick means "play here, on the Mac itself." The engine pins
-/// its output (`outputNode.auAudioUnit.setDeviceID`) to the Mac's REAL current
-/// default output — `kAudioHardwarePropertyDefaultOutputDevice`, the same
-/// selector the capture side reads (house rule, AGENTS.md) — so a user who has
-/// legitimately set Bluetooth headphones or a USB DAC as their Mac's output
-/// hears "Current Device" apps on THAT hardware, not wrongly forced onto the
-/// built-in speakers. ``resolveLocalOutputDeviceID()`` performs the resolution;
-/// ``shouldFollowRealDefault(transportType:)`` is its pure decision.
+/// ## Follow the real default output, EXCEPT AirPlay/virtual (anti-feedback)
+/// A "Current Device" pick means "play here, where I'm actually listening" — so
+/// playback follows the Mac's real default output device
+/// (`kAudioHardwarePropertyDefaultOutputDevice`): Bluetooth headphones, USB, HDMI,
+/// the built-in speakers, whatever the user has actually selected. The engine
+/// resolves that target (``resolveOutputDeviceID()``) and pins the output via
+/// `outputNode.auAudioUnit.setDeviceID`.
 ///
-/// The ONE refusal is the genuine feedback-loop case: if that default output is
-/// itself an AirPlay endpoint (`kAudioDeviceTransportTypeAirPlay`), the engine
-/// does NOT follow it — it falls back to ``builtInOutputDeviceID()`` (exactly
-/// today's behavior in that one case). Sending local playback to an AirPlay
-/// default would defeat "play here on the Mac" AND could feed the whole-system
-/// AirPlay tap in a loop. Any failed read (no default resolvable, unreadable
-/// transport type) falls back to built-in too: uncertainty must never let us
-/// follow a possibly-AirPlay default into a loop. If neither a followable
-/// default nor a built-in device resolves, the engine keeps whatever hardware
-/// default `AVAudioEngine` chose (best effort).
+/// ANTI-FEEDBACK GUARD: it REFUSES to follow a default output device whose Core
+/// Audio TRANSPORT TYPE is AirPlay or virtual/aggregate, and stays on the safe
+/// local target (the built-in speakers) instead. Those transports are exactly the
+/// ones this app may itself be streaming the whole-system mix into (the user is
+/// streaming the system to Sonos, or the default aggregates an AirPlay subdevice)
+/// — rendering local playback there would loop it straight back into the capture.
+/// If neither a followable default nor a built-in device resolves, it falls back
+/// to whatever hardware default `AVAudioEngine` chose (best effort).
 ///
-/// NB — what an AirPlay *default* can (and can't) mean here: this app NEVER sets
-/// the system default output device. It only ever TAPS/captures whatever the
-/// user or macOS already chose (its own capture aggregates are
-/// `kAudioAggregateDeviceIsPrivateKey`, never selectable as a system output; and
-/// grep confirms no `AudioObjectSetPropertyData` on the default-output selector
-/// anywhere in the package). So an AirPlay *default* observed here can only be a
-/// macOS-native AirPlay pick (System Settings ▸ Sound ▸ choosing an AirPlay
-/// receiver as output), which macOS supports entirely outside this app — the
-/// guard protects against THAT, never against anything this app itself does to
-/// the default device (it does nothing).
+/// The target is resolved once per COLD start and re-resolved on the next one
+/// (`configuredDevice` is reset whenever the engine is stopped — `stop()` and the
+/// last-app-out branch of ``removeApp(bundleID:)``). `setDeviceID` runs while the
+/// engine is stopped (before `engine.start()`), which is the safe time to re-pin;
+/// there is deliberately NO live re-pin while players are running — runtime device
+/// re-routing is the historically fragile path this class guards against, so a
+/// mid-session default-output switch is only picked up the next time local
+/// playback starts fresh.
 ///
-/// ## Known live-behaviour findings (T5 adversarial review, 2026-07-24) — NOT
-/// yet resolved; documented so a live tester and future maintainer expect them.
-///   - **One extra reconnect ~300 ms after every output-device switch (new to
-///     the follow-real-default change).** `pinResolvedOutputDevice()` runs inside
-///     config-change recovery and calls `setDeviceID`, which itself posts an
-///     `AVAudioEngineConfigurationChange` (this class asserts that behaviour
-///     above) -> a second debounced recovery. It SELF-TERMINATES after two cycles
-///     (the compare-before-set skips the redundant re-pin), so the cost is one
-///     brief audible tick per switch, not a hang -- the same accepted-glitch class
-///     as the ~1 s reconnect on a routing-set change. Termination rests on
-///     `resolveLocalOutputDeviceID()` eventually agreeing with the
-///     `auAudioUnit.deviceID` readback; there is no iteration cap, so a device
-///     that persistently fails to apply yet still perturbs could in principle
-///     re-pin at ~3 Hz. Not observed; the live test should confirm whether
-///     `setDeviceID` posts a config change on real hardware at all (if it does
-///     NOT, this finding is moot AND the compare-before-set guards nothing -- one
-///     of the two is true).
-///   - **No-built-in fallback fails OPEN to an AirPlay default (PRE-EXISTING,
-///     not introduced by this change).** On a Mac with NO built-in output
-///     (Studio/Pro/headless) whose default IS a macOS-native AirPlay pick:
-///     resolve refuses AirPlay -> `builtInOutputDeviceID()` returns nil -> the pin
-///     is skipped -> the engine renders to its own unpinned default, which is that
-///     AirPlay device -- the very feedback case the guard exists to prevent. The
-///     OLD hard-pin-built-in code had the identical "no built-in -> don't pin ->
-///     engine on its default" behaviour, so this is a latent pre-existing gap, not
-///     a regression. Correct resolution has a PRODUCT component ("play on this
-///     Mac" is ill-defined on a Mac with no built-in speaker) -- deferred to a
-///     decision + live confirmation, not fixed blind on this fragile path.
-///   - Transport-type alone can't detect a VIRTUAL device bridging to AirPlay
-///     (BlackHole/Loopback-style, `kAudioDeviceTransportTypeVirtual`, so followed).
-///     Real but niche; won't affect a normal Sonos/HomePod test.
-///
-/// ## Following stays current via the EXISTING config-change recovery path
-/// The initial pin happens once, in ``configureOutputDevice()`` (guarded by
-/// `configuredDevice`, from `startEngineOnGraphQueue`). To keep "follow the real
-/// default" true OVER TIME — e.g. the user unplugs their Bluetooth headphones
-/// mid-playback, or flips the System Settings output — the engine re-resolves
-/// and re-pins inside ``handleConfigurationChangeOnGraphQueue()``, deliberately
-/// NOT via a new device-change listener. This is the minimal correct hook: a
-/// device unplug / default-output switch ALREADY fires an
-/// `AVAudioEngineConfigurationChange` on its own (that notification is precisely
-/// why the recovery path exists and stops the engine), so re-running the
-/// resolution there keeps the pin current with zero parallel live-monitoring
-/// infrastructure. ``pinResolvedOutputDevice()`` compares-before-setting (like
-/// the capture side's ``TapRebuildDecision`` device guard) so a redundant re-pin
-/// to the same device can't itself spin a config-change storm.
-///
-/// This is distinct from the per-app CAPTURE selector rule only in the AirPlay
-/// guard: CAPTURE always follows `kAudioHardwarePropertyDefaultOutputDevice`
-/// (house rule) because it must tap wherever the app actually plays; PLAYBACK
-/// follows the same selector too, but refuses the one AirPlay case above.
+/// This mirrors the per-app CAPTURE selector rule (the tap follows
+/// `kAudioHardwarePropertyDefaultOutputDevice`, house rule / AGENTS.md), with the
+/// transport-type guard added so PLAYBACK never chases a remote/virtual default it
+/// might be feeding.
 ///
 /// ## Sample-rate conversion is the engine's job, not ours
 /// Each player node is connected to the main mixer using that app's real tap
@@ -247,6 +194,10 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private let graphQueue = DispatchQueue(label: "com.airplaycontroller.localplayback.graph")
     private var nodes: [String: AppNode] = [:]
     private var engineRunning = false
+    /// Whether the output device has been resolved + pinned for the current
+    /// engine run. Reset to `false` whenever the engine is stopped, so each COLD
+    /// start re-resolves the follow target against the CURRENT default output
+    /// device (see the class note). Touched only on `graphQueue`.
     private var configuredDevice = false
     /// Whether per-app RMS metering should be computed and forwarded via
     /// ``onAppLevel`` (T10 — the Current-Device app-bar meter). Guarded by
@@ -256,41 +207,32 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// `NativeCaptureCoordinator.meteringActive`: the popover isn't necessarily
     /// visible yet when an app's local player is first added).
     private var meteringActive = false
+    /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
+    private var configChangeObserver: NSObjectProtocol?
     /// Test-only counter: how many times the debounced config-change handler has
     /// actually fired — i.e. how many times `handleConfigurationChangeOnGraphQueue()`
     /// ran — incremented in ``scheduleConfigChangeDebounce()`` right before calling
-    /// it. Guarded by `stateLock`, exactly like `meteringActive`: read from the
-    /// test's own thread via ``test_configChangeHandlerFireCount``, so (unlike
-    /// `configChangeDebounceWorkItem` below) it needs real cross-thread safety, not
-    /// just graphQueue confinement. Production code never reads it.
+    /// it. Guarded by `stateLock`, read from the test's own thread via
+    /// ``test_configChangeHandlerFireCount``. Production code never reads it.
     private var configChangeHandlerFireCount = 0
-    /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
-    private var configChangeObserver: NSObjectProtocol?
     /// How long to wait, after the LAST `AVAudioEngineConfigurationChange`
     /// notification in a burst, before actually reconnecting (trailing-edge
-    /// debounce — see ``scheduleConfigChangeDebounce()``). Redirect churn
-    /// (routing/unrouting several apps in quick succession) creates/destroys a
-    /// Core Audio tap+aggregate device PER APP, and each one fires its own
-    /// notification; un-debounced, N notifications in a burst would drive N
-    /// independent full engine stop/reconnect/restart cycles — wasteful, and each
-    /// stop/start is audible-glitch risk during active local playback — when one
-    /// at the end would do. 300 ms comfortably exceeds the gap between
-    /// notifications within one churn burst, while still recovering a single,
-    /// isolated config change promptly.
+    /// debounce, T11). Redirect churn creates/destroys a Core Audio tap+aggregate
+    /// device PER APP, each firing its own notification; un-debounced, N
+    /// notifications in a burst would drive N independent full engine
+    /// stop/reconnect/restart cycles (wasteful + audible-glitch risk) when one at
+    /// the end would do. 300 ms exceeds the intra-burst gap while still recovering
+    /// a single isolated config change promptly.
     private static let configChangeDebounceInterval: TimeInterval = 0.3
-    /// Pending trailing-edge debounce work item (see `configChangeDebounceInterval`
-    /// above). Cancelled and replaced by every new `AVAudioEngineConfigurationChange`
-    /// notification in ``scheduleConfigChangeDebounce()``, so only the LAST
-    /// notification in a burst actually fires `handleConfigurationChangeOnGraphQueue()`.
-    /// Confined to `graphQueue` like `configuredDevice`: only ever touched from
-    /// graphQueue-run code, never the RT `receive` thread, so no `stateLock` is
-    /// needed here. Cancelled again in `deinit` so a torn-down engine can't fire a
-    /// stale reconnect after being deallocated.
+    /// Pending trailing-edge debounce work item. Cancelled + replaced by every new
+    /// notification in ``scheduleConfigChangeDebounce()`` so only the LAST in a
+    /// burst fires `handleConfigurationChangeOnGraphQueue()`. Confined to
+    /// `graphQueue` like `configuredDevice`. Cancelled again in `deinit`.
     private var configChangeDebounceWorkItem: DispatchWorkItem?
 
     /// Test seam: if set, `startEngineOnGraphQueue()` calls this instead of
-    /// `engine.start()`. Allows tests to force a start failure without mocking
-    /// Core Audio. Production code never sets it.
+    /// `engine.start()`. Lets tests force a start failure without mocking Core
+    /// Audio (L5 orphan-node regression). Production code never sets it.
     public var test_startOverride: (() throws -> Void)?
 
     /// Fired synchronously from ``receive(buffer:for:)`` with one app's raw
@@ -309,27 +251,17 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         // engine stops after the first tap churn and every buffer is silently
         // dropped (the exact "Current Device plays nothing" symptom). Handle it on
         // `graphQueue` so it serializes against add/remove/start/stop.
-        //
-        // Redirect churn (routing/unrouting several apps in quick succession) can
-        // fire a BURST of these in a row — each one, un-debounced, would drive its
-        // own full stop/reconnect/restart cycle. `scheduleConfigChangeDebounce()`
-        // trailing-edge debounces the burst into a single reconnect, timed off the
-        // LAST notification, so `handleConfigurationChangeOnGraphQueue()` reacts to
-        // the settled device list once instead of N times mid-churn.
         configChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [weak self] _ in
+            // T11: debounce the reconnect — a redirect-churn burst fires many
+            // notifications back-to-back; coalesce them into one reconnect.
             self?.graphQueue.async { self?.scheduleConfigChangeDebounce() }
         }
     }
 
     deinit {
         if let configChangeObserver { NotificationCenter.default.removeObserver(configChangeObserver) }
-        // Cancel any pending trailing-edge debounce so a torn-down engine can't
-        // fire a stale reconnect attempt on a deallocated instance. Safe to touch
-        // `configChangeDebounceWorkItem` directly here without `graphQueue`: like
-        // `configChangeObserver` above, no concurrent access is possible once
-        // `deinit` has started.
         configChangeDebounceWorkItem?.cancel()
     }
 
@@ -368,21 +300,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         AudioDiag.log("LPE.start done isRunning=\(engine.isRunning) configuredDevice=\(configuredDevice)")
     }
 
-    /// Trailing-edge debounce for the `AVAudioEngineConfigurationChange` observer
-    /// installed in `init`: cancel any pending reconnect and schedule a new one
-    /// `configChangeDebounceInterval` out. MUST run on `graphQueue` (matches
+    /// Trailing-edge debounce (T11) for the `AVAudioEngineConfigurationChange`
+    /// observer: cancel any pending reconnect and schedule a new one
+    /// `configChangeDebounceInterval` out, so a burst of notifications collapses
+    /// into ONE reconnect. MUST run on `graphQueue` (matches
     /// `configChangeDebounceWorkItem`'s confinement) — called from the observer's
-    /// closure, and from ``test_triggerConfigChangeDebounce()`` for tests that
-    /// can't synthesize a real notification (the observer is scoped to `object:
-    /// engine`, which is private).
-    ///
-    /// A burst of N calls within the interval collapses into exactly ONE
-    /// `handleConfigurationChangeOnGraphQueue()`, timed off the LAST call — so it
-    /// reacts once the device list has actually settled, not on the first blip.
-    /// This does NOT weaken the single-notification case: each new call only
-    /// pushes the SAME pending fire further out, it never starts a second pending
-    /// fire or blocks the first from ever landing, so one isolated notification
-    /// still recovers after exactly one interval.
+    /// closure and from ``test_triggerConfigChangeDebounce()``. Because each new
+    /// notification only pushes the SAME pending fire further out, a single
+    /// isolated notification still recovers after exactly one interval.
     private func scheduleConfigChangeDebounce() {
         configChangeDebounceWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -427,15 +352,6 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                 return
             }
         }
-        // Re-resolve + re-pin the output device HERE (not via a separate
-        // listener): a config change is ALSO how a default-output switch reaches
-        // this engine — unplugging Bluetooth headphones, or flipping the System
-        // Settings output, fires one on its own — so this recovery path is where
-        // "follow the real default" stays current over time. `pinResolvedOutputDevice`
-        // compares-before-setting, so a config change that did NOT move the default
-        // re-pins to the same device and no-ops, never spinning a storm. See the
-        // class doc's "Following stays current…" section.
-        pinResolvedOutputDevice()
         _ = engine.mainMixerNode
         engine.prepare()
         do {
@@ -488,6 +404,10 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                 engine.stop()
                 stateLock.withLock { engineRunning = false }
             }
+            // Re-resolve the follow target on the next cold start (see the class
+            // note): a default-output switch that happened while stopped is picked
+            // up when playback next starts.
+            configuredDevice = false
         }
     }
 
@@ -566,10 +486,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             }
             player.volume = Self.clamp(volume)
 
+            // L5: `startEngineOnGraphQueue()` can THROW (a real `engine.start()`
+            // failure during device config churn). Roll back the freshly-attached
+            // player on that throw too — exactly like the connect-failure and
+            // not-running guards around it — or it's orphaned in the graph.
             do {
                 try startEngineOnGraphQueue()
             } catch {
-                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: engine start raised \(error)")
+                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: start threw \(error)")
                 engine.detach(player)
                 throw error
             }
@@ -620,6 +544,9 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             if isEmpty, running {
                 engine.stop()
                 stateLock.withLock { engineRunning = false }
+                // Last app out stops the engine; re-resolve the follow target on
+                // the next cold start (see the class note).
+                configuredDevice = false
             }
         }
     }
@@ -762,77 +689,88 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     private static func clamp(_ volume: Float) -> Float { min(1, max(0, volume)) }
 
-    // MARK: Test helpers
+    // MARK: Output device selection
 
-    /// Test helper: return the count of nodes currently attached to the engine.
-    /// Used to verify no orphaned nodes are left behind on error paths.
-    public var test_attachedNodeCount: Int {
-        engine.attachedNodes.count
-    }
-
-    /// Test seam: fire the same trailing-edge debounce path the real
-    /// `AVAudioEngineConfigurationChange` observer uses
-    /// (``scheduleConfigChangeDebounce()``), without needing to synthesize a real
-    /// notification — the observer is scoped to `object: engine`, which is
-    /// private and unreachable from a test target. Safe to call from any thread;
-    /// hops onto `graphQueue` itself, exactly like the real observer's closure
-    /// does. Production code never calls it.
-    public func test_triggerConfigChangeDebounce() {
-        graphQueue.async { [weak self] in self?.scheduleConfigChangeDebounce() }
-    }
-
-    /// Test seam: how many times the debounced config-change handler has
-    /// actually fired (see `configChangeHandlerFireCount`) — used to prove a
-    /// burst of notifications collapses into exactly one call.
-    public var test_configChangeHandlerFireCount: Int {
-        stateLock.withLock { configChangeHandlerFireCount }
-    }
-
-    // MARK: Built-in output device
-
-    /// Pin the engine's output device ONCE per engine lifecycle (guarded by
-    /// `configuredDevice`) to the Mac's real default output — unless that default
-    /// is an AirPlay endpoint, in which case built-in (see the class doc and
-    /// ``resolveLocalOutputDeviceID()``). MUST run on `graphQueue` (called from
-    /// `startEngineOnGraphQueue`); `configuredDevice` is touched only there. The
-    /// ONGOING follow AFTER this initial pin is handled by
-    /// ``handleConfigurationChangeOnGraphQueue()``, not here.
+    /// Resolve and pin the engine's output device (once per cold start): the Mac's
+    /// real default output device when it is safe to FOLLOW, else the built-in
+    /// speakers (the anti-feedback fallback — see ``resolveOutputDeviceID()`` and
+    /// the class note). Best effort: if neither resolves or the set fails, the
+    /// engine keeps its own default output. MUST run on `graphQueue` (called from
+    /// `startEngineOnGraphQueue`, BEFORE `engine.start()`, so `setDeviceID` runs
+    /// while the engine is stopped — the safe time to re-pin); `configuredDevice`
+    /// is touched only on `graphQueue` (here and its reset on stop).
     private func configureOutputDevice() {
         guard !configuredDevice else { return }
         configuredDevice = true
-        pinResolvedOutputDevice()
-    }
-
-    /// Resolve the correct local output device (``resolveLocalOutputDeviceID()``)
-    /// and pin the engine's output node to it — but ONLY if it differs from what's
-    /// already pinned. The compare-before-set mirrors the capture side's
-    /// compare-before-rebuild guard (``TapRebuildDecision``): re-pinning to the
-    /// SAME device during config-change recovery could otherwise fire yet another
-    /// `AVAudioEngineConfigurationChange` and spin a rebuild storm. MUST run on
-    /// `graphQueue` (both call sites — `configureOutputDevice` and the config-change
-    /// recovery handler — are graphQueue-confined). Best effort: on any failure it
-    /// logs and leaves the engine's current output untouched (the same soft-fail
-    /// contract the old built-in-only pin had).
-    private func pinResolvedOutputDevice() {
         #if canImport(AudioToolbox)
-        guard let deviceID = Self.resolveLocalOutputDeviceID() else {
-            AudioDiag.log("LPE.pinResolvedOutputDevice: NO local output device resolved; using engine default")
-            return
-        }
-        guard engine.outputNode.auAudioUnit.deviceID != deviceID else {
-            AudioDiag.log("LPE.pinResolvedOutputDevice: already pinned to \(deviceID); no change")
+        guard let deviceID = Self.resolveOutputDeviceID() else {
+            AudioDiag.log("LPE.configureOutputDevice: NO followable/built-in device found; using engine default")
             return
         }
         do {
             try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
-            AudioDiag.log("LPE.pinResolvedOutputDevice: pinned to device \(deviceID)")
+            AudioDiag.log("LPE.configureOutputDevice: pinned to device \(deviceID)")
         } catch {
-            AudioDiag.log("LPE.pinResolvedOutputDevice: setDeviceID(\(deviceID)) FAILED: \(error)")
+            AudioDiag.log("LPE.configureOutputDevice: setDeviceID(\(deviceID)) FAILED: \(error)")
         }
         #endif
     }
 
     #if canImport(AudioToolbox)
+    /// The output device to pin: the real default output device when its transport
+    /// type is safe to FOLLOW (local hardware), otherwise the built-in speakers.
+    /// Returns `nil` only when neither resolves (caller falls back to the engine's
+    /// own default output).
+    ///
+    /// ANTI-FEEDBACK GUARD: a default output device whose transport type is AirPlay
+    /// or virtual/aggregate is REFUSED — this app may be streaming the whole-system
+    /// mix into exactly that device (or one aggregated inside it), so following it
+    /// would loop local playback back into the capture. Every other transport
+    /// (built-in / Bluetooth / USB / HDMI / Thunderbolt / …) is a real local
+    /// endpoint and is followed.
+    static func resolveOutputDeviceID() -> AudioObjectID? {
+        if let defaultDevice = defaultOutputDeviceID(),
+           isFollowableTransport(transportType(defaultDevice)) {
+            return defaultDevice
+        }
+        return builtInOutputDeviceID()
+    }
+
+    /// The system default output device (`kAudioHardwarePropertyDefaultOutputDevice`),
+    /// or `nil` if unreadable — the same primitive the capture path and the device
+    /// labeler read.
+    static func defaultOutputDeviceID() -> AudioObjectID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID) == noErr,
+              deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return deviceID
+    }
+
+    /// Whether a default-output device with this transport type is safe to FOLLOW
+    /// for local playback. `false` for AirPlay and virtual/aggregate transports
+    /// (the feedback-loop risk — see ``resolveOutputDeviceID()``) and for an
+    /// unreadable transport (`nil`, treated conservatively as not-followable, so
+    /// the safe built-in fallback is used); `true` for every real local-hardware
+    /// transport (built-in / Bluetooth / USB / HDMI / Thunderbolt / …).
+    static func isFollowableTransport(_ transport: UInt32?) -> Bool {
+        guard let transport else { return false }
+        switch transport {
+        case kAudioDeviceTransportTypeAirPlay,
+             kAudioDeviceTransportTypeVirtual,
+             kAudioDeviceTransportTypeAggregate,
+             kAudioDeviceTransportTypeAutoAggregate:
+            return false
+        default:
+            return true
+        }
+    }
+
     /// The Mac's built-in OUTPUT device: the first enumerated device with an
     /// output stream whose transport type is `kAudioDeviceTransportTypeBuiltIn`,
     /// or `nil` if none exists (an unusual headless/aggregate-only setup), in
@@ -857,58 +795,6 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         return nil
     }
 
-    /// Resolve which device local playback should pin to: the Mac's REAL current
-    /// default output (``defaultOutputDeviceID()``) UNLESS its transport type is
-    /// AirPlay — the one feedback-loop case ``shouldFollowRealDefault(transportType:)``
-    /// refuses — in which case fall back to ``builtInOutputDeviceID()``. Every
-    /// failed read also falls back to built-in: if the default can't be resolved,
-    /// or its transport type can't be read, we must NOT risk following a
-    /// possibly-AirPlay default into a loop, and built-in is the safe local
-    /// target. This is the function that replaced ``builtInOutputDeviceID()``'s
-    /// former role as the sole output pin (Q2, the Bluetooth/USB fix).
-    static func resolveLocalOutputDeviceID() -> AudioObjectID? {
-        guard let defaultID = defaultOutputDeviceID() else { return builtInOutputDeviceID() }
-        guard let transport = transportType(defaultID),
-              shouldFollowRealDefault(transportType: transport) else {
-            return builtInOutputDeviceID()
-        }
-        return defaultID
-    }
-
-    /// Pure decision (mirrors ``TapRebuildDecision`` in `NativeCaptureCoordinator`):
-    /// given a default output device's transport type, should local playback
-    /// FOLLOW it? AirPlay (`kAudioDeviceTransportTypeAirPlay`) is the ONLY transport
-    /// refused — the genuine feedback-loop case; every real local transport
-    /// (built-in, Bluetooth, USB, Thunderbolt, HDMI, aggregate, virtual, unknown, …)
-    /// is followed. Kept pure + `static` — no live Core Audio read — so the
-    /// follow/fall-back branch is unit-testable directly, without a real default
-    /// device or a real AirPlay endpoint (which cannot be synthesized against live
-    /// Core Audio in a test).
-    static func shouldFollowRealDefault(transportType: UInt32) -> Bool {
-        transportType != kAudioDeviceTransportTypeAirPlay
-    }
-
-    /// The Mac's REAL current default output device
-    /// (`kAudioHardwarePropertyDefaultOutputDevice` off the system object) — the
-    /// exact selector `PerAppCaptureCoordinator.defaultOutputDeviceID()` and
-    /// `NativeCaptureCoordinator.defaultOutputDeviceID()` read (house rule,
-    /// AGENTS.md), mirrored here in this file's optional-returning style (like
-    /// ``builtInOutputDeviceID()`` / ``transportType(_:)``). `nil` if it can't be
-    /// read. Deliberately NOT `kAudioHardwarePropertyDefaultSystemOutputDevice`
-    /// (the alert-sound device) — the same selector rule the capture side keeps.
-    static func defaultOutputDeviceID() -> AudioObjectID? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID) == noErr,
-            deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
-        return deviceID
-    }
-
     private static func hasOutputStreams(_ device: AudioObjectID) -> Bool {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
@@ -930,6 +816,29 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         return transport
     }
     #endif
+
+    // MARK: Test helpers
+
+    /// Test helper: count of nodes currently attached to the engine — used to
+    /// verify no orphaned player node is left behind on an error path (L5).
+    public var test_attachedNodeCount: Int {
+        engine.attachedNodes.count
+    }
+
+    /// Test seam: fire the same trailing-edge debounce path the real
+    /// `AVAudioEngineConfigurationChange` observer uses
+    /// (``scheduleConfigChangeDebounce()``), without synthesizing a real
+    /// notification (the observer is scoped to the private `engine`). Hops onto
+    /// `graphQueue` itself like the real observer. Production code never calls it.
+    public func test_triggerConfigChangeDebounce() {
+        graphQueue.async { [weak self] in self?.scheduleConfigChangeDebounce() }
+    }
+
+    /// Test seam: how many times the debounced config-change handler has actually
+    /// fired (T11) — proves a burst of notifications collapses into one call.
+    public var test_configChangeHandlerFireCount: Int {
+        stateLock.withLock { configChangeHandlerFireCount }
+    }
 }
 
 #else

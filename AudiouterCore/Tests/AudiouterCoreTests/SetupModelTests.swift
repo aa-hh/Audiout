@@ -758,6 +758,87 @@ final class SetupModelTests: XCTestCase {
         XCTAssertEqual(counter.count, 0, "nothing changed (nil silent read, unengaged network, unchanged PTP) ⇒ silent")
     }
 
+    // MARK: Telemetry (T5) — permission reported-vs-actual divergence
+
+    /// Captures lines from an installed `Telemetry` test sink. The sink is a
+    /// `@Sendable` closure invoked from `Telemetry`'s own serial writer queue
+    /// (a different thread than the test body), so a plain captured `var`
+    /// won't do — this mirrors `TelemetryTests`' own NSLock-guarded `Locked`
+    /// box, the sanctioned pattern for reading back what was logged.
+    private final class TelemetryLineCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.withLock { lines.append(line) } }
+        func snapshot() -> [String] { lock.withLock { lines } }
+    }
+
+    /// Tonight's exact bug shape: the stored/UI-visible status says `.granted`
+    /// (set here by an earlier successful `requestAudioCapture()`, exactly
+    /// like a completed onboarding flow), but the live silent re-check
+    /// disagrees (`.denied` — revoked since, or never really live).
+    /// `auditRequiredPermissions()` is the reconciliation path that re-checks
+    /// audio UNCONDITIONALLY, regardless of the current cached status (unlike
+    /// `refreshStatuses()`, which only re-checks an already-`.denied`/
+    /// `.requested` row — see its doc comment), so it's the path that
+    /// actually catches a granted→revoked flip. This asserts the emitted
+    /// `permission`/`reported_vs_actual` line makes that divergence legible
+    /// on its own, without needing to also read the source to interpret it.
+    func testAuditRequiredPermissionsLogsReportedVsActualDivergence() async throws {
+        let silentAudio = SilentAudioProbe(probeResult: .granted, silentResult: .denied)
+        let model = SetupModel(audioProbe: silentAudio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // → .granted: the "reported"/UI-visible status
+        XCTAssertEqual(model.audioStatus, .granted)
+
+        let capture = TelemetryLineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        _ = await model.auditRequiredPermissions()
+        Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
+
+        XCTAssertEqual(model.audioStatus, .denied,
+                       "the silent read must win — this is the actual regression, not just the log")
+
+        let line = try XCTUnwrap(
+            capture.snapshot().first { $0.contains("\"evt\":\"reported_vs_actual\"") },
+            "expected a permission/reported_vs_actual line")
+        XCTAssertTrue(line.contains("\"cat\":\"permission\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"site\":\"SetupModel.auditRequiredPermissions\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"reported\":\"granted\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"silent\":\"denied\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"diverged\":\"true\""), "line: \(line)")
+    }
+
+    /// The companion case: reported and silent AGREE (both `.granted`). This
+    /// guards the `diverged` field itself — without it, a hard-coded
+    /// `"diverged":"true"` would pass the divergence test above too.
+    func testAuditRequiredPermissionsLogsNonDivergenceWhenStatusesAgree() async throws {
+        let silentAudio = SilentAudioProbe(probeResult: .granted, silentResult: .granted)
+        let model = SetupModel(audioProbe: silentAudio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()   // → .granted
+        XCTAssertEqual(model.audioStatus, .granted)
+
+        let capture = TelemetryLineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        _ = await model.auditRequiredPermissions()
+        Telemetry._installTestSink(nil)
+
+        XCTAssertEqual(model.audioStatus, .granted, "no divergence ⇒ no change")
+
+        let line = try XCTUnwrap(
+            capture.snapshot().first { $0.contains("\"evt\":\"reported_vs_actual\"") },
+            "expected a permission/reported_vs_actual line even when statuses agree")
+        XCTAssertTrue(line.contains("\"reported\":\"granted\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"silent\":\"granted\""), "line: \(line)")
+        XCTAssertTrue(line.contains("\"diverged\":\"false\""), "line: \(line)")
+    }
+
     // MARK: System Settings deep links
 
     func testSystemSettingsPaneURLs() {

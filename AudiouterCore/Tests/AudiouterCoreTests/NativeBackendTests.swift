@@ -2959,6 +2959,56 @@ final class NativeBackendTests: XCTestCase {
                       "a first-capture after .idle must not removeOutput")
     }
 
+    /// T2/T4 single-flight: a SECOND whole-system recapture arriving while the
+    /// FIRST recapture's rebind attempt has already failed and is waiting on its
+    /// backoff timer must SUPERSEDE it — bump the shared `rebindRecoveryGen` and
+    /// cancel the stale `pendingRebindRecoveries` work item — rather than letting
+    /// both chains race to retry the same device. Mirrors the plan's "Rate-bounce
+    /// coalescing" risk: a rapid 44.1->48->44.1 flip must not thrash the rebind.
+    /// Proven by using a backoff delay long enough that a NOT-cancelled stale
+    /// retry would still be pending (and would fire) well after the test's
+    /// observation window closes.
+    func testWholeSystemRapidRecaptureSupersedesStaleBackoffRetry() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        capture.fireStateChange(capturingState())   // first capture: arms the epoch
+
+        // Recapture #1: force its addOutput to fail so a 0.3s backoff retry gets
+        // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireStateChange(capturingState())
+        await pollUntil { engine.removedIDs.filter { $0 == device.outputID }.count >= 1 }
+        let addsAfterFirstAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        // Recapture #2 arrives immediately — well inside the 0.3s backoff window —
+        // and must SUPERSEDE recapture #1's stale attempt-2 retry (bump the
+        // generation and cancel its pending `DispatchWorkItem`). Let its own fresh
+        // attempt succeed.
+        engine.addFailures = []
+        capture.fireStateChange(capturingState())
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFirstAttempt
+        }
+        let addsAfterSecondRecapture = engine.addedIDs.filter { $0 == device.outputID }.count
+        let removesAfterSecondRecapture = engine.removedIDs.filter { $0 == device.outputID }.count
+
+        // Wait well past the FIRST recapture's 0.3s backoff window — if its retry
+        // had NOT been superseded/cancelled, it would fire here and grow the counts.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, addsAfterSecondRecapture,
+                       "a newer recapture must cancel the older recapture's pending backoff retry (single-flight)")
+        XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, removesAfterSecondRecapture,
+                       "no stale retry means no extra removeOutput either")
+    }
+
     // MARK: Per-app routing (T6)
 
     /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`

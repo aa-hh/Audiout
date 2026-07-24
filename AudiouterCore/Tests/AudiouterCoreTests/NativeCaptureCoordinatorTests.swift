@@ -336,6 +336,84 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.stop()
     }
 
+    // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
+    //
+    // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —
+    // e.g. synced-local opening the built-in speakers at a different rate than the
+    // tapped device) leaves the device's UID UNCHANGED, so the identity listener
+    // (`kAudioHardwarePropertyDefaultOutputDevice`) never fires and the coordinator
+    // would otherwise never recover (the tap keeps delivering buffers, but silent
+    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.installSampleRateListener`
+    // (T1) closes that gap by listening on the tapped device's own
+    // `kAudioDevicePropertyNominalSampleRate` and routing the notification onto the
+    // EXACT SAME `onDefaultDeviceChanged` closure `installDefaultDeviceListener` already
+    // uses (see NativeCaptureCoordinator.swift: the listener block calls
+    // `self?.onDefaultDeviceChanged?()`, identical to the identity listener's callback).
+    // That closure is exactly what `FakeTap.fireDeviceChange()` fires — so it is the
+    // correct and only hermetically-fakeable stand-in for "the nominal-rate listener
+    // fired": the real listener registration itself lives on a live `AudioObjectID`
+    // inside `CoreAudioSystemTap` and isn't reachable through the `SystemAudioTap`
+    // seam `NativeCaptureCoordinator` is built against.
+
+    /// A simulated nominal-sample-rate notification (fired through the same seam
+    /// the real listener funnels into) drives a full tap rebuild: `recreateTap`
+    /// tears the stale tap down and creates a fresh one against the new format —
+    /// with NO identity/device-change API involved, mirroring the real bug where
+    /// only the rate changed.
+    func testNominalSampleRateNotificationTriggersTapRecreate() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1)
+        XCTAssertEqual(tap.teardowns, 0)
+
+        // Simulate the device's nominal rate flipping (e.g. 44.1 -> 48kHz) with the
+        // device UID unchanged — the fake models this as just a format change, since
+        // the coordinator only sees it via the shared callback either way.
+        tap.format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // the nominal-sample-rate listener's real callback path
+
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 48000) }
+        XCTAssertEqual(coordinator.state, .capturing(tap.format),
+                       "a nominal-rate renegotiation must rebuild the tap against the new format")
+        XCTAssertEqual(tap.creates, 2, "recreateTap must create a fresh tap")
+        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the stale (silent-PCM) tap must be torn down first")
+
+        coordinator.stop()
+    }
+
+    /// Two back-to-back nominal-rate notifications (a rapid 44.1->48->44.1 bounce,
+    /// e.g. synced-local toggling the local sink on/off quickly) must each drive
+    /// their own rebuild in turn — the C6 `pendingDeviceChange` coalescing guard
+    /// (already covered generically by
+    /// `testDeviceChangeDuringRebuildIsCoalescedAndReplayed`) rides this exact same
+    /// seam, so a rate bounce is never dropped or thrashed into a stuck state.
+    func testRapidNominalSampleRateBounceDrivesSequentialRebuilds() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1)
+
+        tap.format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // 44.1 -> 48
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 48000) }
+
+        tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()   // 48 -> 44.1, back again
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: 44100) }
+
+        XCTAssertEqual(tap.creates, 3, "each rate flip must drive its own rebuild — no bounce dropped")
+        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+
+        coordinator.stop()
+    }
+
     // MARK: - T4: exclusion-list wiring (routed apps + user-excluded apps must
     // not leak into the whole-system mix tap).
 

@@ -63,7 +63,18 @@ final class PopoverControllerTests: XCTestCase {
             }
         }
         backend.start()
-        await fulfillment(of: [expectation], timeout: 2)
+        // 2s was comfortable for a lone `swift test` run but not under
+        // `swift test --parallel` (every other suite is a concurrent sibling
+        // process competing for CPU) — this fixture runs up to 3x in one test
+        // (`testApplicationsCardExpandedOnOpenIffAnyRouteExists` builds three
+        // separate popovers), tripling the exposure to a single marginal
+        // timeout. `fulfillment` returns as soon as the expectation is met, so
+        // a wider ceiling costs nothing in the fast path — it only buys
+        // headroom under load. (2026-07-24: "Asynchronous wait failed:
+        // Exceeded timeout of 2 seconds, with unfulfilled expectations: 'fleet
+        // discovered'" observed intermittently under --parallel, never in
+        // isolation across 10 clean runs.)
+        await fulfillment(of: [expectation], timeout: 10)
         task.cancel()
     }
 
@@ -558,16 +569,29 @@ final class PopoverControllerTests: XCTestCase {
 
     /// A retry while a SECOND device is still connecting: the retry must not
     /// disturb the in-flight device, and both resolve independently.
+    ///
+    /// The `.connecting` checks below read `backend.devices`/the row
+    /// synchronously right after a `tapRetry`/`update()` call — there's no
+    /// event to wait on for "hasn't transitioned yet", so the only lever is
+    /// giving the intervening test/AppKit work (NOT wall-clock bounded — an
+    /// `update()` rebuilds the whole popover, Applications card included) a
+    /// wide margin before each device's scripted timer fires. A prior 0.5s/1.0s
+    /// margin (comfortable for a lone `swift test` run) flaked intermittently
+    /// under `swift test --parallel`'s CPU contention (every other suite is a
+    /// concurrent sibling process) — 2026-07-24: both "connected" observed
+    /// where "connecting" was asserted, on different runs, never in isolation.
+    /// Widening these delays doesn't weaken what's being tested (still-in-
+    /// flight vs. disturbed), only the wall-clock tolerance of the checkpoint.
     func testRetryWhileSecondDeviceConnecting() async throws {
         let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
             "office": ConnectScript(attempts: [
                 .fail(after: 0.05, ConnectionFailure(cause: .refusedOrBusy)),
-                // Retry connects after a comfortable delay so the transient
-                // `.connecting` state is observable after `update()` (which now
-                // rebuilds the Applications card too, taking longer wall-clock).
-                .connect(after: 0.5),
+                // Retry connects after a wide margin so the transient
+                // `.connecting` state stays observable after `update()` even
+                // under `--parallel` contention (see the doc comment above).
+                .connect(after: 3.0),
             ]),
-            "homepod-bed": ConnectScript(attempts: [.connect(after: 1.0)]),
+            "homepod-bed": ConnectScript(attempts: [.connect(after: 6.0)]),
         ])
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -589,8 +613,11 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(homepodDevice.connectionState, .connecting,
                        "the in-flight device was not disturbed by the retry's setOutputSet")
 
-        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
-        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
+        // Timeouts widened to stay above the new 3.0s/6.0s scripted delays
+        // (plus contention headroom) — these calls poll every 20ms until the
+        // predicate holds, so a bigger ceiling is free in the fast path.
+        try await waitForConnectionState(backend, id: "office", timeout: 8) { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed", timeout: 12) { $0 == .connected }
         popover.update(devices: backend.devices)
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connected)
         XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connected)

@@ -52,6 +52,18 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
         XCTAssertEqual(EngineConfig().startBufferMs, 2250)
     }
 
+    /// T-ENGINE-DELAY: `presentationDelayMs` must derive from `startBufferMs`
+    /// the SAME way the vendored sender derives `output_buffer_samples`
+    /// (`airplay.c:1229`) — `startBufferMs − AIRPLAY_AUDIO_LATENCY_MS` (250,
+    /// `airplay.c:94`) — never a hardcoded duplicate of the 250 ms constant.
+    func testEngineConfigPresentationDelayMatchesConfiguredBuffer() {
+        XCTAssertEqual(EngineConfig.airplayAudioLatencyMs, 250)
+        XCTAssertEqual(EngineConfig().presentationDelayMs, 2250 - 250)
+
+        let custom = EngineConfig(startBufferMs: 1000)
+        XCTAssertEqual(custom.presentationDelayMs, 1000 - 250)
+    }
+
     /// `setStartBufferMs` reaches the C shim (headless mode applies inline, no
     /// engine thread) — the primitive `NativeBackend.applyStartBuffer` builds on.
     func testSetStartBufferMsReachesShim() async {
@@ -60,6 +72,22 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
             await engine.enterHeadlessTestMode()
             await engine.setStartBufferMs(1500)
             XCTAssertEqual(outputs_buffer_duration_ms_get(), 1500)
+        }
+    }
+
+    /// T-ENGINE-DELAY: `currentPresentationDelayMs()` must track the LIVE
+    /// buffer (`setStartBufferMs`), not just the original `config` snapshot —
+    /// this is the value a future local-output sink should read so it stays
+    /// in lockstep with whatever the sender is actually using.
+    func testCurrentPresentationDelayTracksLiveStartBuffer() async {
+        await withRestoredStartBufferAsync {
+            let engine = AirPlayEngine(config: EngineConfig(startBufferMs: 1000))
+            let initial = await engine.currentPresentationDelayMs()
+            XCTAssertEqual(initial, 1000 - EngineConfig.airplayAudioLatencyMs)
+
+            await engine.setStartBufferMs(1500)
+            let updated = await engine.currentPresentationDelayMs()
+            XCTAssertEqual(updated, 1500 - EngineConfig.airplayAudioLatencyMs)
         }
     }
 

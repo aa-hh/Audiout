@@ -1,6 +1,10 @@
 import Foundation
 import AirPlayEngine
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 #if canImport(AudioToolbox)
 import AudioToolbox
 import AVFoundation
@@ -80,14 +84,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private let makeConverter: @Sendable (TapFormat) -> PCMConverting
     private let muteBehavior: TapMuteBehavior
 
-    /// Bundle ID -> running pid, for the exclusion list (T4). AppKit-only
-    /// (`NSRunningApplication`), so `AudiouterCore` cannot resolve
-    /// this itself (package rule, `AudiouterCore/AGENTS.md`) —
-    /// mirrors `PerAppCaptureCoordinator`'s injected `resolvePID` exactly.
-    /// Defaults to "nothing resolves," which reproduces today's
+    /// Bundle ID -> the FULL set of live Core Audio process objects (main +
+    /// every child/helper) for the exclusion list (T4/T-LEAK-FIX). A
+    /// multi-process browser (Firefox, Chrome) emits audio from a CHILD
+    /// process with no bundle id of its own, so resolving to a single pid
+    /// (the old shape) named the silent main process and left the real
+    /// audio child leaking into the whole-system mix. `AudioProcessResolver`
+    /// itself is pure Core Audio + Darwin, but its `bundleIDForPID` closure
+    /// is AppKit-only (`NSRunningApplication`), so `AudiouterCore` cannot
+    /// construct the fully-wired resolver itself (package rule,
+    /// `AudiouterCore/AGENTS.md`) — mirrors `PerAppCaptureCoordinator`'s
+    /// injected resolver exactly. Defaults to a resolver over an empty
+    /// enumerator ("nothing resolves"), which reproduces today's
     /// always-empty exclusion list until an AppKit-importing layer supplies
-    /// the real resolver (T6).
-    private let resolvePID: @Sendable (_ bundleID: String) -> pid_t?
+    /// the real one (T6).
+    private let processResolver: AudioProcessResolver
 
     // MARK: State (confined to `queue`)
 
@@ -120,9 +131,61 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// that's already running without going through a recreate.
     private var currentExcludedBundleIDs: Set<String> = []
 
+    /// T-FANOUT: the delayed local sink to ALSO feed (the "play everywhere" second
+    /// consumer), and the pid of the process that RENDERS its output — our own
+    /// process, since the sink is an in-process `AVAudioEngine`. Both queue-confined
+    /// and set together via ``setSyncedLocalSink(_:renderProcessPID:)``.
+    ///
+    /// `syncedLocalRenderPID` is resolved to its process object and unioned into
+    /// every tap's exclusion set (``resolveExcludedProcessObjectIDs()``) so the
+    /// whole-system tap never re-captures the
+    /// sink's own delayed output as an echo (plan risk R2 / brief §8). Because the
+    /// tap is `.mutedWhenTapped`, excluding our process ALSO keeps that delayed
+    /// output audible while the raw system mix stays muted — exactly the intent.
+    /// Both `nil` = play-everywhere off: no fan-out and no self-exclude, i.e.
+    /// today's behavior.
+    private var syncedLocalSink: SyncedLocalPCMSink?
+    private var syncedLocalRenderPID: pid_t?
+
+    /// T3 (Part B) base-rate converter for the fan-out: resamples the 44.1 kHz
+    /// airplay feed UP to the sink's device-native `renderSampleRate` ONCE before
+    /// the ring, so the sink's engine runs at the output device's own rate and
+    /// opening it never renegotiates 48↔44.1 kHz (the dropout root cause). Held
+    /// here (not in ``fanOutToSyncedLocal``, which is stateless/static) because a
+    /// streaming resampler must carry its filter state across delivery buffers —
+    /// a fresh one per buffer would click at every boundary. Queue-confined:
+    /// created/cleared under `queue` alongside `syncedLocalSink` in
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``, snapshotted under `queue` in
+    /// ``handleBuffer(_:)``, then run only on the single tap-delivery thread.
+    /// Deliberately NOT a ``FractionalResampler`` — that stays the sink's ppm
+    /// DRIFT corrector at ratio ≈ 1; base conversion is a distinct step here.
+    private var syncedLocalBaseResampler: SyncedLocalBaseResampler?
+
     /// Fired on every state transition so a UI (or a test) can observe the
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
+
+    /// Fired when the tap was rebuilt specifically because the tapped OUTPUT
+    /// DEVICE changed or renegotiated its nominal sample rate
+    /// (``handleDeviceChange()``) — the ONLY rebuild that leaves the AirPlay RTP
+    /// timeline desynced from its receivers and therefore needs a whole-system
+    /// session reset (``NativeBackend`` wires this to
+    /// `resetAirPlaySessionForWholeSystem`).
+    ///
+    /// Deliberately NOT fired for a rebuild caused by an exclusion-set change
+    /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``). Those are benign,
+    /// backend-initiated parts of NORMAL connect/route setup — in particular,
+    /// attaching the synced-local sink adds its render pid to the exclusion set,
+    /// which recreates the tap on EVERY Mac+AirPlay connect. The output device and
+    /// its clock are unchanged across such a rebuild, so the receivers' timeline
+    /// stays intact; firing a session reset there re-established the RTP session
+    /// (a full removeOutput→addOutput) on every connect — "connects fast, then a
+    /// long silence before audio comes out." Distinguishing the cause (only a
+    /// device/rate rebuild resets) is what keeps first-connect latency at the
+    /// pre-T2 baseline without reintroducing the dropout the reset was added for.
+    /// Called on the coordinator's internal queue, like ``onStateChange``.
+    public var onDeviceRateRebuild: (@Sendable () -> Void)?
 
     /// Fired once per converted buffer with the buffer's peak/RMS level in
     /// 0.0...1.0, so a caller (``NativeBackend``) can plumb it straight into
@@ -144,12 +207,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///   - engine: the ``AirPlayEngine`` to feed. `write(pcm:pts:)` is the only
     ///     method used (nonisolated, fire-and-forget), so the sink is the engine
     ///     itself via ``AirPlayEngine`` conforming to ``PCMSink``.
-    ///   - resolvePID: bundle ID -> running pid, for the live exclusion list
-    ///     (T4 — apps individually routed elsewhere, or user-excluded via
-    ///     Settings, must not double up into the system-wide mix). Defaults
-    ///     to "nothing resolves" (today's behavior: an always-empty
-    ///     exclusion list) until an AppKit-importing layer wires the real
-    ///     resolver (T6).
+    ///   - processResolver: bundle ID -> the full set of live Core Audio
+    ///     process objects, for the live exclusion list (T4 — apps
+    ///     individually routed elsewhere, or user-excluded via Settings,
+    ///     must not double up into the system-wide mix). Defaults to a
+    ///     resolver that always resolves to the empty set (today's
+    ///     behavior: an always-empty exclusion list) until an
+    ///     AppKit-importing layer wires the real one (T6).
     ///   - name: a short label used for the private tap/aggregate device name.
     ///   - muteBehavior: `.mutedWhenTapped` (default) silences local playback
     ///     while capturing — matching the native-path intent (audio goes to the
@@ -157,7 +221,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     #if canImport(AudioToolbox)
     public convenience init(
         engine: AirPlayEngine,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         name: String = "Audiouter",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
@@ -171,7 +235,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             },
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
-            resolvePID: resolvePID,
+            processResolver: processResolver,
             muteBehavior: muteBehavior
         )
     }
@@ -183,13 +247,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> SystemAudioTap,
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
         self.makeTap = makeTap
         self.sink = sink
         self.makeConverter = makeConverter
-        self.resolvePID = resolvePID
+        self.processResolver = processResolver
         self.muteBehavior = muteBehavior
     }
 
@@ -211,11 +275,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     public func start() {
         // Claim: only proceed from idle/failed; move to .creatingTap and snapshot
         // the exclusion pids (queue-confined) under a SHORT lock.
-        let claim: (proceed: Bool, excludedPIDs: Set<pid_t>) = queue.sync {
+        let claim: (proceed: Bool, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
-                return (true, resolveExcludedPIDs())
+                return (true, resolveExcludedProcessObjectIDs())
             default:
                 return (false, []) // already in flight — idempotent
             }
@@ -229,7 +293,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         do {
             // Blocking HAL work OUTSIDE the lock.
-            let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
+            let format = try newTap.createAndStart(
+                muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
             let orphan: SystemAudioTap? = queue.sync {
                 // A stop() may have raced in while we were creating: don't clobber an
@@ -321,11 +386,70 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let needsRecreate: Bool = queue.sync {
             guard union != currentExcludedBundleIDs else { return false }
             currentExcludedBundleIDs = union
+            let capturing: Bool
+            if case .capturing = _state { capturing = true } else { capturing = false }
+            // Telemetry (T2): the exclusion-list choke point — the only place
+            // the live routed/excluded union actually changes. Cleartext
+            // bundle IDs are deliberate (PLAN-TELEMETRY-SYSTEM.md Q6): this is
+            // exactly what makes "why did the system tap just rebuild" legible.
+            Telemetry.log(.captureWS, "exclusion_changed", [
+                "excludedCount": "\(union.count)",
+                "excluded": union.sorted().joined(separator: ","),
+                "recreate": capturing ? "true" : "false",
+            ])
+            return capturing
+        }
+        guard needsRecreate else { return }
+        // Exclusion-set change only (routed/excluded apps): the tapped output device
+        // and its clock are unchanged, so this rebuild does NOT desync the AirPlay
+        // receivers — no whole-system session reset (see `onDeviceRateRebuild`).
+        recreateTap(cause: .exclusionChange)
+    }
+
+    /// Attach (or detach, with `nil`) the delayed local sink fan-out (T-FANOUT),
+    /// and the pid of the process that renders its output. Both move together: a
+    /// non-nil `sink` turns the fan-out ON and adds `renderProcessPID` to the
+    /// whole-system tap's exclusion set so the sink's own delayed audio is never
+    /// re-captured as an echo (R2 / brief §8); `nil` turns both off.
+    ///
+    /// If a tap is currently `.capturing` AND the exclusion pid actually changes,
+    /// the tap is recreated immediately so the new exclusion takes effect without
+    /// waiting for a device change — mirroring
+    /// ``updateRouting(appRoutes:excludedBundleIDs:)``. Otherwise the new pid is
+    /// simply applied at the next tap creation. ``NativeBackend`` calls this when
+    /// the selection enters/leaves "play everywhere" mode; it supplies the
+    /// render-process identity (its own `getpid()`, since the sink renders
+    /// in-process).
+    public func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
+        let needsRecreate: Bool = queue.sync {
+            self.syncedLocalSink = sink
+            // Build the base-rate converter for THIS sink's render rate (read once
+            // at sink construction, T3 Part B). A brand-new instance per attach so
+            // its streaming filter state starts clean and a rate change between
+            // attaches is honored; cleared on detach.
+            if let sink {
+                self.syncedLocalBaseResampler = SyncedLocalBaseResampler(
+                    inputRate: Double(PCMFormat.airplay.sampleRate),
+                    outputRate: sink.renderSampleRate,
+                    channelCount: PCMFormat.airplay.channels)
+            } else {
+                self.syncedLocalBaseResampler = nil
+            }
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != syncedLocalRenderPID else { return false }
+            syncedLocalRenderPID = newPID
             if case .capturing = _state { return true }
             return false
         }
         guard needsRecreate else { return }
-        recreateTap()
+        // Exclusion-set change only (adding/removing the synced-local sink's own
+        // render pid): the tapped output device and its clock are unchanged, so this
+        // rebuild does NOT desync the AirPlay receivers — no whole-system session
+        // reset. Attaching the sink hits this on EVERY Mac+AirPlay connect; treating
+        // it as a rate-renegotiation recapture is what added a redundant RTP
+        // re-establish (a long post-connect silence) to every connect. See
+        // `onDeviceRateRebuild`.
+        recreateTap(cause: .exclusionChange)
     }
 
     // MARK: Start sequence (on `queue`)
@@ -344,15 +468,31 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Resolve the live excluded-bundle-ID set to pids via the injected
-    /// ``resolvePID`` closure. Best-effort: a bundle ID with no resolvable
-    /// running process (not launched, or the AppKit lookup misses) is
-    /// silently dropped rather than failing tap creation — the whole-system
-    /// tap must still succeed even if one excluded app isn't
-    /// pid-resolvable yet. MUST be called while holding `queue`
-    /// (`currentExcludedBundleIDs` is queue-confined).
-    private func resolveExcludedPIDs() -> Set<pid_t> {   // must hold `queue`
-        Set(currentExcludedBundleIDs.compactMap(resolvePID))
+    /// Resolve the live excluded-bundle-ID set to the UNION of every
+    /// resolved bundle's FULL Core Audio process-object set (main + every
+    /// child/helper) via the injected ``processResolver`` — the fix for the
+    /// multi-process leak: a bundle id that resolves to only its silent main
+    /// process previously left the real audio-emitting child unexcluded.
+    /// Best-effort: a bundle ID with no resolvable process yet (not
+    /// launched, or not yet audible) contributes nothing rather than failing
+    /// tap creation — the whole-system tap must still succeed even if one
+    /// excluded app isn't resolvable yet. MUST be called while holding
+    /// `queue` (`currentExcludedBundleIDs` is queue-confined).
+    ///
+    /// Also unions in the synced local sink's own render process object, by
+    /// EXACT pid (``AudioProcessResolver/resolve(pid:)``, no bundle-id
+    /// attribution needed since we already know the pid directly) — T-FANOUT
+    /// self-exclude (R2): keeps the delayed local sink's own render process out
+    /// of the whole-system tap so its output isn't re-captured as an echo, and
+    /// (since the tap is `.mutedWhenTapped`) stays audible.
+    private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
+        var result = currentExcludedBundleIDs.reduce(into: Set<AudioObjectID>()) { result, bundleID in
+            result.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
+        }
+        if let renderPID = syncedLocalRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        return result
     }
 
     // MARK: Buffer delivery (tap IOProc thread → convert → engine)
@@ -366,7 +506,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the actual conversion OUTSIDE it so a slow convert can't stall stop().
         // `meteringActive` rides along on the same read (T-GATE) — no separate
         // lock acquisition per buffer.
-        let (converter, metering) = queue.sync { (self.converter, self.meteringActive) }
+        let (converter, metering, syncedSink, baseResampler) = queue.sync {
+            (self.converter, self.meteringActive, self.syncedLocalSink, self.syncedLocalBaseResampler)
+        }
         guard let converter else { return }
 
         guard let pcm = converter.convertToAirPlayPCM(buffer) else { return }
@@ -374,6 +516,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)
+
+        // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
+        // sink — ONE capture, two consumers. Widened to interleaved Float32 and
+        // base-resampled from 44.1 kHz UP to the sink's device-native render rate
+        // (T3 Part B) so the sink's engine runs at the output device's own rate.
+        // Gated exactly like metering below: a nil sink (play-everywhere off), or
+        // no base resampler, means no fan-out. The sink's own scheduling holds it
+        // phase-aligned with AirPlay; its render process is self-excluded from this
+        // tap (``resolveExcludedProcessObjectIDs()``) so this fanned-out audio
+        // can't loop back as an echo.
+        if let syncedSink, let baseResampler {
+            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink, resampler: baseResampler)
+        }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
         // the meter feature (identical for every fanned-out device) — but only
@@ -387,22 +542,40 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// The default output device changed under us (the tap follows it, so its
     /// real format may now differ — e.g. built-in 44100 → USB DAC 48000).
     /// Delegates to ``recreateTap()`` — the same "tear down + recreate while
-    /// capturing" machinery T4 reuses for an exclusion-list change.
+    /// capturing" machinery T4 reuses for an exclusion-list change. Runs on
+    /// the tap's own dedicated `listenerQueue` (non-RT — see
+    /// ``CoreAudioSystemTap/listenerQueue``), never the IOProc thread.
     private func handleDeviceChange() {
-        recreateTap()
+        Telemetry.log(.captureWS, "device_change", ["trigger": "default_output_changed"])
+        // A genuine device/nominal-rate change: the tapped device's clock moved out
+        // from under the live RTP sessions, so the rebuild MUST reset the
+        // whole-system AirPlay session (see `onDeviceRateRebuild`). This is the one
+        // rebuild path that carries `.deviceOrRateChange`.
+        recreateTap(cause: .deviceOrRateChange)
     }
 
+    /// Why ``recreateTap(cause:)`` is rebuilding — decides whether the rebuild
+    /// needs a whole-system AirPlay session reset (``onDeviceRateRebuild``). A
+    /// device/nominal-rate change (``handleDeviceChange()``) moves the tapped
+    /// device's clock out from under the live RTP sessions and desyncs the
+    /// receivers; an exclusion-set change
+    /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but leaves the
+    /// device and its clock — and thus the receivers' timeline — untouched.
+    enum RebuildCause { case deviceOrRateChange, exclusionChange }
+
     /// Tear the current tap down and recreate it — against the (possibly
-    /// new) default output device, and always with the LIVE exclusion pid
-    /// set (``resolveExcludedPIDs()``, re-resolved fresh so a stale pid from
-    /// before an app relaunch is never carried forward). Shared by two
+    /// new) default output device, and always with the LIVE exclusion process-
+    /// object set (``resolveExcludedProcessObjectIDs()``, re-resolved fresh so a
+    /// stale process object from before an app relaunch is never carried
+    /// forward). Shared by two
     /// triggers: ``handleDeviceChange()`` (the tap's own
     /// `onDefaultDeviceChanged`) and ``updateRouting(appRoutes:excludedBundleIDs:)``
     /// (the routed/excluded bundle-ID set changed while capturing). Only
     /// takes effect if currently `.capturing`; a race with a concurrent
     /// `stop()`/failure is a no-op. Surfaced as a fresh `.capturing(format')`
     /// transition, or `.failed` if re-creation fails.
-    private func recreateTap() {
+    private func recreateTap(cause: RebuildCause) {
         // Under the lock ONLY: check we're still capturing, claim the old tap,
         // and snapshot the current exclusion pids (queue-confined). The blocking
         // Core Audio teardown+recreate then happens OUTSIDE the lock, matching
@@ -417,10 +590,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // mean the LAST notification can be the one that would otherwise be
         // dropped, leaving the tap rebuilt against a stale device/rate. See
         // dev/notes/stability-audit-2026-07-18.md §C6.
-        let claim: (proceed: Bool, old: SystemAudioTap?, excludedPIDs: Set<pid_t>) = queue.sync {
+        let claim: (proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
             guard case .capturing = _state else {
                 if case .creatingTap = _state {
                     pendingDeviceChange = true
+                    // Telemetry (T2): STABILITY(C6) coalescing point — a
+                    // rebuild trigger arrived while already mid-rebuild, so it
+                    // is being deferred/coalesced rather than dropped (see the
+                    // "rebuild_replay" line logged once it's replayed below).
+                    Telemetry.log(.captureWS, "rebuild_coalesced", ["reason": "already_rebuilding"])
                 }
                 return (false, nil, [])
             }
@@ -428,7 +606,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.tap = nil
             self.converter = nil          // stop forwarding buffers through the dying tap
             self.transition(to: .creatingTap)
-            return (true, t, resolveExcludedPIDs())
+            return (true, t, resolveExcludedProcessObjectIDs())
         }
         // Not capturing (racing a stop()/failure): nothing to do.
         guard claim.proceed else { return }
@@ -441,7 +619,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
 
         do {
-            let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
+            let format = try newTap.createAndStart(
+                muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
@@ -465,8 +644,30 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 return (nil, replay)
             }
             commit.orphan?.teardown()
+            // Fire the whole-system session-reset signal ONLY when this rebuild was
+            // caused by a device/nominal-rate change AND actually committed a fresh
+            // `.capturing` (orphan == nil; a racing stop() that won leaves `orphan`
+            // set and no live session to reset). An exclusion-set rebuild
+            // (`.exclusionChange`) leaves the receivers' RTP timeline intact and must
+            // NOT reset — that spurious reset was the redundant per-connect RTP
+            // re-establish (see `onDeviceRateRebuild`). Fired OFF the lock, matching
+            // the "no HAL/handler work under `queue`" discipline the rest of this
+            // method keeps.
+            if commit.orphan == nil, cause == .deviceOrRateChange {
+                onDeviceRateRebuild?()
+            }
             if commit.replay {
-                recreateTap()
+                // Telemetry (T2): the coalesced trigger(s) from the branch
+                // above are being replayed now that the in-flight rebuild
+                // landed back in `.capturing` — see "rebuild_coalesced".
+                Telemetry.log(.captureWS, "rebuild_replay", [:])
+                // A trigger coalesced while we were mid-rebuild (C6). It may have been
+                // a device/rate change, so replay as `.deviceOrRateChange`: a missed
+                // reset would reintroduce the dropout, whereas an extra reset here is
+                // at worst harmless and this path only fires on rapid device/rate
+                // bounces, never on a plain connect (the sink-attach rebuild lands
+                // while `.capturing`, not `.creatingTap`, so it is never coalesced).
+                recreateTap(cause: .deviceOrRateChange)
             }
         } catch {
             newTap.teardown()   // createAndStart already tears down internally; idempotent.
@@ -477,6 +678,70 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self.tap = nil
                 self.converter = nil
                 self.transition(to: .failed(mapped))
+            }
+        }
+    }
+
+    // MARK: Synced-local fan-out (T-FANOUT)
+
+    /// Widen one interleaved S16LE airplay-format buffer (``PCMFormat/airplay`` —
+    /// 44100 / 2ch, the exact bytes handed to the engine) to interleaved Float32 in
+    /// −1.0…1.0, base-resample it UP to the sink's device-native render rate, and
+    /// hand it to the delayed local sink with the capture `pts` (T3 Part B).
+    ///
+    /// Reuses the engine's already-resampled/channel-matched 44.1 kHz PCM rather
+    /// than a second heavy pass off the raw tap buffer: one capture drives both
+    /// consumers, plus this cheap integer→float widen and a fixed-ratio resample.
+    /// The `resampler` carries the fixed ratio `44100 / renderSampleRate`; when the
+    /// output device is itself 44.1 kHz that ratio is 1.0 and the widened samples
+    /// pass through bit-for-bit (``SyncedLocalBaseResampler/isIdentity``), so this
+    /// stays the same program the AirPlay receivers get — up-sampled only when the
+    /// device runs faster (48/88.2/96/176.4/192 kHz).
+    ///
+    /// The resample is deliberately an INTERPOLATOR (Catmull-Rom), so output frame
+    /// 0 equals input frame 0 and output frame `n` samples the input at position
+    /// `n · ratio`: it introduces NO whole-sample timeline shift, so the sink can
+    /// keep anchoring ring-sample-0 to this `pts` with no base-resample delay term
+    /// to fold into `SyncTiming`. Runs on the tap delivery thread; allocation is
+    /// the widen scratch plus the resampler's output buffer, matching the existing
+    /// per-buffer allocation posture of this path (never the sink's RT render
+    /// block, which stays alloc/lock-free).
+    static func fanOutToSyncedLocal(
+        _ s16le: Data, pts: timespec, into sink: SyncedLocalPCMSink, resampler: SyncedLocalBaseResampler
+    ) {
+        let channelCount = PCMFormat.airplay.channels
+        let sampleCount = s16le.count / MemoryLayout<Int16>.size
+        guard channelCount > 0, sampleCount >= channelCount else { return }
+        let frameCount = sampleCount / channelCount
+        let usableSamples = frameCount * channelCount
+        var floats = [Float](repeating: 0, count: usableSamples)
+        let scale: Float = 1.0 / 32768.0
+        s16le.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<usableSamples {
+                floats[i] = Float(Int16(littleEndian: p[i])) * scale
+            }
+        }
+
+        // Rates equal (44.1 kHz device): pass the widened samples straight through,
+        // bit-exact and with no resampler priming lag — mirroring the converter's
+        // "resample only when the rate differs from 44100" discipline upstream.
+        if resampler.isIdentity {
+            floats.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                sink.enqueue(interleavedFrames: base, frameCount: frameCount, pts: pts)
+            }
+            return
+        }
+
+        floats.withUnsafeBufferPointer { inBuf in
+            guard let inBase = inBuf.baseAddress else { return }
+            let out = resampler.resample(input: inBase, frameCount: frameCount)
+            let outFrames = out.count / channelCount
+            guard outFrames > 0 else { return }
+            out.withUnsafeBufferPointer { outBuf in
+                guard let outBase = outBuf.baseAddress else { return }
+                sink.enqueue(interleavedFrames: outBase, frameCount: outFrames, pts: pts)
             }
         }
     }
@@ -543,8 +808,48 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     private func transition(to newState: State) {   // must hold `queue`
         guard newState != _state else { return }
+        let old = _state
         _state = newState
+        // Telemetry (T2): non-blocking, formats on this (non-RT, queue-confined)
+        // thread and hands off to Telemetry's own serial writer — never called
+        // from the IOProc/render path (see `handleBuffer`, which never calls
+        // `transition`). Every idle/creatingTap/capturing/stopping/failed move
+        // funnels through here, so this one call site covers the whole
+        // lifecycle for T2's "captureWS transition" line.
+        Telemetry.log(.captureWS, "transition", Self.transitionFields(from: old, to: newState))
         onStateChange?(newState)
+    }
+
+    /// Fields for the `captureWS`/`transition` telemetry line above: both
+    /// state labels, plus — when available — the tap format the new state
+    /// carries (`.capturing`) or the failure reason (`.failed`). Enough for
+    /// an agent reading the log cold (no repro, days later) to reconstruct
+    /// what happened without cross-referencing the source.
+    private static func transitionFields(from old: State, to newState: State) -> [String: String] {
+        var fields: [String: String] = [
+            "from": stateLabel(old),
+            "to": stateLabel(newState),
+        ]
+        if case .capturing(let format) = newState {
+            fields["format"] = "\(format.sampleRate)/\(format.channels)"
+        }
+        if case .failed(let error) = newState {
+            fields["reason"] = String(describing: error)
+        }
+        return fields
+    }
+
+    /// Stable string label for a `State`, used only for the telemetry `from`/
+    /// `to` fields above. An exhaustive switch so a future new case is a
+    /// compile error here instead of silently logging nothing.
+    private static func stateLabel(_ state: State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .creatingTap: return "creatingTap"
+        case .capturing: return "capturing"
+        case .stopping: return "stopping"
+        case .failed: return "failed"
+        }
     }
 }
 
@@ -611,6 +916,18 @@ public enum TapMuteBehavior: Sendable {
     case mutedWhenTapped
 }
 
+/// A no-op ``AudioProcessEnumerating``: reports no live processes, so an
+/// ``AudioProcessResolver`` built on it always resolves every bundle id to the
+/// empty set. Backs ``NativeCaptureCoordinator``'s default ``AudioProcessResolver``
+/// — "nothing resolves" — until an AppKit-importing layer injects the real,
+/// fully-wired one (T6). `public` (not `internal`) because it backs a default
+/// argument value in `NativeCaptureCoordinator`'s `public` convenience init.
+public struct EmptyAudioProcessEnumerator: AudioProcessEnumerating {
+    public init() {}
+    public func enumerateProcesses() -> [RawAudioProcess] { [] }
+    public func parentPID(of pid: pid_t) -> pid_t? { nil }
+}
+
 /// The Core Audio process-tap seam. The production impl (``CoreAudioSystemTap``)
 /// drives `CATapDescription` / `AudioHardwareCreateProcessTap` + an aggregate
 /// device; tests inject a fake that pushes ``CapturedBuffer``s on demand.
@@ -624,13 +941,13 @@ public protocol SystemAudioTap: AnyObject {
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
     /// ``NativeCaptureError`` on failure (most commonly TCC not granted).
-    /// - Parameter excludedPIDs: pids to leave OUT of the whole-system mix
-    ///   (T4 — apps individually routed elsewhere, or user-excluded via
-    ///   Settings). A pid that can't be translated to a Core Audio process
-    ///   object yet is silently skipped rather than failing tap creation —
-    ///   see ``CoreAudioSystemTap``'s implementation. Empty = the whole
-    ///   system, unchanged from pre-T4 behavior.
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat
+    /// - Parameter excludedProcessObjectIDs: Core Audio process objects to leave
+    ///   OUT of the whole-system mix (T4 — apps individually routed elsewhere, or
+    ///   user-excluded via Settings). Already resolved to the FULL per-bundle
+    ///   process set (main + every child/helper — see
+    ///   ``AudioProcessResolver``) by the caller, so no further pid translation
+    ///   happens here. Empty = the whole system, unchanged from pre-T4 behavior.
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat
 
     /// Stop and destroy the IOProc, aggregate device, and tap (in that order).
     /// Idempotent and non-throwing so teardown always completes.
@@ -649,6 +966,158 @@ public protocol PCMSink: Sendable {
 /// AVFoundation. Returns nil if this buffer can't be converted (it is dropped).
 public protocol PCMConverting: Sendable {
     func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data?
+}
+
+/// The delayed-local-sink fan-out target (T-FANOUT). The whole-system tap feeds
+/// the SAME captured audio it hands the engine (``PCMSink/write(pcm:pts:)``) to a
+/// second consumer conforming to this, so the Mac's own speakers can play a
+/// PTP-delayed copy phase-aligned with the AirPlay receivers ("play everywhere").
+/// The concrete ``SyncedLocalSink`` conforms; tests inject a spy. Fed interleaved
+/// Float32 at the airplay rate/channel-count (44100 / 2ch) — the coordinator
+/// widens the already-converted S16LE airplay PCM, keeping the sink about
+/// scheduling, not format bridging (see ``SyncedLocalSink/enqueue(interleavedFrames:frameCount:pts:)``).
+public protocol SyncedLocalPCMSink: AnyObject, Sendable {
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec)
+
+    /// The sink's device-native render rate (Hz). The coordinator base-resamples
+    /// the 44.1 kHz airplay feed UP to this once before enqueueing, so the ring —
+    /// and the sink's `AVAudioEngine` — run at the output device's own rate and
+    /// opening the sink never renegotiates it (plan Part B). Defaulted to the
+    /// airplay rate so a test spy that doesn't care about rate conversion (its
+    /// feed then passes straight through, ratio 1.0) needn't implement it.
+    var renderSampleRate: Double { get }
+}
+
+extension SyncedLocalPCMSink {
+    var renderSampleRate: Double { Double(PCMFormat.airplay.sampleRate) }
+}
+
+/// ``SyncedLocalSink`` already exposes exactly this shape — both the AVFoundation
+/// and the inert fallback variant — so conformance is declaration-only.
+extension SyncedLocalSink: SyncedLocalPCMSink {}
+
+/// A streaming, fixed-ratio 4-point cubic (Catmull-Rom) resampler for the
+/// synced-local fan-out's ONE base-rate conversion: the 44.1 kHz airplay feed →
+/// the sink's device-native render rate, done before the ring (T3 Part B).
+///
+/// Distinct from ``FractionalResampler`` on purpose. That one is the sink's ppm
+/// DRIFT corrector — its ratio stays ≈ 1 under a PI loop and it is clamped to
+/// [0.5, 2.0], a range base conversion up to 96/176.4/192 kHz would exceed. This
+/// one takes a FIXED ratio spanning every real output rate and does no drift
+/// work, keeping the two concerns separate (plan: keep the `FractionalResampler`
+/// a 1 ± ppm drift corrector only; base conversion must not run through it). The
+/// Catmull-Rom kernel is the same math the phase-lock spike validated
+/// (`dev/notes/phase-lock-spike-findings.md`).
+///
+/// Sync-critical interpolator property: at the stream start (`frac == 0`) the
+/// cubic collapses to the first input frame, so `output[0] == input[0]` exactly,
+/// and thereafter output frame `n` samples the input at position `n · ratio`.
+/// There is NO whole-sample group delay to compensate, so the caller anchors
+/// ring-sample-0 to the input `pts` unchanged (no `SyncTiming` delay term for the
+/// base resample).
+///
+/// Streaming across delivery buffers: the 4-tap register and the fractional phase
+/// carry between ``resample(input:frameCount:)`` calls, so block boundaries are
+/// seamless. Single-consumer (the tap delivery thread), like the ring it feeds.
+final class SyncedLocalBaseResampler {
+
+    let channelCount: Int
+    /// Input frames consumed per output frame = `inputRate / outputRate`.
+    let ratio: Double
+    /// Input and output rates match → the feed passes through untouched.
+    let isIdentity: Bool
+
+    /// 4 taps (`d0..d3`) of `channelCount` interleaved samples each; carries the
+    /// interpolation window across buffers.
+    private var taps: [Float]
+    private var frac: Double = 0
+    private var primed = false
+
+    init(inputRate: Double, outputRate: Double, channelCount: Int) {
+        let cc = max(1, channelCount)
+        self.channelCount = cc
+        let inR = (inputRate.isFinite && inputRate > 0) ? inputRate : Double(PCMFormat.airplay.sampleRate)
+        let outR = (outputRate.isFinite && outputRate > 0) ? outputRate : inR
+        let r = inR / outR
+        self.ratio = r
+        self.isIdentity = abs(r - 1.0) < 1e-12
+        self.taps = [Float](repeating: 0, count: 4 * cc)
+    }
+
+    /// Resample `frameCount` interleaved input frames (buffer length ≥
+    /// `frameCount · channelCount`) to freshly-returned interleaved output at the
+    /// output rate. Empty only when the very first call can't prime — a first
+    /// block shorter than the 3-frame lookahead, which real converter blocks never
+    /// are (guarded so a pathological tiny first buffer drops rather than traps).
+    func resample(input: UnsafePointer<Float>, frameCount: Int) -> [Float] {
+        let cc = channelCount
+        guard frameCount > 0 else { return [] }
+        if isIdentity {
+            return Array(UnsafeBufferPointer(start: input, count: frameCount * cc))
+        }
+
+        // Upper bound on outputs producible from this block (see class note): the
+        // loop always exhausts the input (`break outer`) before hitting this cap,
+        // so no input frame is ever dropped; the tail is trimmed after.
+        let maxOutFrames = Int((Double(frameCount) / ratio).rounded(.up)) + 4
+        var out = [Float](repeating: 0, count: maxOutFrames * cc)
+        var produced = 0
+
+        out.withUnsafeMutableBufferPointer { ob in
+            guard let obase = ob.baseAddress else { return }
+            taps.withUnsafeMutableBufferPointer { tp in
+                guard let d0 = tp.baseAddress else { return }
+                let d1 = d0 + cc, d2 = d0 + 2 * cc, d3 = d0 + 3 * cc
+                var inIdx = 0
+
+                // Prime once: d0 = 0 (implicit pre-start history), d1/d2/d3 = the
+                // first three input frames. `output[0]` then collapses to d1 =
+                // input[0] at frac 0 — the exact-anchor property.
+                if !primed {
+                    guard frameCount >= 3 else { return }
+                    for ch in 0..<cc {
+                        d0[ch] = 0
+                        d1[ch] = input[ch]
+                        d2[ch] = input[cc + ch]
+                        d3[ch] = input[2 * cc + ch]
+                    }
+                    inIdx = 3
+                    frac = 0
+                    primed = true
+                }
+
+                outer: while produced < maxOutFrames {
+                    // Advance the window until frac ∈ [0, 1). If the block runs out
+                    // mid-advance, stop and preserve the register + frac for the
+                    // next call (seamless resume, no extrapolation past the taps).
+                    while frac >= 1.0 {
+                        if inIdx >= frameCount { break outer }
+                        let src = inIdx * cc
+                        for ch in 0..<cc {
+                            d0[ch] = d1[ch]; d1[ch] = d2[ch]; d2[ch] = d3[ch]
+                            d3[ch] = input[src + ch]
+                        }
+                        inIdx += 1
+                        frac -= 1.0
+                    }
+                    let f = Float(frac)
+                    let dst = obase + produced * cc
+                    for ch in 0..<cc {
+                        let x0 = d0[ch], x1 = d1[ch], x2 = d2[ch], x3 = d3[ch]
+                        let a = -0.5 * x0 + 1.5 * x1 - 1.5 * x2 + 0.5 * x3
+                        let b = x0 - 2.5 * x1 + 2.0 * x2 - 0.5 * x3
+                        let c = -0.5 * x0 + 0.5 * x2
+                        dst[ch] = ((a * f + b) * f + c) * f + x1
+                    }
+                    produced += 1
+                    frac += ratio
+                }
+            }
+        }
+
+        out.removeLast((maxOutFrames - produced) * cc)
+        return out
+    }
 }
 
 /// Every way native capture can fail, shaped so a UI can render an actionable
@@ -713,7 +1182,7 @@ final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
 
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
         throw NativeCaptureError.osUnsupported(minimum: "14.2")
     }
 
@@ -755,6 +1224,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     private var format = TapFormat(
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
+    private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`
     /// below). Resampled once at `startIOProc()` (i.e. every tap create/recreate,
@@ -783,12 +1254,27 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// id, so a double teardown is safe.
     deinit { teardown() }
 
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+        // Connect-latency diagnosis (temporary — see AudioDiag): brackets whole-
+        // system capture setup (tap + aggregate + IOProc + rate reconciliation) —
+        // read alongside NativeBackend's CONNECT logs to see whether this app's own
+        // setup, vs. the AirPlay receiver's negotiation, vs. the sync pre-roll, is
+        // where a slow connect's time actually goes.
+        AudioDiag.log("CAPTURE createAndStart begin")
         do {
-            try createTapAndReadFormat(muteBehavior: muteBehavior, excludedPIDs: excludedPIDs)
+            try createTapAndReadFormat(muteBehavior: muteBehavior, excludedProcessObjectIDs: excludedProcessObjectIDs)
             try createAggregate()
             try startIOProc()
+            // The format read from `kAudioTapPropertyFormat` above was taken on the
+            // BARE tap, before it joined the aggregate. The buffers the IOProc
+            // actually delivers arrive on the AGGREGATE's clock, which can differ —
+            // correct `format`/`asbd` to that real rate NOW, before the converter is
+            // ever built from it (see `reconcileFormatWithAggregate`). Ordered after
+            // `startIOProc` (aggregate live, rate settled) and before the listeners
+            // so the rate listener's compare-before-rebuild uses the corrected rate.
+            reconcileFormatWithAggregate()
             installDefaultDeviceListener()
+            installSampleRateListener()
         } catch {
             // Any step after the tap/aggregate was created leaves live system
             // objects; tear them down before propagating so we never orphan a
@@ -796,19 +1282,38 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             teardown()
             throw error
         }
+        AudioDiag.log("CAPTURE createAndStart done, rate=\(format.sampleRate)")
         return format
     }
 
     // MARK: Tap creation + ASBD read
 
-    private func createTapAndReadFormat(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws {
+    private func createTapAndReadFormat(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws {
+        // COLD-PROMPT GUARD (see ``SystemAudioCaptureTCC``): creating the tap is
+        // what surfaces the macOS audio-capture prompt. Never do that
+        // automatically — only the Setup screen's explicit "Allow…" may. If the
+        // grant isn't already in place, refuse so a launch-time capture attempt
+        // (a restored AirPlay selection) can't prompt cold.
+        let granted = SystemAudioCaptureTCC.isGranted()
+        // Telemetry (T2): the gate result itself, both outcomes — runs once
+        // per tap creation/recreation, before the IOProc exists, never on the
+        // RT delivery thread.
+        Telemetry.log(.permission, "gate_check", [
+            "site": "NativeCaptureCoordinator",
+            "granted": granted ? "true" : "false",
+        ])
+        guard granted else {
+            throw NativeCaptureError.tapCreationFailed(
+                reason: "audio capture not authorized — awaiting the Setup grant")
+        }
         // Whole-system stereo mixdown, excluding apps that are individually
         // routed elsewhere or user-excluded (T4 — avoids the double-send bug:
         // a routed app's audio going to its own destination AND leaking into
-        // this system mix). Empty exclusion list = the whole system, exactly
-        // pre-T4 behavior.
-        let excludedProcessObjects = Self.translateExcludedProcessObjects(excludedPIDs)
-        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludedProcessObjects)
+        // this system mix). The caller has already resolved each excluded
+        // bundle id to its FULL Core Audio process-object set (main + every
+        // child/helper, via ``AudioProcessResolver``) — no pid translation
+        // needed here. Empty exclusion set = the whole system, unchanged.
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: Array(excludedProcessObjectIDs))
         desc.uuid = UUID()
         desc.muteBehavior = muteBehavior == .mutedWhenTapped ? .mutedWhenTapped : .unmuted
         self.tapDescription = desc
@@ -852,38 +1357,6 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     private var asbd = AudioStreamBasicDescription()
 
-    /// Best-effort pid → Core Audio process-object translation for the
-    /// exclusion list (T4). Mirrors
-    /// `PerAppCaptureCoordinator.CoreAudioProcessTap.translateProcessObject`
-    /// (same `kAudioHardwarePropertyTranslatePIDToProcessObject` call) but
-    /// folded down to non-throwing + batch: a pid that doesn't resolve yet
-    /// (app not launched, or hasn't opened an audio stream) is silently
-    /// skipped rather than failing the WHOLE global tap — losing one app's
-    /// exclusion for a moment is far better than losing system audio
-    /// capture entirely.
-    private static func translateExcludedProcessObjects(_ pids: Set<pid_t>) -> [AudioObjectID] {
-        guard !pids.isEmpty else { return [] }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var result: [AudioObjectID] = []
-        result.reserveCapacity(pids.count)
-        for pid in pids {
-            var pidQualifier = pid
-            var objID: AudioObjectID = kAudioObjectUnknown
-            var size = UInt32(MemoryLayout<AudioObjectID>.size)
-            let err = AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject), &address,
-                UInt32(MemoryLayout<pid_t>.size), &pidQualifier,
-                &size, &objID)
-            if err == noErr, objID != kAudioObjectUnknown {
-                result.append(objID)
-            }
-        }
-        return result
-    }
-
     private func createAggregate() throws {
         guard let desc = tapDescription else {
             throw NativeCaptureError.aggregateDeviceFailed(reason: "no tap description")
@@ -896,6 +1369,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
         }
+        self.tappedOutputDeviceID = outputID
         let aggregateUID = UUID().uuidString
 
         let description: [String: Any] = [
@@ -1001,6 +1475,92 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         }
     }
 
+    // MARK: Aggregate-rate reconciliation (converter input-rate correctness)
+    //
+    // ROOT CAUSE of the single-AirPlay pitch-shift bug. `createTapAndReadFormat`
+    // reads `kAudioTapPropertyFormat` off the BARE process tap, before it is placed
+    // in the aggregate device. The buffers the IOProc ultimately delivers, however,
+    // arrive on the AGGREGATE's clock: the aggregate runs at its main sub-device's
+    // nominal rate (the tapped output device) and, with sub-tap drift compensation
+    // ON (`kAudioSubTapDriftCompensationKey`, set in `createAggregate`), the tap's
+    // audio is sample-rate-converted ONTO that clock. So a tap whose bare-tap format
+    // read back 44100 while it sits on a 48000 output device actually delivers
+    // 48000-rate frames. The IOProc's frame-count math is rate-INDEPENDENT
+    // (`byteSize / bytesPerFrame`), so buffers keep flowing at full cadence — but
+    // building the `AVAudioConverter` from the stale 44100 makes it reinterpret
+    // every 48000-rate buffer as 44100: a sustained ~8.8% (48000/44100) pitch-UP,
+    // exactly the live symptom Alec heard on the simplest single-AirPlay selection.
+    // Read the aggregate's REAL nominal rate here — after it exists and its IOProc
+    // has started, so it has settled — and correct `format`/`asbd` to it so the
+    // converter's assumed input rate can never diverge from what the hardware is
+    // actually delivering. The aggregate's nominal rate (not a second
+    // `kAudioTapPropertyFormat` re-read) is authoritative precisely because drift
+    // compensation resamples the sub-tap ONTO the aggregate clock — that is the
+    // cadence the IOProc sees. If the aggregate rate can't be read we keep the
+    // pre-aggregate format (no regression vs. the prior behaviour).
+    private func reconcileFormatWithAggregate() {
+        guard aggregateID != kAudioObjectUnknown else { return }
+        let aggregateRate = Self.readNominalSampleRate(aggregateID)
+        let reconciled = Self.reconciledFormat(declared: format, aggregateRate: aggregateRate)
+        guard reconciled != format else { return }
+        AudioDiag.log(
+            "System tap: pre-aggregate tap format declared \(format.sampleRate) Hz but the "
+            + "aggregate device actually delivers \(reconciled.sampleRate) Hz — correcting the "
+            + "converter's input rate to the aggregate's real rate (prevents a sustained pitch shift)")
+        self.asbd.mSampleRate = Double(reconciled.sampleRate)
+        self.format = reconciled
+    }
+
+    /// Correct a pre-aggregate tap ``TapFormat`` against the aggregate device's real
+    /// nominal sample rate. Pure so it is unit-testable without a live aggregate
+    /// (where the real divergence only exists). Keeps every rate-INDEPENDENT field
+    /// (channels / bit-depth / float / interleave — unaffected by drift
+    /// compensation, which only resamples); rewrites ONLY the sample rate, and only
+    /// when the aggregate rate is readable, valid, and actually different. A
+    /// nil/non-finite/≤0 aggregate rate returns `declared` unchanged (trust the
+    /// pre-aggregate read over a bad one).
+    static func reconciledFormat(declared: TapFormat, aggregateRate: Double?) -> TapFormat {
+        guard let aggregateRate, aggregateRate.isFinite, aggregateRate > 0 else { return declared }
+        let corrected = Int(aggregateRate.rounded())
+        guard corrected > 0, corrected != declared.sampleRate else { return declared }
+        return TapFormat(
+            sampleRate: corrected,
+            channels: declared.channels,
+            bitsPerSample: declared.bitsPerSample,
+            isFloat: declared.isFloat,
+            isInterleaved: declared.isInterleaved)
+    }
+
+    /// Compare-before-rebuild loop-breaker for the nominal-sample-rate listener
+    /// (mirrors the known (deviceID, nominalRate) compare-before-rebuild idiom from
+    /// the CPU/coreaudiod-storm work). Rebuild ONLY when the notified rate actually
+    /// differs from the rate the converter is currently built on; a notification
+    /// that re-announces the SAME rate (Core Audio posts these for a set-to-same-
+    /// value) must not tear down and recreate the tap. An unreadable notified rate
+    /// returns `true` — we can't prove it's a no-op, so fall back to the safe
+    /// rebuild rather than risk missing a real change. Pure/testable.
+    static func shouldRebuildForNominalRate(notifiedRate: Double?, currentEffectiveRate: Int) -> Bool {
+        guard let notifiedRate, notifiedRate.isFinite, notifiedRate > 0 else { return true }
+        return Int(notifiedRate.rounded()) != currentEffectiveRate
+    }
+
+    /// Read a device's current nominal sample rate
+    /// (`kAudioDevicePropertyNominalSampleRate`), or nil if unreadable/degenerate.
+    /// Used both to reconcile the converter rate against the aggregate and to
+    /// compare-before-rebuild inside the rate listener.
+    static func readNominalSampleRate(_ deviceID: AudioObjectID) -> Double? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        guard err == noErr, rate.isFinite, rate > 0 else { return nil }
+        return rate
+    }
+
     // MARK: Default-device-change listener
 
     private func installDefaultDeviceListener() {
@@ -1027,10 +1587,82 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         deviceChangeBlock = nil
     }
 
+    // MARK: Nominal-sample-rate listener (documented process-tap silent-buffer fix)
+    //
+    // A process tap keeps delivering buffers at full cadence but goes SILENT
+    // (all-zero PCM) when the tapped output device renegotiates its nominal
+    // sample rate (44.1 ↔ 48 kHz) — classically triggered by another app taking
+    // the mic and forcing voice-processing mode, or (synced-local) a local sink
+    // opening the built-in speakers at a different rate than the tapped device.
+    // This is a known, Apple-unresolved Core Audio behaviour (Developer Forums
+    // thread 825780); the only reliable recovery is a FULL teardown + rebuild
+    // of the tap AND aggregate, which `handleDeviceChange` already performs.
+    // The catch: this rate change happens with the default output device's UID
+    // UNCHANGED, so the `kAudioHardwarePropertyDefaultOutputDevice` (identity)
+    // listener never fires. Listening for the device's
+    // `kAudioDevicePropertyNominalSampleRate` catches it and drives the same
+    // rebuild via `onDefaultDeviceChanged`. Mirrors
+    // `PerAppCaptureCoordinator.installSampleRateListener` — see that file for
+    // the fuller writeup — but registers on this class's own `listenerQueue`
+    // (not a `nil` queue) for the same off-HAL-thread reason
+    // `installDefaultDeviceListener` above documents.
+    private func installSampleRateListener() {
+        guard tappedOutputDeviceID != kAudioObjectUnknown else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD LOOP-BREAKER: read the tapped device's new
+            // nominal rate and rebuild ONLY if it actually differs from the rate the
+            // converter is currently built on (`format.sampleRate`, already
+            // corrected to the aggregate's real rate by `reconcileFormatWithAggregate`
+            // before this listener was installed). Core Audio can post this listener
+            // for a set-to-same-value; a spurious full teardown+rebuild both burns
+            // CPU and risks a rebuild storm, so a no-op notification must stay a
+            // no-op. `format` is written ONLY during `createAndStart` (before this
+            // listener is installed) and is never mutated afterward for the life of
+            // the instance — a real rate change rebuilds a fresh `CoreAudioSystemTap`
+            // whose own `createAndStart` re-reads the format — so reading it here off
+            // `listenerQueue` is race-free, the same setup-time-immutability the rest
+            // of this class relies on for `tappedOutputDeviceID`.
+            let notified = Self.readNominalSampleRate(self.tappedOutputDeviceID)
+            guard Self.shouldRebuildForNominalRate(
+                notifiedRate: notified, currentEffectiveRate: self.format.sampleRate) else {
+                AudioDiag.log(
+                    "System tap: nominal-rate notification but rate unchanged "
+                    + "(\(self.format.sampleRate) Hz) — skipping rebuild")
+                return
+            }
+            AudioDiag.log(
+                "System tap: nominal-sample-rate changed on tapped device (now "
+                + "\(notified.map { String(Int($0.rounded())) } ?? "unreadable") Hz) — triggering rebuild")
+            self.onDefaultDeviceChanged?()
+        }
+        self.sampleRateBlock = block
+        AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, listenerQueue, block)
+    }
+
+    private func removeSampleRateListener() {
+        guard let block = sampleRateBlock, tappedOutputDeviceID != kAudioObjectUnknown else {
+            sampleRateBlock = nil
+            return
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, listenerQueue, block)
+        sampleRateBlock = nil
+    }
+
     // MARK: Teardown (order matters: stop → destroy IOProc → destroy aggregate → destroy tap)
 
     func teardown() {
         removeDefaultDeviceListener()
+        removeSampleRateListener()
+        tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
             _ = AudioDeviceStop(aggregateID, proc)
             _ = AudioDeviceDestroyIOProcID(aggregateID, proc)

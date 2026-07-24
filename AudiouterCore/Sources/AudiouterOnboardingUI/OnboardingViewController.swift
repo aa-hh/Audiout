@@ -497,6 +497,37 @@ public final class OnboardingViewController: NSViewController {
         networkRow.update(status: model.localNetworkStatus, isProbing: false)
         remoteControlRow.update(status: model.remoteControlStatus, isProbing: false)
         ptpHelperRow.update(status: model.ptpHelperStatus)
+        refreshPermissionLostBanner()
+    }
+
+    /// Keep the `.permissionLost` banner honest as the user re-grants: re-word it
+    /// to the still-missing subset, and HIDE it once every permission it warned
+    /// about is satisfied. Without this the "…currently turned off" warning stayed
+    /// up even after the row it named flipped to Allowed. Scoped to the permissions
+    /// the banner ORIGINALLY flagged (from `reason`), so granting them clears it
+    /// and it never expands to nag about something it didn't open for. No-op for
+    /// `.firstRun` — there's no banner (`permissionBannerView` is nil).
+    private func refreshPermissionLostBanner() {
+        guard let banner = permissionBannerView,
+              case .permissionLost(let originallyUnmet) = reason else { return }
+        let notGranted = model.requiredPermissionsNotGranted()
+        let stillMissing = originallyUnmet.filter { notGranted.contains($0) }
+        if !stillMissing.isEmpty {
+            permissionBannerLabel?.stringValue = Self.bannerText(for: stillMissing)
+        }
+        let shouldHide = stillMissing.isEmpty
+        guard banner.isHidden != shouldHide else { return }   // only act on a change
+        banner.isHidden = shouldHide
+
+        // Re-fit the window so hiding the banner doesn't leave a gap, keeping the
+        // title bar fixed (window origin is bottom-left, so shrink from the bottom).
+        view.layoutSubtreeIfNeeded()
+        guard let window = view.window else { return }
+        let target = view.fittingSize
+        var frame = window.frame
+        frame.origin.y += frame.height - target.height
+        frame.size = target
+        window.setFrame(frame, display: true, animate: true)
     }
 
     private func allowAudio() {
@@ -649,6 +680,16 @@ public final class OnboardingViewController: NSViewController {
 
     /// Whether this presentation rendered the `.permissionLost` banner.
     public var test_showsPermissionLostBanner: Bool { _ = view; return permissionBannerView != nil }
+
+    /// Whether the `.permissionLost` banner is currently VISIBLE (built AND not
+    /// hidden) — distinct from ``test_showsPermissionLostBanner`` (was one ever
+    /// built) so a test can assert the banner CLEARS once its permission is
+    /// granted.
+    public var test_permissionLostBannerIsVisible: Bool {
+        _ = view
+        guard let banner = permissionBannerView else { return false }
+        return !banner.isHidden
+    }
 
     /// The banner's copy, if shown (nil for `.firstRun`).
     public var test_permissionLostBannerText: String? { _ = view; return permissionBannerLabel?.stringValue }

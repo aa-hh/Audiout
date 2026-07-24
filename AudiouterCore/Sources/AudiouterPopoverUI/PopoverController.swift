@@ -1135,8 +1135,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // revert on the first model repaint after a mute click.
         var device = device
         device.isMuted = device.isMuted || controller.isMuted(device.id)
-        // Block only the local device when it can't currently be turned ON.
-        let blocked = device.isLocalDevice && !selected && !controller.canSelectLocalSpeaker(device.id)
+        // T-UI-ALLOW: the Phase-1 local-mix block is gone — `canSelectLocalSpeaker`
+        // is unconditionally `true` now (T-GROUPCTL / Q5, synced local sink), so
+        // the Mac row is never blocked/greyed any more. This no longer computes
+        // or passes `blocked`/`blockReason` to the row (both default to
+        // false/nil in `DeviceRowView.apply`, which is exactly the always-un-blocked
+        // behavior this now produces).
         // Route-armed inputs (spec §3.3, S2): membership is evaluated against
         // the ACTIVE Main Out target — the Selected set when Main Out targets
         // Selected Devices, the group's member set when it targets a saved
@@ -1154,8 +1158,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         row.apply(device,
                   selected: selected,
                   controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
-                  blocked: blocked,
-                  blockReason: blocked ? GroupController.localMixRefusalReason : nil,
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],

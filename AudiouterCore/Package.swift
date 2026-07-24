@@ -1,5 +1,47 @@
 // swift-tools-version:5.10
 import PackageDescription
+import Foundation
+
+// Brew include paths for the same Homebrew-keg-only libs AirPlayEngine's C
+// target needs (../AirPlayEngine/Package.swift). A C target's cSettings
+// .unsafeFlags do NOT propagate to a DOWNSTREAM package's Swift target when it
+// imports that C target's headers (transitively, via `import AirPlayEngine` ->
+// CAirPlayEngine's umbrella header, which #includes <event2/event.h> etc.) —
+// AirPlayEngine/Package.swift's own AirPlayEngine Swift target already has to
+// restate these for itself (see its swiftClangImporterFlags), and this
+// manifest is one dependency hop further away, so it must restate them again.
+// Without this, a normal debug `swift build` still resolves the module (the
+// implicit build system tolerates it), but an explicit-module-build release
+// config (as newer Xcode toolchains default to) fails to find
+// 'event2/thread.h' resolving CAirPlayEngine's module from here.
+func resolveBrewPrefix() -> String {
+    if let env = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"], !env.isEmpty {
+        return env
+    }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    p.arguments = ["brew", "--prefix"]
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    if (try? p.run()) != nil {
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !s.isEmpty, FileManager.default.fileExists(atPath: s) {
+            return s
+        }
+    }
+    if FileManager.default.fileExists(atPath: "/opt/homebrew") { return "/opt/homebrew" }
+    return "/usr/local"
+}
+
+let brewPrefix = resolveBrewPrefix()
+
+let brewFormulae = ["libevent", "libsodium", "libgcrypt", "libgpg-error", "libplist"]
+
+let swiftClangImporterFlags: [String] =
+    brewFormulae.flatMap { ["-Xcc", "-I\(brewPrefix)/opt/\($0)/include"] }
 
 // Platform floor: raised from .v13 to .v14 for T-NB-PKGDEP-1. AirPlayEngine
 // (../AirPlayEngine/Package.swift) is .macOS(.v14) — its Core Audio process
@@ -54,6 +96,9 @@ let package = Package(
         // priming) — the window isn't visible to an agent shell, so this renders
         // it (light + dark, each permission status) for visual verification.
         .executable(name: "onboarding-snapshot", targets: ["onboarding-snapshot"]),
+        // Silent read-only Core Audio diagnostic for enumerating process objects and
+        // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
+        .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
@@ -81,11 +126,15 @@ let package = Package(
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
                 "ObjCExceptionShim",
+            ],
+            swiftSettings: [
+                .unsafeFlags(swiftClangImporterFlags),
             ]
         ),
         .executableTarget(
             name: "mock-speakers-demo",
-            dependencies: ["AudiouterCore"]
+            dependencies: ["AudiouterCore"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The shared `DeviceRowView` (SPEC §9 "Device row (shared by the popover
         // and the window)"). A library both `AudiouterPopoverUI` and
@@ -97,7 +146,8 @@ let package = Package(
         // `Delegate` — no backend knowledge.
         .target(
             name: "AudiouterSharedUI",
-            dependencies: ["AudiouterCore"]
+            dependencies: ["AudiouterCore"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):
         // `PopoverController` + `GroupRowView`, a Control-Center-style panel
@@ -106,7 +156,8 @@ let package = Package(
         // and assert the built panel structure. Reuses the shared `DeviceRowView`.
         .target(
             name: "AudiouterPopoverUI",
-            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit mixer window (SPEC §9 "Full window"): a
         // `MixerWindowController` hosting an `NSSplitViewController` (source-list
@@ -117,7 +168,8 @@ let package = Package(
         // the built window structure. Reuses the shared `DeviceRowView`.
         .target(
             name: "AudiouterWindowUI",
-            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit Settings window (the header gear's destination): a
         // `SettingsWindowController` hosting a `.toolbar`-style
@@ -130,7 +182,8 @@ let package = Package(
             name: "AudiouterSettingsUI",
             // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — Settings styles through Tokens.* now.
-            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit first-run onboarding window (permission priming): an
         // `OnboardingWindowController` hosting a single-screen explanation + a
@@ -143,7 +196,8 @@ let package = Package(
             name: "AudiouterOnboardingUI",
             // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — onboarding styles through Tokens.* now.
-            dependencies: ["AudiouterCore", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
         // lifecycle); the popover dropdown lives in AudiouterPopoverUI,
@@ -157,43 +211,57 @@ let package = Package(
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
                 "AudiouterOnboardingUI",
-            ]
+            ],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Programmatic popover-structure verification for T-U6 (the popover isn't
         // visible to an agent shell) — see the product comment above.
         .executableTarget(
             name: "popover-harness",
-            dependencies: ["AudiouterCore", "AudiouterPopoverUI"]
+            dependencies: ["AudiouterCore", "AudiouterPopoverUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Programmatic window-structure verification for T-U4 (the window isn't
         // visible to an agent shell) — see the product comment above.
         .executableTarget(
             name: "window-harness",
-            dependencies: ["AudiouterCore", "AudiouterWindowUI"]
+            dependencies: ["AudiouterCore", "AudiouterWindowUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the popover panel (layout overhaul visual
         // verification) — see the product comment above.
         .executableTarget(
             name: "popover-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterPopoverUI", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterPopoverUI", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the Settings window — see the product
         // comment above.
         .executableTarget(
             name: "settings-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterSettingsUI"]
+            dependencies: ["AudiouterCore", "AudiouterSettingsUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the onboarding window — see the product
         // comment above.
         .executableTarget(
             name: "onboarding-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterOnboardingUI"]
+            dependencies: ["AudiouterCore", "AudiouterOnboardingUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
             name: "window-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterWindowUI", "AudiouterSharedUI"]
+            dependencies: ["AudiouterCore", "AudiouterWindowUI", "AudiouterSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
+        // Silent read-only diagnostic for enumerating Core Audio process objects
+        // and their associated PIDs and bundle IDs, useful for diagnosing per-app
+        // audio routing issues (T7). Run with: AUDIOUTER_CORE_AUDIO_DIAGNOSTIC=1 swift run core-audio-diagnostic
+        .executableTarget(
+            name: "core-audio-diagnostic",
+            dependencies: ["AudiouterCore"]
         ),
         .testTarget(
             name: "AudiouterCoreTests",
@@ -204,7 +272,8 @@ let package = Package(
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
                 "AudiouterOnboardingUI",
-            ]
+            ],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
     ]
 )

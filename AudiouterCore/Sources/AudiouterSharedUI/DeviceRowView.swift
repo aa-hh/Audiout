@@ -1571,8 +1571,28 @@ public final class DeviceRowView: NSView {
     }
 
     /// Simulate the user flipping this row's primary "send audio here" switch.
+    ///
+    /// NOTE: this calls the delegate method directly — it does NOT go through
+    /// `enableCheckbox`'s real AppKit target/action wiring. That shortcut is
+    /// fine for tests that only care about the resulting `SelectionResult`, but
+    /// it can't catch a real dispatch regression (the row-selection lesson:
+    /// `MainOutRowView.selectionChanged` broke while delegate-shortcut tests
+    /// stayed green because AppKit's real sender didn't match what the shortcut
+    /// assumed). Use ``test_performEnableClick()`` below when the real dispatch
+    /// path itself is what's under test.
     public func test_toggleEnabled(_ on: Bool) {
         delegate?.deviceRow(self, didToggleEnabled: on, for: device.id)
+    }
+
+    /// Simulate a REAL user click on the primary "Selected Devices" membership
+    /// checkbox via AppKit's own `NSButton.performClick(_:)` — this exercises
+    /// the actual `enableCheckbox.target`/`.action` wiring set up in
+    /// `buildSubviews()` (`enableToggled(_:)`), the same path a live mouse
+    /// click drives, rather than calling the delegate method directly like
+    /// ``test_toggleEnabled(_:)`` does. A no-op if the checkbox is currently
+    /// disabled (mirrors what a real click would do).
+    public func test_performEnableClick() {
+        enableCheckbox.performClick(nil)
     }
 
     /// Simulate the user clicking the device NAME (toggles the ENABLED checkbox,

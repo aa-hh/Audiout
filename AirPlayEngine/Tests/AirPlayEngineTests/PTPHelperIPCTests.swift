@@ -50,16 +50,46 @@ final class PTPHelperIPCTests: XCTestCase {
     private static let eventPort: UInt16 = 30319
     private static let generalPort: UInt16 = 30320
 
+    /// Test-only shm name (never the production "/airptp_shm"). A real
+    /// ptp-helper daemon installed via SMAppService runs as root and owns
+    /// "/airptp_shm"; an unprivileged test process can't shm_unlink() a
+    /// root-owned segment of that name, so daemon_shm_create() would fail
+    /// with EACCES whenever the real daemon happens to be running. See
+    /// airptp_shm_name_override() (libairptp/airptp.h).
+    private static let shmName = "/airptp_shm_test"
+
+    override func tearDown() {
+        // ptp_test_ports_override()/ptp_test_shm_name_override() mutate plain
+        // C process-globals (libairptp/src/airptp.c), not per-test state -
+        // restore the shipping defaults (PTP_EVENT_PORT/PTP_GENERAL_PORT =
+        // 319/320, AIRPTP_SHM_NAME = "/airptp_shm") so this test can't leak
+        // its overrides into any sibling test that shares the process (e.g.
+        // one exercising the engine's production ptpd_setup -> daemon_find
+        // path, shims/ptpd.c).
+        ptp_test_ports_override(319, 320)
+        "/airptp_shm".withCString { ptp_test_shm_name_override($0) }
+        super.tearDown()
+    }
+
     func testFindClockReadAndPeerAddRemoveOverLoopback() throws {
         // Every libairptp entry point in this test reads/writes process-wide
-        // globals (airptp_event_port/airptp_general_port - see
-        // libairptp/src/airptp.c), so apply the override before the master
-        // binds.
+        // globals (airptp_event_port/airptp_general_port/airptp_shm_name -
+        // see libairptp/src/airptp.c), so apply the overrides before the
+        // master binds.
         ptp_test_ports_override(Self.eventPort, Self.generalPort)
+        Self.shmName.withCString { ptp_test_shm_name_override($0) }
 
         // MARK: master role (stands in for the future root helper, minus
         // root - these are high ports so no privilege is required).
-        guard let masterHdl = ptp_test_daemon_bind(nil) else {
+        // Bind explicitly to loopback rather than passing `nil` (which
+        // resolves to `AI_PASSIVE`/`INADDR_ANY` — a listener on every
+        // interface). This test only ever talks to itself over 127.0.0.1
+        // (see the "loopback-UDP control path" note above), so nothing it
+        // verifies changes — but an all-interfaces bind is exactly what
+        // trips macOS's Application Firewall's "accept incoming network
+        // connections?" prompt for the xctest host process on every
+        // `swift test` run. A loopback-only listener is never firewalled.
+        guard let masterHdl = "127.0.0.1".withCString({ ptp_test_daemon_bind($0) }) else {
             // Guard against CI flakiness if something else already holds
             // these high ports; skip rather than fail the suite.
             throw XCTSkip("Could not bind PTP test ports \(Self.eventPort)/\(Self.generalPort) - \(String(cString: ptp_test_errmsg_get())); skipping (likely port contention)")

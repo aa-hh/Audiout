@@ -16,6 +16,12 @@ ptp_test_ports_override(unsigned short event_port, unsigned short general_port)
   airptp_ports_override(event_port, general_port);
 }
 
+void
+ptp_test_shm_name_override(const char *name)
+{
+  airptp_shm_name_override(name);
+}
+
 struct airptp_handle *
 ptp_test_daemon_bind(const char *node)
 {

@@ -64,7 +64,18 @@ final class PopoverControllerTests: XCTestCase {
             }
         }
         backend.start()
-        await fulfillment(of: [expectation], timeout: 2)
+        // 2s was comfortable for a lone `swift test` run but not under
+        // `swift test --parallel` (every other suite is a concurrent sibling
+        // process competing for CPU) — this fixture runs up to 3x in one test
+        // (`testApplicationsCardExpandedOnOpenIffAnyRouteExists` builds three
+        // separate popovers), tripling the exposure to a single marginal
+        // timeout. `fulfillment` returns as soon as the expectation is met, so
+        // a wider ceiling costs nothing in the fast path — it only buys
+        // headroom under load. (2026-07-24: "Asynchronous wait failed:
+        // Exceeded timeout of 2 seconds, with unfulfilled expectations: 'fleet
+        // discovered'" observed intermittently under --parallel, never in
+        // isolation across 10 clean runs.)
+        await fulfillment(of: [expectation], timeout: 10)
         task.cancel()
     }
 
@@ -183,19 +194,53 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertFalse(result.autoSwappedCurrentDevice, "no auto-swap when local isn't the sole member")
     }
 
-    func testLocalMixBlockRefusesAndSurfacesReason() async throws {
+    func testAddingLocalIntoAMixedSetIsAllowed() async throws {
+        // T-GROUPCTL (Q5): the synced local sink lifted the old pre-engine
+        // local-mix block. The Mac may now join a mixed Selected Devices set.
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
-        XCTAssertFalse(controller.canSelectLocalSpeaker("local-mac"))
+        XCTAssertTrue(controller.canSelectLocalSpeaker("local-mac"))
         let result = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
-        XCTAssertFalse(result.applied, "adding local into a mixed set is refused")
-        XCTAssertEqual(result.refusalReason, GroupController.localMixRefusalReason)
-        XCTAssertFalse(controller.isSpeakerSelected("local-mac"))
-        XCTAssertEqual(popover.test_lastRefusalReason, GroupController.localMixRefusalReason,
-                       "the popover surfaced the refusal reason")
-        // The local row's toggle is presented disabled (blocked) with the reason.
+        XCTAssertTrue(result.applied, "adding local into a mixed set is now allowed")
+        XCTAssertNil(result.refusalReason)
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"))
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "AirPlay member stays — Mac joins, nothing drops")
+        // The local row's toggle is presented enabled (not blocked).
         let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        XCTAssertTrue(row.test_isEnabledOn)
+    }
+
+    /// T-UI-ALLOW: the sibling of `testAddingLocalIntoAMixedSetIsAllowed` above,
+    /// but driven through the row's REAL AppKit dispatch path
+    /// (`enableCheckbox.performClick(_:)` via `test_performEnableClick()`)
+    /// instead of `test_toggleDeviceEnabled`, which calls
+    /// `GroupController.setDeviceSelected` directly and never touches the
+    /// checkbox or its target/action wiring at all. Per the repo's own
+    /// documented lesson (row selection tests bypassing AppKit dispatch let a
+    /// real `MainOutRowView` regression through green tests), a delegate
+    /// shortcut can't catch a checkbox that's actually left disabled/greyed —
+    /// `performClick` is a no-op on a disabled `NSControl`, so if the local row
+    /// were still blocked (a T-GROUPCTL/T-UI-ALLOW regression) this test would
+    /// fail because the click would silently do nothing.
+    func testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "starts out of the set")
+
+        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
+        row.test_performEnableClick()   // real enableCheckbox.performClick(_:) dispatch
+
+        XCTAssertTrue(row.test_isEnabledOn, "the checkbox itself flips ON via its own action")
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"),
+                      "a real click joins the Mac into the mixed Selected Devices set")
+        XCTAssertTrue(controller.isSpeakerSelected("office"),
+                      "the AirPlay member stays selected — nothing drops when the Mac joins")
+
+        // Click again (real dispatch) to remove it — same path, both directions.
+        row.test_performEnableClick()
         XCTAssertFalse(row.test_isEnabledOn)
+        XCTAssertFalse(controller.isSpeakerSelected("local-mac"), "a second real click removes it again")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "removing local never touches the AirPlay member")
     }
 
     func testMainOutMasterReflectsCurrentTarget() async throws {
@@ -559,16 +604,29 @@ final class PopoverControllerTests: XCTestCase {
 
     /// A retry while a SECOND device is still connecting: the retry must not
     /// disturb the in-flight device, and both resolve independently.
+    ///
+    /// The `.connecting` checks below read `backend.devices`/the row
+    /// synchronously right after a `tapRetry`/`update()` call — there's no
+    /// event to wait on for "hasn't transitioned yet", so the only lever is
+    /// giving the intervening test/AppKit work (NOT wall-clock bounded — an
+    /// `update()` rebuilds the whole popover, Applications card included) a
+    /// wide margin before each device's scripted timer fires. A prior 0.5s/1.0s
+    /// margin (comfortable for a lone `swift test` run) flaked intermittently
+    /// under `swift test --parallel`'s CPU contention (every other suite is a
+    /// concurrent sibling process) — 2026-07-24: both "connected" observed
+    /// where "connecting" was asserted, on different runs, never in isolation.
+    /// Widening these delays doesn't weaken what's being tested (still-in-
+    /// flight vs. disturbed), only the wall-clock tolerance of the checkpoint.
     func testRetryWhileSecondDeviceConnecting() async throws {
         let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
             "office": ConnectScript(attempts: [
                 .fail(after: 0.05, ConnectionFailure(cause: .refusedOrBusy)),
-                // Retry connects after a comfortable delay so the transient
-                // `.connecting` state is observable after `update()` (which now
-                // rebuilds the Applications card too, taking longer wall-clock).
-                .connect(after: 0.5),
+                // Retry connects after a wide margin so the transient
+                // `.connecting` state stays observable after `update()` even
+                // under `--parallel` contention (see the doc comment above).
+                .connect(after: 3.0),
             ]),
-            "homepod-bed": ConnectScript(attempts: [.connect(after: 1.0)]),
+            "homepod-bed": ConnectScript(attempts: [.connect(after: 6.0)]),
         ])
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -590,8 +648,11 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(homepodDevice.connectionState, .connecting,
                        "the in-flight device was not disturbed by the retry's setOutputSet")
 
-        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
-        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
+        // Timeouts widened to stay above the new 3.0s/6.0s scripted delays
+        // (plus contention headroom) — these calls poll every 20ms until the
+        // predicate holds, so a bigger ceiling is free in the fast path.
+        try await waitForConnectionState(backend, id: "office", timeout: 8) { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed", timeout: 12) { $0 == .connected }
         popover.update(devices: backend.devices)
         XCTAssertEqual(popover.test_deviceRow(for: "office")?.test_statusKind, .connected)
         XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind, .connected)
@@ -715,9 +776,14 @@ final class PopoverControllerTests: XCTestCase {
                        "an AirPlay row below the terminus is bare — no rail through it")
     }
 
-    /// Node rendering across a real popover: members filled, non-members hollow,
-    /// the local-mix-blocked Mac distinct — and the node column x is identical
-    /// on every row (one fixed column, §4.1/R7).
+    /// Node rendering across a real popover: members filled, non-members hollow
+    /// — and the node column x is identical on every row (one fixed column,
+    /// §4.1/R7). The Mac is a plain non-member here (auto-dropped by the
+    /// sole-member auto-swap when "office" was added, then never re-selected) —
+    /// NOT the distinct "blocked" node §4.6 originally described: T-GROUPCTL/Q5
+    /// (synced local sink) lifted the local-mix block, so the Mac can freely
+    /// rejoin a mixed set at will (see `testAddingLocalIntoAMixedSetIsAllowed`);
+    /// it just isn't re-added in THIS test.
     func testBusNodesReflectMembershipAndShareOneColumn() async throws {
         let (popover, _, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -727,8 +793,9 @@ final class PopoverControllerTests: XCTestCase {
         XCTAssertEqual(popover.test_deviceRow(for: "homepod-bed")?.test_busNode, .member)
         XCTAssertEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNode, .nonMember,
                        "an untapped device's node is hollow — the line detours it")
-        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .blocked,
-                       "the Mac can't join a mixed set — the distinct blocked node (§4.6)")
+        XCTAssertEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .nonMember,
+                       "the Mac auto-dropped via the sole-member auto-swap — a plain "
+                       + "non-member, not blocked (the local-mix block is retired)")
 
         // One fixed column: every node's center x is identical across rows AND
         // unchanged when a membership toggles (zero layout shift, R7).
@@ -787,52 +854,19 @@ final class PopoverControllerTests: XCTestCase {
                        "…and re-deriving the checked set removed the note live")
     }
 
-    // MARK: S4 (spec §4.6) — blocked row's in-place refusal note
-
-    /// A body-click on the local-mix-blocked row toggles a one-line in-place
-    /// refusal note (from `GroupController.localMixRefusalReason`) directly
-    /// under it — the reachable trigger; the disabled checkbox + tooltip is
-    /// never the only surfacing (stress-break §8.5).
-    func testBlockedRowBodyClickTogglesRefusalNote() async throws {
-        let (popover, _, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        await drain()
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
-        XCTAssertEqual(row.test_busNode, .blocked, "mixed set ⇒ the Mac is local-mix blocked")
-        XCTAssertFalse(popover.test_isBlockedNoteShown(id: "local-mac"),
-                       "no note before any ask")
-
-        row.test_simulateBlockedBodyClick()
-        XCTAssertTrue(popover.test_isBlockedNoteShown(id: "local-mac"),
-                      "the body-click mounted the in-place note under the row")
-        XCTAssertEqual(popover.test_lastRefusalReason, GroupController.localMixRefusalReason,
-                       "the note carries the model's refusal reason")
-
-        row.test_simulateBlockedBodyClick()
-        XCTAssertFalse(popover.test_isBlockedNoteShown(id: "local-mac"),
-                       "a second ask dismisses the note")
-    }
-
-    /// The NAME of a blocked row is part of the reachable trigger too (§4.6 "a
-    /// click anywhere on the row body / name / node") — it surfaces the same
-    /// note, never toggles membership, and the row's VoiceOver hint speaks the
-    /// same reason (S4's spoken equivalent).
-    func testBlockedRowNameClickSurfacesRefusalNote() async throws {
-        let (popover, controller, _) = try await makePopover()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        await drain()
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "local-mac"))
-
-        row.test_clickName()
-        XCTAssertTrue(popover.test_isBlockedNoteShown(id: "local-mac"),
-                      "the name-click surfaced the same in-place note")
-        XCTAssertFalse(controller.isSpeakerSelected("local-mac"),
-                       "…without touching the blocked membership")
-        XCTAssertEqual(row.test_accessibilityHint, GroupController.localMixRefusalReason,
-                       "the blocked row's accessibility hint carries the refusal reason")
-    }
+    // MARK: S4 (spec §4.6) — blocked row's in-place refusal note [RETIRED]
+    //
+    // `testBlockedRowBodyClickTogglesRefusalNote` and
+    // `testBlockedRowNameClickSurfacesRefusalNote` lived here, covering the
+    // local-mix-blocked row's in-place refusal note (a click surfaces
+    // `GroupController.localMixRefusalReason` under the row). T-GROUPCTL/Q5
+    // (synced local sink, pulled in by the ring-resting-state x main merge,
+    // 2026-07-24) lifted the local-mix block entirely — the Mac can freely join
+    // a mixed set now, so this row state is never reached and both tests failed
+    // asserting a `.blocked` node the real popover no longer produces. Dropped
+    // rather than kept red; the superseding "Mac joins freely" behavior is
+    // covered by `testAddingLocalIntoAMixedSetIsAllowed` and
+    // `testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet` above.
 
     /// T-3 — exact-fit sizing: the popover is exactly its visible content height,
     /// with no `NSScrollView` and no clipping. The resize primitive publishes the

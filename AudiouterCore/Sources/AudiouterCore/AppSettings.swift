@@ -70,6 +70,7 @@ public struct AppSettings {
         static let hasCompletedSetup = "setup.hasCompleted"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
+        static let syncOffsetMs = "audio.syncOffsetMs"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -193,6 +194,38 @@ public struct AppSettings {
         }
         nonmutating set {
             defaults.set(min(max(newValue, Self.minConnectVolume), Self.maxConnectVolume), forKey: Keys.connectVolume)
+        }
+    }
+
+    /// The lowest/highest manual sync-offset the setting can hold, and the
+    /// unset/reset default (T-OFFSET-UI, Settings › Audio › Advanced). Bare
+    /// milliseconds by design — same house rule as ``startBufferOptionsMs``/
+    /// ``wakeRestoreMinuteOptions``: no named preset survives localization. Signed
+    /// — a device that reports its own latency wrong needs to be nudged either
+    /// direction (R1), so unlike the connect-volume floor this range straddles
+    /// zero. ±500 ms comfortably covers any plausible misreport while keeping the
+    /// slider usable (a wider range buys nothing but a mis-clickable control).
+    public static let minSyncOffsetMs = -500
+    public static let maxSyncOffsetMs = 500
+    public static let defaultSyncOffsetMs = 0
+
+    /// The persisted manual sync-offset bias (ms), clamped to
+    /// ``minSyncOffsetMs``…``maxSyncOffsetMs`` on both read and write. Added, as a
+    /// static user bias, on top of the computed+corrected delay target inside
+    /// ``SyncTiming/totalDelayNanos(presentationDelayMs:localOutputLatencySeconds:safetyMarginMs:userOffsetMs:)``.
+    /// Unset resolves to ``defaultSyncOffsetMs`` (0) — distinguished from an
+    /// explicitly-stored 0 via `object(forKey:)`, though both resolve to the same
+    /// value, exactly like ``wakeRestoreMinutes``'s unset-vs-zero handling.
+    public var syncOffsetMs: Int {
+        get {
+            guard defaults.object(forKey: Keys.syncOffsetMs) != nil else {
+                return Self.defaultSyncOffsetMs
+            }
+            let stored = defaults.integer(forKey: Keys.syncOffsetMs)
+            return min(max(stored, Self.minSyncOffsetMs), Self.maxSyncOffsetMs)
+        }
+        nonmutating set {
+            defaults.set(min(max(newValue, Self.minSyncOffsetMs), Self.maxSyncOffsetMs), forKey: Keys.syncOffsetMs)
         }
     }
 }

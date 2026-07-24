@@ -1,15 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- SMAppService launchd daemon plist for the ptp-helper binary (T5,
-     AirPlayEngine/docs/ptp-helper-design.md §2.2). Copied verbatim by
-     scripts/make-app.sh into Contents/Library/LaunchDaemons/ — the filename
-     there MUST equal Label + ".plist" (SMAppService.daemon(plistName:)
-     resolves the plist by that exact name). Never edit this in place without
-     mirroring the copy destination in make-app.sh. -->
+     AirPlayEngine/docs/ptp-helper-design.md §2.2). scripts/make-app.sh
+     substitutes the placeholder token below (BUNDLE underscore ID, doubled
+     underscores each side) with the app's actual BUNDLE_ID (default
+     com.audiouter.Audiouter) before copying into
+     Contents/Library/LaunchDaemons/ — the filename there MUST equal Label +
+     ".plist" (SMAppService.daemon(plistName:) resolves the plist by that
+     exact name). Label/AssociatedBundleIdentifiers are BUNDLE_ID-derived (not
+     hardcoded) so a side-by-side dev build under a distinct BUNDLE_ID gets its
+     own independently-registerable daemon identity rather than colliding with
+     another Audiouter copy's already-claimed "com.audiouter.Audiouter.ptphelper"
+     label (2026-07-24 live-testing bug — two copies silently fought over one
+     daemon identity, and the loser's register() silently no-op'd instead of
+     throwing). Never edit this in place without mirroring the substitution in
+     make-app.sh. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.audiouter.Audiouter.ptphelper</string>
+    <string>__BUNDLE_ID__.ptphelper</string>
 
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>
@@ -21,7 +30,7 @@
     <true/>
 
     <key>AssociatedBundleIdentifiers</key>
-    <string>com.audiouter.Audiouter</string>
+    <string>__BUNDLE_ID__</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>

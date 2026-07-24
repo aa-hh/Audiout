@@ -55,6 +55,9 @@ func describe(_ event: BackendEvent) -> String? {
     case .remoteTransport(let command):
         // Also native-only (a key pressed on the speaker itself); never under mock.
         return "▶ remote key  \(command) (from a speaker)"
+    case .streamHealth(let id, let recovering):
+        // Also native-only (T8 rebind-recovery signal); never under mock.
+        return "⚠ stream health \(id) recovering:\(recovering)"
     }
 }
 

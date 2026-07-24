@@ -51,8 +51,17 @@ LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network 
 # the AirPlayEngine package, not AudiouterCore — a separate `swift build`
 # invocation below. Label MUST equal the LaunchDaemons plist's own filename
 # (SMAppService.daemon(plistName:) resolves it by exact name match).
+#
+# BUNDLE_ID-derived (not hardcoded): PTPHelperService.swift's default
+# plistName mirrors this exact derivation (Bundle.main.bundleIdentifier +
+# ".ptphelper.plist"), so a side-by-side dev build under a distinct
+# BUNDLE_ID registers its OWN daemon identity instead of colliding with
+# another Audiouter copy that already claimed "com.audiouter.Audiouter.ptphelper"
+# (2026-07-24 live-testing bug: the loser's SMAppService.register() silently
+# no-ops instead of throwing, so the daemon never shows up in Login Items at
+# all for the losing copy). Default BUNDLE_ID unset ⇒ identical to before.
 HELPER_EXECUTABLE="ptp-helper"
-HELPER_LABEL="com.audiouter.Audiouter.ptphelper"
+HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
@@ -165,14 +174,15 @@ cp "$BUILT_HELPER" "$MACOS_DIR/$HELPER_EXECUTABLE"
 chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 
 # --- SMAppService launchd daemon plist -------------------------------------
-# Ships from scripts/ptp-helper.plist verbatim (see that file for the SMAppService
-# shape rationale — ptp-helper-design.md §2.2). The filename here MUST equal
-# Label + ".plist"; SMAppService.daemon(plistName:) resolves the plist by that
-# exact name, not by content.
+# Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
+# real BUNDLE_ID (see that file for the SMAppService shape rationale —
+# ptp-helper-design.md §2.2, and the BUNDLE_ID-derivation rationale). The
+# filename here MUST equal Label + ".plist"; SMAppService.daemon(plistName:)
+# resolves the plist by that exact name, not by content.
 echo "==> Installing LaunchDaemons plist"
 test -f "$HELPER_PLIST_SOURCE" || { echo "error: helper plist not found at $HELPER_PLIST_SOURCE" >&2; exit 1; }
 mkdir -p "$LAUNCH_DAEMONS_DIR"
-cp "$HELPER_PLIST_SOURCE" "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
+sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$HELPER_PLIST_SOURCE" > "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
 
 # --- Bundle Homebrew dylibs (opt-in) ---------------------------------------
 # The executable currently links Homebrew dylibs (libevent, libsodium,

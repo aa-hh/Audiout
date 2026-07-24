@@ -1133,6 +1133,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             try createTapAndReadFormat(muteBehavior: muteBehavior, excludedProcessObjectIDs: excludedProcessObjectIDs)
             try createAggregate()
             try startIOProc()
+            // The format read from `kAudioTapPropertyFormat` above was taken on the
+            // BARE tap, before it joined the aggregate. The buffers the IOProc
+            // actually delivers arrive on the AGGREGATE's clock, which can differ —
+            // correct `format`/`asbd` to that real rate NOW, before the converter is
+            // ever built from it (see `reconcileFormatWithAggregate`). Ordered after
+            // `startIOProc` (aggregate live, rate settled) and before the listeners
+            // so the rate listener's compare-before-rebuild uses the corrected rate.
+            reconcileFormatWithAggregate()
             installDefaultDeviceListener()
             installSampleRateListener()
         } catch {
@@ -1326,6 +1334,92 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         }
     }
 
+    // MARK: Aggregate-rate reconciliation (converter input-rate correctness)
+    //
+    // ROOT CAUSE of the single-AirPlay pitch-shift bug. `createTapAndReadFormat`
+    // reads `kAudioTapPropertyFormat` off the BARE process tap, before it is placed
+    // in the aggregate device. The buffers the IOProc ultimately delivers, however,
+    // arrive on the AGGREGATE's clock: the aggregate runs at its main sub-device's
+    // nominal rate (the tapped output device) and, with sub-tap drift compensation
+    // ON (`kAudioSubTapDriftCompensationKey`, set in `createAggregate`), the tap's
+    // audio is sample-rate-converted ONTO that clock. So a tap whose bare-tap format
+    // read back 44100 while it sits on a 48000 output device actually delivers
+    // 48000-rate frames. The IOProc's frame-count math is rate-INDEPENDENT
+    // (`byteSize / bytesPerFrame`), so buffers keep flowing at full cadence — but
+    // building the `AVAudioConverter` from the stale 44100 makes it reinterpret
+    // every 48000-rate buffer as 44100: a sustained ~8.8% (48000/44100) pitch-UP,
+    // exactly the live symptom Alec heard on the simplest single-AirPlay selection.
+    // Read the aggregate's REAL nominal rate here — after it exists and its IOProc
+    // has started, so it has settled — and correct `format`/`asbd` to it so the
+    // converter's assumed input rate can never diverge from what the hardware is
+    // actually delivering. The aggregate's nominal rate (not a second
+    // `kAudioTapPropertyFormat` re-read) is authoritative precisely because drift
+    // compensation resamples the sub-tap ONTO the aggregate clock — that is the
+    // cadence the IOProc sees. If the aggregate rate can't be read we keep the
+    // pre-aggregate format (no regression vs. the prior behaviour).
+    private func reconcileFormatWithAggregate() {
+        guard aggregateID != kAudioObjectUnknown else { return }
+        let aggregateRate = Self.readNominalSampleRate(aggregateID)
+        let reconciled = Self.reconciledFormat(declared: format, aggregateRate: aggregateRate)
+        guard reconciled != format else { return }
+        AudioDiag.log(
+            "System tap: pre-aggregate tap format declared \(format.sampleRate) Hz but the "
+            + "aggregate device actually delivers \(reconciled.sampleRate) Hz — correcting the "
+            + "converter's input rate to the aggregate's real rate (prevents a sustained pitch shift)")
+        self.asbd.mSampleRate = Double(reconciled.sampleRate)
+        self.format = reconciled
+    }
+
+    /// Correct a pre-aggregate tap ``TapFormat`` against the aggregate device's real
+    /// nominal sample rate. Pure so it is unit-testable without a live aggregate
+    /// (where the real divergence only exists). Keeps every rate-INDEPENDENT field
+    /// (channels / bit-depth / float / interleave — unaffected by drift
+    /// compensation, which only resamples); rewrites ONLY the sample rate, and only
+    /// when the aggregate rate is readable, valid, and actually different. A
+    /// nil/non-finite/≤0 aggregate rate returns `declared` unchanged (trust the
+    /// pre-aggregate read over a bad one).
+    static func reconciledFormat(declared: TapFormat, aggregateRate: Double?) -> TapFormat {
+        guard let aggregateRate, aggregateRate.isFinite, aggregateRate > 0 else { return declared }
+        let corrected = Int(aggregateRate.rounded())
+        guard corrected > 0, corrected != declared.sampleRate else { return declared }
+        return TapFormat(
+            sampleRate: corrected,
+            channels: declared.channels,
+            bitsPerSample: declared.bitsPerSample,
+            isFloat: declared.isFloat,
+            isInterleaved: declared.isInterleaved)
+    }
+
+    /// Compare-before-rebuild loop-breaker for the nominal-sample-rate listener
+    /// (mirrors the known (deviceID, nominalRate) compare-before-rebuild idiom from
+    /// the CPU/coreaudiod-storm work). Rebuild ONLY when the notified rate actually
+    /// differs from the rate the converter is currently built on; a notification
+    /// that re-announces the SAME rate (Core Audio posts these for a set-to-same-
+    /// value) must not tear down and recreate the tap. An unreadable notified rate
+    /// returns `true` — we can't prove it's a no-op, so fall back to the safe
+    /// rebuild rather than risk missing a real change. Pure/testable.
+    static func shouldRebuildForNominalRate(notifiedRate: Double?, currentEffectiveRate: Int) -> Bool {
+        guard let notifiedRate, notifiedRate.isFinite, notifiedRate > 0 else { return true }
+        return Int(notifiedRate.rounded()) != currentEffectiveRate
+    }
+
+    /// Read a device's current nominal sample rate
+    /// (`kAudioDevicePropertyNominalSampleRate`), or nil if unreadable/degenerate.
+    /// Used both to reconcile the converter rate against the aggregate and to
+    /// compare-before-rebuild inside the rate listener.
+    static func readNominalSampleRate(_ deviceID: AudioObjectID) -> Double? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        guard err == noErr, rate.isFinite, rate > 0 else { return nil }
+        return rate
+    }
+
     // MARK: Default-device-change listener
 
     private func installDefaultDeviceListener() {
@@ -1378,8 +1472,32 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            AudioDiag.log("System tap: nominal-sample-rate changed on tapped device — triggering rebuild")
-            self?.onDefaultDeviceChanged?()
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD LOOP-BREAKER: read the tapped device's new
+            // nominal rate and rebuild ONLY if it actually differs from the rate the
+            // converter is currently built on (`format.sampleRate`, already
+            // corrected to the aggregate's real rate by `reconcileFormatWithAggregate`
+            // before this listener was installed). Core Audio can post this listener
+            // for a set-to-same-value; a spurious full teardown+rebuild both burns
+            // CPU and risks a rebuild storm, so a no-op notification must stay a
+            // no-op. `format` is written ONLY during `createAndStart` (before this
+            // listener is installed) and is never mutated afterward for the life of
+            // the instance — a real rate change rebuilds a fresh `CoreAudioSystemTap`
+            // whose own `createAndStart` re-reads the format — so reading it here off
+            // `listenerQueue` is race-free, the same setup-time-immutability the rest
+            // of this class relies on for `tappedOutputDeviceID`.
+            let notified = Self.readNominalSampleRate(self.tappedOutputDeviceID)
+            guard Self.shouldRebuildForNominalRate(
+                notifiedRate: notified, currentEffectiveRate: self.format.sampleRate) else {
+                AudioDiag.log(
+                    "System tap: nominal-rate notification but rate unchanged "
+                    + "(\(self.format.sampleRate) Hz) — skipping rebuild")
+                return
+            }
+            AudioDiag.log(
+                "System tap: nominal-sample-rate changed on tapped device (now "
+                + "\(notified.map { String(Int($0.rounded())) } ?? "unreadable") Hz) — triggering rebuild")
+            self.onDefaultDeviceChanged?()
         }
         self.sampleRateBlock = block
         AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, listenerQueue, block)

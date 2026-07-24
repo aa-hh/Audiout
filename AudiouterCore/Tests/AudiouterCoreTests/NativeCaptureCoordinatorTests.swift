@@ -761,6 +761,127 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(NativeCaptureCoordinator.rmsOfS16LE(full), 1.0, accuracy: 0.01)
     }
 
+    // MARK: - Aggregate-rate reconciliation (converter input-rate correctness).
+    //
+    // ROOT CAUSE of the single-AirPlay pitch-shift bug: `CoreAudioSystemTap` reads
+    // `kAudioTapPropertyFormat` off the BARE tap before it joins the aggregate, but
+    // the IOProc then delivers buffers on the AGGREGATE's clock (its main sub-device
+    // = the tapped output device, with sub-tap drift compensation resampling the tap
+    // ONTO that clock). When those rates differ, the converter is built from a stale
+    // rate and reinterprets every buffer — a sustained pitch shift. The fix reads the
+    // aggregate's REAL nominal rate and corrects the format BEFORE the converter is
+    // built (`reconcileFormatWithAggregate`). The reconciliation and compare-before-
+    // rebuild DECISIONS are pure and pinned here; the live-aggregate divergence
+    // itself (real AudioHardwareCreateProcessTap/AggregateDevice) can only be
+    // exercised on real Core Audio, so end-to-end correctness rests on the live
+    // re-test (plan T7). The `FakeTap` above deliberately can't reproduce it — it
+    // returns a format directly with no aggregate — which is exactly why the fix and
+    // its unit coverage live at the pure-decision seam.
+
+    #if canImport(AudioToolbox)
+    /// The bug direction heard live: the bare tap declares 44100 while the aggregate
+    /// actually delivers 48000. `reconciledFormat` must rewrite the rate to the
+    /// aggregate's 48000 so the converter is built on the real delivered rate — NOT
+    /// the stale pre-aggregate 44100 that pitched playback UP ~8.8% (48000/44100).
+    @available(macOS 14.2, *)
+    func testReconciledFormatCorrectsStalePreAggregateRate() {
+        let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        let reconciled = CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000)
+        XCTAssertEqual(reconciled.sampleRate, 48000,
+            "the converter's input rate must follow the aggregate's real delivered rate, not the pre-aggregate tap read")
+        // Every rate-INDEPENDENT field is preserved (drift compensation only resamples).
+        XCTAssertEqual(reconciled.channels, 2)
+        XCTAssertEqual(reconciled.bitsPerSample, 32)
+        XCTAssertTrue(reconciled.isFloat)
+        XCTAssertFalse(reconciled.isInterleaved)
+    }
+
+    /// The reverse divergence (declared 48000, aggregate 44100) is corrected too —
+    /// the fix is symmetric: it always snaps to the aggregate's real rate.
+    @available(macOS 14.2, *)
+    func testReconciledFormatCorrectsEitherDirection() {
+        let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 44100).sampleRate, 44100)
+    }
+
+    /// When the pre-aggregate read already matches the aggregate (the common case),
+    /// the format is returned UNCHANGED — no needless rewrite.
+    @available(macOS 14.2, *)
+    func testReconciledFormatUnchangedWhenRatesMatch() {
+        let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000), declared)
+    }
+
+    /// An unreadable / degenerate aggregate rate must NOT clobber the format — we
+    /// keep the pre-aggregate read (no regression vs. the prior behaviour).
+    @available(macOS 14.2, *)
+    func testReconciledFormatIgnoresUnreadableAggregateRate() {
+        let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: nil), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 0), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: -48000), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .nan), declared)
+        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .infinity), declared)
+    }
+
+    /// Compare-before-rebuild loop-breaker: a nominal-rate notification that
+    /// re-announces the SAME rate the converter already runs at must NOT rebuild.
+    @available(macOS 14.2, *)
+    func testShouldRebuildForNominalRateSkipsNoOpNotification() {
+        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000, currentEffectiveRate: 48000),
+            "a set-to-same-value notification must be a no-op — no teardown+rebuild churn")
+        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000.4, currentEffectiveRate: 48000),
+            "sub-Hz jitter that rounds to the same integer rate is still a no-op")
+    }
+
+    /// A genuinely different notified rate DOES rebuild; an unreadable rate falls
+    /// back to the safe rebuild (can't prove it's a no-op).
+    @available(macOS 14.2, *)
+    func testShouldRebuildForNominalRateRebuildsOnRealChangeOrUnreadable() {
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 44100, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: nil, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 0, currentEffectiveRate: 48000))
+        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: .nan, currentEffectiveRate: 48000))
+    }
+
+    /// Mechanism proof with the REAL `AVFormatConverter`: the declared input rate is
+    /// exactly the pitch lever. The same captured bytes, converted to the fixed 44100
+    /// output, yield FEWER total frames when declared at 48000 than at 44100 — by the
+    /// 44100/48000 ratio. So a converter left on a stale 44100 while the aggregate
+    /// really delivers 48000 would stretch the audio (shift pitch); feeding it the
+    /// reconciled real rate is what keeps playback at the correct pitch.
+    ///
+    /// Summed over many small buffers rather than one big one: a single
+    /// `AVAudioConverter.convert` caps output at an internal ~4096-frame quantum, so
+    /// one large buffer clips identically for both rates and hides the ratio. Small
+    /// buffers stay under the quantum and the sum converges on the steady-state
+    /// rate ratio (per-call priming latency washes out over the run).
+    @available(macOS 14.2, *)
+    func testConverterOutputLengthScalesWithDeclaredInputRate() {
+        let framesPerBuffer = 2048
+        let iterations = 32
+        let planar = Self.planarFloat32Stereo(frameCount: framesPerBuffer)
+        let buffer = CapturedBuffer(channelData: planar, frameCount: framesPerBuffer, pts: timespec())
+
+        let at44100 = AVFormatConverter(from: TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+        let at48000 = AVFormatConverter(from: TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+
+        var frames44 = 0   // interleaved S16LE stereo = 4 bytes/frame
+        var frames48 = 0
+        for _ in 0..<iterations {
+            if let out = at44100.convertToAirPlayPCM(buffer) { frames44 += out.count / 4 }
+            if let out = at48000.convertToAirPlayPCM(buffer) { frames48 += out.count / 4 }
+        }
+        XCTAssertGreaterThan(frames44, 0)
+        XCTAssertGreaterThan(frames48, 0)
+        XCTAssertLessThan(frames48, frames44,
+            "a higher declared input rate yields fewer 44100 output frames — the exact pitch lever this fix corrects")
+        let ratio = Double(frames48) / Double(frames44)
+        XCTAssertEqual(ratio, 44100.0 / 48000.0, accuracy: 0.01,
+            "total output length must scale by the declared-rate ratio (44100/48000), confirming rate == pitch")
+    }
+    #endif
+
     // MARK: - utils
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {
@@ -770,6 +891,21 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     private func stateIsCapturing(_ c: NativeCaptureCoordinator, sampleRate: Int) -> Bool {
         if case .capturing(let f) = c.state { return f.sampleRate == sampleRate }
         return false
+    }
+
+    /// Two planar Float32 stereo channel buffers of `frameCount` frames each (a mild
+    /// sine, so it's non-degenerate signal), for the real-`AVFormatConverter`
+    /// mechanism test. Non-interleaved = one `Data` per channel, matching the tap's
+    /// stereo-mixdown layout.
+    private static func planarFloat32Stereo(frameCount: Int) -> [Data] {
+        var left = [Float](repeating: 0, count: frameCount)
+        var right = [Float](repeating: 0, count: frameCount)
+        for i in 0..<frameCount {
+            let s = Float(sin(Double(i) * 0.05)) * 0.25
+            left[i] = s
+            right[i] = s
+        }
+        return [left.withUnsafeBytes { Data($0) }, right.withUnsafeBytes { Data($0) }]
     }
 }
 

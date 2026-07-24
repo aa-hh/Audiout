@@ -102,6 +102,19 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private let makeTap: @Sendable () -> ProcessAudioTap
     private let processResolver: AudioProcessResolver
     private let muteBehavior: TapMuteBehavior
+    /// Whether `start(bundleID:)` arms the REAL, live system-wide
+    /// ``kAudioHardwarePropertyProcessObjectList`` listener
+    /// (``installProcessListListenerLocked()``). Defaults to `true` in the
+    /// designated initializer below, so production (and every call site that
+    /// predates this seam) is unaffected. Hermetic tests that never want a
+    /// registration on the actual system Core Audio object — which notifies
+    /// on ANY process anywhere on the machine opening or closing an audio
+    /// session, not just bundle IDs this coordinator tracks, and whose
+    /// handler re-enters `start(bundleID:)` from an internal HAL thread at an
+    /// unpredictable moment — pass `false`. ``handleProcessListChanged()``
+    /// stays directly callable either way, so a test can still simulate the
+    /// notification deterministically instead of relying on live HAL churn.
+    private let installsProcessListListener: Bool
 
     // MARK: State (confined to `queue`)
 
@@ -205,14 +218,18 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// factory and an ``AudioProcessResolver`` built over a fake
     /// ``AudioProcessEnumerating`` so the state machine runs without a real
     /// tap, real Core Audio, or a real running app).
+    /// - Parameter installsProcessListListener: see the stored property of
+    ///   the same name. Defaults to `true` — production behavior, unchanged.
     init(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
-        muteBehavior: TapMuteBehavior = .mutedWhenTapped
+        muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        installsProcessListListener: Bool = true
     ) {
         self.makeTap = makeTap
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
+        self.installsProcessListListener = installsProcessListListener
     }
 
     /// Tears down every still-active tap. A backstop against leaking system
@@ -474,6 +491,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// file. Process-list changes are never delivered from the IO context, so
     /// the async-dispatch caveat in AudioHardware.h does not bite.
     private func installProcessListListenerLocked() {
+        // Test-only opt-out (see `installsProcessListListener`'s doc comment
+        // on the stored property above) — skips ever touching the real HAL
+        // for this listener, production behavior unchanged (defaults `true`).
+        guard installsProcessListListener else { return }
         guard processListBlock == nil else { return }
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.handleProcessListChanged()

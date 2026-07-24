@@ -137,13 +137,44 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Builds a coordinator the way every test in this file wants it: the
+    /// same 3 injected seams every call site already passes
+    /// (`makeTap`/`processResolver`/`muteBehavior`) PLUS
+    /// `installsProcessListListener: false`, so `start(bundleID:)` never arms
+    /// the REAL, live `kAudioHardwarePropertyProcessObjectList` listener on
+    /// the actual system Core Audio object. That listener fires on ANY
+    /// process anywhere on the machine opening or closing an audio session —
+    /// not just bundle IDs this suite drives — and its handler re-enters
+    /// `start(bundleID:)` from an internal HAL thread at an unpredictable
+    /// moment, which could otherwise transiently flip a slot back through
+    /// `.resolvingProcess` right as a test asserts a `.failed(...)` state (a
+    /// real flake this helper closes off for good, not just makes less
+    /// likely). No coverage is lost by keeping the real listener off here:
+    /// ``PerAppCaptureCoordinator/handleProcessListChanged()`` stays directly
+    /// callable regardless of this flag, and
+    /// `testProcessListChangeReDrivesRetryableFailedSlotButNotNonRetryable`
+    /// below exercises the resume-listener's re-drive logic that way —
+    /// deterministically — instead of depending on the live listener firing.
+    private func makeCoordinator(
+        makeTap: @escaping @Sendable () -> ProcessAudioTap,
+        processResolver: AudioProcessResolver,
+        muteBehavior: TapMuteBehavior = .mutedWhenTapped
+    ) -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: makeTap,
+            processResolver: processResolver,
+            muteBehavior: muteBehavior,
+            installsProcessListListener: false
+        )
+    }
+
     // MARK: - Single bundle ID: start -> buffers forwarded (tagged) -> stop -> clean teardown.
 
     func testStartForwardsTaggedBuffersThenStopTearsDownAndClearsState() {
         let tap = FakeProcessTap()
         let spy = BufferSpy()
         let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 4242)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -192,7 +223,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         ])
         enumerator.parents = [701: 700]
         let resolver = AudioProcessResolver(enumerator: enumerator)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -234,7 +265,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
             RawAudioProcess(objectID: 2, pid: 222, bundleID: "com.example.b")
         ])
 
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { factory.make() },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -275,7 +306,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     // running" apart from "running but silent", so both retry the same way.
 
     func testEmptyResolvedProcessSetSurfacesProcessNotYetAudible() {
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { FakeProcessTap() },
             processResolver: emptyResolver(),
             muteBehavior: .mutedWhenTapped
@@ -296,7 +327,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let tap = FakeProcessTap()
         tap.startError = .processNotYetAudible(bundleID: "com.example.silent")
         let (resolver, _) = makeResolver(bundleID: "com.example.silent", objectID: 1, pid: 999)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -332,7 +363,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testUnavailableProcessTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
         let (resolver, _) = makeResolver(bundleID: "com.example.old", objectID: 1, pid: 1)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { UnavailableProcessTap() },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -351,7 +382,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testDeviceChangeRecreatesTapAndReResolvesProcessSet() {
         let tap = FakeProcessTap()
         let (resolver, enumerator) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -383,7 +414,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testDeviceChangeDuringRebuildIsCoalescedAndReplayed() {
         let tap = FakeProcessTap()
         let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 4242)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -450,7 +481,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         // is currently driving through the coordinator — the fake tap the
         // resolver hands processes for is not otherwise observable from here.
         let nextBundleID = NSMutableString(string: "")
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { factory.make(for: nextBundleID as String) },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -495,7 +526,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testStartIsIdempotentAndStopOnUnstartedBundleIDIsNoOp() {
         let tap = FakeProcessTap()
         let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
-        let coordinator = PerAppCaptureCoordinator(
+        let coordinator = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped
@@ -517,7 +548,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testCoordinatorDeinitTearsDownRemainingTaps() {
         let tap = FakeProcessTap()
         let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
-        var coordinator: PerAppCaptureCoordinator? = PerAppCaptureCoordinator(
+        var coordinator: PerAppCaptureCoordinator? = makeCoordinator(
             makeTap: { tap },
             processResolver: resolver,
             muteBehavior: .mutedWhenTapped

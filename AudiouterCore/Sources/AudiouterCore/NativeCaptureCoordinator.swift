@@ -165,6 +165,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
 
+    /// Fired when the tap was rebuilt specifically because the tapped OUTPUT
+    /// DEVICE changed or renegotiated its nominal sample rate
+    /// (``handleDeviceChange()``) — the ONLY rebuild that leaves the AirPlay RTP
+    /// timeline desynced from its receivers and therefore needs a whole-system
+    /// session reset (``NativeBackend`` wires this to
+    /// `resetAirPlaySessionForWholeSystem`).
+    ///
+    /// Deliberately NOT fired for a rebuild caused by an exclusion-set change
+    /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``). Those are benign,
+    /// backend-initiated parts of NORMAL connect/route setup — in particular,
+    /// attaching the synced-local sink adds its render pid to the exclusion set,
+    /// which recreates the tap on EVERY Mac+AirPlay connect. The output device and
+    /// its clock are unchanged across such a rebuild, so the receivers' timeline
+    /// stays intact; firing a session reset there re-established the RTP session
+    /// (a full removeOutput→addOutput) on every connect — "connects fast, then a
+    /// long silence before audio comes out." Distinguishing the cause (only a
+    /// device/rate rebuild resets) is what keeps first-connect latency at the
+    /// pre-T2 baseline without reintroducing the dropout the reset was added for.
+    /// Called on the coordinator's internal queue, like ``onStateChange``.
+    public var onDeviceRateRebuild: (@Sendable () -> Void)?
+
     /// Fired once per converted buffer with the buffer's peak/RMS level in
     /// 0.0...1.0, so a caller (``NativeBackend``) can plumb it straight into
     /// `BackendEvent.level` without recomputing it. Called from the tap's IOProc
@@ -368,7 +390,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             return false
         }
         guard needsRecreate else { return }
-        recreateTap()
+        // Exclusion-set change only (routed/excluded apps): the tapped output device
+        // and its clock are unchanged, so this rebuild does NOT desync the AirPlay
+        // receivers — no whole-system session reset (see `onDeviceRateRebuild`).
+        recreateTap(cause: .exclusionChange)
     }
 
     /// Attach (or detach, with `nil`) the delayed local sink fan-out (T-FANOUT),
@@ -407,7 +432,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             return false
         }
         guard needsRecreate else { return }
-        recreateTap()
+        // Exclusion-set change only (adding/removing the synced-local sink's own
+        // render pid): the tapped output device and its clock are unchanged, so this
+        // rebuild does NOT desync the AirPlay receivers — no whole-system session
+        // reset. Attaching the sink hits this on EVERY Mac+AirPlay connect; treating
+        // it as a rate-renegotiation recapture is what added a redundant RTP
+        // re-establish (a long post-connect silence) to every connect. See
+        // `onDeviceRateRebuild`.
+        recreateTap(cause: .exclusionChange)
     }
 
     // MARK: Start sequence (on `queue`)
@@ -502,8 +534,22 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Delegates to ``recreateTap()`` — the same "tear down + recreate while
     /// capturing" machinery T4 reuses for an exclusion-list change.
     private func handleDeviceChange() {
-        recreateTap()
+        // A genuine device/nominal-rate change: the tapped device's clock moved out
+        // from under the live RTP sessions, so the rebuild MUST reset the
+        // whole-system AirPlay session (see `onDeviceRateRebuild`). This is the one
+        // rebuild path that carries `.deviceOrRateChange`.
+        recreateTap(cause: .deviceOrRateChange)
     }
+
+    /// Why ``recreateTap(cause:)`` is rebuilding — decides whether the rebuild
+    /// needs a whole-system AirPlay session reset (``onDeviceRateRebuild``). A
+    /// device/nominal-rate change (``handleDeviceChange()``) moves the tapped
+    /// device's clock out from under the live RTP sessions and desyncs the
+    /// receivers; an exclusion-set change
+    /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but leaves the
+    /// device and its clock — and thus the receivers' timeline — untouched.
+    enum RebuildCause { case deviceOrRateChange, exclusionChange }
 
     /// Tear the current tap down and recreate it — against the (possibly
     /// new) default output device, and always with the LIVE exclusion process-
@@ -516,7 +562,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// takes effect if currently `.capturing`; a race with a concurrent
     /// `stop()`/failure is a no-op. Surfaced as a fresh `.capturing(format')`
     /// transition, or `.failed` if re-creation fails.
-    private func recreateTap() {
+    private func recreateTap(cause: RebuildCause) {
         // Under the lock ONLY: check we're still capturing, claim the old tap,
         // and snapshot the current exclusion pids (queue-confined). The blocking
         // Core Audio teardown+recreate then happens OUTSIDE the lock, matching
@@ -580,8 +626,26 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 return (nil, replay)
             }
             commit.orphan?.teardown()
+            // Fire the whole-system session-reset signal ONLY when this rebuild was
+            // caused by a device/nominal-rate change AND actually committed a fresh
+            // `.capturing` (orphan == nil; a racing stop() that won leaves `orphan`
+            // set and no live session to reset). An exclusion-set rebuild
+            // (`.exclusionChange`) leaves the receivers' RTP timeline intact and must
+            // NOT reset — that spurious reset was the redundant per-connect RTP
+            // re-establish (see `onDeviceRateRebuild`). Fired OFF the lock, matching
+            // the "no HAL/handler work under `queue`" discipline the rest of this
+            // method keeps.
+            if commit.orphan == nil, cause == .deviceOrRateChange {
+                onDeviceRateRebuild?()
+            }
             if commit.replay {
-                recreateTap()
+                // A trigger coalesced while we were mid-rebuild (C6). It may have been
+                // a device/rate change, so replay as `.deviceOrRateChange`: a missed
+                // reset would reintroduce the dropout, whereas an extra reset here is
+                // at worst harmless and this path only fires on rapid device/rate
+                // bounces, never on a plain connect (the sink-attach rebuild lands
+                // while `.capturing`, not `.creatingTap`, so it is never coalesced).
+                recreateTap(cause: .deviceOrRateChange)
             }
         } catch {
             newTap.teardown()   // createAndStart already tears down internally; idempotent.

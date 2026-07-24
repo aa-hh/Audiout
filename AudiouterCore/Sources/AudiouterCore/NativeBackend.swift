@@ -457,20 +457,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the bundle stops being routed or its capture stops.
     private var everCapturedBundleIDs: Set<String> = []
 
-    /// Whole-system analogue of `everCapturedBundleIDs` (T2): `true` once the
-    /// whole-system tap has reached `.capturing` at least once in the CURRENT
-    /// capture epoch. Lets a LATER `.capturing` be recognised as a RE-capture —
-    /// the tap was torn down and rebuilt WITHOUT a full stop in between (a
-    /// nominal-sample-rate renegotiation, the synced-local mixed-selection dropout
-    /// bug), which leaves every stream-0 AirPlay session's RTP timeline desynced
-    /// from its receiver and permanently silent even though real PCM keeps flowing
-    /// — so a re-capture triggers a whole-system session reset (rebind). Reset to
-    /// `false` when the tap fully stops (`.idle`) or fails (`.failed`), so the NEXT
-    /// `.capturing` after a gate stop/start or a teardown is treated as a fresh
-    /// first-capture (the devices are freshly re-added by `convergeDevice`), NOT a
-    /// rebuild needing a reset. Confined to `stateQueue`.
-    private var everCapturedWholeSystem = false
-
     /// bundleID → how many `.processNotYetAudible` retries have already fired
     /// (edge case 3). Kept ONLY to grow the capped-exponential backoff delay, not
     /// as a give-up ceiling. Reset on recovery (`.capturing`) or on losing the
@@ -912,18 +898,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
             // Whole-system capture health (T2). A nominal-sample-rate renegotiation
             // (opening the Mac's built-in speakers in a Mac+AirPlay synced-local
-            // selection flips the tapped device 44.1↔48 kHz) rebuilds the tap —
-            // `.capturing → .creatingTap → .capturing` — after which the process tap
-            // keeps delivering buffers but the stream-0 AirPlay sessions stay pinned
-            // to a now-stale RTP timeline and the receivers go silent forever
-            // (Apple-unresolved, Dev Forums 825780). The whole-system port of the
-            // proven per-app fix: a LATER `.capturing` (recognised via
-            // `everCapturedWholeSystem`) rebinds every selected device to reset its
-            // session. Wired here like `onLevel` (the coordinator is assigned before
-            // `start()`); it fires from the coordinator's own queue and the handler
-            // hops to `stateQueue` for the mutation.
-            self.captureCoordinator?.onStateChange = { [weak self] state in
-                self?.handleWholeSystemCaptureHealthChange(state: state)
+            // selection flips the tapped device 44.1↔48 kHz) rebuilds the tap, after
+            // which the process tap keeps delivering buffers but the stream-0 AirPlay
+            // sessions stay pinned to a now-stale RTP timeline and the receivers go
+            // silent forever (Apple-unresolved, Dev Forums 825780). The coordinator
+            // fires `onDeviceRateRebuild` ONLY for that device/rate-caused rebuild —
+            // NOT for a benign exclusion-set rebuild (the synced-local sink attach on
+            // every connect, or an app-route change), which leaves the receivers'
+            // timeline intact. Resetting on the benign rebuild too (the earlier
+            // `.capturing`-count heuristic) fired a redundant removeOutput→addOutput
+            // on every Mac+AirPlay connect — "connects fast, then a long silence
+            // before audio." Wired here like `onLevel` (the coordinator is assigned
+            // before `start()`); it fires from the coordinator's own queue and
+            // `resetAirPlaySessionForWholeSystem` hops to `stateQueue` for the mutation.
+            self.captureCoordinator?.onDeviceRateRebuild = { [weak self] in
+                self?.resetAirPlaySessionForWholeSystem()
             }
 
             // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
@@ -945,11 +934,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
-        // T2: stop observing the whole-system tap's lifecycle so the ordered
-        // `captureControlQueue` stop below (which drives the coordinator through
-        // `.stopping → .idle`) can't fire a spurious recapture reset during
-        // teardown. `everCapturedWholeSystem` is reset in the state block below.
-        captureCoordinator?.onStateChange = nil
+        // T2: stop observing the whole-system tap's device/rate rebuilds so the
+        // ordered `captureControlQueue` stop below (which tears the tap down) can't
+        // fire a spurious session reset during teardown.
+        captureCoordinator?.onDeviceRateRebuild = nil
         captureCoordinator?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
@@ -1052,7 +1040,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.lastRoutes.removeAll()
             self.deadBundleIDs.removeAll()
             self.everCapturedBundleIDs.removeAll()
-            self.everCapturedWholeSystem = false   // T2: next start() is a fresh first-capture
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
@@ -1598,39 +1585,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
 
         case .idle, .resolvingProcess, .creatingTap, .stopping:
-            break
-        }
-    }
-
-    /// React to the WHOLE-SYSTEM tap's lifecycle (T2) — the stream-0 analogue of
-    /// `handlePerAppCaptureHealthChange`. Runs off `stateQueue` (callback context
-    /// from `NativeCaptureCoordinator.onStateChange`); hops on only for the mutation.
-    ///
-    /// A `.capturing` that is NOT the first of the current capture epoch is a
-    /// RE-capture: the tap was torn down and rebuilt with no full stop in between
-    /// (a nominal-sample-rate renegotiation). The whole-system output topology is
-    /// unchanged, so every stream-0 AirPlay session keeps its now-desynced RTP
-    /// anchor and the receivers stay silent unless we explicitly reset them. Any
-    /// terminal state (`.idle`, `.failed`) ends the epoch so the NEXT `.capturing`
-    /// counts as a fresh first-capture (the gate stopped/started the tap, or it
-    /// failed and will restart) — the devices are freshly (re-)added by
-    /// `convergeDevice` in that case, so no reset is wanted.
-    private func handleWholeSystemCaptureHealthChange(state: NativeCaptureCoordinator.State) {
-        switch state {
-        case .capturing:
-            let isRecapture: Bool = stateQueue.sync {
-                let was = self.everCapturedWholeSystem
-                self.everCapturedWholeSystem = true
-                return was
-            }
-            if isRecapture {
-                resetAirPlaySessionForWholeSystem()
-            }
-
-        case .idle, .failed:
-            stateQueue.sync { self.everCapturedWholeSystem = false }
-
-        case .creatingTap, .stopping:
             break
         }
     }
@@ -3845,15 +3799,17 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
     var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
 
-    /// Fired on every whole-system-tap lifecycle transition (T2), so
-    /// ``NativeBackend`` can recognise a tap REBUILD — a nominal-sample-rate
-    /// renegotiation tears the tap down and recreates it
-    /// (`.capturing → .creatingTap → .capturing`) — and reset the desynced AirPlay
-    /// RTP sessions it leaves behind. See ``NativeCaptureCoordinator/onStateChange``.
-    /// Default get-nil/set-noop (below) so a fake that only exercises the capture
-    /// gate compiles unchanged; ``NativeCaptureCoordinator`` provides the real
-    /// stored property.
-    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? { get set }
+    /// Fired when the whole-system tap was rebuilt specifically because the tapped
+    /// output device changed or renegotiated its nominal sample rate (T2), so
+    /// ``NativeBackend`` can reset the AirPlay RTP sessions that rebuild leaves
+    /// desynced. Deliberately NOT fired for a benign exclusion-set rebuild (the
+    /// synced-local sink attach on every Mac+AirPlay connect, or an app-route
+    /// change) — resetting there added a redundant RTP re-establish to every
+    /// connect ("connects fast, then a long silence"). See
+    /// ``NativeCaptureCoordinator/onDeviceRateRebuild``. Default get-nil/set-noop
+    /// (below) so a fake that only exercises the capture gate compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real stored property.
+    var onDeviceRateRebuild: (@Sendable () -> Void)? { get set }
     /// Begin capturing system audio. Idempotent.
     ///
     /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers
@@ -3888,7 +3844,7 @@ extension CaptureControlling {
     /// lifecycle compiles unchanged; ``NativeCaptureCoordinator`` provides the real
     /// stored property. A conformer that never fires it (get returns `nil`, set is
     /// dropped) is a faithful stand-in for a test that only drives the capture gate.
-    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? {
+    var onDeviceRateRebuild: (@Sendable () -> Void)? {
         get { nil }
         set { }
     }

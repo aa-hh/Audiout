@@ -192,6 +192,52 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tap.teardowns, 2)
     }
 
+    // MARK: - onDeviceRateRebuild fires only for a device/rate rebuild, never an
+    //         exclusion-set rebuild (the "connects fast, then long silence" fix).
+
+    /// The whole-system AirPlay session reset must fire ONLY when a device/nominal-
+    /// rate change rebuilt the tap — NOT when the tap was rebuilt because the
+    /// exclusion set changed. Attaching the synced-local sink adds its render pid to
+    /// the exclusion set on EVERY Mac+AirPlay connect, recreating the tap; an
+    /// app-route change does the same. Treating those benign rebuilds as a rate-
+    /// renegotiation recapture fired a redundant removeOutput→addOutput RTP
+    /// re-establish on every connect — the long silence Alec heard after an
+    /// already-fast connect. `recreateTap(cause: .exclusionChange)` must stay silent;
+    /// only `recreateTap(cause: .deviceOrRateChange)` (the device-change/nominal-rate
+    /// listener path) may fire `onDeviceRateRebuild`.
+    func testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.creates, 1, "first capture — no rebuild yet")
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
+                       "the initial start must NOT fire onDeviceRateRebuild")
+
+        // Exclusion-set change (models the synced-local sink attach on connect / an
+        // app-route change): the tap rebuilds, but the tapped device and its clock
+        // are unchanged, so NO session reset.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        waitFor { tap.creates >= 2 }
+        XCTAssertEqual(coordinator.state, .capturing(tap.format), "the exclusion rebuild lands in .capturing")
+        // Give any erroneous callback a chance to fire before asserting it didn't.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
+                       "an exclusion-set rebuild must NOT fire onDeviceRateRebuild — no AirPlay session reset")
+
+        // A genuine device/nominal-rate change (the default-device / sample-rate
+        // listener path) DOES fire it — the dropout the reset was built for.
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { deviceRateRebuilds } == 1 }
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
+                       "a device/nominal-rate rebuild MUST fire onDeviceRateRebuild exactly once")
+        XCTAssertGreaterThanOrEqual(tap.creates, 3, "the device-change rebuild created a fresh tap")
+    }
+
     // MARK: - A dropped (nil) conversion is not forwarded.
 
     func testDroppedConversionIsNotForwarded() {

@@ -1198,6 +1198,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if previous != wantOn, !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
+                    // Connect-latency diagnosis (temporary — see AudioDiag): T0 for
+                    // "click to first audio," read alongside the addOutput
+                    // start/resolve timestamps in convergeDevice below.
+                    if wantOn {
+                        AudioDiag.log("CONNECT requested device=\(id)")
+                    }
                 }
             }
             // Ids that vanished from the model but were desired-on: drop their
@@ -2142,7 +2148,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         try await engine.updateDiscovery(descriptor)
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
+                    // Connect-latency diagnosis (temporary — see AudioDiag): brackets
+                    // the real RTSP/negotiate handshake `addOutput` awaits (device_start
+                    // through the STREAMING completion) — the gap between these two
+                    // lines is the AirPlay receiver's own negotiation time, not
+                    // anything this app controls.
+                    AudioDiag.log("CONNECT addOutput starting device=\(id) output=\(outputID)")
                     try await engine.addOutput(outputID)
+                    AudioDiag.log("CONNECT addOutput RESOLVED (streaming) device=\(id) output=\(outputID)")
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success

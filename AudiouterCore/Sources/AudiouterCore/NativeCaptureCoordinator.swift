@@ -1193,6 +1193,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     deinit { teardown() }
 
     func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+        // Connect-latency diagnosis (temporary — see AudioDiag): brackets whole-
+        // system capture setup (tap + aggregate + IOProc + rate reconciliation) —
+        // read alongside NativeBackend's CONNECT logs to see whether this app's own
+        // setup, vs. the AirPlay receiver's negotiation, vs. the sync pre-roll, is
+        // where a slow connect's time actually goes.
+        AudioDiag.log("CAPTURE createAndStart begin")
         do {
             try createTapAndReadFormat(muteBehavior: muteBehavior, excludedProcessObjectIDs: excludedProcessObjectIDs)
             try createAggregate()
@@ -1214,6 +1220,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             teardown()
             throw error
         }
+        AudioDiag.log("CAPTURE createAndStart done, rate=\(format.sampleRate)")
         return format
     }
 

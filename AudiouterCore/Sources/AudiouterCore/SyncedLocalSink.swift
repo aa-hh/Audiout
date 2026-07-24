@@ -498,6 +498,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 anchored = true
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
                     anchorPtsNanos: ptsNanos, totalDelayNanos: delay)
+                // Connect-latency diagnosis (temporary — see AudioDiag): the
+                // deliberate, by-design pre-roll silence this session will hold
+                // before its first real frame releases — distinguishes "intentional
+                // sync buffer" from unexplained latency elsewhere in the pipeline.
+                // Fires once per session anchor (this branch), not per render cycle —
+                // matches this call's existing one-time-lock cost, not the RT
+                // render path's stricter budget.
+                AudioDiag.log("SYNC session anchored, one-time pre-roll delayNanos=\(delay) (\(Double(delay) / 1_000_000)ms)")
             }
             stateLock.unlock()
         }

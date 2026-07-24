@@ -69,6 +69,19 @@ public enum LocalOutputLatency {
         try measure(deviceID: defaultOutputDeviceID())
     }
 
+    /// The CURRENT DEFAULT OUTPUT DEVICE's nominal sample rate (Hz) — read from
+    /// `kAudioHardwarePropertyDefaultOutputDevice`, never
+    /// `kAudioHardwarePropertyDefaultSystemOutputDevice` (see `measure()`). Used to
+    /// build ``SyncedLocalSink`` at the device's own render rate so opening it never
+    /// forces a 48↔44.1 kHz renegotiation (T3 Part B). A lighter read than
+    /// ``measure()`` — it touches only the one property, so a device that momentarily
+    /// exposes no output streams still yields a rate rather than throwing.
+    public static func defaultOutputDeviceNominalSampleRate() throws -> Double {
+        try readDouble(
+            defaultOutputDeviceID(), selector: kAudioDevicePropertyNominalSampleRate,
+            scopes: [kAudioObjectPropertyScopeGlobal])
+    }
+
     static func measure(deviceID: AudioObjectID) throws -> LocalOutputLatencyMeasurement {
         let safetyOffset = try readUInt32(
             deviceID, selector: kAudioDevicePropertySafetyOffset,
@@ -193,6 +206,10 @@ public enum LocalOutputLatencyError: Error, Equatable, Sendable {
 
 public enum LocalOutputLatency {
     public static func measure() throws -> LocalOutputLatencyMeasurement {
+        throw LocalOutputLatencyError.unsupportedPlatform
+    }
+
+    public static func defaultOutputDeviceNominalSampleRate() throws -> Double {
         throw LocalOutputLatencyError.unsupportedPlatform
     }
 }

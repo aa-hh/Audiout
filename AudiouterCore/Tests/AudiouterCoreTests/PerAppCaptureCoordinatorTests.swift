@@ -114,6 +114,29 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var all: [(bundleID: String, frameCount: Int)] { lock.withLock { deliveries } }
     }
 
+    /// Collects `Telemetry._installTestSink` lines thread-safely — the sink
+    /// runs on Telemetry's own serial writer queue, a different thread than
+    /// the test body (same reason `BufferSpy` above needs a lock).
+    private final class TelemetryLineSpy: @unchecked Sendable {
+        let lock = NSLock()
+        private(set) var lines: [String] = []
+        func record(_ line: String) { lock.withLock { lines.append(line) } }
+        var all: [String] { lock.withLock { lines } }
+    }
+
+    // MARK: Setup/teardown
+
+    override func tearDown() {
+        // Belt-and-suspenders alongside the explicit drain in
+        // testSampleRateChangeEmitsCapturePARateRebuildTelemetry: guarantees
+        // no installed sink ever leaks forward to a later test method in this
+        // same process (swift test --parallel runs a class's methods
+        // serially in one process). A no-op for every other test, which
+        // never installs one.
+        Telemetry._installTestSink(nil)
+        super.tearDown()
+    }
+
     // MARK: Helpers
 
     private func buffer(hostTime: UInt64, frames: Int = 4) -> CapturedBuffer {
@@ -403,6 +426,64 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
                        "device-change recreation re-resolves the process set")
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on device change")
         XCTAssertGreaterThanOrEqual(tap.creates, 2)
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (T3): a sample-rate-triggered rebuild emits a
+    // capturePA/rate_rebuild line with old/new rate fields populated.
+    //
+    // The real HAL detection point (CoreAudioProcessTap.installSampleRateListener,
+    // PerAppCaptureCoordinator.swift) isn't reachable hermetically — this
+    // suite never touches that concrete Core Audio class (no live Core Audio
+    // here; see that file's own doc comment on why FakeProcessTap exists).
+    // This asserts the coordinator-level emission in handleDeviceChange(bundleID:)
+    // instead, using this file's own established "mutate tap.format then
+    // fireDeviceChange()" convention (see
+    // testDeviceChangeRecreatesTapAndReResolvesProcessSet above) to simulate
+    // the rate change the real listener would have detected.
+
+    func testSampleRateChangeEmitsCapturePARateRebuildTelemetry() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+        XCTAssertEqual(tap.format.sampleRate, 48000, "sanity: the fake tap's rate before the simulated change")
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+
+        // Simulate the tapped output device renegotiating its nominal rate
+        // (44.1 <-> 48 kHz) — the documented process-tap silent-buffer bug
+        // this event exists to surface (see the "Nominal-sample-rate
+        // listener" doc comment on CoreAudioProcessTap).
+        tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        tap.fireDeviceChange()
+        waitFor {
+            if case .capturing(let f) = coordinator.state(for: "com.example.music") { return f.sampleRate == 44100 }
+            return false
+        }
+
+        // Flush barrier + clear (Telemetry's writer queue is serial/FIFO, so
+        // this guarantees every write enqueued above has landed in `spy` —
+        // mirrors TelemetryTests' own `drain()` helper).
+        Telemetry._installTestSink(nil)
+
+        let rebuildLine = try XCTUnwrap(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") },
+            "expected a capturePA/rate_rebuild line among: \(spy.all)")
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(rebuildLine.utf8)) as? [String: Any],
+            "not a JSON object: \(rebuildLine)")
+        XCTAssertEqual(obj["cat"] as? String, "capturePA")
+        XCTAssertEqual(obj["bundleID"] as? String, "com.example.music")
+        XCTAssertEqual(obj["oldRate"] as? String, "48000")
+        XCTAssertEqual(obj["newRate"] as? String, "44100")
 
         coordinator.stop(bundleID: "com.example.music")
     }

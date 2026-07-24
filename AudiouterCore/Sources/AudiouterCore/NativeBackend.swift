@@ -409,6 +409,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `handleDestinationSetsChanged`'s own `stateQueue` critical section.
     private var lastDestinationSets: [AppRouteMixer.DestinationSet] = []
 
+    /// Mixed-buffer counter driving the rate-limited write-backlog sampling (see
+    /// `sampleWriteBacklogIfDue`). Confined to the mixer's `onMixedBuffer` queue.
+    private var backlogSampleCounter = 0
+    /// Last `droppedWrites` total reported to Telemetry, so the sampler emits only
+    /// on change instead of once per sample. Same queue confinement as above.
+    private var lastReportedDroppedWrites: UInt64 = 0
+
     /// deviceID → the sorted app display names last published via `.routedApps`, so
     /// the event fires only when a device's live app mapping actually changes.
     private var routedAppNames: [String: [String]] = [:]
@@ -792,6 +799,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self?.engine.write(
                 pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
+            // silently DROP audio once a stream's un-drained backlog hits its cap
+            // — audible as "dropped milliseconds" that the routing telemetry above
+            // can never explain (no rebuild, no reset, nothing logged). Sample the
+            // guard's counters here, but RATE-LIMITED and only emitting on CHANGE:
+            // this closure runs per mixed buffer (mixer queue, RT-adjacent), and
+            // `Telemetry` must never be called at buffer cadence. One cheap
+            // counter increment per buffer; a snapshot read + possible log only
+            // once every `backlogSampleInterval` buffers.
+            self?.sampleWriteBacklogIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -2395,6 +2412,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for v in ints { let a = v == Int16.min ? Int16.max : abs(v); if a > peak { peak = a } }
         }
         return Int(peak)
+    }
+
+    /// How many mixed buffers between write-backlog samples. At ~44.1 kHz with
+    /// typical buffer sizes this is a handful of seconds — frequent enough to
+    /// catch a backlog trend, rare enough that neither the snapshot read (which
+    /// takes the guard's own lock) nor a Telemetry write ever lands at buffer
+    /// cadence on this RT-adjacent queue.
+    private static let backlogSampleInterval = 500
+
+    /// Sample the engine's write-backpressure guard every `backlogSampleInterval`
+    /// buffers and emit a Telemetry line ONLY when the cumulative dropped-write
+    /// count actually moves. Counters are confined to the mixer's callback queue
+    /// (this is the sole caller, and `onMixedBuffer` is serialized on that queue),
+    /// so no additional lock is needed.
+    ///
+    /// `dropped > 0` is the definitive signal that audio is being discarded by
+    /// backpressure rather than interrupted by a rebuild/reset — the distinction
+    /// the routing telemetry cannot make. `maxInFlightSeconds` climbing toward the
+    /// cap across samples means the engine thread is draining slower than capture
+    /// produces (clock drift / a stalled receiver), which is the underlying
+    /// condition the drop is merely the symptom of.
+    private func sampleWriteBacklogIfDue() {
+        backlogSampleCounter &+= 1
+        guard backlogSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeBacklogSnapshot()
+        guard snap.droppedWrites != lastReportedDroppedWrites else { return }
+        let delta = snap.droppedWrites &- lastReportedDroppedWrites
+        lastReportedDroppedWrites = snap.droppedWrites
+        Telemetry.log(.airplay, "write_backlog_drop", [
+            "droppedTotal": String(snap.droppedWrites),
+            "droppedDelta": String(delta),
+            "maxInFlightSeconds": String(format: "%.3f", snap.maxInFlightSeconds),
+            "streamsTracked": String(snap.streamsTracked),
+        ])
     }
 
     private func handleDestinationSetsChanged(_ sets: [AppRouteMixer.DestinationSet]) {
@@ -4218,9 +4269,22 @@ protocol EngineControlling: Sendable {
     /// `NativeBackendTests` spy) compiles unchanged and keeps its prior
     /// all-healthy behavior.
     var ptpClockAvailable: Bool { get async }
+
+    /// Diagnostic snapshot of the engine's write-path backpressure guard (T14):
+    /// cumulative writes DROPPED because a stream's un-drained backlog hit the
+    /// cap, plus the current worst-case backlog. Read-only and side-effect-free —
+    /// it reports what the guard already did, it never gates a write. Surfaced so
+    /// a live run can tell "audio is being discarded by backpressure" apart from
+    /// "audio is being interrupted by a rebuild/reset", which the routing
+    /// telemetry already covers.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot
 }
 
 extension EngineControlling {
+    /// Default: an all-zero (healthy) snapshot, so every existing test double
+    /// compiles unchanged. ``EngineAdapter`` overrides this with the real read.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot { WriteBacklogSnapshot() }
+
     /// Default: legacy single-stream behavior (`streamId` 0), so a conformer
     /// that predates T2 doesn't need updating. ``EngineAdapter`` overrides this
     /// with the real forwarding call.
@@ -4248,6 +4312,9 @@ struct EngineAdapter: EngineControlling {
 
     func start() async throws { try await engine.start() }
     func stop() async { await engine.stop() }
+    /// Real read of the write-path backpressure guard (T14 diagnostic).
+    /// `nonisolated` on the engine, so no hop/await is needed here.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot { engine.writeBacklogSnapshot() }
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
         try await engine.updateDiscovery(descriptor)

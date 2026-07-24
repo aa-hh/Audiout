@@ -1084,6 +1084,22 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD LOOP-BREAKER (mirrors
+            // `CoreAudioSystemTap.shouldRebuildForNominalRate`, reused here
+            // directly): Core Audio posts this listener for a set-to-same-value
+            // too, not just a genuine change. Without this guard, EVERY such
+            // spurious re-announcement on the tapped device tore this per-app tap
+            // down and rebuilt it — observed live as Music's "Play on this Mac"
+            // capture restarting every few seconds with no real rate change.
+            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
+            guard CoreAudioSystemTap.shouldRebuildForNominalRate(
+                notifiedRate: newRate, currentEffectiveRate: self.format.sampleRate) else {
+                AudioDiag.log(
+                    "PAC nominal-rate notification but rate unchanged "
+                    + "(\(self.format.sampleRate) Hz) — skipping rebuild")
+                return
+            }
             AudioDiag.log("PAC nominal-sample-rate changed on tapped device — triggering rebuild")
             // Upgrades the AudioDiag line above with a structured event
             // (PLAN-TELEMETRY-SYSTEM.md T3) — this is the real HAL detection
@@ -1092,8 +1108,6 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             // rebuilt tap's ASBD). Never exercised by the hermetic suite (no
             // live Core Audio) — see the coordinator-level emission in
             // `handleDeviceChange(bundleID:)`, which is.
-            guard let self else { return }
-            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
             Telemetry.log(.capturePA, "rate_rebuild", [
                 "bundleID": bundleID,
                 "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),

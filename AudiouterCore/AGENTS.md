@@ -164,8 +164,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never an env var), non-blocking, and must never call back into a caller. Never
   call it from the IOProc/render path — only from the (non-realtime) decision
   points around it. It auto-neutralizes under tests; don't add a per-suite
-  workaround, and don't reach for its `_resetForTesting`/`_installTestSink` seams
-  outside `TelemetryTests`.
+  workaround, and don't reach for its heavier `_resetForTesting` seam outside
+  `TelemetryTests` (the logger's own suite). `_installTestSink` is lighter-weight
+  (no filesystem) and is also the intended seam for each instrumented
+  subsystem's OWN suite to assert its emissions (e.g.
+  `PerAppCaptureCoordinatorTests`' `capturePA`/`rate_rebuild` assertion) — install
+  it, drive the real code path, then call it again with `nil` (a synchronous
+  flush barrier) to read back what was captured and restore the neutralized
+  default before the next test.
 
 ## Map
 

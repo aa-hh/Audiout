@@ -457,6 +457,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the bundle stops being routed or its capture stops.
     private var everCapturedBundleIDs: Set<String> = []
 
+    /// Whole-system analogue of `everCapturedBundleIDs` (T2): `true` once the
+    /// whole-system tap has reached `.capturing` at least once in the CURRENT
+    /// capture epoch. Lets a LATER `.capturing` be recognised as a RE-capture —
+    /// the tap was torn down and rebuilt WITHOUT a full stop in between (a
+    /// nominal-sample-rate renegotiation, the synced-local mixed-selection dropout
+    /// bug), which leaves every stream-0 AirPlay session's RTP timeline desynced
+    /// from its receiver and permanently silent even though real PCM keeps flowing
+    /// — so a re-capture triggers a whole-system session reset (rebind). Reset to
+    /// `false` when the tap fully stops (`.idle`) or fails (`.failed`), so the NEXT
+    /// `.capturing` after a gate stop/start or a teardown is treated as a fresh
+    /// first-capture (the devices are freshly re-added by `convergeDevice`), NOT a
+    /// rebuild needing a reset. Confined to `stateQueue`.
+    private var everCapturedWholeSystem = false
+
     /// bundleID → how many `.processNotYetAudible` retries have already fired
     /// (edge case 3). Kept ONLY to grow the capped-exponential backoff delay, not
     /// as a give-up ceiling. Reset on recovery (`.capturing`) or on losing the
@@ -896,6 +910,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    wire early: it only fires while the tap is running.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
 
+            // Whole-system capture health (T2). A nominal-sample-rate renegotiation
+            // (opening the Mac's built-in speakers in a Mac+AirPlay synced-local
+            // selection flips the tapped device 44.1↔48 kHz) rebuilds the tap —
+            // `.capturing → .creatingTap → .capturing` — after which the process tap
+            // keeps delivering buffers but the stream-0 AirPlay sessions stay pinned
+            // to a now-stale RTP timeline and the receivers go silent forever
+            // (Apple-unresolved, Dev Forums 825780). The whole-system port of the
+            // proven per-app fix: a LATER `.capturing` (recognised via
+            // `everCapturedWholeSystem`) rebinds every selected device to reset its
+            // session. Wired here like `onLevel` (the coordinator is assigned before
+            // `start()`); it fires from the coordinator's own queue and the handler
+            // hops to `stateQueue` for the mutation.
+            self.captureCoordinator?.onStateChange = { [weak self] state in
+                self?.handleWholeSystemCaptureHealthChange(state: state)
+            }
+
             // Per-app meter, source 2/3: `.currentDevice` apps rendered locally.
             // Wired here like `onLevel` (the engine is assigned before `start()`);
             // it only fires while metering is active (the engine gates its own RMS
@@ -915,6 +945,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        // T2: stop observing the whole-system tap's lifecycle so the ordered
+        // `captureControlQueue` stop below (which drives the coordinator through
+        // `.stopping → .idle`) can't fire a spurious recapture reset during
+        // teardown. `everCapturedWholeSystem` is reset in the state block below.
+        captureCoordinator?.onStateChange = nil
         captureCoordinator?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
@@ -1017,6 +1052,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.lastRoutes.removeAll()
             self.deadBundleIDs.removeAll()
             self.everCapturedBundleIDs.removeAll()
+            self.everCapturedWholeSystem = false   // T2: next start() is a fresh first-capture
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
@@ -1552,6 +1588,39 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    /// React to the WHOLE-SYSTEM tap's lifecycle (T2) — the stream-0 analogue of
+    /// `handlePerAppCaptureHealthChange`. Runs off `stateQueue` (callback context
+    /// from `NativeCaptureCoordinator.onStateChange`); hops on only for the mutation.
+    ///
+    /// A `.capturing` that is NOT the first of the current capture epoch is a
+    /// RE-capture: the tap was torn down and rebuilt with no full stop in between
+    /// (a nominal-sample-rate renegotiation). The whole-system output topology is
+    /// unchanged, so every stream-0 AirPlay session keeps its now-desynced RTP
+    /// anchor and the receivers stay silent unless we explicitly reset them. Any
+    /// terminal state (`.idle`, `.failed`) ends the epoch so the NEXT `.capturing`
+    /// counts as a fresh first-capture (the gate stopped/started the tap, or it
+    /// failed and will restart) — the devices are freshly (re-)added by
+    /// `convergeDevice` in that case, so no reset is wanted.
+    private func handleWholeSystemCaptureHealthChange(state: NativeCaptureCoordinator.State) {
+        switch state {
+        case .capturing:
+            let isRecapture: Bool = stateQueue.sync {
+                let was = self.everCapturedWholeSystem
+                self.everCapturedWholeSystem = true
+                return was
+            }
+            if isRecapture {
+                resetAirPlaySessionForWholeSystem()
+            }
+
+        case .idle, .failed:
+            stateQueue.sync { self.everCapturedWholeSystem = false }
+
+        case .creatingTap, .stopping:
+            break
+        }
+    }
+
     /// Re-run the mixer over the current route table minus dead bundle IDs (T8).
     /// Called whenever `deadBundleIDs` changes OUTSIDE of `updateAppRoutes` itself
     /// (a capture health transition), so the topology — and therefore `.routedApps`
@@ -1579,10 +1648,75 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
                     self.enqueueRebindRecovery(
-                        deviceID: deviceID, outputID: outputID, stream: streamU,
+                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
                         gen: gen, attempt: 1)
                 }
             }
+        }
+    }
+
+    /// Reset the WHOLE-SYSTEM (stream-0) AirPlay RTP session for every currently
+    /// streaming Selected Device by rebinding it (removeOutput → addOutput = a fresh
+    /// RTSP/RTP session with a clean timeline anchor) — the stream-0 analogue of
+    /// `resetAirPlaySessionForRoutedApp` (T2). Called when the whole-system tap was
+    /// rebuilt (a nominal-sample-rate renegotiation), which leaves every receiver on
+    /// the whole-system mix desynced and permanently silent even though real PCM
+    /// keeps flowing. Iterates `added` (the devices actually streaming stream 0),
+    /// not `expectedSelected`/`desiredOn` — only a device with a live engine session
+    /// has a session to reset. Runs on `stateQueue`.
+    ///
+    /// Single-flight: bumps each device's `rebindRecoveryGen` (shared per-deviceID
+    /// with the per-app path — a device is either whole-system or per-app, never
+    /// both, so one recovery chain per device is exactly right) and cancels any
+    /// pending backoff before enqueuing attempt 1. A rapid rate bounce
+    /// (44.1→48→44.1) fires this again; the second bump supersedes the first
+    /// chain's bookkeeping, so recovery never thrashes.
+    private func resetAirPlaySessionForWholeSystem() {
+        stateQueue.sync {
+            for deviceID in self.added {
+                guard let outputID = self.outputIDs[deviceID] else { continue }
+                let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
+                self.rebindRecoveryGen[deviceID] = gen
+                self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                AudioDiag.log("RESET AirPlay session (whole-system): device=\(deviceID) stream=0 (tap rebuilt)")
+                self.enqueueRebindRecovery(
+                    deviceID: deviceID, outputID: outputID, scope: .wholeSystem,
+                    gen: gen, attempt: 1)
+            }
+        }
+    }
+
+    /// Which AirPlay session a rebind-recovery chain is restoring (T2/T4). Both
+    /// kinds share `rebindRecoveryGen`/`pendingRebindRecoveries` (keyed by deviceID,
+    /// so one device never runs two chains at once) but differ in the engine op they
+    /// issue and the "do we still own this device?" ownership check they use to bow
+    /// out the moment the device is de-routed/deselected.
+    private enum RebindScope: Equatable {
+        /// A per-app redirect's dedicated stream (≥ 1). Ownership:
+        /// `streamBindings[deviceID] == stream`. Re-added via `addOutput(_:streamId:)`.
+        case perApp(stream: UInt32)
+        /// The whole-system "Selected Devices" output set (stream 0). Ownership:
+        /// `added.contains(deviceID)`. Re-added via the single-stream `addOutput(_:)`
+        /// — the exact op `convergeDevice` used to bind it.
+        case wholeSystem
+    }
+
+    /// Whether `deviceID` still owns the session `scope` describes — the guard both
+    /// the completion handler and the backoff re-check use to bow out the moment a
+    /// device is de-routed (per-app) or deselected (whole-system). Must hold
+    /// `stateQueue`.
+    private func stillOwnsRebind(deviceID: String, scope: RebindScope) -> Bool {
+        switch scope {
+        case .perApp(let stream): return self.streamBindings[deviceID] == stream
+        case .wholeSystem:        return self.added.contains(deviceID)
+        }
+    }
+
+    /// A short label for `scope` used in the recovery diagnostics.
+    private static func rebindScopeLabel(_ scope: RebindScope) -> String {
+        switch scope {
+        case .perApp(let stream): return "stream=\(stream)"
+        case .wholeSystem:        return "stream=0 (whole-system)"
         }
     }
 
@@ -1599,23 +1733,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// Single-flighted per device via `rebindRecoveryGen`: a newer reset bumps the
     /// gen, so this chain — checking its captured `gen` still matches on completion
-    /// — bows out the moment it is superseded, de-routed, or the device leaves
-    /// per-app routing (`streamBindings[deviceID] != stream`). Called on
+    /// — bows out the moment it is superseded, or the device stops owning the
+    /// session `scope` describes (per-app: `streamBindings[deviceID] != stream`;
+    /// whole-system: `!added.contains(deviceID)`, i.e. deselected). Called on
     /// `stateQueue` (the async body hops back onto `stateQueue` only for the
     /// bookkeeping mutation, never holding it across the engine op).
     private func enqueueRebindRecovery(
-        deviceID: String, outputID: OutputID, stream: UInt32, gen: Int, attempt: Int
+        deviceID: String, outputID: OutputID, scope: RebindScope, gen: Int, attempt: Int
     ) {   // on stateQueue
         let prev = self.bindTail
         self.bindTail = Task { [weak self] in
             await prev.value
             guard let self else { return }
-            let ok = await self.performRebindRecovery(outputID: outputID, stream: stream)
+            let ok = await self.performRebindRecovery(outputID: outputID, scope: scope)
             self.stateQueue.sync {
-                // Superseded by a newer reset, or the device left per-app routing
-                // (unbind / teardown cleared the binding): we no longer own it.
+                // Superseded by a newer reset, or the device stopped owning this
+                // session (per-app unbind/teardown cleared the binding, or a
+                // whole-system deselect dropped it from `added`): we no longer own it.
                 guard self.rebindRecoveryGen[deviceID] == gen,
-                      self.streamBindings[deviceID] == stream else { return }
+                      self.stillOwnsRebind(deviceID: deviceID, scope: scope) else { return }
+                let label = Self.rebindScopeLabel(scope)
                 if ok {
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
@@ -1624,7 +1761,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard attempt < self.maxRebindRecoveryAttempts else {
                     AudioDiag.log(
                         "RESET AirPlay session GAVE UP after \(attempt) attempts: "
-                        + "device=\(deviceID) stream=\(stream) — receiver likely gone; "
+                        + "device=\(deviceID) \(label) — receiver likely gone; "
                         + "left unbound-in-engine (re-binds on next topology change)")
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
@@ -1633,17 +1770,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 let delay = self.rebindRecoveryRetryDelay * pow(2.0, Double(attempt - 1))
                 AudioDiag.log(
                     "RESET AirPlay session retry \(attempt + 1)/\(self.maxRebindRecoveryAttempts) "
-                    + "in \(delay)s: device=\(deviceID) stream=\(stream)")
+                    + "in \(delay)s: device=\(deviceID) \(label)")
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
                     self.stateQueue.sync {
                         // Re-check under the lock: still the same generation, still
-                        // bound to this stream, device still discovered.
+                        // owns this session, device still discovered.
                         guard self.rebindRecoveryGen[deviceID] == gen,
-                              self.streamBindings[deviceID] == stream,
+                              self.stillOwnsRebind(deviceID: deviceID, scope: scope),
                               let out = self.outputIDs[deviceID] else { return }
                         self.enqueueRebindRecovery(
-                            deviceID: deviceID, outputID: out, stream: stream,
+                            deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1)
                     }
                 }
@@ -1654,20 +1791,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// The observable rebind: stop the device's session then re-add it on `stream`,
-    /// returning whether the re-add SUCCEEDED (T4). The `removeOutput` throw is
-    /// tolerated (the device may not currently be added — a no-op teardown is fine);
-    /// only the `addOutput` result determines success, since that is what actually
-    /// re-establishes the RTP session with a clean timeline anchor.
-    private func performRebindRecovery(outputID: OutputID, stream: UInt32) async -> Bool {
-        AudioDiag.log("engine REBIND(recover) output=\(outputID) stream=\(stream)")
+    /// The observable rebind: stop the device's session then re-add it on the stream
+    /// `scope` selects, returning whether the re-add SUCCEEDED (T4). The
+    /// `removeOutput` throw is tolerated (the device may not currently be added — a
+    /// no-op teardown is fine); only the `addOutput` result determines success, since
+    /// that is what actually re-establishes the RTP session with a clean timeline
+    /// anchor. Whole-system uses the single-stream `addOutput(_:)` (stream 0, the
+    /// exact op `convergeDevice` used); per-app uses `addOutput(_:streamId:)`.
+    private func performRebindRecovery(outputID: OutputID, scope: RebindScope) async -> Bool {
+        let label = Self.rebindScopeLabel(scope)
+        AudioDiag.log("engine REBIND(recover) output=\(outputID) \(label)")
         try? await engine.removeOutput(outputID)
         do {
-            try await engine.addOutput(outputID, streamId: stream)
+            switch scope {
+            case .perApp(let stream): try await engine.addOutput(outputID, streamId: stream)
+            case .wholeSystem:        try await engine.addOutput(outputID)
+            }
             return true
         } catch {
             AudioDiag.log(
-                "engine REBIND(recover) FAILED output=\(outputID) stream=\(stream): \(error)")
+                "engine REBIND(recover) FAILED output=\(outputID) \(label): \(error)")
             return false
         }
     }
@@ -3595,6 +3738,16 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Fired once per captured buffer with its level in 0.0…1.0, from the tap's
     /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
     var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
+
+    /// Fired on every whole-system-tap lifecycle transition (T2), so
+    /// ``NativeBackend`` can recognise a tap REBUILD — a nominal-sample-rate
+    /// renegotiation tears the tap down and recreates it
+    /// (`.capturing → .creatingTap → .capturing`) — and reset the desynced AirPlay
+    /// RTP sessions it leaves behind. See ``NativeCaptureCoordinator/onStateChange``.
+    /// Default get-nil/set-noop (below) so a fake that only exercises the capture
+    /// gate compiles unchanged; ``NativeCaptureCoordinator`` provides the real
+    /// stored property.
+    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? { get set }
     /// Begin capturing system audio. Idempotent.
     ///
     /// The real tap is `.mutedWhenTapped`: while it runs, the Mac's own speakers
@@ -3625,6 +3778,15 @@ public protocol CaptureControlling: AnyObject, Sendable {
 }
 
 extension CaptureControlling {
+    /// Default no-op (T2) so a fake that doesn't exercise the whole-system tap's
+    /// lifecycle compiles unchanged; ``NativeCaptureCoordinator`` provides the real
+    /// stored property. A conformer that never fires it (get returns `nil`, set is
+    /// dropped) is a faithful stand-in for a test that only drives the capture gate.
+    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? {
+        get { nil }
+        set { }
+    }
+
     /// Default no-op (T-GATE) so a fake that doesn't exercise the metering gate
     /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setMeteringActive(_ active: Bool) {}

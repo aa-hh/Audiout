@@ -4482,6 +4482,156 @@ final class NativeBackendTests: XCTestCase {
         }
     }
 
+    // MARK: - Metering: the LOCAL device (synced-local mixed-selection fix)
+    //
+    // Pre-existing gap fix (docs/plans/PLAN-SYNCED-LOCAL-DROPOUT-FIX.md
+    // follow-up, live by-ear report): the local device's meter never received
+    // ANY `.level`, even while genuinely playing the synced mix, because
+    // `emitLevel`/`emitCombinedLevel` gated the whole-system contribution on
+    // `Device.isSelected` — a flag the local device structurally never sets
+    // (see "MARK: Current (local) output device (BUG B)"). `isMeterable` now
+    // substitutes `syncedLocalSinkEnabled` for the local device only.
+
+    /// A `SyncedLocalSinkControlling` spy: records start/stop calls so a test
+    /// can `pollUntil` the sink is actually enabled/disabled before asserting
+    /// on the local device's meter. Mirrors
+    /// `NativeBackendSyncedLocalSelectionTests.SpySyncedLocalSink`, duplicated
+    /// here because that one is private to its own file.
+    private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [String] = []
+        func start() throws { lock.withLock { _calls.append("start") } }
+        func stop() { lock.withLock { _calls.append("stop") } }
+        func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
+        func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
+        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
+        var calls: [String] { lock.withLock { _calls } }
+    }
+
+    /// A thread-safe `Bool` box standing in for the local Mac row's membership
+    /// in `GroupController.selectedDeviceIDs` — lets a test flip "is the Mac
+    /// selected" between `setOutputSet` calls. Mirrors
+    /// `NativeBackendSyncedLocalSelectionTests.LockedBool`, duplicated here for
+    /// the same reason as `SpySyncedLocalSink` above.
+    private final class LockedBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ v: Bool) { value = v }
+        func get() -> Bool { lock.withLock { value } }
+        func set(_ v: Bool) { lock.withLock { value = v } }
+    }
+
+    /// Wires a backend + `FakeCapture` + a synced-local-sink spy + a
+    /// `selectedDevicesQuery` reporting the Mac's membership from `macSelected`
+    /// — everything `setOutputSet`'s "Mac + ≥1 AirPlay" decision needs, with no
+    /// `AVAudioEngine`/real Core Audio in the loop.
+    private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
+        -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        let macSelected = LockedBool(macSelectedByDefault)
+        backend.selectedDevicesQuery = { id in
+            id == NativeBackend.localDeviceID ? macSelected.get() : false
+        }
+        return (backend, engine, discovery, capture, sink, macSelected)
+    }
+
+    /// The core fix: with Mac + 1 AirPlay device selected (synced-local sink
+    /// enabled) and metering active, the SAME whole-system-tap RMS that feeds
+    /// the AirPlay device's meter must ALSO reach the local device's meter —
+    /// through the identical `.level` event mechanism, not a separate path.
+    func testLocalDeviceReceivesLevelWhenSyncedLocalSinkEnabled() async {
+        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Synced Local Partner")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Precondition: the local device exists but must NOT be metered yet —
+        // the sink hasn't enabled (no AirPlay device selected yet).
+        XCTAssertTrue(backend.devices.contains { $0.isLocalDevice })
+
+        backend.setOutputSet([device.id])   // Mac + 1 AirPlay -> synced-local sink enables
+        await pollUntil { sink.calls.contains("start") }
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        backend.setMeteringActive(true)
+        await pollUntil { capture.meteringActive }
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        capture.fireLevelIfActive(0.6)
+
+        await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
+        XCTAssertEqual(levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0, 0.6, accuracy: 0.001,
+                       "the local device must receive the SAME whole-system-tap RMS driving the AirPlay device's meter")
+        XCTAssertEqual(levels.lastDeviceLevel(device.id) ?? 0, 0.6, accuracy: 0.001,
+                       "sanity: the AirPlay device sharing the mix reports the identical source level")
+    }
+
+    /// A device that is ONLY the local Mac (no AirPlay device selected at all,
+    /// so the synced-local sink never enables) must NOT be metered from the
+    /// whole-system tap — there is nothing shared to measure, and the tap
+    /// itself doesn't even run in pure passthrough. Guards against a fix that
+    /// accidentally makes the local device meterable unconditionally.
+    func testLocalDeviceAloneNeverReceivesSystemLevel() async {
+        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        backend.setOutputSet([])   // Mac-only: synced-local sink must stay OFF
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
+
+        backend.setMeteringActive(true)
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        capture.fireLevelIfActive(0.6)   // the real tap wouldn't even be running here
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNil(levels.lastDeviceLevel(NativeBackend.localDeviceID),
+                     "the local device must not be metered while the synced-local sink is disabled")
+    }
+
+    /// Symmetric to the fix above: disabling the synced-local sink (the Mac
+    /// leaving the mix while the AirPlay side is unchanged) must push a final
+    /// zero `.level` for the local device — mirroring
+    /// `testUnbindingStreamZeroesDeviceLevel`'s "a torn-down stream can't leave
+    /// a stuck bar" discipline — so the row's meter can't freeze at its last
+    /// nonzero reading once the Mac stops actually receiving the synced mix.
+    func testLocalDeviceLevelClearsWhenSyncedLocalSinkDisables() async {
+        let (backend, engine, discovery, capture, sink, macSelected) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Synced Local Partner 2")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { sink.calls.contains("start") }
+        backend.setMeteringActive(true)
+        await pollUntil { capture.meteringActive }
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        capture.fireLevelIfActive(0.6)
+        await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
+
+        // The user deselects the Mac; the AirPlay side of the selection is unchanged.
+        macSelected.set(false)
+        backend.setOutputSet([device.id])
+        await pollUntil { sink.calls.contains("stop") }
+
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
+        XCTAssertEqual(levels.lastDeviceLevel(NativeBackend.localDeviceID), 0,
+                       "disabling the synced-local sink must emit a final .level of 0, not leave a stuck bar")
+    }
+
     private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

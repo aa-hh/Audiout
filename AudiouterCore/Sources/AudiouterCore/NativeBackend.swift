@@ -1242,6 +1242,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             if wantSyncedLocal != self.syncedLocalSinkEnabled {
                 self.syncedLocalSinkEnabled = wantSyncedLocal
                 syncedLocalDecision = wantSyncedLocal
+                // Metering fix: re-emit the local device's combined `.level`
+                // immediately on this transition, mirroring the per-app "a
+                // torn-down stream gets a final combined .level" discipline
+                // (`updateRoutedSets`'s `unboundDevices` loop, below). Turning
+                // OFF must push a zero-system-contribution reading right away —
+                // `isMeterable` now returns false for the local device the
+                // instant `syncedLocalSinkEnabled` flips, so this is a genuine
+                // clear, not a stale nonzero value — so the row's meter can't
+                // stick at its last reading after the Mac (or the last AirPlay
+                // device) leaves the mix. Turning ON gets its first real
+                // reading a whole tap-buffer-interval sooner than waiting for
+                // the next `emitLevel` callback. Unconditional (not metering-
+                // gated), matching that same precedent.
+                self.emitCombinedLevel(forDevice: Self.localDeviceID)
             }
 
             return (kicks, syncedLocalDecision)
@@ -3555,16 +3569,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Level emission (T3 — combined per-device MAX)
 
+    /// Whether `device` is genuinely streaming the whole-system mix right now,
+    /// for METERING purposes — the fact `emitLevel`/`emitCombinedLevel` need to
+    /// decide whether `latestSystemRMS` belongs in this device's bar. For every
+    /// AirPlay device this is exactly `Device.isSelected` (a live engine
+    /// session — see `applyEngineState`/`convergeDevice`). The LOCAL device is
+    /// structurally EXCLUDED from that mechanism: `setOutputSet` never adds it
+    /// to `ids`/`outputIDs`/`added` (see "MARK: Current (local) output device
+    /// (BUG B)" above — it has no engine session at all), so
+    /// `known[localDeviceID].isSelected` never becomes true even while the
+    /// synced-local sink is genuinely rendering the same mix to the Mac's own
+    /// speakers (the "Mac + AirPlay" scenario) — the local row's meter was
+    /// permanently silent. Its real "streaming now" fact lives in
+    /// `syncedLocalSinkEnabled` instead, flipped by the SAME "Mac + ≥1 AirPlay"
+    /// decision in `setOutputSet` that starts/stops the sink — and the sink
+    /// renders the identical already-captured PCM this RMS was measured from
+    /// (T-FANOUT), so reusing it is exact, not an approximation. This was a
+    /// pre-existing gap (the synced-local sink and per-device metering shipped
+    /// in separate phases; neither retrofitted the other), not a regression
+    /// from the T1-T3 dropout fixes. Must run on `stateQueue`, like every caller.
+    private func isMeterable(_ device: Device) -> Bool {
+        device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
+    }
+
     /// A whole-system-tap RMS sample (stream_id 0). Store it and re-emit the
-    /// combined `.level` for every Selected + unmuted device (its system
-    /// contribution just changed). On `stateQueue`; gated on metering (belt-and-
-    /// suspenders — the coordinator already only fires `onLevel` while active).
+    /// combined `.level` for every device currently streaming it (``isMeterable``)
+    /// and unmuted (its system contribution just changed). On `stateQueue`; gated
+    /// on metering (belt-and-suspenders — the coordinator already only fires
+    /// `onLevel` while active).
     private func emitLevel(_ rms: Float) {
         stateQueue.async {
             guard self.meteringActive else { return }
             self.latestSystemRMS = rms
             for id in self.order {
-                guard let device = self.known[id], device.isSelected, !device.isMuted else { continue }
+                guard let device = self.known[id], self.isMeterable(device), !device.isMuted else { continue }
                 self.emitCombinedLevel(forDevice: id)
             }
         }
@@ -3594,7 +3632,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Emit `.level` for `id` as the MAX of its whole-system contribution
-    /// (`latestSystemRMS`, only if it's a Selected Device + unmuted) and its SOURCE
+    /// (`latestSystemRMS`, only while ``isMeterable`` + unmuted) and its SOURCE
     /// contribution — the loudest PRE-volume level among the apps `.device`-routed
     /// to it (`latestAppLevel`). A device fed by both shows the larger. Every input
     /// is a source/program level, so no routing/output volume ever attenuates the
@@ -3602,7 +3640,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private func emitCombinedLevel(forDevice id: String) {
         guard let device = known[id] else { return }
-        let systemContribution: Float = (device.isSelected && !device.isMuted) ? latestSystemRMS : 0
+        let systemContribution: Float = (isMeterable(device) && !device.isMuted) ? latestSystemRMS : 0
         var sourceContribution: Float = 0
         for route in lastRoutes where !deadBundleIDs.contains(route.bundleID) {
             if case .device(let deviceID) = route.destination, deviceID == id,

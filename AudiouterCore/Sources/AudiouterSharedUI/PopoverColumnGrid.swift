@@ -125,7 +125,7 @@ public enum PopoverColumnGrid {
     /// Deliberately its OWN constant, not `haloRingDiameter` — grown slightly
     /// past the device-row ring so the heavier matched stroke doesn't read
     /// cramped against the icon glyph.
-    public static let mainAudioRingDiameter: CGFloat = 30
+    public static let mainAudioRingDiameter: CGFloat = 34
     /// Stroke width of the Main Audio ring while connected — set equal to
     /// `busLineWidth` (the rail's own stroke) so the rail and ring read as ONE
     /// continuous line at their join, not two different-weight strokes
@@ -138,7 +138,7 @@ public enum PopoverColumnGrid {
     /// ring's own host box past `iconWidth`, so the larger `mainAudioRingDiameter`
     /// ring plus its heavier matched stroke has drawing room without crowding
     /// the row's other controls.
-    public static let mainAudioRingHostBoxGap: CGFloat = 6
+    public static let mainAudioRingHostBoxGap: CGFloat = 8
     /// The Main Audio ring's host square diameter once breathing room is
     /// applied — mirrors `haloRingHostBoxDiameter`'s derivation but off the
     /// bespoke `mainAudioRingDiameter`/`mainAudioRingHostBoxGap`.
@@ -323,7 +323,15 @@ public enum PopoverColumnGrid {
     /// Paired with `haloRingHostBoxDiameter` as the ring's own host box (see
     /// below) so the enlarged ring isn't cramped against the row's other
     /// controls. The contrast floor is tested at this size (spec §3.2).
-    public static let haloRingDiameter: CGFloat = 26
+    // UX spacing/contrast pass (2026-07-23, owner live-build feedback): grown
+    // 26 → 30. Two complaints landed together — the ring read "a bit small,"
+    // AND on WIDE glyphs (the Mixer/AirPlay router symbol, which extends past
+    // the 18 pt point size at its left/right) the ring "hugs the icon." Both
+    // are the same lever: a larger circle reads bigger AND opens the side gap a
+    // wide glyph was closing. Paired with the `haloBreathingRoomGap` bump below
+    // so the enlarged ring still has host-box headroom. Stays the smaller
+    // sibling of the bespoke `mainAudioRingDiameter` (34).
+    public static let haloRingDiameter: CGFloat = 30
     /// Stroke width of the **connected** solid ring (spec §3.2 ≈1.6 pt).
     public static let haloRingConnectedStroke: CGFloat = 1.6
     /// Stroke width of the **connecting/reconnecting** dashed ring — same weight
@@ -346,7 +354,7 @@ public enum PopoverColumnGrid {
     /// and `MainOutRowView`, still centered on the icon, keeps the icon
     /// glyph's own size/position untouched — the halo is purely an overlay,
     /// so only its own box grows.
-    public static let haloBreathingRoomGap: CGFloat = 4
+    public static let haloBreathingRoomGap: CGFloat = 6
     /// The ring's host square diameter once breathing room is applied —
     /// `iconWidth` grown by `haloBreathingRoomGap` on each side. The ring
     /// itself (`haloRingDiameter`) is sized/centered within this larger box
@@ -364,19 +372,26 @@ public enum PopoverColumnGrid {
     /// Diameter of the lit/socket route-armed dot disc (spec/S2 "6 pt gold
     /// disc" — deliberately smaller than the retired 10 pt connection dot so a
     /// lit dot reads as an indicator, not a beacon; R1's luminance/size cap).
-    public static let routeArmedDotDiameter: CGFloat = 6
+    // UX spacing/contrast pass (2026-07-23, owner live-build feedback): grown
+    // 6 → 8. At 6 pt the lit gold dot "kind of disappears" against the warm
+    // icon/ring — too small to register as an on-icon state badge. 8 pt (still
+    // below the retired 10 pt connection beacon) reads as a deliberate
+    // indicator while the parchment punch-out border keeps it separated from
+    // the glyph. Paired with the `routeArmedDotBoxSize` bump so the larger disc
+    // plus its glow halo isn't clipped.
+    public static let routeArmedDotDiameter: CGFloat = 8
     /// Blur radius of the lit dot's STATIC `glow` halo (spec §3.3 "subtle
     /// glow" — a resting shadow, not an animation; energy rule intact).
-    public static let routeArmedGlowRadius: CGFloat = 3
+    public static let routeArmedGlowRadius: CGFloat = 3.5
     /// Opacity of the lit dot's static `glow` halo shadow.
-    public static let routeArmedGlowOpacity: Float = 0.55
+    public static let routeArmedGlowOpacity: Float = 0.6
     /// Duration of the one-shot `ember → gold` bloom when a dot transitions
     /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
     /// instant under Reduce Motion; never fires on initial render).
     public static let routeArmedBloomDuration: CFTimeInterval = 0.45
     /// Side length of the square overlay view hosting the dot — big enough to
     /// contain the disc plus its glow halo without clipping.
-    public static let routeArmedDotBoxSize: CGFloat = 14
+    public static let routeArmedDotBoxSize: CGFloat = 18
 
     // MARK: Membership bus — the LEFT SPINE (Warm Signal v4 §Call-1)
     //

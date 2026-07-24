@@ -162,7 +162,11 @@ public final class LevelMeterView: NSView {
 
     private func updateLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            trackLayer.backgroundColor = Tokens.Color.tertiarySystemFill.cgColor
+            // The empty track must stay visible at every level so the meter's
+            // full scale (the ratio's denominator) always reads — `meterTrack`
+            // is a warm recess with a measured floor, replacing the near-
+            // invisible `tertiarySystemFill` (UX contrast pass, 2026-07-23).
+            trackLayer.backgroundColor = Tokens.Color.meterTrack.cgColor
             // The warm ramp (S2): ember low end → gold body → caution ceiling.
             // NEVER `failure` red (house rule 8). Re-stamped on every
             // appearance/Increase-Contrast change since CGColors are static.

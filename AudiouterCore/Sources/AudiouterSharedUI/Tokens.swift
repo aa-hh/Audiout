@@ -201,6 +201,27 @@ public enum Tokens {
                        light: 0xE2DACC, lightHighContrast: 0x9B8768)
         }
 
+        /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
+        /// `trackLayer`). Added in the UX spacing/contrast pass (2026-07-23,
+        /// owner live-build feedback): the track was `NSColor.tertiarySystemFill`,
+        /// a translucent grey that all but vanished on the warm `canvas` — "the
+        /// empty part just disappears; you only ever see the moving fill." A
+        /// meter reads a RATIO, so its full length (the denominator) must be
+        /// visible at every level, including 0. This is a dedicated warm recess
+        /// with a measured floor — visibly present but quiet, deliberately below
+        /// the gold/ember fill drawn over it so the fill still wins.
+        /// CONTRAST RATIONALE (WCAG relative luminance): dark `#4E463A` ≈ 2.0:1
+        /// vs `canvas` `#16130F` (the empty channel reads as a recess), and the
+        /// dimmest fill end `ember` `#8A6A2F` sits ≈ 1.9:1 OVER it so the fill
+        /// boundary is legible; light `#CBBEA1` ≈ 1.6:1 vs `canvas` `#F4EFE7`
+        /// (kept quiet so a full-length empty track never competes with the
+        /// name). IC variants deepen the recess for definition (dark `#5A5245`,
+        /// light `#BEAF90`) without turning the track into a signal.
+        public static var meterTrack: NSColor {
+            warmDynamic(name: "meterTrack", dark: 0x4E463A, darkHighContrast: 0x5A5245,
+                       light: 0xCBBEA1, lightHighContrast: 0xBEAF90)
+        }
+
         // MARK: Connection-ring instruments (spec §3.2, S1)
         //
         // The two hues the halo connection ring (``HaloRingView``) needs. Teal

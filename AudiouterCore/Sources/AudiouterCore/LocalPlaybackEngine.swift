@@ -188,6 +188,17 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private var meteringActive = false
     /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
     private var configChangeObserver: NSObjectProtocol?
+    /// TEST SEAM ONLY (default `false` — every production call site, incl.
+    /// `OwnToneBackend`, gets the real path unchanged). When `true`, the engine
+    /// runs in `AVAudioEngine`'s OFFLINE manual-rendering mode instead of against
+    /// hardware: it still starts (so `engineRunning` is `true` and the T10
+    /// metering path in `receive` fires), players still schedule buffers, and
+    /// every graph invariant holds — but the output is NEVER pinned to the
+    /// built-in device and no buffer reaches a speaker (offline render blocks are
+    /// simply never pulled). This lets `LocalPlaybackEngineTests` exercise the
+    /// REAL engine + RMS metering without grabbing the audio device on every
+    /// full-suite run (which clicked the Mac's built-in speakers mid-session).
+    private let offlineRenderingForTests: Bool
 
     /// Fired synchronously from ``receive(buffer:for:)`` with one app's raw
     /// captured RMS level (0.0...1.0), while metering is active. PRE-VOLUME by
@@ -197,7 +208,11 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// delivery thread (same thread as `receive`); keep the handler cheap.
     public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
 
-    public init() {
+    /// - Parameter offlineRenderingForTests: default `false` (real hardware
+    ///   output). Tests pass `true` to run the engine offline — see
+    ///   ``offlineRenderingForTests``.
+    public init(offlineRenderingForTests: Bool = false) {
+        self.offlineRenderingForTests = offlineRenderingForTests
         // AVAudioEngine STOPS itself on a configuration change — and one fires
         // whenever the CoreAudio device list changes, which our OWN per-app taps
         // do every time one is created or torn down (their aggregate devices come
@@ -231,7 +246,14 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// `true` and let `play()` hit a stopped engine (an uncatchable abort).
     private func startEngineOnGraphQueue() throws {
         guard !(stateLock.withLock { engineRunning }) else { return }
-        configureBuiltInOutput()
+        if offlineRenderingForTests {
+            // Offline test seam: render to nowhere instead of the built-in
+            // device. `configureBuiltInOutput` is skipped (its own offline guard
+            // also no-ops it), so no hardware is ever touched.
+            enableOfflineRenderingIfNeeded()
+        } else {
+            configureBuiltInOutput()
+        }
         // Touch the main mixer so it (and its main-mixer→output connection) is
         // instantiated before start; starting with no player inputs is silent
         // and correct — players attach/connect afterward while it runs.
@@ -600,6 +622,30 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     private static func clamp(_ volume: Float) -> Float { min(1, max(0, volume)) }
 
+    // MARK: Offline rendering (test seam)
+
+    /// Put the engine into `.offline` manual-rendering mode so `start()` brings
+    /// it up without any hardware IO. Idempotent (guards on
+    /// `isInManualRenderingMode`). The render format matches the per-app player
+    /// connection format (`standardFormatWithSampleRate:channels:`, deinterleaved
+    /// Float32) the taps use, so no format mismatch at the mixer→output bus.
+    /// Offline render blocks are never pulled, so scheduled buffers accumulate
+    /// and play nowhere — exactly the silent-but-running state the metering unit
+    /// tests need. Only ever reached when ``offlineRenderingForTests`` is set.
+    private func enableOfflineRenderingIfNeeded() {
+        guard !engine.isInManualRenderingMode else { return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2) else {
+            AudioDiag.log("LPE.offline: could not build render format; engine will use its default")
+            return
+        }
+        do {
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
+            AudioDiag.log("LPE.offline: manual rendering enabled (no hardware output)")
+        } catch {
+            AudioDiag.log("LPE.offline: enableManualRenderingMode FAILED: \(error)")
+        }
+    }
+
     // MARK: Built-in output device
 
     /// Pin the engine's output to the built-in speakers (once). Best effort:
@@ -607,6 +653,9 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// own default output. MUST run on `graphQueue` (called from
     /// `startEngineOnGraphQueue`); `configuredDevice` is touched only there.
     private func configureBuiltInOutput() {
+        // Offline test seam never pins a real device (belt-and-suspenders: the
+        // caller already skips this, but any future call path stays hardware-safe).
+        guard !offlineRenderingForTests else { return }
         guard !configuredDevice else { return }
         configuredDevice = true
         #if canImport(AudioToolbox)
@@ -677,7 +726,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 /// floor is macOS 14 — but this keeps the file compiling anywhere). Every call
 /// is an inert no-op.
 public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sendable {
-    public init() {}
+    public init(offlineRenderingForTests: Bool = false) {}
     public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
     public func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {}
     public func removeApp(bundleID: String) {}

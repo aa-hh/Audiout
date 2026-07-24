@@ -9,8 +9,18 @@ import XCTest
 /// + ``LocalPlaybackEngine/setMeteringActive(_:)``. These drive the REAL
 /// `AVAudioEngine`-backed engine (no fake/spy — `LocalPlaybackControlling` is
 /// what `NativeBackend` fakes in its own tests; this file tests the concrete
-/// type those fakes stand in for), so `addApp`/`start` exercise real Core Audio
-/// against the Mac's built-in output.
+/// type those fakes stand in for), so `addApp`/`start` exercise the real Core
+/// Audio graph and the real RMS path.
+///
+/// The engine is created with `offlineRenderingForTests: true`, so it runs in
+/// `AVAudioEngine`'s OFFLINE manual-rendering mode: the graph starts, players
+/// schedule buffers, and the metering path fires exactly as in production — but
+/// NO hardware is touched and no buffer reaches a speaker. That keeps the
+/// full-suite run from clicking the Mac's built-in speakers mid live-session
+/// (the metering assertions never needed real output — they read RMS off the
+/// captured buffer). One opt-in test (`testRealEngineComesUpOnBuiltInOutput`,
+/// gated behind `AUDIOUTER_LPE_REAL_OUTPUT=1`) keeps the real-hardware
+/// integration smoke available on demand.
 final class LocalPlaybackEngineTests: XCTestCase {
 
     /// Records every ``LocalPlaybackEngine/onAppLevel`` call under a lock — the
@@ -52,11 +62,14 @@ final class LocalPlaybackEngineTests: XCTestCase {
         return CapturedBuffer(channelData: [channel, channel], frameCount: frames, pts: pts)
     }
 
-    /// Add `bundleID` as a real local player and start the engine. A helper so
-    /// every test starts from the same known-good state; failures here would
-    /// mean the environment has no usable audio output at all, not a T10 bug.
+    /// Add `bundleID` as a local player and start the engine OFFLINE (no
+    /// hardware). A helper so every test starts from the same known-good state;
+    /// a failure here would mean the offline graph itself won't come up, not a
+    /// T10 bug. Uses `offlineRenderingForTests: true` so the suite never grabs
+    /// the audio device — the metering path under test reads RMS off the
+    /// captured buffer and is identical whether output is real or offline.
     private func makeStartedEngine() throws -> LocalPlaybackEngine {
-        let engine = LocalPlaybackEngine()
+        let engine = LocalPlaybackEngine(offlineRenderingForTests: true)
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         return engine
     }
@@ -184,5 +197,35 @@ final class LocalPlaybackEngineTests: XCTestCase {
         // Re-adding after removal (idempotent add path) still works.
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+    }
+
+    // MARK: - Real-hardware integration smoke (opt-in)
+
+    /// OPT-IN: the only test that drives the engine against REAL Core Audio
+    /// output (`offlineRenderingForTests: false`), verifying the production path
+    /// actually comes up on the Mac's built-in device. Skipped unless
+    /// `AUDIOUTER_LPE_REAL_OUTPUT=1` so a normal full-suite run — including the
+    /// pre-commit gate during a live session — never touches the audio device.
+    /// Feeds nothing but a single silent (zero-amplitude) buffer, so even when
+    /// opted in it can't emit an audible tone.
+    func testRealEngineComesUpOnBuiltInOutput() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["AUDIOUTER_LPE_REAL_OUTPUT"] == "1",
+            "Real-hardware smoke is opt-in (set AUDIOUTER_LPE_REAL_OUTPUT=1) — it touches the audio device")
+
+        let engine = LocalPlaybackEngine()   // real output path
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        defer { engine.stop() }
+
+        // A zero buffer keeps it silent while still exercising the real schedule
+        // path; the metering hook still reports the (zero) RMS, proving the real
+        // graph runs end to end.
+        let recorder = LevelRecorder()
+        engine.onAppLevel = { recorder.record($0, $1) }
+        engine.setMeteringActive(true)
+        engine.receive(buffer: constantBuffer(amplitude: 0.0), for: bundleID)
+
+        let level = try XCTUnwrap(recorder.last, "real engine must run so the metering path fires")
+        XCTAssertEqual(level.rms, 0.0, accuracy: 0.001, "silent buffer reads as zero RMS")
     }
 }

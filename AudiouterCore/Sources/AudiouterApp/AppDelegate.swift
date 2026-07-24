@@ -389,7 +389,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // otherwise the OS dialog would be their first exposure to the ask, which
         // is the exact thing this flow exists to prevent. Every other launch (and
         // every non-native backend) starts immediately.
-        if SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind) {
+        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
+        // T5: the onboarding-presentation gate's decision + the inputs behind
+        // it. `hasCompletedSetup` is the "setup says done/granted" side of
+        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
+        // just below (logged separately) is the "real gate" side — together
+        // they let a reader see the exact moment those two disagree.
+        Telemetry.log(.permission, "onboarding_gate", [
+            "site": "AppDelegate.launch.shouldPresentOnLaunch",
+            "decision": presentOnLaunch ? "present" : "skip",
+            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+            "backendKind": "\(backendKind)",
+        ])
+        if presentOnLaunch {
             log("Audiouter launched (backend: \(type(of: backend))) — first-run setup")
             presentSetup()
         } else {
@@ -408,7 +420,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // which lagged the launch: the user saw the popover first (a menu-bar
             // click, `onboardingWindowController` still nil) and setup flashed in
             // after. Local Network / PTP gaps are still caught by that audit.
-            if onboardingWindowController == nil, !SystemAudioCaptureTCC.isGranted() {
+            let liveAudioGranted = SystemAudioCaptureTCC.isGranted()
+            // T5: the live-permission-triggered half of the gate. Logged
+            // unconditionally (not only when it re-presents) so the common
+            // "still granted" case is on record too, not just the exception —
+            // and `backendKind` is included because this specific check, unlike
+            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
+            Telemetry.log(.permission, "onboarding_gate", [
+                "site": "AppDelegate.launch.liveAudioCaptureCheck",
+                "decision": (onboardingWindowController == nil && !liveAudioGranted) ? "present" : "skip",
+                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+                "backendKind": "\(backendKind)",
+                "liveGranted": "\(liveAudioGranted)",
+            ])
+            if onboardingWindowController == nil, !liveAudioGranted {
                 log("Audio capture not granted at launch — presenting setup")
                 presentSetup(reason: .permissionLost([.audioCapture]))
             }

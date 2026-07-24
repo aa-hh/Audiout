@@ -386,8 +386,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let needsRecreate: Bool = queue.sync {
             guard union != currentExcludedBundleIDs else { return false }
             currentExcludedBundleIDs = union
-            if case .capturing = _state { return true }
-            return false
+            let capturing: Bool
+            if case .capturing = _state { capturing = true } else { capturing = false }
+            // Telemetry (T2): the exclusion-list choke point — the only place
+            // the live routed/excluded union actually changes. Cleartext
+            // bundle IDs are deliberate (PLAN-TELEMETRY-SYSTEM.md Q6): this is
+            // exactly what makes "why did the system tap just rebuild" legible.
+            Telemetry.log(.captureWS, "exclusion_changed", [
+                "excludedCount": "\(union.count)",
+                "excluded": union.sorted().joined(separator: ","),
+                "recreate": capturing ? "true" : "false",
+            ])
+            return capturing
         }
         guard needsRecreate else { return }
         // Exclusion-set change only (routed/excluded apps): the tapped output device
@@ -532,8 +542,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// The default output device changed under us (the tap follows it, so its
     /// real format may now differ — e.g. built-in 44100 → USB DAC 48000).
     /// Delegates to ``recreateTap()`` — the same "tear down + recreate while
-    /// capturing" machinery T4 reuses for an exclusion-list change.
+    /// capturing" machinery T4 reuses for an exclusion-list change. Runs on
+    /// the tap's own dedicated `listenerQueue` (non-RT — see
+    /// ``CoreAudioSystemTap/listenerQueue``), never the IOProc thread.
     private func handleDeviceChange() {
+        Telemetry.log(.captureWS, "device_change", ["trigger": "default_output_changed"])
         // A genuine device/nominal-rate change: the tapped device's clock moved out
         // from under the live RTP sessions, so the rebuild MUST reset the
         // whole-system AirPlay session (see `onDeviceRateRebuild`). This is the one
@@ -581,6 +594,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             guard case .capturing = _state else {
                 if case .creatingTap = _state {
                     pendingDeviceChange = true
+                    // Telemetry (T2): STABILITY(C6) coalescing point — a
+                    // rebuild trigger arrived while already mid-rebuild, so it
+                    // is being deferred/coalesced rather than dropped (see the
+                    // "rebuild_replay" line logged once it's replayed below).
+                    Telemetry.log(.captureWS, "rebuild_coalesced", ["reason": "already_rebuilding"])
                 }
                 return (false, nil, [])
             }
@@ -639,6 +657,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 onDeviceRateRebuild?()
             }
             if commit.replay {
+                // Telemetry (T2): the coalesced trigger(s) from the branch
+                // above are being replayed now that the in-flight rebuild
+                // landed back in `.capturing` — see "rebuild_coalesced".
+                Telemetry.log(.captureWS, "rebuild_replay", [:])
                 // A trigger coalesced while we were mid-rebuild (C6). It may have been
                 // a device/rate change, so replay as `.deviceOrRateChange`: a missed
                 // reset would reintroduce the dropout, whereas an extra reset here is
@@ -786,8 +808,48 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     private func transition(to newState: State) {   // must hold `queue`
         guard newState != _state else { return }
+        let old = _state
         _state = newState
+        // Telemetry (T2): non-blocking, formats on this (non-RT, queue-confined)
+        // thread and hands off to Telemetry's own serial writer — never called
+        // from the IOProc/render path (see `handleBuffer`, which never calls
+        // `transition`). Every idle/creatingTap/capturing/stopping/failed move
+        // funnels through here, so this one call site covers the whole
+        // lifecycle for T2's "captureWS transition" line.
+        Telemetry.log(.captureWS, "transition", Self.transitionFields(from: old, to: newState))
         onStateChange?(newState)
+    }
+
+    /// Fields for the `captureWS`/`transition` telemetry line above: both
+    /// state labels, plus — when available — the tap format the new state
+    /// carries (`.capturing`) or the failure reason (`.failed`). Enough for
+    /// an agent reading the log cold (no repro, days later) to reconstruct
+    /// what happened without cross-referencing the source.
+    private static func transitionFields(from old: State, to newState: State) -> [String: String] {
+        var fields: [String: String] = [
+            "from": stateLabel(old),
+            "to": stateLabel(newState),
+        ]
+        if case .capturing(let format) = newState {
+            fields["format"] = "\(format.sampleRate)/\(format.channels)"
+        }
+        if case .failed(let error) = newState {
+            fields["reason"] = String(describing: error)
+        }
+        return fields
+    }
+
+    /// Stable string label for a `State`, used only for the telemetry `from`/
+    /// `to` fields above. An exhaustive switch so a future new case is a
+    /// compile error here instead of silently logging nothing.
+    private static func stateLabel(_ state: State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .creatingTap: return "creatingTap"
+        case .capturing: return "capturing"
+        case .stopping: return "stopping"
+        case .failed: return "failed"
+        }
     }
 }
 
@@ -1232,7 +1294,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         // automatically — only the Setup screen's explicit "Allow…" may. If the
         // grant isn't already in place, refuse so a launch-time capture attempt
         // (a restored AirPlay selection) can't prompt cold.
-        guard SystemAudioCaptureTCC.isGranted() else {
+        let granted = SystemAudioCaptureTCC.isGranted()
+        // Telemetry (T2): the gate result itself, both outcomes — runs once
+        // per tap creation/recreation, before the IOProc exists, never on the
+        // RT delivery thread.
+        Telemetry.log(.permission, "gate_check", [
+            "site": "NativeCaptureCoordinator",
+            "granted": granted ? "true" : "false",
+        ])
+        guard granted else {
             throw NativeCaptureError.tapCreationFailed(
                 reason: "audio capture not authorized — awaiting the Setup grant")
         }

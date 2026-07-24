@@ -1152,6 +1152,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
+    /// prefers the human-readable ``Device/name`` when the id is currently known
+    /// (falls back to the raw id for a vanished/unknown one), sorted for
+    /// deterministic output (Q6: names in cleartext are the point — a local-only
+    /// diagnostic file, not uploaded anywhere). Pure formatting over an
+    /// already-captured snapshot — takes no lock of its own, so it's safe to call
+    /// from inside any existing critical section.
+    private static func telemetryDeviceList(_ ids: Set<String>, known: [String: Device]) -> String {
+        "[" + ids.sorted().map { known[$0]?.name ?? $0 }.joined(separator: ",") + "]"
+    }
+
     public func setOutputSet(_ ids: Set<String>) {
         // Record the intent and update the per-device coalescing target under the
         // state lock, then kick a per-device converge loop for anything whose
@@ -1160,6 +1171,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // one op at a time (root cause 1) — intermediate flips are simply dropped.
         // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
         let (toKick, syncedLocalTransition): ([(id: String, outputID: OutputID)], Bool?) = stateQueue.sync {
+            // T4: captured BEFORE the overwrite below so the Telemetry line at the
+            // end of this critical section can log the actual added/removed diff.
+            let previouslySelected = self.expectedSelected
             self.expectedSelected = ids
 
             // Only ids we can actually stream to — a known discovered receiver
@@ -1250,6 +1264,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // gated), matching that same precedent.
                 self.emitCombinedLevel(forDevice: Self.localDeviceID)
             }
+
+            // T4: log the selection diff + the resulting per-device convergence
+            // target. Read-only over state already captured above, then a single
+            // non-blocking `Telemetry.log` call (formats + hands off to its own
+            // queue, never blocks/calls back) — purely additive, no new locking
+            // and no change to the decisions or their order above.
+            Telemetry.log(.airplay, "set_output_set", [
+                "added": Self.telemetryDeviceList(ids.subtracting(previouslySelected), known: self.known),
+                "removed": Self.telemetryDeviceList(previouslySelected.subtracting(ids), known: self.known),
+                "desiredOn": Self.telemetryDeviceList(
+                    Set(self.order.filter { self.desiredOn[$0] == true }), known: self.known),
+            ])
 
             return (kicks, syncedLocalDecision)
         }
@@ -1622,6 +1648,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     AudioDiag.log("RESET AirPlay session: device=\(deviceID) stream=\(stream) (tap rebuilt)")
                     self.emit(.streamHealth(id: deviceID, recovering: true))
+                    // T4: the trigger + generation bump for the rebind-recovery
+                    // chain `enqueueRebindRecovery` is about to start (attempt 1)
+                    // for this device. `scope` is the routed app whose per-app tap
+                    // rebuild caused this — the one fact the attempt trail below
+                    // can't otherwise carry. Non-blocking, same critical section as
+                    // the `AudioDiag.log` call directly above it.
+                    Telemetry.log(.airplay, "session_reset", [
+                        "device": deviceID,
+                        "scope": bundleID,
+                        "stream": "\(stream)",
+                        "gen": "\(gen)",
+                        "trigger": "recapture",
+                    ])
                     self.enqueueRebindRecovery(
                         deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
                         gen: gen, attempt: 1)
@@ -1735,6 +1774,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func enqueueRebindRecovery(
         deviceID: String, outputID: OutputID, scope: RebindScope, gen: Int, attempt: Int
     ) {   // on stateQueue
+        // T4: every call into this function — attempt 1 from
+        // `resetAirPlaySessionForRoutedApp`, or a later attempt recursing from the
+        // backoff `DispatchWorkItem` below — traces back to a tap-rebuild
+        // recapture (the only call site today, so `trigger` is hardcoded rather
+        // than threaded as a parameter — keeps this purely additive). Both call
+        // sites already hold `stateQueue` (see their own `// on stateQueue`
+        // markers), so this is just a format + non-blocking hand-off, same as the
+        // `AudioDiag.log` calls already in this chain — no new locking, no new
+        // await, no reordering of what follows.
+        Telemetry.log(.airplay, "rebind", [
+            "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+            "trigger": "recapture", "outcome": "scheduled",
+        ])
         let prev = self.bindTail
         self.bindTail = Task { [weak self] in
             await prev.value
@@ -1757,6 +1809,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // whole-system deselect dropped it from `added`): we no longer own it.
                 guard self.rebindRecoveryGen[deviceID] == gen,
                       self.stillOwnsRebind(deviceID: deviceID, scope: scope) else {
+                    // T4: which guard failed — a newer reset already bumped (or an
+                    // unbind/deselect cleared) `gen`, or ownership of this device's
+                    // session moved elsewhere (a topology change, or — for
+                    // whole-system scope — a concurrent convergeDevice claimed it).
+                    // Read-only over state already under this `stateQueue.sync`; no
+                    // extra locking.
+                    let reason = self.rebindRecoveryGen[deviceID] != gen ? "gen_superseded" : "ownership_changed"
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "superseded", "reason": reason,
+                    ])
                     if case .wholeSystem = scope {
                         return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
                     }
@@ -1764,6 +1827,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
                 let label = Self.rebindScopeLabel(scope)
                 if ok {
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "succeeded",
+                    ])
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     self.emit(.streamHealth(id: deviceID, recovering: false))
@@ -1773,6 +1840,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     return nil
                 }
                 guard attempt < self.maxRebindRecoveryAttempts else {
+                    Telemetry.log(.airplay, "rebind", [
+                        "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                        "trigger": "recapture", "outcome": "gave_up",
+                    ])
                     AudioDiag.log(
                         "RESET AirPlay session GAVE UP after \(attempt) attempts: "
                         + "device=\(deviceID) \(label) — receiver likely gone; "
@@ -1785,6 +1856,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     return nil
                 }
                 let delay = self.rebindRecoveryRetryDelay * pow(2.0, Double(attempt - 1))
+                // T4: an explicit 5th outcome beyond the task's four named ones
+                // (scheduled/succeeded/gave-up/superseded) — this attempt failed
+                // but hasn't hit the ceiling, so a backed-off retry is queued.
+                // Without it the trail would jump straight from this attempt's
+                // `scheduled` line to the next attempt's, with no record that this
+                // one failed or why the next is delayed.
+                Telemetry.log(.airplay, "rebind", [
+                    "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt)",
+                    "trigger": "recapture", "outcome": "retry_scheduled",
+                    "delayMs": "\(Int(delay * 1000))",
+                ])
                 AudioDiag.log(
                     "RESET AirPlay session retry \(attempt + 1)/\(self.maxRebindRecoveryAttempts) "
                     + "in \(delay)s: device=\(deviceID) \(label)")
@@ -1795,7 +1877,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // owns this session, device still discovered.
                         guard self.rebindRecoveryGen[deviceID] == gen,
                               self.stillOwnsRebind(deviceID: deviceID, scope: scope),
-                              let out = self.outputIDs[deviceID] else { return }
+                              let out = self.outputIDs[deviceID] else {
+                            // T4: the backed-off retry for `attempt + 1` never got
+                            // to run — state moved on while it was waiting out the
+                            // delay. Without this line the trail goes silent after
+                            // `retry_scheduled` with no explanation.
+                            Telemetry.log(.airplay, "rebind", [
+                                "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt + 1)",
+                                "trigger": "recapture", "outcome": "superseded",
+                                "reason": "state_changed_before_retry_fired",
+                            ])
+                            return
+                        }
                         self.enqueueRebindRecovery(
                             deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1)
@@ -2597,6 +2690,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Arm the fallback watchdog only if we're actually waiting on a reconnect.
             self.awaitingWakeReconnect = !desiredIDs.isEmpty
             if self.awaitingWakeReconnect { self.armWakeWatchdog() }
+
+            // T4: log the wake re-converge — which still-desired devices are being
+            // re-kicked. Only reached past the guard above (a real, in-force
+            // suspension being lifted), so this never fires for a stray/duplicate
+            // wake notification with nothing to re-converge. Non-blocking, added
+            // after every decision above with no reordering.
+            Telemetry.log(.airplay, "wake_reconverge", [
+                "desiredOn": Self.telemetryDeviceList(Set(desiredIDs), known: self.known),
+                "kicked": Self.telemetryDeviceList(Set(kicks.map(\.0)), known: self.known),
+            ])
             return kicks
         }
         for (id, outputID) in toKick {

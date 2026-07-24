@@ -3997,6 +3997,157 @@ final class NativeBackendTests: XCTestCase {
                        "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
     }
 
+    /// Thread-safe capture box for a `Telemetry._installTestSink` — the sink runs
+    /// on Telemetry's own writer queue, a different thread than the test body, so
+    /// appending straight into a plain `[String]` there would race the read here.
+    /// Mirrors `TelemetryTests`'s own private `Locked` helper (`TelemetryTests.swift`).
+    private final class TelemetryLineBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+        func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
+    }
+
+    /// T4: `enqueueRebindRecovery`'s Telemetry instrumentation. Fires TWO
+    /// recaptures back-to-back on the SAME device with NO `await` between them
+    /// — `RebindTriggerTap.fireDeviceChange()` -> `PerAppCaptureCoordinator.
+    /// handleDeviceChange` -> `transition`/`onStateChange` ->
+    /// `NativeBackend.handlePerAppCaptureHealthChange` ->
+    /// `resetAirPlaySessionForRoutedApp` is a fully SYNCHRONOUS call chain on
+    /// THIS thread (no suspension point anywhere in it), so the second call's
+    /// generation bump only needs to beat gen 1's recovery `Task` — spawned by
+    /// the first call, but a freshly-spawned `Task` can start running on
+    /// another cooperative-pool thread concurrently, so being synchronous on
+    /// THIS thread alone doesn't guarantee the ordering. `engine.opDelayNanos`
+    /// below makes gen 1's engine ops (on that other thread) deterministically
+    /// slower than this thread's synchronous fireDeviceChange chain, so the
+    /// second call is guaranteed to see gen 1 still in place (its own recovery
+    /// hasn't resolved and cleared it yet) — no flaky race. Because both
+    /// recovery `Task`s share the `bindTail` FIFO, gen 1's completion (and its
+    /// `superseded` outcome) is then a hard PREREQUISITE of gen 2 ever starting
+    /// its own first attempt, not a further race to poll for.
+    ///
+    /// Asserts the emitted `airplay` lines let a reader reconstruct the exact
+    /// causal chain end to end:
+    ///  - a `session_reset` per recapture, its `gen` MONOTONICALLY INCREASING
+    ///    (1, then 2) — a fresh recapture bumps the single-flight generation
+    ///    rather than reusing it;
+    ///  - gen 1's superseded recovery says so explicitly (`outcome:superseded`)
+    ///    instead of silently vanishing;
+    ///  - gen 2 (deliberately forced to fail once before recovering, the same
+    ///    forced-failure shape `testRebindRecoveryRetriesThenSucceedsWithin
+    ///    BoundedAttempts` above uses) shows an INCREMENTING `attempt` number
+    ///    (1, then 2) before a terminal `succeeded` outcome.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`) rather than touching disk; the sink is removed in a
+    /// `defer` so a later test in this same process (swift test --parallel runs
+    /// a class's methods serially in one process) never inherits it.
+    func testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt() async throws {
+        let tap = RebindTriggerTap()
+        let resolver = singleProcessResolver(["com.foo": 4242])
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func airplayLines(evt: String) -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
+                    && $0["device"] as? String == device.id
+            }
+        }
+        func rebindLines(gen: Int) -> [[String: Any]] {
+            airplayLines(evt: "rebind").filter { $0["gen"] as? String == "\(gen)" }
+        }
+
+        // Both set BEFORE firing anything, so there is no race with the
+        // recovery `Task`'s own scheduling: a freshly spawned `Task` can start
+        // running on another cooperative-pool thread concurrently — the two
+        // `fireDeviceChange()` calls below have no `await` between them, which
+        // keeps THIS thread's own chain synchronous, but does not by itself
+        // stop gen 1's recovery `Task` from being picked up and racing ahead on
+        // a different thread. `opDelayNanos` makes gen 1's engine ops
+        // deterministically slower than this thread's synchronous
+        // fireDeviceChange→…→resetAirPlaySessionForRoutedApp chain — a GENEROUS
+        // margin (not just "large enough on an idle machine"): it must stay well
+        // above the synchronous chain's cost even under heavy contention (e.g.
+        // several `swift build`/`swift test` runs competing for cores in sibling
+        // worktrees), or the second `fireDeviceChange()` could occasionally lose
+        // the race and flake. `addFailures` set here (rather than after firing)
+        // guarantees gen 2's own first attempt actually fails, giving its trail
+        // an incrementing attempt number to assert on below.
+        engine.opDelayNanos = 200_000_000
+        engine.addFailures = [device.outputID.rawValue]
+
+        // Two recaptures, back-to-back, no `await` in between.
+        tap.fireDeviceChange()
+        tap.fireDeviceChange()
+
+        await pollUntil(timeout: 5) {
+            rebindLines(gen: 2).contains { $0["outcome"] as? String == "retry_scheduled" }
+        }
+        engine.addFailures = []
+        await pollUntil(timeout: 5) {
+            rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" }
+        }
+
+        // Monotonically increasing generation: the two `session_reset` triggers,
+        // IN THE ORDER THEY WERE LOGGED, went 1 then 2 — never resets, never repeats.
+        let resetGens = airplayLines(evt: "session_reset").compactMap { ($0["gen"] as? String).flatMap(Int.init) }
+        XCTAssertEqual(resetGens, [1, 2],
+                       "session_reset gen must strictly increase across the two recaptures")
+        XCTAssertEqual(Set(airplayLines(evt: "session_reset").compactMap { $0["scope"] as? String }), ["com.foo"],
+                       "session_reset must record which routed app (scope) triggered it")
+
+        // Gen 1's single in-flight attempt must recognize it was superseded by
+        // gen 2 — this is a prerequisite of gen 2 ever starting (shared
+        // `bindTail`), so it is already present by now, not a further race.
+        XCTAssertTrue(rebindLines(gen: 1).contains { $0["outcome"] as? String == "superseded" },
+                      "gen 1's recovery must say it was superseded, not silently vanish")
+        XCTAssertEqual(rebindLines(gen: 1).compactMap { $0["reason"] as? String }.last, "gen_superseded")
+
+        // Incrementing attempt number WITHIN generation 2: attempts 1 and 2 both
+        // appear, and attempt numbers never go backwards across the ordered
+        // trail for this one generation.
+        let gen2Attempts = rebindLines(gen: 2).compactMap { ($0["attempt"] as? String).flatMap(Int.init) }
+        XCTAssertTrue(gen2Attempts.contains(1), "attempt 1 must be recorded")
+        XCTAssertTrue(gen2Attempts.contains(2), "attempt 2 must be recorded after the forced failure")
+        XCTAssertEqual(gen2Attempts, gen2Attempts.sorted(),
+                       "attempt numbers must never decrease across the ordered trail for one generation")
+
+        // Every rebind line for gen 2 carries the causal fields the trail
+        // depends on: an accurate trigger and a real outcome.
+        for obj in rebindLines(gen: 2) {
+            XCTAssertEqual(obj["trigger"] as? String, "recapture")
+            XCTAssertNotNil(obj["outcome"] as? String, "every rebind line must carry an outcome")
+        }
+
+        // Gen 2's trail ends in a real terminal outcome, not a lone "scheduled"
+        // or "retry_scheduled" line with no resolution.
+        XCTAssertTrue(rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" })
+    }
+
     /// T8 edge case 2 (device disappears while routed), driven through the REAL
     /// cross-controller chain rather than a direct `updateAppRoutes` call: a
     /// stale doc comment in `NativeBackend.swift` (`MARK: Per-app routing edge

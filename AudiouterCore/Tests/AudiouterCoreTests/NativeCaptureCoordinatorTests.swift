@@ -797,6 +797,67 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
+    // MARK: - Telemetry (T2): start -> capturing emits captureWS/transition lines.
+
+    /// Thread-safe capture box for a `Telemetry` test sink: the sink runs on
+    /// Telemetry's own serial writer queue (a different thread than the test
+    /// body), so a plain `[String]` here would race the read after
+    /// `_installTestSink(nil)` drains it. Mirrors `TelemetryTests`' own
+    /// `Locked<Value>`, built on this file's existing `NSLock.withLock`.
+    private final class TelemetryLineBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.withLock { lines.append(line) } }
+        var snapshot: [String] { lock.withLock { lines } }
+    }
+
+    /// A `start()` → `.capturing` sequence must emit `captureWS`/`transition`
+    /// lines for BOTH hops (`idle` → `creatingTap`, `creatingTap` →
+    /// `capturing`), the second carrying the tap's format — the minimum an
+    /// agent needs to reconstruct "capture came up" from the log alone, cold,
+    /// with no repro (PLAN-TELEMETRY-SYSTEM.md §A).
+    ///
+    /// Uses `Telemetry._installTestSink` — the lightweight, no-disk seam —
+    /// rather than `_resetForTesting`; never touches a real directory.
+    /// Cleaned up via `addTeardownBlock` (runs even if an assertion above
+    /// fails) so the sink can never leak forward into whatever test runs next
+    /// in this same process (`swift test --parallel` runs one class's
+    /// methods serially in one process — AGENTS.md / TelemetryTests.swift).
+    func testStartEmitsCaptureWSTransitionTelemetry() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        addTeardownBlock { Telemetry._installTestSink(nil) }
+
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+
+        // `_installTestSink(nil)` is a synchronous barrier on Telemetry's
+        // writer queue (mirrors TelemetryTests' own `drain()`) — guarantees
+        // both lines above are fully written before we inspect them.
+        Telemetry._installTestSink(nil)
+
+        let lines = capturedLines.snapshot
+        let idleToCreating = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
+                && $0.contains("\"from\":\"idle\"") && $0.contains("\"to\":\"creatingTap\"")
+        }
+        XCTAssertNotNil(idleToCreating, "expected an idle -> creatingTap captureWS/transition line, got: \(lines)")
+
+        let creatingToCapturing = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
+                && $0.contains("\"from\":\"creatingTap\"") && $0.contains("\"to\":\"capturing\"")
+        }
+        XCTAssertNotNil(creatingToCapturing, "expected a creatingTap -> capturing captureWS/transition line, got: \(lines)")
+        XCTAssertTrue(
+            creatingToCapturing?.contains("\"format\":\"\(tap.format.sampleRate)/\(tap.format.channels)\"") ?? false,
+            "the capturing transition must carry the tap format, got: \(creatingToCapturing ?? "nil")")
+
+        coordinator.stop()
+    }
+
     // MARK: - RMS metering (pure).
 
     func testRMSOfS16LE() {

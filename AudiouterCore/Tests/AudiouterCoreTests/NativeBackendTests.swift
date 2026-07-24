@@ -399,6 +399,7 @@ final class NativeBackendTests: XCTestCase {
     /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
     /// "dead" — construct a coordinator with this tap instead.
     private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+        func updateProcessSet(pids: [pid_t]) -> Bool { false }
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
@@ -448,6 +449,7 @@ final class NativeBackendTests: XCTestCase {
     /// interleaved S16) so buffers round-trip through the real `AVFormatConverter`
     /// essentially unchanged — letting a test assert on exact byte content.
     private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
+        func updateProcessSet(pids: [pid_t]) -> Bool { false }
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         var onRegister: (@Sendable (String) -> Void)?
@@ -509,6 +511,7 @@ final class NativeBackendTests: XCTestCase {
     /// T8's bounded-retry recovery path (`NativeBackend.scheduleProcessNotYetAudibleRetry`)
     /// deterministically.
     private final class FlakyThenSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+        func updateProcessSet(pids: [pid_t]) -> Bool { false }
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         private let lock = NSLock()
@@ -2779,9 +2782,17 @@ final class NativeBackendTests: XCTestCase {
             get { lock.withLock { _onLevel } }
             set { lock.withLock { _onLevel = newValue } }
         }
+        private var _refreshedBundleIDs: [String] = []
+
         func start() { lock.withLock { _ops.append("start") } }
         func stop() { lock.withLock { _ops.append("stop") } }
         func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+        /// Records every bundle ID passed to `refreshExcludedProcessSet` (R14) so
+        /// a test can assert `handleAppLaunched` calls it, order-independent of
+        /// the routed-tap-restart path.
+        func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+            lock.withLock { _refreshedBundleIDs.append(bundleID) }
+        }
 
         /// Every start/stop, in the order they executed.
         var ops: [String] { lock.withLock { _ops } }
@@ -2790,6 +2801,8 @@ final class NativeBackendTests: XCTestCase {
         var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
         /// The last value passed to `setMeteringActive`, `false` until called.
         var meteringActive: Bool { lock.withLock { _meteringActive } }
+        /// Every bundle ID `refreshExcludedProcessSet` was called with, in order.
+        var refreshedBundleIDs: [String] { lock.withLock { _refreshedBundleIDs } }
         /// Fire `onLevel` as the real coordinator would — but only if metering is
         /// active, mirroring `NativeCaptureCoordinator.handleBuffer`'s gate so this
         /// fake is a faithful stand-in for the T-GATE test below.
@@ -3373,6 +3386,51 @@ final class NativeBackendTests: XCTestCase {
                              "handleAppLaunched must re-bind the device after the relaunch")
     }
 
+    // MARK: R14 relaunch correctness — system-tap exclusion refresh
+
+    /// R14: `handleAppLaunched` refreshes the whole-system tap's exclusion pids
+    /// for EVERY launch notification, not only ones with an active `.device`
+    /// route — this is what fixes a purely user-EXCLUDED app relaunching
+    /// (no route exists for it at all, so the routed-only path below never
+    /// runs) leaking back into the system mix with a stale/no-longer-excluded
+    /// pid.
+    func testHandleAppLaunchedRefreshesSystemTapExclusionForExcludedApp() async {
+        let (backend, engine, _) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.handleAppLaunched(bundleID: "com.excluded.only")
+
+        XCTAssertEqual(capture.refreshedBundleIDs, ["com.excluded.only"],
+                       "handleAppLaunched must refresh the system tap's exclusion pids even for a "
+                       + "bundle ID with no active route (a purely user-excluded app)")
+    }
+
+    /// R14: a ROUTED app's relaunch also refreshes the system-tap exclusion
+    /// (not just its own per-app capture restart), so its fresh pid can't
+    /// double into both the target route and the system/Main-Out mix.
+    func testHandleAppLaunchedRefreshesSystemTapExclusionForRoutedApp() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture())
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Refresh Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.routed.relaunch", name: "Relaunch", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        backend.handleAppTerminated(bundleID: "com.routed.relaunch")
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        backend.handleAppLaunched(bundleID: "com.routed.relaunch")
+
+        XCTAssertTrue(capture.refreshedBundleIDs.contains("com.routed.relaunch"),
+                     "a routed app's relaunch must also refresh the system tap's exclusion pids")
+    }
+
     /// T4 bug fix: `handleAppLaunched` is a no-op for a bundle ID that has no
     /// active `.device(id:)` route — non-routed app launches must never perturb
     /// the backend.
@@ -3521,6 +3579,7 @@ final class NativeBackendTests: XCTestCase {
     /// `NativeBackend`'s T4 rebind-recovery path (a rebuild with no death in
     /// between is a "recapture", which triggers `resetAirPlaySessionForRoutedApp`).
     private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
+        func updateProcessSet(pids: [pid_t]) -> Bool { false }
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {

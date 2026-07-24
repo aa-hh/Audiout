@@ -330,6 +330,33 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap()
     }
 
+    /// Force the whole-system tap to re-resolve pids for the CURRENT
+    /// excluded-bundle-ID set and rebuild, if `bundleID` is actually in that
+    /// set (R14). `updateRouting`'s no-op guard only recreates when the
+    /// bundle-ID UNION changes — a relaunched excluded-or-routed app keeps
+    /// the same bundle ID, so that guard never fires even though the app's
+    /// underlying pids did (old pid died, a fresh one took its place). This
+    /// bypasses that guard directly: it doesn't touch
+    /// `currentExcludedBundleIDs` at all, it just asks `recreateTap()` to
+    /// rebuild against a freshly-resolved pid set, which is exactly what
+    /// picks up the relaunched process. A no-op (no rebuild) if `bundleID`
+    /// isn't currently excluded/routed-away, or if the tap isn't
+    /// `.capturing` yet (the next `start()` resolves fresh anyway).
+    ///
+    /// Callers: `NativeBackend.handleAppLaunched`, unconditionally on every
+    /// app-launch notification — cheap to call for a bundle ID that turns
+    /// out not to matter, since the `contains` check below makes the whole
+    /// thing a no-op in that case.
+    public func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+        let needsRecreate: Bool = queue.sync {
+            guard currentExcludedBundleIDs.contains(bundleID) else { return false }
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard needsRecreate else { return }
+        recreateTap()
+    }
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it

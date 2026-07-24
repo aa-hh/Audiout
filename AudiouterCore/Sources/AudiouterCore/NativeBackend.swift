@@ -1633,6 +1633,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///  - Emits `.routedAppRunning(bundleID:isRunning:true)` so the UI can
     ///    clear any offline indicator it had shown for this app
     public func handleAppLaunched(bundleID: String) {
+        // R14: refresh the whole-system tap's exclusion pids for this bundle ID
+        // unconditionally, BEFORE the routed-only early-return below — this is
+        // what fixes an EXCLUDED (not routed) app relaunching and leaking back
+        // into the system mix, since that case has no route to restart and
+        // would otherwise hit `guard hasRoute else { return }` and never touch
+        // capture at all. Also covers the ROUTED-app-relaunch half of R14
+        // (avoids doubling into the system mix): a `.device`-routed bundle ID
+        // is unioned into the same `currentExcludedBundleIDs` set inside
+        // `NativeCaptureCoordinator`, so one call handles both cases. The
+        // coordinator itself no-ops unless `bundleID` is actually in that set,
+        // so this is cheap to call for every app launch, routed or not.
+        captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+
         let hasRoute: Bool = stateQueue.sync {
             guard self.routedBundleIDs.contains(bundleID) else { return false }
             // Clear any dead/retry state from a prior quit (edge case 1 cleanup).
@@ -3468,6 +3481,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// that only exercises the capture gate compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real implementation.
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)
+
+    /// Force a re-resolve + rebuild against the LIVE process set for
+    /// `bundleID`, if it's currently excluded/routed-away (R14 — relaunch
+    /// correctness). See ``NativeCaptureCoordinator/refreshExcludedProcessSet(forRelaunchedBundleID:)``.
+    /// Default no-op so a fake that doesn't exercise this path compiles
+    /// unchanged; ``NativeCaptureCoordinator`` provides the real implementation.
+    func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String)
 }
 
 extension CaptureControlling {
@@ -3475,6 +3495,7 @@ extension CaptureControlling {
     /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setMeteringActive(_ active: Bool) {}
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {}
+    func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}

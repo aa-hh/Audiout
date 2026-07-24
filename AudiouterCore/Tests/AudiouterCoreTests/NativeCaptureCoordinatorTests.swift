@@ -90,6 +90,18 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         var converts: Int { lock.withLock { convertCount } }
     }
 
+    /// Thread-safe bundle-ID → pid map a test can mutate BETWEEN calls (e.g. to
+    /// simulate a relaunch handing out a fresh pid) while still handing a plain
+    /// `@Sendable` closure to `resolveProcessSet` — a captured `var` dictionary
+    /// doesn't compile under strict concurrency (R14 relaunch tests).
+    private final class MutablePIDMap: @unchecked Sendable {
+        private let lock = NSLock()
+        private var map: [String: pid_t]
+        init(_ initial: [String: pid_t]) { self.map = initial }
+        func get(_ bundleID: String) -> pid_t? { lock.withLock { map[bundleID] } }
+        func set(_ bundleID: String, _ pid: pid_t) { lock.withLock { map[bundleID] = pid } }
+    }
+
     // MARK: Helpers
 
     private func makeCoordinator(
@@ -501,6 +513,95 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(tap.creates, 1)
         XCTAssertEqual(tap.excludedPIDs, [111], "the previously-computed exclusion set is applied on start()")
         coordinator.stop()
+    }
+
+    // MARK: - R14: relaunch correctness (`refreshExcludedProcessSet`)
+
+    /// An EXCLUDED app relaunches (old pid dies, a fresh pid takes its place
+    /// under the same bundle ID) — the bundle-ID union `updateRouting` tracks
+    /// is unchanged, so its own no-op guard would never recreate the tap.
+    /// `refreshExcludedProcessSet` must bypass that guard and pick up the
+    /// fresh pid so the relaunched app doesn't leak back into the system mix.
+    func testRefreshExcludedProcessSetPicksUpRelaunchedExcludedAppPID() {
+        let tap = FakeTap()
+        let pids = MutablePIDMap(["com.app.excluded": 111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        // The app quits and relaunches with a new pid — same bundle ID.
+        pids.set("com.app.excluded", 456)
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+
+        XCTAssertGreaterThan(tap.creates, createsAfterExclude, "relaunch must recreate the tap")
+        XCTAssertEqual(tap.excludedPIDs, [456], "the relaunched app's FRESH pid is excluded, not the stale one")
+        coordinator.stop()
+    }
+
+    /// A ROUTED (`.device`) app relaunches — its fresh pid must be excluded
+    /// from the system mix too, or it doubles: once via its own target route,
+    /// once via the whole-system mixdown.
+    func testRefreshExcludedProcessSetPicksUpRelaunchedRoutedAppPID() {
+        let tap = FakeTap()
+        let pids = MutablePIDMap(["com.app.routed": 111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.routed", displayName: "Routed", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterRoute = tap.creates
+
+        pids.set("com.app.routed", 777)
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.routed")
+
+        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "relaunch must recreate the tap")
+        XCTAssertEqual(tap.excludedPIDs, [777], "the relaunched routed app's fresh pid is excluded — no doubling")
+        coordinator.stop()
+    }
+
+    /// A bundle ID that ISN'T currently excluded/routed-away must not trigger
+    /// any rebuild — cheap to call on every app launch, routed or not.
+    func testRefreshExcludedProcessSetIsNoOpForUnrelatedBundleID() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        let createsAfterRoute = tap.creates
+
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.unrelated")
+        XCTAssertEqual(tap.creates, createsAfterRoute, "an unrelated bundle ID must not recreate the tap")
+        coordinator.stop()
+    }
+
+    /// Calling `refreshExcludedProcessSet` while not capturing (e.g. no
+    /// device selected yet) must not create a tap — the fresh pid is simply
+    /// picked up on the next real `start()`.
+    func testRefreshExcludedProcessSetWhileIdleIsNoOp() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.excluded": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+
+        // Excluded set recorded while idle (no start() yet).
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
     }
 
     // MARK: - Idempotency: start() while capturing is a no-op; stop() from idle is a no-op.

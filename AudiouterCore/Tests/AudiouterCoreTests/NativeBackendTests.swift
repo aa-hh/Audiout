@@ -3514,6 +3514,213 @@ final class NativeBackendTests: XCTestCase {
                        "no further retry may be scheduled once the route has been dropped")
     }
 
+    /// Bug 1 fix (tap resurrection race): a `.processNotYetAudible` retry
+    /// scheduled BEFORE a de-route must not resurrect a live (muted) Core Audio
+    /// tap for a bundle ID nobody wants any more if it fires AFTER the de-route
+    /// and happens to succeed (the app started playing audio in the interim).
+    ///
+    /// Models the scripted-tap setup of `testProcessNotYetAudibleRetriesStopOnDeRoute`
+    /// above, but de-routes via a DESTINATION CHANGE (`.device` → `.noRedirect`,
+    /// bundle ID kept `stillPresent` in the route table) rather than removing the
+    /// route entirely. A full removal (`updateAppRoutes([])`) races
+    /// `updateAppRoutes`'s own `pendingRetries` cleanup (best-effort
+    /// `DispatchWorkItem.cancel()`, applied only to bundle IDs no longer present
+    /// in the table AT ALL) — which is exactly why
+    /// `testProcessNotYetAudibleRetriesStopOnDeRoute` only TOLERATES an
+    /// already-in-flight retry rather than asserting one occurs. This test needs
+    /// the retry to deterministically survive the de-route so it can prove what
+    /// happens when it lands, so it keeps "com.foo" in the table with
+    /// `.noRedirect`: that still clears `routedBundleIDs`/`localBundleIDs` (the
+    /// fix's membership guard) and still fully removes the coordinator's slot via
+    /// the ordinary `captureToStop` diff — but does NOT touch `pendingRetries`,
+    /// so the scheduled retry is guaranteed to still fire.
+    func testOrphanedCaptureAfterDeRouteIsStoppedNotAccepted() async {
+        // Fails once (`.processNotYetAudible`), then succeeds — the single
+        // failure is what schedules the retry that must survive the de-route.
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            // A generous 0.3s delay (well past the 5ms poll granularity and the
+            // sub-millisecond de-route call below) so the de-route deterministically
+            // lands before the timer fires, rather than racing it.
+            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // Let the first (scripted) failure happen — its retry is now scheduled
+        // ~0.3s out.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+
+        // De-route WITHOUT removing "com.foo" from the table (destination ->
+        // .noRedirect instead of dropping the AppRoute entirely) — see the test's
+        // doc comment for why this is what makes the retry's survival
+        // deterministic rather than a tolerated race. Snapshot the per-device
+        // bind count here: `updateAppRoutes` binds a device OPTIMISTICALLY from
+        // route-table membership alone (see `testAppRouteBindsDeviceToNonZeroStream`),
+        // so this device already has ONE bind from the very first
+        // `updateAppRoutes([route(...)])` call above, well before either capture
+        // attempt — the leak signal to prove is "no NEW bind after this point",
+        // not "no bind ever".
+        let bindCountAtDeRoute = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect),
+        ])
+
+        // The scheduled retry fires AFTER the de-route and SUCCEEDS per the
+        // script — this is the resurrection race: a capture lands, in a
+        // brand-new coordinator slot, for a bundle ID nobody wants any more.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+
+        // The fix's orphan guard must stop it right back, not accept it. The stop
+        // is dispatched onto `captureControlQueue` (async — calling it inline
+        // from inside the coordinator's own state-change callback would deadlock
+        // its queue, see the `isOrphan` branch of `handlePerAppCaptureHealthChange`),
+        // so this must be polled rather than asserted synchronously.
+        await pollUntil(timeout: 5) {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+        if case .idle = perAppCapture.state(for: "com.foo") {} else {
+            XCTFail("an orphaned recapture (bundle ID no longer routed or local) must be " +
+                     "stopped, not accepted — it stayed \(perAppCapture.state(for: "com.foo"))")
+        }
+
+        // No leaked engine binding either: the orphaned capture landing must never
+        // cause a FRESH per-app stream bind for the de-routed device — the orphan
+        // branch returns before `republishMixerTopology()`/
+        // `resetAirPlaySessionForRoutedApp` ever run, so the mixer/engine never
+        // hear about this capture at all.
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, bindCountAtDeRoute,
+                       "an orphaned recapture must never cause a fresh per-app stream bind " +
+                       "for the de-routed device")
+    }
+
+    /// Bookkeeping-hygiene fix: `everCapturedBundleIDs` must forget a bundle
+    /// whose capture stops even though the bundle stays IN the route table —
+    /// a `.device` -> `.noRedirect` -> `.device` toggle (same bundle id, same
+    /// route row), not just when it leaves the table entirely. Before the fix,
+    /// the SECOND capture (after re-routing back to `.device`) misread as
+    /// `isRecapture == true` and fired an extra `resetAirPlaySessionForRoutedApp`
+    /// (an extra removeOutput/addOutput pair) on top of the one NATURAL bind
+    /// the re-route's own destination-set change already produces.
+    func testDeviceToggleOffThenOnDoesNotTriggerSpuriousRecaptureReset() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // De-route via destination change (bundle stays IN the table, unlike
+        // `testOrphanedCaptureAfterDeRouteIsStoppedNotAccepted`'s de-route,
+        // which mirrors the SAME style here) — the capture must actually stop.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect),
+        ])
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // Re-route back to the same device — a brand-new (not rebuilt) capture.
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // Give any (buggy) async session-reset time to land before inspecting —
+        // same tolerance `testRebindRecoveryGivesUpAfterMaxAttempts` uses to
+        // prove a negative ("nothing more happens").
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let binds = engine.streamAddCalls.filter { $0.0 == device.outputID }
+        XCTAssertEqual(binds.count, 2,
+                       "toggling a route off then back on is exactly two NATURAL binds " +
+                       "(initial route + re-route) — a stale isRecapture must not fire an extra " +
+                       "resetAirPlaySessionForRoutedApp on top, got \(binds.count)")
+    }
+
+    /// Bookkeeping-hygiene fix, `handleAppTerminated` half: a quit must forget
+    /// `everCapturedBundleIDs` for the terminated bundle — same "capture
+    /// genuinely stopped" contract as the route-toggle case above, reached via
+    /// `handleAppTerminated` instead of `updateAppRoutes`.
+    ///
+    /// Asserted DIRECTLY via `test_hasEverCaptured` rather than through an
+    /// engine-bind side effect (contrast the toggle test above): traced this
+    /// while writing the test — `resetAirPlaySessionForRoutedApp`, the
+    /// consumer of a stale entry here, is ALSO a guaranteed no-op when
+    /// triggered from a relaunch's `.capturing`, for an unrelated reason —
+    /// `handleAppLaunched` calls `perAppCapture.start` SYNCHRONOUSLY (it
+    /// blocks the caller until `.capturing`/`.failed` resolves, including
+    /// firing this handler, since neither the coordinator nor
+    /// `NativeBackend`'s `onStateChange` wiring hops to another queue) and
+    /// only calls its OWN `republishMixerTopology()` afterward — so
+    /// `routeMixer.streamID(for:)` is still nil at the moment `.capturing`
+    /// lands, regardless of `isRecapture`. That makes an engine-bind-counting
+    /// version of this test pass identically whether or not the fix below is
+    /// present (confirmed empirically) — a false positive. Direct state is
+    /// the honest way to test this specific half of the fix; the doc comment
+    /// on `everCapturedBundleIDs` at its declaration states the "cleared ...
+    /// when its capture stops" contract this keeps true independent of that
+    /// other function's current no-op behavior.
+    /// (`testCurrentDeviceAppTerminatedStopsItsCapture`/
+    /// `testCurrentDeviceAppRelaunchRestartsItsCapture` cover the SAME
+    /// handler for a `.currentDevice` bundle, but only assert coordinator
+    /// state, never `everCapturedBundleIDs` — a `.currentDevice` bundle also
+    /// has no mixer stream at all, ever, so this exact question doesn't arise
+    /// for them.)
+    func testAppTerminatedClearsEverCapturedBundleIDs() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+        XCTAssertTrue(backend.test_hasEverCaptured(bundleID: "com.foo"),
+                      "setup failed: the first capture must record the ever-captured bit")
+
+        backend.handleAppTerminated(bundleID: "com.foo")
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        XCTAssertFalse(backend.test_hasEverCaptured(bundleID: "com.foo"),
+                       "a quit must forget everCapturedBundleIDs for the terminated bundle, " +
+                       "per its own doc comment (\"cleared ... when its capture stops\")")
+    }
+
     /// A `ProcessAudioTap` that always succeeds and stores the
     /// `onDefaultDeviceChanged` closure it was handed, so a test can force a
     /// tap rebuild (`fireDeviceChange()`) at will — the per-app analogue of
@@ -3619,6 +3826,119 @@ final class NativeBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, countAtCeiling,
                        "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
+    }
+
+    /// A `ProcessAudioTap` that throws `.processNotYetAudible` on its FIRST
+    /// attempt (schedules `NativeBackend`'s own `pendingRetries` timer), then
+    /// throws a DIFFERENT, non-retryable error (`.tapCreationFailed`) on every
+    /// attempt after — scripts "the retry fires and lands a permanent failure."
+    private final class RetryThenPermanentlyFailsTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        private let lock = NSLock()
+        private var attempts = 0
+        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            let n = lock.withLock { attempts += 1; return attempts }
+            if n == 1 { throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID) }
+            throw PerAppCaptureError.tapCreationFailed(reason: "permanent failure for test")
+        }
+        func teardown() {}
+        var attemptsMade: Int { lock.withLock { attempts } }
+    }
+
+    /// Bookkeeping-hygiene fix: a `.processNotYetAudible` retry's
+    /// `DispatchWorkItem` must not linger in `pendingRetries` once it fires
+    /// and lands a DIFFERENT, non-retryable failure while the bundle is
+    /// STILL routed — nothing else would ever remove it in this scenario (the
+    /// bundle never leaves the route table, the app never quits), so without
+    /// the fix it's a permanently stale reference.
+    func testNonRetryableFailureAfterScheduledRetryClearsPendingRetries() async {
+        let tap = RetryThenPermanentlyFailsTap()
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.1)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8F", name: "Permanent Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // First attempt fails with .processNotYetAudible (schedules a retry);
+        // the retry fires ~0.05s later and fails PERMANENTLY (a different,
+        // non-retryable error) while "com.foo" is STILL routed.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+
+        // The stale entry left by the fired-and-not-replaced work item must be
+        // forgotten, not linger forever. (Nothing in this scenario would ever
+        // clear it on its own — the bundle stays routed and never quits — so
+        // 2s is ample margin over the near-instant clear the fix produces,
+        // without paying a full 5s if it regresses.)
+        await pollUntil(timeout: 2) { !backend.test_hasPendingRetry(bundleID: "com.foo") }
+        XCTAssertFalse(backend.test_hasPendingRetry(bundleID: "com.foo"),
+                       "a non-retryable .failed while the bundle is still routed must clear " +
+                       "pendingRetries, not leave the fired work item's stale reference behind")
+    }
+
+    /// Bookkeeping-hygiene fix: a destination-set-driven `.rebind` (the mixer
+    /// moving a device to a different stream because its routed app-set
+    /// changed — see `testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream`
+    /// for the same membership-change mechanism) must cancel/remove any
+    /// pending rebind-recovery retry for that SAME device, exactly like
+    /// `.unbind` already does — a rebind supersedes whatever recovery was in
+    /// flight, so a stale backed-off retry must not later fire a stray
+    /// removeOutput/addOutput pair against a device that has already moved on
+    /// to a different stream.
+    func testRebindSupersedesPendingRebindRecovery() async {
+        let tap = RebindTriggerTap()
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 10.0)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8E", name: "Supersede Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Every addOutput for this device fails, so the rebind-recovery
+        // attempt triggered below fails and schedules a BACKED-OFF retry
+        // (10s — long enough it will not have fired by the time this test
+        // makes its assertion below).
+        engine.addFailures = [device.outputID.rawValue]
+        tap.fireDeviceChange()   // tap rebuild -> isRecapture -> resetAirPlaySessionForRoutedApp
+
+        await pollUntil(timeout: 5) { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        XCTAssertTrue(backend.test_hasPendingRebindRecovery(deviceID: device.id),
+                     "setup failed: expected a pending rebind recovery after the first failed attempt")
+
+        // Let addOutput succeed again so the second app's route below can
+        // bind cleanly (its OWN natural bind, not the pending recovery).
+        engine.addFailures = []
+
+        // Route a second app to the SAME device — the destination-set's
+        // app-set signature changes, so the mixer issues a genuine `.rebind`
+        // for it.
+        backend.updateAppRoutes([
+            route("com.foo", name: "Foo", toDevice: device.id),
+            route("com.bar", name: "Bar", toDevice: device.id),
+        ])
+
+        // The natural, topology-driven rebind must supersede (cancel) the
+        // pending explicit-reset recovery for the same device.
+        await pollUntil(timeout: 2) { !backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        XCTAssertFalse(backend.test_hasPendingRebindRecovery(deviceID: device.id),
+                       "a destination-set-driven .rebind must cancel/remove any pending " +
+                       "rebind-recovery retry for the same device, exactly like .unbind already does")
     }
 
     /// T8 edge case 2 (device disappears while routed), driven through the REAL
@@ -3791,6 +4111,92 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch
+    //
+    // `AppRoutingController.resetDeviceRoute` deliberately leaves a `.currentDevice`
+    // ("play on this Mac") route untouched on quit (its own doc comment +
+    // `AppRoutingControllerTests` prove that's correct and intentional — a local
+    // pick should survive the app's own quit/relaunch, unlike an AirPlay redirect).
+    // Because the persisted route never changes, `updateAppRoutes` is never
+    // re-invoked, so — before this fix — nothing ever called `perAppCapture.stop`
+    // for the bundle: its per-app Core Audio tap stayed registered in coreaudiod
+    // against a dead pid forever. `handleAppTerminated`/`handleAppLaunched` already
+    // existed for exactly this cleanup, but their guard was `.device`-route-only
+    // (`routedBundleIDs.contains` alone), so a `.currentDevice` bundle was silently
+    // ignored by both. The fix extends the guard to
+    // `routedBundleIDs.contains || localBundleIDs.contains`.
+
+    /// Bug 2 fix, quit half: a `.currentDevice` app's process quitting must stop
+    /// its per-app capture tap.
+    func testCurrentDeviceAppTerminatedStopsItsCapture() async {
+        let perAppCapture = workingPerAppCapture()
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .capturing = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("setup failed: capture never reached .capturing before handleAppTerminated")
+            return
+        }
+
+        backend.handleAppTerminated(bundleID: "com.local")
+
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .idle = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("a `.currentDevice` app's quit must stop its per-app capture tap — " +
+                     "it stayed \(perAppCapture.state(for: "com.local"))")
+        }
+    }
+
+    /// Bug 2 fix, relaunch half: after `handleAppTerminated` stops a
+    /// `.currentDevice` app's capture, `handleAppLaunched` must restart it — the
+    /// same guard extension fixes both directions (the old guard made
+    /// `handleAppLaunched` silently ignore a `.currentDevice` bundle too, so a
+    /// relaunched "play on this Mac" app never got its audio back without the
+    /// user re-touching the route).
+    func testCurrentDeviceAppRelaunchRestartsItsCapture() async {
+        let perAppCapture = workingPerAppCapture()
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+
+        backend.handleAppTerminated(bundleID: "com.local")
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+
+        backend.handleAppLaunched(bundleID: "com.local")
+
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .capturing = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("a relaunched `.currentDevice` app must have its per-app capture tap " +
+                     "restarted — it stayed \(perAppCapture.state(for: "com.local"))")
+        }
     }
 
     // MARK: - Metering: three real level sources (T3)

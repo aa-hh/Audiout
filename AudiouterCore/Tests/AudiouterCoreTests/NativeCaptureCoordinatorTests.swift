@@ -606,6 +606,36 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(NativeCaptureCoordinator.rmsOfS16LE(full), 1.0, accuracy: 0.01)
     }
 
+    // MARK: - Compare-before-rebuild decision (TapRebuildDecision), whole-system tap
+    // (Fix 3 / CoreAudioSystemTap.installDefaultDeviceListener). The whole-system tap
+    // rebuilds on device-IDENTITY change only (it has no sample-rate listener), so its
+    // guard is the device variant, fed by the new `tappedOutputDeviceID` property.
+    // Testing the pure decision is what makes the storm guard meaningful without a real
+    // HAL — the live `defaultOutputDeviceID()` read stays a thin wrapper around it.
+
+    #if canImport(AudioToolbox)
+    func testSystemTapDeviceGuardFiresOnlyOnGenuineDeviceChange() {
+        // Unchanged pinned device -> NO rebuild: the no-op notification that another
+        // live tap's own rebuild fires on THIS tap must be dropped, or the taps storm
+        // each other into the diagnosed coreaudiod live-lock.
+        XCTAssertFalse(TapRebuildDecision.shouldRebuild(currentDeviceID: 42, trackedDeviceID: 42),
+                       "an unchanged default output device must NOT rebuild the whole-system tap")
+        // Genuine default-output-device change -> rebuild fires.
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentDeviceID: 43, trackedDeviceID: 42),
+                      "a genuine default-output-device change MUST rebuild the whole-system tap")
+        // Failed live read (nil) -> treat as changed -> fire (never suppress on a
+        // failed read).
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentDeviceID: nil, trackedDeviceID: 42),
+                      "a failed device read must be treated as changed (fire), not suppressed")
+        // Fresh-tap edge: trackedDeviceID is kAudioObjectUnknown until createAggregate
+        // pins a device, so a real current device must then read as changed.
+        XCTAssertTrue(
+            TapRebuildDecision.shouldRebuild(
+                currentDeviceID: 42, trackedDeviceID: AudioObjectID(kAudioObjectUnknown)),
+            "before the aggregate pins a device (tracked == unknown), a real device reads as changed")
+    }
+    #endif
+
     // MARK: - utils
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {

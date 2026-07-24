@@ -85,12 +85,15 @@ public final class DefaultOutputObserver: @unchecked Sendable {
     /// when no concurrent access is possible (deinit).
     private func stopListening() {
         guard isListening, let block = listenerBlock else { return }
-        AudioObjectRemovePropertyListenerBlock(
+        let status = AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &defaultDeviceAddress,
             queue,
             block
         )
+        if status != noErr {
+            AudioDiag.log("DefaultOutputObserver.stopListening AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         listenerBlock = nil
         isListening = false
     }

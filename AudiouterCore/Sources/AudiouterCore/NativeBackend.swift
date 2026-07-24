@@ -445,6 +445,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     private var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
 
+    /// Test-only (`@testable`): whether a `.processNotYetAudible` retry
+    /// `DispatchWorkItem` is currently sitting in `pendingRetries` for
+    /// `bundleID` — lets a test prove the map doesn't leak a stale reference
+    /// past a non-retryable failure.
+    func test_hasPendingRetry(bundleID: String) -> Bool {
+        stateQueue.sync { pendingRetries[bundleID] != nil }
+    }
+
+    /// Test-only (`@testable`): whether a rebind-recovery retry
+    /// `DispatchWorkItem` is currently sitting in `pendingRebindRecoveries`
+    /// for `deviceID` — lets a test prove the map doesn't leak a stale
+    /// reference past a superseding topology-driven `.rebind`.
+    func test_hasPendingRebindRecovery(deviceID: String) -> Bool {
+        stateQueue.sync { pendingRebindRecoveries[deviceID] != nil }
+    }
+
+    /// Test-only (`@testable`): whether `bundleID` is currently recorded in
+    /// `everCapturedBundleIDs`. Asserted DIRECTLY (rather than via an
+    /// engine-bind side effect) because `resetAirPlaySessionForRoutedApp` —
+    /// the consumer of a stale entry here — is a guaranteed no-op via its own
+    /// `routeMixer.streamID(for:)` guard when triggered from
+    /// `handleAppLaunched`'s synchronous relaunch path (the topology republish
+    /// that would bind a stream hasn't run yet), so a test built on engine
+    /// binds alone cannot distinguish a fixed `handleAppTerminated` from a
+    /// broken one for that path.
+    func test_hasEverCaptured(bundleID: String) -> Bool {
+        stateQueue.sync { everCapturedBundleIDs.contains(bundleID) }
+    }
+
     /// Bounded attempt ceiling for the AirPlay-session rebind recovery (T4).
     /// UNLIKE the indefinite `.processNotYetAudible` retry: a rebind that keeps
     /// failing means the receiver is genuinely gone, and infinite
@@ -1209,7 +1238,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for bundleID in self.pendingRetries.keys where !stillPresent.contains(bundleID) {
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             }
-            for bundleID in self.everCapturedBundleIDs where !stillPresent.contains(bundleID) {
+            // Bookkeeping-hygiene fix: unlike dead/retry tracking above,
+            // `everCapturedBundleIDs` must ALSO forget a bundle that merely
+            // drops OUT OF ROUTING while staying `stillPresent` in the table —
+            // e.g. a `.device` -> `.noRedirect` -> `.device` toggle (same route
+            // row, capture genuinely stops via `captureToStop` below and later
+            // restarts fresh). Otherwise the later restart's `.capturing` misreads
+            // as a RE-capture (see `everCapturedBundleIDs`'s doc comment) and fires
+            // an unneeded `resetAirPlaySessionForRoutedApp`. `newRouted`/`newLocal`
+            // are both subsets of `stillPresent`, so "not in either" is a strict
+            // superset of the old `!stillPresent` condition — every bundle the old
+            // check cleared is still cleared here, plus the toggle case.
+            for bundleID in self.everCapturedBundleIDs
+            where !newRouted.contains(bundleID) && !newLocal.contains(bundleID) {
                 self.everCapturedBundleIDs.remove(bundleID)
             }
 
@@ -1370,8 +1411,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// recovers). Runs off `stateQueue` (callback context from
     /// `PerAppCaptureCoordinator.onStateChange`); hops on only for the mutation.
     ///
-    /// `.capturing` clears `deadBundleIDs`/`retryCounts`/`pendingRetries` for the
-    /// bundle ID and, if it had been dead, re-includes it in the mixer topology.
+    /// `.capturing` FIRST checks `bundleID` is still actually wanted (present in
+    /// `routedBundleIDs` OR `localBundleIDs`) before accepting it — see the
+    /// `isOrphan` branch below for why an orphaned capture can land here at all
+    /// (a `.processNotYetAudible` retry racing a de-route) and why it must be
+    /// stopped rather than accepted. Once accepted, it clears
+    /// `deadBundleIDs`/`retryCounts`/`pendingRetries` for the bundle ID and, if it
+    /// had been dead, re-includes it in the mixer topology.
     /// `.failed` marks it dead (excluding it from `.routedApps` / the engine stream
     /// binding so a silent app is never claimed as streaming) and, ONLY for
     /// `.processNotYetAudible`, schedules an INDEFINITE capped-exponential-backoff
@@ -1385,14 +1431,50 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ) {
         switch state {
         case .capturing:
-            let (recovered, isRecapture): (Bool, Bool) = stateQueue.sync {
+            let (recovered, isRecapture, isOrphan): (Bool, Bool, Bool) = stateQueue.sync {
+                // A capture can land here for a bundle ID nobody wants any more: a
+                // `.processNotYetAudible` retry (`scheduleProcessNotYetAudibleRetry`)
+                // scheduled BEFORE a de-route can fire AFTER it and SUCCEED — the app
+                // started playing audio in the meantime, so `perAppCapture.start`
+                // does NOT fail fast the way the retry's doc comment used to
+                // (incorrectly) assume. That builds a brand-new coordinator slot
+                // that nothing in `updateAppRoutes`'s route-table diff will ever
+                // see again. Refuse it here rather than accept it.
+                guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else {
+                    return (false, false, true)
+                }
                 let wasDead = self.deadBundleIDs.remove(bundleID) != nil
                 self.retryCounts.removeValue(forKey: bundleID)
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
                 // First-ever capture inserts (isRecapture=false); a later capture
                 // (tap rebuilt) is already present (isRecapture=true).
                 let isRecapture = !self.everCapturedBundleIDs.insert(bundleID).inserted
-                return (wasDead, isRecapture)
+                return (wasDead, isRecapture, false)
+            }
+            if isOrphan {
+                // Nothing wants this tap any more — stop it rather than leave a
+                // live (muted, per `TapMuteBehavior.mutedWhenTapped`) Core Audio
+                // tap + private aggregate device + IOProc running in coreaudiod
+                // forever for a bundle ID that is neither routed nor local.
+                //
+                // MUST be dispatched, never called inline: the `onStateChange`
+                // callback that reached us fires SYNCHRONOUSLY from inside
+                // `PerAppCaptureCoordinator`'s own private serial `queue`
+                // (`transition(_:bundleID:to:)`, itself invoked from a
+                // `queue.sync { … }` in `beginStart`/`handleDeviceChange`).
+                // `PerAppCaptureCoordinator.stop(bundleID:)` ALSO does
+                // `queue.sync { … }` on that SAME queue — calling it inline here
+                // would recursively `sync` onto a serial queue we are already
+                // executing on and deadlock the coordinator (and every per-app
+                // capture app-wide) the very first time this race occurs.
+                // `captureControlQueue` is the existing convention for
+                // Core-Audio-touching work triggered by a route/state change (see
+                // the comment above `updateAppRoutes`'s own hand-off to this same
+                // queue, a few hundred lines up).
+                captureControlQueue.async { [weak self] in
+                    self?.perAppCapture.stop(bundleID: bundleID)
+                }
+                return
             }
             if recovered {
                 // Was excluded from the topology while dead; re-adding it rebinds
@@ -1411,6 +1493,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard self.routedBundleIDs.contains(bundleID),
                       case .processNotYetAudible = error
                 else {
+                    // Bookkeeping-hygiene fix: no retry is being scheduled from
+                    // here (either the bundle isn't routed any more, or this is a
+                    // NON-retryable failure while it still is) — a `pendingRetries`
+                    // entry left over from the retry attempt that just landed here
+                    // (or any earlier one) is now stale and must not linger as a
+                    // dangling `DispatchWorkItem` reference.
+                    self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
                     return (justDied, false, 0)
                 }
                 // Indefinite retry: as long as the route is still desired (guard
@@ -1569,10 +1658,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `retryDelay × 2^(attempt-1)`, capped at `processNotYetAudibleMaxBackoff`
     /// (e.g. 2 → 4 → 8 → 10 → 10 … forever). Single-flighted: replaces any retry
     /// already pending for this bundle ID (so N `.failed` events never stack N
-    /// timers). Best-effort (D4): if the route is gone by the time the timer fires,
-    /// `perAppCapture.start` fails fast (`.appNotRunning` or similar) and the
-    /// failure handler above declines to reschedule (route no longer in
-    /// `routedBundleIDs`).
+    /// timers).
+    ///
+    /// CORRECTED: this was previously documented as best-effort-safe on the
+    /// assumption that "if the route is gone by the time the timer fires,
+    /// `perAppCapture.start` fails fast (`.appNotRunning` or similar)". That is
+    /// FALSE whenever the app has started playing audio by the time this fires —
+    /// `start` then SUCCEEDS (lands `.capturing`) even though the route is long
+    /// gone, because this closure captures only `bundleID`, never re-checks
+    /// `routedBundleIDs`/`localBundleIDs`, and `PerAppCaptureCoordinator.start`
+    /// happily builds a brand-new slot from `.idle`. The guard against that
+    /// resurrected/orphaned capture lives at the OTHER end instead, where the
+    /// outcome is actually known: the `.capturing` case in
+    /// `handlePerAppCaptureHealthChange` checks route/local membership before
+    /// accepting a capture, and stops (rather than accepts) an orphaned one. This
+    /// timer is deliberately left unguarded on the route table.
     private func scheduleProcessNotYetAudibleRetry(bundleID: String, attempt: Int) {
         let delay = min(
             processNotYetAudibleRetryDelay * pow(2.0, Double(attempt - 1)),
@@ -1589,27 +1689,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Forward an app-quit notification from the AppKit boundary (T8, edge case 1:
-    /// a routed app's process quits mid-stream). `AppDelegate` observes
+    /// a routed app's process quits mid-stream; Bug 2: a `.currentDevice`-routed
+    /// app's process quits mid-stream). `AppDelegate` observes
     /// `NSWorkspace.didTerminateApplicationNotification` and calls this with the
     /// terminated app's bundle ID — Core can't observe AppKit notifications itself,
     /// mirroring the `resolvePID` injection.
     ///
-    /// A no-op unless `bundleID` currently has an active `.device(id:)` route: the
-    /// PERSISTED route survives the quit (the silent-fallback-to-`.noRedirect`
-    /// behavior is reserved for a lost DEVICE, not a quit app — the user may
-    /// relaunch the app and expect its route to still apply). Its per-app capture
-    /// is stopped, it's marked dead so the mixer topology drops it immediately, and
-    /// any pending `.processNotYetAudible` retry is cancelled (retrying a tap for a
-    /// pid that no longer exists is pointless).
+    /// A no-op unless `bundleID` currently has an active `.device(id:)` route OR is
+    /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, which meant a
+    /// "play on this Mac" app's per-app Core Audio tap was NEVER stopped on quit:
+    /// `AppRoutingController.resetDeviceRoute` deliberately never touches
+    /// `.currentDevice` — see its doc comment — so no route-table change ever
+    /// re-drove `updateAppRoutes` for it either, leaving the tap registered against
+    /// a dead pid in coreaudiod forever). Either way the PERSISTED route survives
+    /// the quit (the silent-fallback-to-`.noRedirect` behavior is reserved for a
+    /// lost DEVICE, not a quit app — the user may relaunch the app and expect its
+    /// route/pick to still apply). The per-app capture is stopped, it's marked dead
+    /// so the mixer topology drops it immediately (a no-op for a `.currentDevice`
+    /// bundle — it was never in the mixer topology to begin with), and any pending
+    /// `.processNotYetAudible` retry is cancelled (retrying a tap for a pid that no
+    /// longer exists is pointless).
     public func handleAppTerminated(bundleID: String) {
-        let wasRouted: Bool = stateQueue.sync {
+        let wasCaptured: Bool = stateQueue.sync {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.retryCounts.removeValue(forKey: bundleID)
-            return self.routedBundleIDs.contains(bundleID)
+            return self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID)
         }
-        guard wasRouted else { return }
+        guard wasCaptured else { return }
         perAppCapture.stop(bundleID: bundleID)
-        let justDied: Bool = stateQueue.sync { self.deadBundleIDs.insert(bundleID).inserted }
+        let justDied: Bool = stateQueue.sync {
+            // Bookkeeping-hygiene fix: the capture just stopped for real (a
+            // quit, not a tap rebuild) — forget the "ever captured" bit so a
+            // later relaunch's fresh `.capturing` (`handleAppLaunched`) is
+            // recognised as a first capture, not a stale recapture. (In
+            // practice `resetAirPlaySessionForRoutedApp` is ALSO a guaranteed
+            // no-op for this exact call path today — `handleAppLaunched` calls
+            // `perAppCapture.start` synchronously-to-completion BEFORE its own
+            // `republishMixerTopology()` runs, so `routeMixer.streamID(for:)`
+            // is still nil when `.capturing` lands — but this keeps the
+            // invariant this field documents true regardless of that other
+            // function's current implementation, and keeps it in sync with
+            // `deadBundleIDs`/`retryCounts`/`pendingRetries`, all cleared at
+            // this same capture-stop point.)
+            self.everCapturedBundleIDs.remove(bundleID)
+            return self.deadBundleIDs.insert(bundleID).inserted
+        }
         if justDied { republishMixerTopology() }
         // Notify the UI that this routed app is no longer running so it can
         // show an offline indicator on the row (T4). The route itself persists
@@ -1618,30 +1742,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// React to an app-launch notification forwarded from the AppKit boundary
-    /// (T4, bug fix: relaunching a routed app did not restart its capture).
-    /// `AppDelegate` observes `NSWorkspace.didLaunchApplicationNotification` and
-    /// calls this; Core can't observe AppKit notifications itself, mirroring the
+    /// (T4, bug fix: relaunching a routed app did not restart its capture; Bug 2:
+    /// same fix extended to a relaunched `.currentDevice`-routed app). `AppDelegate`
+    /// observes `NSWorkspace.didLaunchApplicationNotification` and calls this; Core
+    /// can't observe AppKit notifications itself, mirroring the
     /// `handleAppTerminated` / `resolvePID` injection pattern.
     ///
-    /// Only acts when `bundleID` currently has an active `.device(id:)` route —
-    /// a non-routed app launch is silently ignored. On a match it:
+    /// Only acts when `bundleID` currently has an active `.device(id:)` route OR is
+    /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, so a "play on this
+    /// Mac" app's capture never restarted after `handleAppTerminated` stopped it) —
+    /// a non-routed, non-local app launch is silently ignored. On a match it:
     ///  - Clears any dead/retry tracking left over from a prior quit
     ///  - Restarts the per-app Core Audio capture tap (the previous one was
     ///    torn down by `handleAppTerminated` when the process exited)
     ///  - Republishes the mixer topology so `.routedApps` and the engine stream
-    ///    binding reflect the restarted app
+    ///    binding reflect the restarted app (a no-op for a `.currentDevice`
+    ///    bundle — see `resetAirPlaySessionForRoutedApp`'s doc comment; the
+    ///    relaunched local player itself comes back through
+    ///    `handleLocalCaptureStateChange`'s `.capturing` case once the capture
+    ///    below reaches it, not through this republish)
     ///  - Emits `.routedAppRunning(bundleID:isRunning:true)` so the UI can
     ///    clear any offline indicator it had shown for this app
     public func handleAppLaunched(bundleID: String) {
-        let hasRoute: Bool = stateQueue.sync {
-            guard self.routedBundleIDs.contains(bundleID) else { return false }
+        let hasCapture: Bool = stateQueue.sync {
+            guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else { return false }
             // Clear any dead/retry state from a prior quit (edge case 1 cleanup).
             self.deadBundleIDs.remove(bundleID)
             self.retryCounts.removeValue(forKey: bundleID)
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             return true
         }
-        guard hasRoute else { return }
+        guard hasCapture else { return }
         // Restart the per-app capture tap for the relaunched process. This is
         // the same call `updateAppRoutes` issues for newly-routed apps; calling
         // it here means a relaunch self-heals without any route-table change.
@@ -1733,7 +1864,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (deviceID, stream) in newBindings {
                 let outputID = self.outputIDs[deviceID]!
                 if let old = self.streamBindings[deviceID] {
-                    if old != stream { ops.append(.rebind(outputID, stream)) }
+                    if old != stream {
+                        ops.append(.rebind(outputID, stream))
+                        // Bookkeeping-hygiene fix: this topology-driven rebind
+                        // supersedes any pending (explicit-reset) rebind-recovery
+                        // retry for the SAME device, exactly like the `.unbind`
+                        // loop below already does for a device leaving routing
+                        // entirely — otherwise a stale backed-off recovery attempt
+                        // can fire later against a device that has already moved
+                        // on to a different stream.
+                        self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                        self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                    }
                 } else {
                     ops.append(.bind(outputID, stream))
                 }

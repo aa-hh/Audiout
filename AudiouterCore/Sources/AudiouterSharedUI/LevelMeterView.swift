@@ -55,7 +55,10 @@ public final class LevelMeterView: NSView {
     /// The currently-drawn level, eased toward `target` each frame.
     private var displayed: CGFloat = 0
 
-    private var displayLink: CVDisplayLink?
+    /// Display link driven by the modern NSView.displayLink API (macOS 14.0+),
+    /// eliminating manual Unmanaged pointer management. The API keeps a strong
+    /// reference to the target (self) while the display link is active.
+    private var activeLink: CADisplayLink?
 
     public init() {
         super.init(frame: .zero)
@@ -190,34 +193,31 @@ public final class LevelMeterView: NSView {
 
     // MARK: Display link
 
+    /// Create and activate a display link using the modern NSView.displayLink API
+    /// (macOS 14.0+). This API manages strong references to the target
+    /// automatically, eliminating the manual Unmanaged pointer dance and its
+    /// dependency on precise cleanup ordering.
     private func startDisplayLinkIfNeeded() {
-        guard displayLink == nil else { return }
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let link else { return }
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        CVDisplayLinkSetOutputCallback(link, { _, _, _, _, _, userInfo -> CVReturn in
-            guard let userInfo else { return kCVReturnSuccess }
-            let view = Unmanaged<LevelMeterView>.fromOpaque(userInfo).takeUnretainedValue()
-            DispatchQueue.main.async {
-                view.tick()
-            }
-            return kCVReturnSuccess
-        }, context)
-        CVDisplayLinkStart(link)
-        displayLink = link
+        guard activeLink == nil else { return }
+        let link = self.displayLink(target: self, selector: #selector(tick))
+        link.add(to: RunLoop.main, forMode: .default)
+        activeLink = link
     }
 
+    /// Stop and invalidate the display link. The modern NSView.displayLink API
+    /// handles cleanup of the target reference automatically upon invalidation.
     private func stopDisplayLink() {
-        guard let link = displayLink else { return }
-        CVDisplayLinkStop(link)
-        displayLink = nil
+        guard let link = activeLink else { return }
+        link.invalidate()
+        activeLink = nil
     }
 
     /// One frame of ballistics, called on the main thread by the display link
     /// callback. Stops and releases the link once the bar has eased down to
     /// rest at a zero target — the zero-CPU-at-rest property.
-    private func tick() {
+    /// Marked @objc to enable selector-based callback from CADisplayLink via
+    /// NSView.displayLink(target:selector:).
+    @objc private func tick() {
         displayed = Self.ballisticsStep(displayed: displayed, target: target)
         redrawFill()
         if target <= Self.restEpsilon && displayed <= Self.restEpsilon {

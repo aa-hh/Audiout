@@ -332,13 +332,27 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try tap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
-            queue.sync {
+            let replay: Bool = queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     tap.teardown() // a stop() (or a second start()) raced in — don't leak this tap
-                    return
+                    return false
                 }
                 slot.tap = tap
                 transition(slot, bundleID: bundleID, to: .capturing(format))
+                // STABILITY(C6): a device-change notification landed while this slot
+                // was in its VERY FIRST `.creatingTap` (via `beginStart`, the initial
+                // start, NOT a later `handleDeviceChange` rebuild) — replay it once now
+                // that we're capturing, coalescing however many were dropped into one
+                // retry. Without this the initial-start path silently drops a device
+                // change that only `handleDeviceChange`'s own commit-block replay (below)
+                // would otherwise catch. Mirrors that replay shape exactly.
+                guard slot.pendingDeviceChange else { return false }
+                slot.pendingDeviceChange = false
+                return true
+            }
+            if replay {
+                AudioDiag.log("PAC.beginStart bundle=\(bundleID) replaying coalesced pending device change from initial start")
+                handleDeviceChange(bundleID: bundleID)
             }
         } catch {
             tap.teardown()
@@ -485,8 +499,11 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private func removeProcessListListenerLocked() {
         guard let block = processListBlock else { return }
         var address = Self.processObjectListAddress
-        AudioObjectRemovePropertyListenerBlock(
+        let status = AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        if status != noErr {
+            AudioDiag.log("PerAppCaptureCoordinator.removeProcessListListenerLocked AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         processListBlock = nil
     }
 
@@ -691,7 +708,11 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     private var asbd = AudioStreamBasicDescription()
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
     /// The physical output device our aggregate is built on. Kept so we can
-    /// listen for ITS nominal-sample-rate changes (see `installSampleRateListener`).
+    /// (1) listen for ITS nominal-sample-rate changes (see `installSampleRateListener`)
+    /// and (2) compare-before-rebuild in BOTH the default-device and sample-rate
+    /// listeners — firing a rebuild only when the device/rate THIS tap is pinned
+    /// to actually changed, never on an unrelated system-wide notification (the
+    /// structural guard against the multi-tap rebuild storm; see ``TapRebuildDecision``).
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
     private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
@@ -748,6 +769,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.tapCreationFailed(reason: "AudioHardwareCreateProcessTap \(err)")
         }
         self.tapID = newTapID
+        AudioDiag.handleCreated("processTap")
 
         // Read the ACTUAL format — never assume 48k/2ch (config-follows-tap,
         // same discipline as the system-wide tap).
@@ -842,6 +864,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.aggregateDeviceFailed(reason: "AudioHardwareCreateAggregateDevice \(err)")
         }
         self.aggregateID = newAggregateID
+        AudioDiag.handleCreated("aggregateDevice")
     }
 
     /// The current default *output* device (what the user actually hears
@@ -862,6 +885,29 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.deviceLost(reason: "no default output device (\(err))")
         }
         return deviceID
+    }
+
+    /// The CURRENT nominal sample rate (Hz) of `deviceID`, read fresh off the
+    /// HAL. Used ONLY by `installSampleRateListener`'s compare-before-rebuild
+    /// guard to tell a genuine rate renegotiation from a no-op notification.
+    /// Mirrors the property-read shape used by `translateProcessObject` /
+    /// `defaultOutputDeviceID` (address struct + single `AudioObjectGetPropertyData`
+    /// + `err == noErr` guard). Throws on a failed read so the caller's `try?`
+    /// yields `nil`, which `TapRebuildDecision.shouldRebuild(currentRate:...)`
+    /// treats as "changed" (fires) — a failed read is never evidence of "no change."
+    private static func readNominalSampleRate(_ deviceID: AudioObjectID) throws -> Double {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var rate: Double = 0
+        var size = UInt32(MemoryLayout<Double>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        guard err == noErr else {
+            throw PerAppCaptureError.formatReadFailed(
+                reason: "read kAudioDevicePropertyNominalSampleRate \(err)")
+        }
+        return rate
     }
 
     // MARK: IOProc
@@ -916,6 +962,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.aggregateDeviceFailed(reason: "AudioDeviceCreateIOProcIDWithBlock \(err)")
         }
         self.ioProcID = newProcID
+        AudioDiag.handleCreated("ioProc")
 
         let startErr = AudioDeviceStart(aggregateID, ioProcID)
         guard startErr == noErr else {
@@ -931,7 +978,24 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.onDefaultDeviceChanged?()
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD GUARD (device identity). This notification
+            // fires on ANY system-wide `kAudioHardwarePropertyDefaultOutputDevice`
+            // change — including one that leaves the device THIS tap is actually
+            // pinned to (`tappedOutputDeviceID`) unchanged. Fire the full tap+
+            // aggregate teardown+rebuild ONLY when the pinned device genuinely
+            // changed. This is the structural guard that breaks the multi-tap
+            // rebuild storm: every live tap pins its aggregate to the SAME physical
+            // device, so any one tap's own rebuild can perturb that shared HAL
+            // object graph and re-fire this listener on every OTHER live tap;
+            // without the guard each of those no-op notifications would rebuild too,
+            // cascading. A failed live read (`nil`) counts as "changed" (fires) —
+            // a failed read is not evidence of "no change," and the rebuild path
+            // handles a subsequently-failing device resolve via its own error path.
+            let current = try? Self.defaultOutputDeviceID()
+            guard TapRebuildDecision.shouldRebuild(
+                currentDeviceID: current, trackedDeviceID: self.tappedOutputDeviceID) else { return }
+            self.onDefaultDeviceChanged?()
         }
         self.deviceChangeBlock = block
         AudioObjectAddPropertyListenerBlock(
@@ -944,8 +1008,11 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
+        let status = AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        if status != noErr {
+            AudioDiag.log("CoreAudioProcessTap.removeDefaultDeviceListener AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         deviceChangeBlock = nil
     }
 
@@ -969,8 +1036,25 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD GUARD (RATE variant — NOT device identity).
+            // This listener exists specifically to catch a silent-tap rate change
+            // that happens with the tapped device's UID UNCHANGED (see the doc
+            // comment above) — the exact case the identity listener CANNOT catch.
+            // The guard therefore MUST compare the RATE, never device identity, or
+            // it silently reintroduces the silent-tap bug this listener was built to
+            // fix. Fire the rebuild ONLY when the tapped device's current nominal
+            // rate actually differs from the rate this tap is running at
+            // (`format.sampleRate`); a no-op notification — a rebuild elsewhere
+            // perturbed the shared device without changing ITS rate — is dropped,
+            // which is what breaks the multi-tap rebuild storm here. A failed live
+            // read (`nil`) counts as "changed" (fires), same rule as the identity
+            // listener above.
+            let current = try? Self.readNominalSampleRate(self.tappedOutputDeviceID)
+            guard TapRebuildDecision.shouldRebuild(
+                currentRate: current, trackedRateInt: self.format.sampleRate) else { return }
             AudioDiag.log("PAC nominal-sample-rate changed on tapped device — triggering rebuild")
-            self?.onDefaultDeviceChanged?()
+            self.onDefaultDeviceChanged?()
         }
         self.sampleRateBlock = block
         AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
@@ -985,7 +1069,10 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+        let status = AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+        if status != noErr {
+            AudioDiag.log("CoreAudioProcessTap.removeSampleRateListener AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         sampleRateBlock = nil
     }
 
@@ -996,16 +1083,32 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         removeSampleRateListener()
         tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)")
+            } else {
+                AudioDiag.handleDestroyed("ioProc")
+            }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)")
+            } else {
+                AudioDiag.handleDestroyed("aggregateDevice")
+            }
             aggregateID = kAudioObjectUnknown
         }
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)")
+            } else {
+                AudioDiag.handleDestroyed("processTap")
+            }
             tapID = kAudioObjectUnknown
         }
     }

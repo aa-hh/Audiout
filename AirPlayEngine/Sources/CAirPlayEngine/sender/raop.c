@@ -2047,6 +2047,13 @@ session_free(struct raop_session *rs)
   if (rs->server_fd >= 0)
     close(rs->server_fd);
 
+  /* A session torn down mid-handshake (external stop/deinit racing an
+   * in-flight pair-verify/pair-setup exchange) bypasses the handshake state
+   * machine's own pair_verify_free()/pair_setup_free() calls -- free them
+   * here too. Both are NULL-safe, matching every other call site. */
+  pair_verify_free(rs->pair_verify_ctx);
+  pair_setup_free(rs->pair_setup_ctx);
+
   free(rs->realm);
   free(rs->nonce);
   free(rs->session);

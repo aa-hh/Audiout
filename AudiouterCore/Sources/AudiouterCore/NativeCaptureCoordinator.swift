@@ -720,6 +720,55 @@ final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
     func teardown() {}
 }
 
+/// Pure compare-before-rebuild decision for the capture taps' Core Audio property
+/// listeners, split out from the live HAL reads so the DECISION — the part that is
+/// easy to get subtly wrong and the part that actually breaks the storm — is
+/// unit-testable without mocking Core Audio (the same pure/live split
+/// ``AppRouteMixer``'s sample math uses). Both ``CoreAudioSystemTap`` and
+/// ``PerAppCaptureCoordinator``'s `CoreAudioProcessTap` call these from inside
+/// their listener blocks AFTER reading the current device/rate live; the tap
+/// rebuilds only when a call returns `true`. The live reads stay a thin,
+/// hard-to-unit-test wrapper around this.
+///
+/// ## The storm these guards break (confirmed by live graph analysis)
+/// Every live tap pins its private aggregate to the SAME physical output device,
+/// so any one tap's teardown+rebuild can perturb that shared device and re-fire
+/// these listeners on every OTHER live tap. Without a changed-value guard each of
+/// those no-op notifications triggers a full rebuild, which perturbs the device
+/// again — a self-sustaining live-lock (the diagnosed "coreaudiod pinned at high
+/// CPU while audio plays"). Comparing the freshly-read value against what the tap
+/// is already built on drops the no-op notifications and cuts the feedback loop.
+/// This is STRUCTURAL, not a debounce: a debounce alone would still eventually
+/// fire on a no-op change.
+enum TapRebuildDecision {
+    /// Device-identity guard (whole-system + per-app default-device listeners):
+    /// rebuild only when the freshly-read default output device differs from the
+    /// one the tap is pinned to. A failed live read (`nil`) is treated as "changed"
+    /// (returns `true`): a failed read is not evidence of "no change," and the
+    /// rebuild path handles a subsequently-failing device resolve via its own error
+    /// path — so a `nil` current ID must NOT be treated as equal to a tracked ID
+    /// and must NOT suppress the fire.
+    static func shouldRebuild(currentDeviceID: AudioObjectID?, trackedDeviceID: AudioObjectID) -> Bool {
+        guard let currentDeviceID else { return true }
+        return currentDeviceID != trackedDeviceID
+    }
+
+    /// Nominal-sample-rate guard (per-app tap only — the whole-system tap has no
+    /// rate listener): rebuild only when the tapped device's freshly-read nominal
+    /// rate, rounded to `Int` to match how ``TapFormat/sampleRate`` is itself
+    /// computed (`Int(mSampleRate.rounded())`), differs from the rate the tap is
+    /// currently running at. This deliberately compares the RATE, not device
+    /// identity — a silent-tap rate renegotiation happens with the device UID
+    /// UNCHANGED, the exact case the identity guard cannot catch, so comparing
+    /// identity here would silently reintroduce the silent-tap bug the rate
+    /// listener exists to fix. A failed live read (`nil`) is treated as "changed"
+    /// (returns `true`), same rule as the device guard.
+    static func shouldRebuild(currentRate: Double?, trackedRateInt: Int) -> Bool {
+        guard let currentRate else { return true }
+        return Int(currentRate.rounded()) != trackedRateInt
+    }
+}
+
 /// The real Core Audio process tap (adapted from `dev/audiocap/TapEngine.swift`,
 /// read-only reference). Creates a whole-system stereo-mixdown `CATapDescription`,
 /// reads its true ASBD, builds a private aggregate device pinned to the default
@@ -755,6 +804,18 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     private var format = TapFormat(
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
+
+    /// The physical output device this whole-system tap's aggregate is built on
+    /// (set in `createAggregate`, reset in `teardown`). Kept so the default-device
+    /// listener can compare-before-rebuild — firing a rebuild only when the device
+    /// THIS tap is actually pinned to changed, never on an unrelated system-wide
+    /// default-output-device notification. Mirrors
+    /// `PerAppCaptureCoordinator.CoreAudioProcessTap.tappedOutputDeviceID` (the
+    /// structural guard against the multi-tap rebuild storm; see ``TapRebuildDecision``).
+    /// This class has NO sample-rate listener (the whole-system tap rebuilds on
+    /// device-identity change only), so — unlike the per-app tap — this device is
+    /// tracked purely for the identity guard.
+    private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`
     /// below). Resampled once at `startIOProc()` (i.e. every tap create/recreate,
@@ -905,6 +966,9 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
         }
+        // Record the device we're pinning this aggregate to, so the default-device
+        // listener can compare-before-rebuild (mirrors CoreAudioProcessTap).
+        self.tappedOutputDeviceID = outputID
         let aggregateUID = UUID().uuidString
 
         let description: [String: Any] = [
@@ -1018,7 +1082,20 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.onDefaultDeviceChanged?()
+            guard let self else { return }
+            // COMPARE-BEFORE-REBUILD GUARD (device identity), identical to
+            // CoreAudioProcessTap.installDefaultDeviceListener. This fires on ANY
+            // system-wide default-output-device change, including one that leaves
+            // the device THIS whole-system tap is pinned to (`tappedOutputDeviceID`)
+            // unchanged. Fire the full tap+aggregate teardown+rebuild ONLY when the
+            // pinned device genuinely changed — the structural guard that stops one
+            // tap's own rebuild from re-firing a no-op notification that would
+            // otherwise cascade a rebuild across every live tap. A failed live read
+            // (`nil`) counts as "changed" (fires).
+            let current = try? Self.defaultOutputDeviceID()
+            guard TapRebuildDecision.shouldRebuild(
+                currentDeviceID: current, trackedDeviceID: self.tappedOutputDeviceID) else { return }
+            self.onDefaultDeviceChanged?()
         }
         self.deviceChangeBlock = block
         AudioObjectAddPropertyListenerBlock(
@@ -1031,8 +1108,11 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
+        let status = AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
+        if status != noErr {
+            AudioDiag.log("CoreAudioSystemTap.removeDefaultDeviceListener AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         deviceChangeBlock = nil
     }
 
@@ -1040,17 +1120,28 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     func teardown() {
         removeDefaultDeviceListener()
+        tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("CoreAudioSystemTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr {
+                AudioDiag.log("CoreAudioSystemTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)")
+            }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr {
+                AudioDiag.log("CoreAudioSystemTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)")
+            }
             aggregateID = kAudioObjectUnknown
         }
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr {
+                AudioDiag.log("CoreAudioSystemTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)")
+            }
             tapID = kAudioObjectUnknown
         }
     }

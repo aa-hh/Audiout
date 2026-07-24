@@ -185,4 +185,129 @@ final class LocalPlaybackEngineTests: XCTestCase {
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
     }
+
+    // MARK: - Memory leak: orphaned player node on engine start failure
+
+    /// When ``startEngineOnGraphQueue()`` throws (e.g., during device config
+    /// churn), the freshly-attached player node MUST be detached — not orphaned
+    /// in the engine's graph. This test forces a start failure via the
+    /// `test_startOverride` seam and verifies the error is re-thrown.
+    func testAddAppDetachesPlayerOnStartFailure() throws {
+        // Reference engine: a normal, successful add-then-remove. This tells us
+        // what "internal engine bookkeeping only, zero app players" looks like
+        // as an attached-node COUNT, without guessing at AVAudioEngine's own
+        // lazy mixer/output-node creation (which `startEngineOnGraphQueue()`
+        // triggers via `_ = engine.mainMixerNode` BEFORE it ever calls
+        // `engine.start()` — so that internal setup happens identically whether
+        // start succeeds or fails, and a bare pre-`addApp` baseline of 0 does
+        // NOT account for it). `removeApp` only ever detaches the app's own
+        // player (verified by reading its body), never the engine's own nodes,
+        // so this is a clean "player added, then correctly removed" reference.
+        let referenceEngine = LocalPlaybackEngine()
+        try referenceEngine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        referenceEngine.removeApp(bundleID: bundleID)
+        let noOrphanNodeCount = referenceEngine.test_attachedNodeCount
+
+        let engine = LocalPlaybackEngine()
+
+        // Force engine.start() to throw via the test seam.
+        struct TestError: Error { let message: String }
+        let testError = TestError(message: "test override")
+        engine.test_startOverride = {
+            throw testError
+        }
+
+        // Attempt to add an app — this should throw when start fails.
+        var errorThrown = false
+        do {
+            try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        } catch is TestError {
+            errorThrown = true
+        } catch {
+            XCTFail("Expected TestError, got \(type(of: error)): \(error)")
+        }
+
+        XCTAssertTrue(errorThrown, "addApp must throw when engine start fails")
+
+        // DIRECT proof of the fix: after a failed start, the attached-node count
+        // must match the "no orphan" reference exactly. `addApp`'s idempotency
+        // guard (`nodes[bundleID]`) never got populated by the failed call, so a
+        // second `addApp` for the same bundle ID would attach a brand-new,
+        // independently-tracked player node regardless of whether the first one
+        // was ever cleaned up — a "second call succeeds" check alone would pass
+        // even with the leak present (confirmed: the delta between a failed and
+        // a subsequent successful call is always +1 either way). Comparing
+        // against the engine's real attached-node count is what actually rules
+        // out the orphan.
+        XCTAssertEqual(engine.test_attachedNodeCount, noOrphanNodeCount,
+                       "a failed engine start must leave no orphaned player node attached")
+
+        // Secondary check: a retry with the override cleared should also work
+        // end-to-end (proves the failed attempt left no stale bookkeeping either).
+        engine.test_startOverride = nil
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        engine.stop()  // Clean up
+        referenceEngine.stop()
+    }
+
+    // MARK: - Config-change debounce (redirect-churn burst coalescing)
+
+    /// A burst of `AVAudioEngineConfigurationChange` notifications (redirect
+    /// churn — routing/unrouting several apps in quick succession, each
+    /// creating/destroying its own Core Audio tap+aggregate device) must
+    /// collapse into exactly ONE call to the reconnect handler, not one per
+    /// notification. Drives ``LocalPlaybackEngine/test_triggerConfigChangeDebounce()``
+    /// — the same trailing-edge debounce path `init`'s real observer closure
+    /// uses — three times a few ms apart (a real notification burst is at
+    /// least this tight: several taps torn down/created back-to-back on the
+    /// same churn event), then proves via
+    /// ``LocalPlaybackEngine/test_configChangeHandlerFireCount`` (a plain
+    /// counter, not real engine/playback state — this test only needs to prove
+    /// coalescing, not exercise the reconnect sequence itself) that the
+    /// handler fired once, and only after settling. No `addApp` is called, so
+    /// `nodes` stays empty and the real handler takes its early-return branch
+    /// (`engineRunning = false`) — no Core Audio interaction, no audio, on a
+    /// worker thread that reads real hardware.
+    func testConfigChangeBurstCoalescesIntoOneHandlerCall() throws {
+        let engine = LocalPlaybackEngine()
+        defer { engine.stop() }
+
+        engine.test_triggerConfigChangeDebounce()
+        Thread.sleep(forTimeInterval: 0.01)
+        engine.test_triggerConfigChangeDebounce()
+        Thread.sleep(forTimeInterval: 0.01)
+        engine.test_triggerConfigChangeDebounce()
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 0,
+                       "the handler must not have fired yet — still inside the ~300ms debounce window")
+
+        // Wait past the debounce interval (300ms) with margin, then check.
+        let settled = XCTestExpectation(description: "debounce settles")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+        wait(for: [settled], timeout: 2.0)
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 1,
+                       "a burst of 3 rapid notifications must collapse into exactly ONE handler call")
+    }
+
+    /// The debounce must not weaken responsiveness for the common case: ONE
+    /// isolated config-change notification (not part of a burst) still
+    /// recovers — the handler still fires — after roughly the debounce
+    /// interval. Guards against a broken implementation that only fires on a
+    /// SUBSEQUENT notification (a true "N-th event" throttle) rather than
+    /// timing off the single call actually made.
+    func testSingleConfigChangeStillFiresHandlerAfterDebounceInterval() throws {
+        let engine = LocalPlaybackEngine()
+        defer { engine.stop() }
+
+        engine.test_triggerConfigChangeDebounce()
+
+        let settled = XCTestExpectation(description: "single debounce settles")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+        wait(for: [settled], timeout: 2.0)
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 1,
+                       "a single, isolated notification must still recover on its own — the debounce " +
+                       "delays and coalesces, it must never indefinitely postpone recovery")
+    }
 }

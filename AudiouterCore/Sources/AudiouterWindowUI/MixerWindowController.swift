@@ -229,10 +229,30 @@ public final class MixerWindowController: NSWindowController {
 
     // MARK: App integration
 
+    /// Test seam: simulate the window being visible so `update(devices:)`
+    /// exercises its refresh path headlessly (no real WindowServer window in
+    /// `swift test`). Mirrors `PopoverController.test_isShownOverride` exactly
+    /// (same B8 problem, same fix shape, one host each).
+    public var test_isWindowVisibleOverride = false
+
+    /// Whether the window should be treated as visible for refresh-gating
+    /// purposes — the real `window?.isVisible` OR the test override above.
+    /// Mirrors `PopoverController.isEffectivelyShown`.
+    private var isEffectivelyVisible: Bool { (window?.isVisible ?? false) || test_isWindowVisibleOverride }
+
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
-    /// content pane (auto-selecting a group if nothing was selected yet).
+    /// content pane (auto-selecting a group if nothing was selected yet) —
+    /// but ONLY while the window is actually visible (or the test override is
+    /// set): this is called on every backend event for the app's entire
+    /// lifetime once the window has been opened once, so skipping the full
+    /// rebuild while closed avoids doing real work (sidebar node-tree rebuild
+    /// + `NSOutlineView` reload + content-pane re-render) that nobody can see
+    /// (B8, mirrors `PopoverController`'s identical fix for the same problem).
+    /// `showWindow()` below still refreshes unconditionally on open, so the
+    /// window always shows current data the moment it appears.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        guard isEffectivelyVisible else { return }
         refreshAll()
     }
 

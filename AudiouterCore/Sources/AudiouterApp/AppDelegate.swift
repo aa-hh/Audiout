@@ -313,10 +313,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (and, before the cold-prompt guard, re-prompt) on a later launch.
         // `resetDeviceRoute` reverts a `.device` redirect back to `.noRedirect` and
         // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing the
-        // per-app tap down through the SAME un-route path a manual change takes
-        // (so it supersedes the old `handleAppTerminated` "keep route, show
-        // offline" behavior). Core can't observe AppKit notifications itself, so
-        // this is the one place that forwards the quit across the boundary. Never
+        // per-app tap down through the SAME un-route path a manual change takes —
+        // but ONLY for a `.device` route: it deliberately leaves a `.currentDevice`
+        // ("play on this Mac") route untouched (see its own doc comment), so on its
+        // own it can't tear down THAT tap on quit — it would otherwise leak
+        // (registered in coreaudiod against a dead pid) forever. Forwarding to
+        // `backend.handleAppTerminated` below covers both cases directly (capture
+        // lifecycle, orthogonal to `resetDeviceRoute`'s route persistence) —
+        // called FIRST so its routed/local membership check sees the pre-reset
+        // state rather than racing `resetDeviceRoute`'s own cascade having already
+        // changed it. Core can't observe AppKit notifications itself, so this is
+        // the one place that forwards the quit across the boundary. Never
         // explicitly removed: this observer's lifetime is the app's own
         // (AppDelegate is never deallocated before termination).
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -329,6 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     as? NSRunningApplication,
                 let bundleID = app.bundleIdentifier
             else { return }
+            (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
             self?.appRouting.resetDeviceRoute(bundleID: bundleID)
         }
 
@@ -504,6 +512,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///     `permissionAuditModel` so later automatic audits keep reusing it.
     @MainActor
     private func presentSetup(reason: OnboardingReason = .firstRun, model providedModel: SetupModel? = nil) {
+        // Re-entry guard (matches the three other call sites' `onboardingWindowController
+        // == nil` pattern above): without this, a second call while a first
+        // onboarding window is still open (reachable via Settings ▸ General's
+        // "Run Setup Again…" — the window is normal-level, so Settings stays
+        // clickable) silently overwrites `onboardingWindowController`, orphaning
+        // the first window on screen with its two live 1.5s polling Timers
+        // (`OnboardingViewController`) never stopped, and a Done button whose
+        // action closure captured the now-deallocated first controller weakly.
+        // Bring the existing window forward instead of building a second one, so
+        // a repeat click visibly does something rather than silently no-op'ing.
+        guard onboardingWindowController == nil else {
+            onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
+            return
+        }
         let model = providedModel ?? SetupModel(
             audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
             localNetwork: LocalNetworkPrimerFactory.makeDefault(),
@@ -973,6 +995,12 @@ final class QuittingIndicatorPanel: NSPanel {
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
+        // A programmatic NSPanel defaults `isReleasedWhenClosed` to true (AppKit
+        // releases it on close) — combined with the strong `quittingIndicator`
+        // property that ALSO releases it (cleared to nil after close), that's a
+        // double-release. This class has no window controller to own that
+        // instead, so ARC via the property is the one owner.
+        isReleasedWhenClosed = false
         isFloatingPanel = true
         level = .floating
         isOpaque = false

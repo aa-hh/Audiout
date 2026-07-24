@@ -435,6 +435,101 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         coordinator = nil
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "dropping the coordinator without stop() must not leak the tap")
     }
+
+    // MARK: - A1 gap: a device-change notification arriving during the VERY FIRST
+    // .creatingTap (beginStart, the initial start — NOT a handleDeviceChange rebuild)
+    // must be coalesced and replayed once capturing is reached, exactly like
+    // handleDeviceChange's own replay. Before the fix, beginStart's success commit
+    // never checked slot.pendingDeviceChange, so this notification was silently dropped.
+
+    func testBeginStartReplaysPendingDeviceChangeFromInitialStart() {
+        let tap = FakeProcessTap()
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolvePID: { _ in 4242 },
+            muteBehavior: .mutedWhenTapped
+        )
+
+        // Fire a device-change notification DURING the first createAndStart, i.e.
+        // while the slot is in its initial `.creatingTap` (before beginStart commits
+        // `.capturing`). handleDeviceChange sees `.creatingTap` and coalesces it into
+        // slot.pendingDeviceChange rather than acting immediately. Guarded to the
+        // FIRST create so the replayed rebuild's own createAndStart doesn't re-fire.
+        tap.onCreateAndStart = { [weak tap] in
+            guard let tap, tap.creates == 1 else { return }
+            tap.fireDeviceChange()
+        }
+
+        coordinator.start(bundleID: "com.example.music")
+
+        // The coalesced change must be replayed once capturing is reached, driving a
+        // SECOND tap creation. Without the beginStart replay fix, `creates` stops at 1
+        // (the notification dropped) and no rebuild ever happens.
+        waitFor { tap.creates >= 2 }
+        XCTAssertGreaterThanOrEqual(
+            tap.creates, 2,
+            "a device change arriving during the initial-start .creatingTap must be "
+            + "coalesced and replayed once capturing is reached, not dropped")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+        XCTAssertEqual(coordinator.state(for: "com.example.music"), .capturing(tap.format))
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Compare-before-rebuild decision (TapRebuildDecision): the pure logic
+    // BOTH per-app listener guards call after their live HAL read. Testing the
+    // DECISION here is what makes the storm guard meaningful without mocking Core
+    // Audio — the live reads (defaultOutputDeviceID / readNominalSampleRate) stay a
+    // thin wrapper, while the part that's easy to get subtly wrong is fully covered.
+
+    #if canImport(AudioToolbox)
+
+    /// RATE guard (Fix 2 / installSampleRateListener). Cases (c), (d), (e).
+    /// (d) — a genuinely CHANGED rate must STILL fire the rebuild — is the one
+    /// regression that would silently reintroduce the process-tap silent-buffer bug
+    /// (a rate renegotiation with the device UID unchanged, which only THIS listener
+    /// catches). The guard must therefore compare the RATE, never device identity.
+    func testRateGuardFiresOnlyOnGenuineRateChange() {
+        // (c) unchanged rate -> NO rebuild (drops the no-op notification that would
+        // otherwise storm across every live tap).
+        XCTAssertFalse(TapRebuildDecision.shouldRebuild(currentRate: 48000, trackedRateInt: 48000),
+                       "an identical nominal rate must NOT trigger a rebuild (storm guard)")
+
+        // (d) CHANGED rate -> rebuild MUST fire. If a real rate change stopped firing,
+        // the tap would go silent (all-zero PCM) with no recovery — the exact bug this
+        // listener exists to fix.
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentRate: 44100, trackedRateInt: 48000),
+                      "a genuinely changed nominal rate MUST still trigger a rebuild (silent-tap regression)")
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentRate: 96000, trackedRateInt: 48000))
+
+        // (e) failed live read (nil) -> treat as changed -> fire. A failed read is
+        // never evidence of "no change."
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentRate: nil, trackedRateInt: 48000),
+                      "a failed rate read must be treated as changed (fire), not suppressed")
+
+        // Sub-Hz driver jitter that rounds to the SAME Int rate must NOT rebuild —
+        // matching how TapFormat.sampleRate is computed via Int(mSampleRate.rounded());
+        // a rounded value that lands on a different Int must.
+        XCTAssertFalse(TapRebuildDecision.shouldRebuild(currentRate: 48000.4, trackedRateInt: 48000),
+                       "sub-Hz jitter that rounds to the same rate must not rebuild")
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentRate: 48000.6, trackedRateInt: 48000),
+                      "a rounded rate that lands on a different Int must rebuild")
+    }
+
+    /// DEVICE-IDENTITY guard (Fix 1 / installDefaultDeviceListener). Cases (a), (b), (e).
+    func testDeviceGuardFiresOnlyOnGenuineDeviceChange() {
+        // (a) unchanged pinned device -> NO rebuild.
+        XCTAssertFalse(TapRebuildDecision.shouldRebuild(currentDeviceID: 77, trackedDeviceID: 77),
+                       "an unchanged pinned device must NOT trigger a rebuild (storm guard)")
+        // (b) the pinned device actually changed -> rebuild fires.
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentDeviceID: 88, trackedDeviceID: 77),
+                      "the pinned device actually changing MUST trigger a rebuild")
+        // (e) failed live read (nil) -> treat as changed -> fire.
+        XCTAssertTrue(TapRebuildDecision.shouldRebuild(currentDeviceID: nil, trackedDeviceID: 77),
+                      "a failed device read must be treated as changed (fire), not suppressed")
+    }
+
+    #endif
 }
 
 private extension NSLock {

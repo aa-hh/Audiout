@@ -186,8 +186,42 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// `NativeCaptureCoordinator.meteringActive`: the popover isn't necessarily
     /// visible yet when an app's local player is first added).
     private var meteringActive = false
+    /// Test-only counter: how many times the debounced config-change handler has
+    /// actually fired — i.e. how many times `handleConfigurationChangeOnGraphQueue()`
+    /// ran — incremented in ``scheduleConfigChangeDebounce()`` right before calling
+    /// it. Guarded by `stateLock`, exactly like `meteringActive`: read from the
+    /// test's own thread via ``test_configChangeHandlerFireCount``, so (unlike
+    /// `configChangeDebounceWorkItem` below) it needs real cross-thread safety, not
+    /// just graphQueue confinement. Production code never reads it.
+    private var configChangeHandlerFireCount = 0
     /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
     private var configChangeObserver: NSObjectProtocol?
+    /// How long to wait, after the LAST `AVAudioEngineConfigurationChange`
+    /// notification in a burst, before actually reconnecting (trailing-edge
+    /// debounce — see ``scheduleConfigChangeDebounce()``). Redirect churn
+    /// (routing/unrouting several apps in quick succession) creates/destroys a
+    /// Core Audio tap+aggregate device PER APP, and each one fires its own
+    /// notification; un-debounced, N notifications in a burst would drive N
+    /// independent full engine stop/reconnect/restart cycles — wasteful, and each
+    /// stop/start is audible-glitch risk during active local playback — when one
+    /// at the end would do. 300 ms comfortably exceeds the gap between
+    /// notifications within one churn burst, while still recovering a single,
+    /// isolated config change promptly.
+    private static let configChangeDebounceInterval: TimeInterval = 0.3
+    /// Pending trailing-edge debounce work item (see `configChangeDebounceInterval`
+    /// above). Cancelled and replaced by every new `AVAudioEngineConfigurationChange`
+    /// notification in ``scheduleConfigChangeDebounce()``, so only the LAST
+    /// notification in a burst actually fires `handleConfigurationChangeOnGraphQueue()`.
+    /// Confined to `graphQueue` like `configuredDevice`: only ever touched from
+    /// graphQueue-run code, never the RT `receive` thread, so no `stateLock` is
+    /// needed here. Cancelled again in `deinit` so a torn-down engine can't fire a
+    /// stale reconnect after being deallocated.
+    private var configChangeDebounceWorkItem: DispatchWorkItem?
+
+    /// Test seam: if set, `startEngineOnGraphQueue()` calls this instead of
+    /// `engine.start()`. Allows tests to force a start failure without mocking
+    /// Core Audio. Production code never sets it.
+    public var test_startOverride: (() throws -> Void)?
 
     /// Fired synchronously from ``receive(buffer:for:)`` with one app's raw
     /// captured RMS level (0.0...1.0), while metering is active. PRE-VOLUME by
@@ -205,15 +239,28 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         // engine stops after the first tap churn and every buffer is silently
         // dropped (the exact "Current Device plays nothing" symptom). Handle it on
         // `graphQueue` so it serializes against add/remove/start/stop.
+        //
+        // Redirect churn (routing/unrouting several apps in quick succession) can
+        // fire a BURST of these in a row — each one, un-debounced, would drive its
+        // own full stop/reconnect/restart cycle. `scheduleConfigChangeDebounce()`
+        // trailing-edge debounces the burst into a single reconnect, timed off the
+        // LAST notification, so `handleConfigurationChangeOnGraphQueue()` reacts to
+        // the settled device list once instead of N times mid-churn.
         configChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [weak self] _ in
-            self?.graphQueue.async { self?.handleConfigurationChangeOnGraphQueue() }
+            self?.graphQueue.async { self?.scheduleConfigChangeDebounce() }
         }
     }
 
     deinit {
         if let configChangeObserver { NotificationCenter.default.removeObserver(configChangeObserver) }
+        // Cancel any pending trailing-edge debounce so a torn-down engine can't
+        // fire a stale reconnect attempt on a deallocated instance. Safe to touch
+        // `configChangeDebounceWorkItem` directly here without `graphQueue`: like
+        // `configChangeObserver` above, no concurrent access is possible once
+        // `deinit` has started.
+        configChangeDebounceWorkItem?.cancel()
     }
 
     // MARK: Lifecycle
@@ -238,13 +285,43 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         _ = engine.mainMixerNode
         engine.prepare()
         do {
-            try engine.start()
+            if let testOverride = test_startOverride {
+                try testOverride()
+            } else {
+                try engine.start()
+            }
         } catch {
             AudioDiag.log("LPE.start FAILED: \(error)")
             throw error
         }
         stateLock.withLock { engineRunning = engine.isRunning }
         AudioDiag.log("LPE.start done isRunning=\(engine.isRunning) configuredDevice=\(configuredDevice)")
+    }
+
+    /// Trailing-edge debounce for the `AVAudioEngineConfigurationChange` observer
+    /// installed in `init`: cancel any pending reconnect and schedule a new one
+    /// `configChangeDebounceInterval` out. MUST run on `graphQueue` (matches
+    /// `configChangeDebounceWorkItem`'s confinement) — called from the observer's
+    /// closure, and from ``test_triggerConfigChangeDebounce()`` for tests that
+    /// can't synthesize a real notification (the observer is scoped to `object:
+    /// engine`, which is private).
+    ///
+    /// A burst of N calls within the interval collapses into exactly ONE
+    /// `handleConfigurationChangeOnGraphQueue()`, timed off the LAST call — so it
+    /// reacts once the device list has actually settled, not on the first blip.
+    /// This does NOT weaken the single-notification case: each new call only
+    /// pushes the SAME pending fire further out, it never starts a second pending
+    /// fire or blocks the first from ever landing, so one isolated notification
+    /// still recovers after exactly one interval.
+    private func scheduleConfigChangeDebounce() {
+        configChangeDebounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.stateLock.withLock { self.configChangeHandlerFireCount += 1 }
+            self.handleConfigurationChangeOnGraphQueue()
+        }
+        configChangeDebounceWorkItem = work
+        graphQueue.asyncAfter(deadline: .now() + Self.configChangeDebounceInterval, execute: work)
     }
 
     /// Recover from an `AVAudioEngineConfigurationChange` (the engine has already
@@ -410,7 +487,13 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             }
             player.volume = Self.clamp(volume)
 
-            try startEngineOnGraphQueue()
+            do {
+                try startEngineOnGraphQueue()
+            } catch {
+                AudioDiag.log("LPE.addApp bundle=\(bundleID) FAILED: engine start raised \(error)")
+                engine.detach(player)
+                throw error
+            }
 
             // NEVER call `play()` on a stopped engine — `AVAudioPlayerNode.play`
             // asserts `engine->IsRunning()` and aborts the whole process (an
@@ -599,6 +682,32 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     }
 
     private static func clamp(_ volume: Float) -> Float { min(1, max(0, volume)) }
+
+    // MARK: Test helpers
+
+    /// Test helper: return the count of nodes currently attached to the engine.
+    /// Used to verify no orphaned nodes are left behind on error paths.
+    public var test_attachedNodeCount: Int {
+        engine.attachedNodes.count
+    }
+
+    /// Test seam: fire the same trailing-edge debounce path the real
+    /// `AVAudioEngineConfigurationChange` observer uses
+    /// (``scheduleConfigChangeDebounce()``), without needing to synthesize a real
+    /// notification — the observer is scoped to `object: engine`, which is
+    /// private and unreachable from a test target. Safe to call from any thread;
+    /// hops onto `graphQueue` itself, exactly like the real observer's closure
+    /// does. Production code never calls it.
+    public func test_triggerConfigChangeDebounce() {
+        graphQueue.async { [weak self] in self?.scheduleConfigChangeDebounce() }
+    }
+
+    /// Test seam: how many times the debounced config-change handler has
+    /// actually fired (see `configChangeHandlerFireCount`) — used to prove a
+    /// burst of notifications collapses into exactly one call.
+    public var test_configChangeHandlerFireCount: Int {
+        stateLock.withLock { configChangeHandlerFireCount }
+    }
 
     // MARK: Built-in output device
 

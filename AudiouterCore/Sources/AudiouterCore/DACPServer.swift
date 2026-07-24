@@ -63,9 +63,32 @@ public final class DACPServer: @unchecked Sendable {
             try? handle.close()
         }
     }
+    /// `listener` / `connections` / `idleTimeouts` are mutated ONLY on
+    /// ``queue``. `accept(_:)`, `receive(_:)`, and the connection state
+    /// handlers already run there (they're callbacks for objects started
+    /// with `queue: queue`); `start(dacpID:)`/`stop()` dispatch onto it too
+    /// rather than mutating from whatever thread calls them.
     private var listener: NWListener?
     /// Held so a connection isn't deallocated mid-exchange.
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+
+    /// How long an accepted connection may sit without producing its first
+    /// receive completion before it's treated as an idle/misbehaving peer (a
+    /// network scanner, a probing client, a flaky receiver that half-opens)
+    /// and closed. A real DACP receiver's request arrives within
+    /// milliseconds of connecting. Without this, such a peer — and its
+    /// kernel socket — would stay in `connections` for as long as this
+    /// server runs (this server runs for the entire native-streaming session).
+    private static let idleReceiveTimeout: TimeInterval = 30
+    /// Test-only: overrides ``idleReceiveTimeout`` so an idle-cancellation
+    /// test doesn't have to wait 30 real seconds. Nil (default) uses the
+    /// real value.
+    public var test_idleReceiveTimeoutOverride: TimeInterval?
+    /// Pending idle-timeout work item per connection, mirroring
+    /// `connections` — cancelled the moment `receive(_:)` actually completes
+    /// (success or error), cleaned up in the same places `connections`
+    /// itself is (the `.cancelled`/`.failed` state handler and `stop()`).
+    private var idleTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
 
     public init() {}
 
@@ -74,8 +97,28 @@ public final class DACPServer: @unchecked Sendable {
     /// Advertise `iTunes_Ctrl_<dacpID>` and start listening. `dacpID` MUST equal
     /// the value the engine sends in its `DACP-ID` header (``AirPlayEngine/dacpID``)
     /// or the receiver won't find us. Idempotent-ish: a second call restarts.
+    ///
+    /// Dispatched onto ``queue`` — the same queue `accept(_:)` and the
+    /// connection state handlers already run on — rather than mutating
+    /// `listener`/`connections` on whatever thread calls this. `.async`:
+    /// nothing here needs to be visible to the caller before this returns;
+    /// `listener.start` is itself asynchronous (the listener isn't actually
+    /// bound/`.ready` until later regardless of which queue scheduled the
+    /// call), so there's no synchronous guarantee to preserve.
     public func start(dacpID: UInt64) {
-        stop()
+        queue.async { [weak self] in
+            self?.startLocked(dacpID: dacpID)
+        }
+    }
+
+    /// The body of `start(dacpID:)`. MUST only run on ``queue`` (called via
+    /// `start(dacpID:)`'s dispatch above). Calls `stopLocked()` directly
+    /// rather than the public `stop()`, which does `queue.sync` — calling
+    /// that here would recursively `sync` onto the queue we're already
+    /// executing on and deadlock (same hazard NativeBackend.swift documents
+    /// at its orphan-tap dispatch, near `updateAppRoutes`).
+    private func startLocked(dacpID: UInt64) {
+        stopLocked()
         // `%08llX`-style upper-hex, matching airplay.c's `%" PRIX64 "` DACP-ID.
         let serviceName = "iTunes_Ctrl_" + String(format: "%016llX", dacpID)
 
@@ -112,34 +155,89 @@ public final class DACPServer: @unchecked Sendable {
         debugLog("advertising \(serviceName)")
     }
 
+    /// Dispatched onto ``queue`` like `start(dacpID:)`. `.sync`, unlike
+    /// `start`'s `.async`: `NativeBackend.stop()` calls this inline on the
+    /// app-quit teardown path (not from inside a `Task`), and a caller that
+    /// goes on to tear down further — or exit the process — right after
+    /// should see `listener` and every connection already cancelled, not a
+    /// fire-and-forget that might not have run yet. Safe to block on:
+    /// cancelling a couple of local objects is cheap, there's no network I/O
+    /// to wait for.
     public func stop() {
+        queue.sync { [weak self] in
+            self?.stopLocked()
+        }
+    }
+
+    /// The body of `stop()`. MUST only run on ``queue``. Also called
+    /// directly by `startLocked(dacpID:)` (never through the public
+    /// `stop()` — see its doc comment for why that would deadlock).
+    private func stopLocked() {
         listener?.cancel()
         listener = nil
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
+        for (_, work) in idleTimeouts { work.cancel() }
+        idleTimeouts.removeAll()
     }
 
     // MARK: - Connection handling
 
-    private func accept(_ connection: NWConnection) {
+    /// `internal` (not `private`) so `DACPServerTests` can hand it a real
+    /// loopback connection directly via `@testable import`, without going
+    /// through `start(dacpID:)`'s own listener — which binds ALL interfaces
+    /// and Bonjour-advertises, neither of which the idle-timeout test needs,
+    /// and an all-interfaces bind is exactly what trips macOS's Application
+    /// Firewall "accept incoming network connections?" prompt for the
+    /// xctest process on a `swift test` run (see PTPHelperIPCTests.swift for
+    /// the same lesson already applied to the PTP test daemon). Otherwise
+    /// unchanged: always invoked on ``queue`` in production, via
+    /// `listener.newConnectionHandler`.
+    func accept(_ connection: NWConnection) {
         let key = ObjectIdentifier(connection)
         connections[key] = connection
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .cancelled, .failed:
-                self?.queue.async { self?.connections[key] = nil }
+                self?.queue.async {
+                    self?.connections[key] = nil
+                    self?.idleTimeouts.removeValue(forKey: key)?.cancel()
+                }
             default:
                 break
             }
         }
         connection.start(queue: queue)
         receive(connection)
+
+        // Idle-receive deadline: a peer that opens a TCP connection and
+        // never sends anything (a network scanner, a misbehaving/probing
+        // client, a flaky receiver that half-opens) would otherwise sit in
+        // `connections` — and hold its kernel socket open — for as long as
+        // this server runs. Cancelled by `receive(_:)`'s completion handler
+        // the moment this connection actually produces one; if it fires
+        // uncancelled, the peer was idle the whole window and we close it
+        // ourselves — the `stateUpdateHandler` above then removes it from
+        // `connections` exactly like any other cancellation, so there's no
+        // duplicated removal logic here.
+        let timeout = test_idleReceiveTimeoutOverride ?? Self.idleReceiveTimeout
+        let idleWork = DispatchWorkItem { [weak self] in
+            self?.connections[key]?.cancel()
+        }
+        idleTimeouts[key] = idleWork
+        queue.asyncAfter(deadline: .now() + timeout, execute: idleWork)
     }
 
     private func receive(_ connection: NWConnection) {
         // DACP requests are single small header-only GETs; one receive is enough.
+        let key = ObjectIdentifier(connection)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            // The connection is no longer idle the moment ANY receive
+            // completes — a real request, a peer-closed EOF, or an error —
+            // so cancel its pending idle-timeout deadline (accept(_:)) before
+            // it can fire and cancel a connection we're already finishing.
+            self.idleTimeouts.removeValue(forKey: key)?.cancel()
             if let data, !data.isEmpty, let request = DACPServer.parse(data) {
                 self.dispatch(request)
             }

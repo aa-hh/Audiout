@@ -3049,6 +3049,131 @@ final class NativeBackendTests: XCTestCase {
                        "no stale retry means no extra removeOutput either")
     }
 
+    /// Adversarial-review Finding 1: the whole-system rebind recovery
+    /// (`resetAirPlaySessionForWholeSystem` → `enqueueRebindRecovery` →
+    /// `performRebindRecovery`) used to run its removeOutput→addOutput purely on
+    /// `bindTail`, a SEPARATE serialization domain from the one `convergeDevice`
+    /// uses (the `converging` slot claimed in `setOutputSet`). A user deselect
+    /// landing between the recovery's own removeOutput and addOutput could let
+    /// the engine end up re-added even though the backend's `desiredOn`/`added`
+    /// say the device is off — a zombie AirPlay session.
+    ///
+    /// Reproduces the race with an engine spy: force the recovery's engine ops to
+    /// be slow (`opDelayNanos`), fire a tap-rebuild recapture (which enqueues the
+    /// whole-system recovery), then IMMEDIATELY deselect the device while the
+    /// recovery's remove/add pair is still in flight. The fix claims `converging`
+    /// for the device before starting recovery, so `setOutputSet`'s deselect
+    /// cannot kick a concurrent `convergeDevice` — it only updates `desiredOn`,
+    /// and the recovery's own completion re-checks that target and issues the
+    /// real removeOutput itself once it releases the slot. Proof: the LAST engine
+    /// op recorded for this device is a `remove` (never a trailing `add`), and at
+    /// no point were two ops for the device in flight concurrently.
+    func testWholeSystemDeselectDuringRebindRecoveryNeverLeavesEngineStreaming() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        capture.fireStateChange(capturingState())   // first capture: arms the epoch
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Slow every subsequent engine op so the recovery's remove→add pair has a
+        // wide window for a concurrent deselect to try to land inside it.
+        engine.opDelayNanos = 150_000_000
+
+        capture.fireStateChange(capturingState())   // RE-capture: enqueues recovery
+        // Give the recovery a moment to actually start (claim `converging`,
+        // issue its removeOutput) before the deselect races it.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        backend.setOutputSet([])   // concurrent user deselect
+
+        // Let everything settle: the recovery's remove/add, then (if the
+        // deselect's target survived) a requeued real convergeDevice removeOutput.
+        await pollUntil(timeout: 5) {
+            !backend.devices.contains { $0.id == device.id && $0.isSelected }
+        }
+        // Drain any trailing op that might still be mid-flight.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        XCTAssertEqual(engine.maxConcurrentPerDevice, 1,
+                       "the recovery and a concurrent deselect must never run overlapping engine ops for the same device")
+        XCTAssertFalse(backend.devices.first { $0.id == device.id }!.isSelected,
+                       "the backend must reflect the deselect")
+        let deviceOps = engine.ops.filter {
+            $0.hasPrefix("add:\(device.outputID.rawValue)") || $0.hasPrefix("remove:\(device.outputID.rawValue)")
+        }
+        XCTAssertFalse(deviceOps.isEmpty, "expected at least the recovery's own remove/add")
+        XCTAssertTrue(deviceOps.last!.hasPrefix("remove:"),
+                      "the LAST engine op for a deselected device must be a remove — a trailing add would be a "
+                      + "zombie AirPlay session still streaming a device the backend considers off")
+    }
+
+    /// Adversarial-review Finding 1, reverse direction: a select/deselect already
+    /// IN FLIGHT (holding the `converging` slot) when a whole-system tap-rebuild
+    /// recapture fires must make the recovery bow out entirely — not queue a
+    /// redundant removeOutput/addOutput that could interleave with
+    /// `convergeDevice`'s own op and leave a device the user just (re)selected
+    /// silently un-added. `resetAirPlaySessionForWholeSystem` checks
+    /// `!converging.contains(deviceID)` before claiming the slot, so a rebuild
+    /// landing mid-toggle skips that device — the in-flight `convergeDevice`
+    /// alone decides the device's final engine state.
+    func testWholeSystemRebuildDuringInFlightSelectSkipsRecoveryAndDeviceEndsSelected() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        capture.fireStateChange(capturingState())   // first capture: arms the epoch
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Slow every subsequent engine op so the deselect's removeOutput is still
+        // in flight (holding `converging`) when the recapture fires.
+        engine.opDelayNanos = 150_000_000
+        let addsBeforeToggle = engine.addedIDs.filter { $0 == device.outputID }.count
+        let removesBeforeToggle = engine.removedIDs.filter { $0 == device.outputID }.count
+
+        backend.setOutputSet([])                        // deselect: claims `converging`, slow removeOutput starts
+        try? await Task.sleep(nanoseconds: 30_000_000)   // let it actually start
+        backend.setOutputSet([device.id])                // re-select while still converging — only updates desiredOn
+        capture.fireStateChange(capturingState())        // recapture races the in-flight toggle: must bow out
+
+        // Wait for the requeued reselect's addOutput to actually land (the real
+        // signal of full convergence — `Device.isSelected` is written a step
+        // later, inside the same locked block, so polling the op count directly
+        // avoids a spurious poll-window miss on a slow CI runner).
+        await pollUntil(timeout: 10) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeToggle
+        }
+        // Give the post-add bookkeeping (the `applyLocal` write) a moment to run.
+        await pollUntil(timeout: 2) {
+            backend.devices.first { $0.id == device.id }?.isSelected == true
+        }
+
+        XCTAssertEqual(engine.maxConcurrentPerDevice, 1,
+                       "a recapture racing an in-flight toggle must never run overlapping engine ops for the device")
+        XCTAssertTrue(backend.devices.first { $0.id == device.id }!.isSelected,
+                      "the device must end up genuinely selected/streaming, not silently left un-added")
+        XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, removesBeforeToggle + 1,
+                       "exactly one removeOutput (the deselect) — the recapture must have skipped its own recovery")
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, addsBeforeToggle + 1,
+                       "exactly one addOutput (the requeued reselect) — no extra recovery-driven add")
+        let deviceOps = engine.ops.filter {
+            $0.hasPrefix("add:\(device.outputID.rawValue)") || $0.hasPrefix("remove:\(device.outputID.rawValue)")
+        }
+        XCTAssertTrue(deviceOps.last!.hasPrefix("add:"),
+                      "the LAST engine op must be the add that leaves the device genuinely streaming")
+    }
+
     // MARK: Per-app routing (T6)
 
     /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`

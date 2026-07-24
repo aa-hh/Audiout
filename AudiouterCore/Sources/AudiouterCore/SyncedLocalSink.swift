@@ -133,7 +133,15 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// knob later).
     public static let defaultSafetyMarginMs: Double = 3.0
 
-    private let renderSampleRate: Double
+    /// The device-native render rate this sink was built for (read ONCE at
+    /// construction from `kAudioHardwarePropertyDefaultOutputDevice`'s
+    /// `kAudioDevicePropertyNominalSampleRate`; see `makeBackend`). Public so the
+    /// whole-system fan-out (``NativeCaptureCoordinator``) can base-resample the
+    /// 44.1 kHz airplay feed UP to it once before the ring — opening the sink's
+    /// engine at the device's own rate is what stops the "adding the Mac silences
+    /// AirPlay" renegotiation (plan Part B). All render/timing math below is keyed
+    /// off this value, never a hardcoded 44100.
+    public let renderSampleRate: Double
     private let channelCount: Int
     private let safetyMarginMs: Double
     private let maxRenderFrames: Int
@@ -736,6 +744,7 @@ private final class InterleavedFloatRing {
 /// is macOS 14 — but this keeps the file compiling anywhere). Inert no-ops.
 public final class SyncedLocalSink: @unchecked Sendable {
     public static let defaultSafetyMarginMs: Double = 3.0
+    public let renderSampleRate: Double
     public init(
         renderSampleRate: Double = 48_000,
         channelCount: Int = 2,
@@ -745,7 +754,9 @@ public final class SyncedLocalSink: @unchecked Sendable {
         presentationDelayMs: @escaping @Sendable () -> Int,
         localOutputLatency: @escaping @Sendable () -> LocalOutputLatencyMeasurement? = { nil },
         userOffsetMs: @escaping @Sendable () -> Int = { AppSettings().syncOffsetMs }
-    ) {}
+    ) {
+        self.renderSampleRate = renderSampleRate
+    }
     public var latestPhaseErrorNanos: Int64 { 0 }
     public func start() throws {}
     public func stop() {}

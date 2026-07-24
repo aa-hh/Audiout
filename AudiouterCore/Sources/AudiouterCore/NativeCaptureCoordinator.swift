@@ -147,6 +147,20 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var syncedLocalSink: SyncedLocalPCMSink?
     private var syncedLocalRenderPID: pid_t?
 
+    /// T3 (Part B) base-rate converter for the fan-out: resamples the 44.1 kHz
+    /// airplay feed UP to the sink's device-native `renderSampleRate` ONCE before
+    /// the ring, so the sink's engine runs at the output device's own rate and
+    /// opening it never renegotiates 48↔44.1 kHz (the dropout root cause). Held
+    /// here (not in ``fanOutToSyncedLocal``, which is stateless/static) because a
+    /// streaming resampler must carry its filter state across delivery buffers —
+    /// a fresh one per buffer would click at every boundary. Queue-confined:
+    /// created/cleared under `queue` alongside `syncedLocalSink` in
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``, snapshotted under `queue` in
+    /// ``handleBuffer(_:)``, then run only on the single tap-delivery thread.
+    /// Deliberately NOT a ``FractionalResampler`` — that stays the sink's ppm
+    /// DRIFT corrector at ratio ≈ 1; base conversion is a distinct step here.
+    private var syncedLocalBaseResampler: SyncedLocalBaseResampler?
+
     /// Fired on every state transition so a UI (or a test) can observe the
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
@@ -374,6 +388,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     public func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
         let needsRecreate: Bool = queue.sync {
             self.syncedLocalSink = sink
+            // Build the base-rate converter for THIS sink's render rate (read once
+            // at sink construction, T3 Part B). A brand-new instance per attach so
+            // its streaming filter state starts clean and a rate change between
+            // attaches is honored; cleared on detach.
+            if let sink {
+                self.syncedLocalBaseResampler = SyncedLocalBaseResampler(
+                    inputRate: Double(PCMFormat.airplay.sampleRate),
+                    outputRate: sink.renderSampleRate,
+                    channelCount: PCMFormat.airplay.channels)
+            } else {
+                self.syncedLocalBaseResampler = nil
+            }
             let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
             guard newPID != syncedLocalRenderPID else { return false }
             syncedLocalRenderPID = newPID
@@ -438,8 +464,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the actual conversion OUTSIDE it so a slow convert can't stall stop().
         // `meteringActive` rides along on the same read (T-GATE) — no separate
         // lock acquisition per buffer.
-        let (converter, metering, syncedSink) = queue.sync {
-            (self.converter, self.meteringActive, self.syncedLocalSink)
+        let (converter, metering, syncedSink, baseResampler) = queue.sync {
+            (self.converter, self.meteringActive, self.syncedLocalSink, self.syncedLocalBaseResampler)
         }
         guard let converter else { return }
 
@@ -450,14 +476,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         sink.write(pcm: pcm, pts: buffer.pts)
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
-        // sink, widened to interleaved Float32 — ONE capture, two consumers. Gated
-        // exactly like metering below: a nil sink (play-everywhere off) means no
-        // fan-out. The sink's own scheduling holds it phase-aligned with AirPlay;
-        // its render process is self-excluded from this tap
-        // (``resolveExcludedProcessObjectIDs()``) so this fanned-out audio can't
-        // loop back as an echo.
-        if let syncedSink {
-            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink)
+        // sink — ONE capture, two consumers. Widened to interleaved Float32 and
+        // base-resampled from 44.1 kHz UP to the sink's device-native render rate
+        // (T3 Part B) so the sink's engine runs at the output device's own rate.
+        // Gated exactly like metering below: a nil sink (play-everywhere off), or
+        // no base resampler, means no fan-out. The sink's own scheduling holds it
+        // phase-aligned with AirPlay; its render process is self-excluded from this
+        // tap (``resolveExcludedProcessObjectIDs()``) so this fanned-out audio
+        // can't loop back as an echo.
+        if let syncedSink, let baseResampler {
+            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink, resampler: baseResampler)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
@@ -572,15 +600,29 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     /// Widen one interleaved S16LE airplay-format buffer (``PCMFormat/airplay`` —
     /// 44100 / 2ch, the exact bytes handed to the engine) to interleaved Float32 in
-    /// −1.0…1.0 and hand it to the delayed local sink with the capture `pts`.
+    /// −1.0…1.0, base-resample it UP to the sink's device-native render rate, and
+    /// hand it to the delayed local sink with the capture `pts` (T3 Part B).
     ///
-    /// Reuses the engine's already-resampled/channel-matched PCM rather than a
-    /// SECOND `AVAudioConverter` pass off the raw tap buffer: one capture drives
-    /// both consumers with a single heavy conversion plus this cheap integer→float
-    /// widen, and the local copy is bit-for-bit the same program the AirPlay
-    /// receivers get (the whole point of "play everywhere"). Runs on the tap
-    /// delivery thread; the only allocation is the one Float scratch array.
-    static func fanOutToSyncedLocal(_ s16le: Data, pts: timespec, into sink: SyncedLocalPCMSink) {
+    /// Reuses the engine's already-resampled/channel-matched 44.1 kHz PCM rather
+    /// than a second heavy pass off the raw tap buffer: one capture drives both
+    /// consumers, plus this cheap integer→float widen and a fixed-ratio resample.
+    /// The `resampler` carries the fixed ratio `44100 / renderSampleRate`; when the
+    /// output device is itself 44.1 kHz that ratio is 1.0 and the widened samples
+    /// pass through bit-for-bit (``SyncedLocalBaseResampler/isIdentity``), so this
+    /// stays the same program the AirPlay receivers get — up-sampled only when the
+    /// device runs faster (48/88.2/96/176.4/192 kHz).
+    ///
+    /// The resample is deliberately an INTERPOLATOR (Catmull-Rom), so output frame
+    /// 0 equals input frame 0 and output frame `n` samples the input at position
+    /// `n · ratio`: it introduces NO whole-sample timeline shift, so the sink can
+    /// keep anchoring ring-sample-0 to this `pts` with no base-resample delay term
+    /// to fold into `SyncTiming`. Runs on the tap delivery thread; allocation is
+    /// the widen scratch plus the resampler's output buffer, matching the existing
+    /// per-buffer allocation posture of this path (never the sink's RT render
+    /// block, which stays alloc/lock-free).
+    static func fanOutToSyncedLocal(
+        _ s16le: Data, pts: timespec, into sink: SyncedLocalPCMSink, resampler: SyncedLocalBaseResampler
+    ) {
         let channelCount = PCMFormat.airplay.channels
         let sampleCount = s16le.count / MemoryLayout<Int16>.size
         guard channelCount > 0, sampleCount >= channelCount else { return }
@@ -594,9 +636,27 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 floats[i] = Float(Int16(littleEndian: p[i])) * scale
             }
         }
-        floats.withUnsafeBufferPointer { buf in
-            guard let base = buf.baseAddress else { return }
-            sink.enqueue(interleavedFrames: base, frameCount: frameCount, pts: pts)
+
+        // Rates equal (44.1 kHz device): pass the widened samples straight through,
+        // bit-exact and with no resampler priming lag — mirroring the converter's
+        // "resample only when the rate differs from 44100" discipline upstream.
+        if resampler.isIdentity {
+            floats.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                sink.enqueue(interleavedFrames: base, frameCount: frameCount, pts: pts)
+            }
+            return
+        }
+
+        floats.withUnsafeBufferPointer { inBuf in
+            guard let inBase = inBuf.baseAddress else { return }
+            let out = resampler.resample(input: inBase, frameCount: frameCount)
+            let outFrames = out.count / channelCount
+            guard outFrames > 0 else { return }
+            out.withUnsafeBufferPointer { outBuf in
+                guard let outBase = outBuf.baseAddress else { return }
+                sink.enqueue(interleavedFrames: outBase, frameCount: outFrames, pts: pts)
+            }
         }
     }
 
@@ -792,11 +852,147 @@ public protocol PCMConverting: Sendable {
 /// scheduling, not format bridging (see ``SyncedLocalSink/enqueue(interleavedFrames:frameCount:pts:)``).
 public protocol SyncedLocalPCMSink: AnyObject, Sendable {
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec)
+
+    /// The sink's device-native render rate (Hz). The coordinator base-resamples
+    /// the 44.1 kHz airplay feed UP to this once before enqueueing, so the ring —
+    /// and the sink's `AVAudioEngine` — run at the output device's own rate and
+    /// opening the sink never renegotiates it (plan Part B). Defaulted to the
+    /// airplay rate so a test spy that doesn't care about rate conversion (its
+    /// feed then passes straight through, ratio 1.0) needn't implement it.
+    var renderSampleRate: Double { get }
+}
+
+extension SyncedLocalPCMSink {
+    var renderSampleRate: Double { Double(PCMFormat.airplay.sampleRate) }
 }
 
 /// ``SyncedLocalSink`` already exposes exactly this shape — both the AVFoundation
 /// and the inert fallback variant — so conformance is declaration-only.
 extension SyncedLocalSink: SyncedLocalPCMSink {}
+
+/// A streaming, fixed-ratio 4-point cubic (Catmull-Rom) resampler for the
+/// synced-local fan-out's ONE base-rate conversion: the 44.1 kHz airplay feed →
+/// the sink's device-native render rate, done before the ring (T3 Part B).
+///
+/// Distinct from ``FractionalResampler`` on purpose. That one is the sink's ppm
+/// DRIFT corrector — its ratio stays ≈ 1 under a PI loop and it is clamped to
+/// [0.5, 2.0], a range base conversion up to 96/176.4/192 kHz would exceed. This
+/// one takes a FIXED ratio spanning every real output rate and does no drift
+/// work, keeping the two concerns separate (plan: keep the `FractionalResampler`
+/// a 1 ± ppm drift corrector only; base conversion must not run through it). The
+/// Catmull-Rom kernel is the same math the phase-lock spike validated
+/// (`dev/notes/phase-lock-spike-findings.md`).
+///
+/// Sync-critical interpolator property: at the stream start (`frac == 0`) the
+/// cubic collapses to the first input frame, so `output[0] == input[0]` exactly,
+/// and thereafter output frame `n` samples the input at position `n · ratio`.
+/// There is NO whole-sample group delay to compensate, so the caller anchors
+/// ring-sample-0 to the input `pts` unchanged (no `SyncTiming` delay term for the
+/// base resample).
+///
+/// Streaming across delivery buffers: the 4-tap register and the fractional phase
+/// carry between ``resample(input:frameCount:)`` calls, so block boundaries are
+/// seamless. Single-consumer (the tap delivery thread), like the ring it feeds.
+final class SyncedLocalBaseResampler {
+
+    let channelCount: Int
+    /// Input frames consumed per output frame = `inputRate / outputRate`.
+    let ratio: Double
+    /// Input and output rates match → the feed passes through untouched.
+    let isIdentity: Bool
+
+    /// 4 taps (`d0..d3`) of `channelCount` interleaved samples each; carries the
+    /// interpolation window across buffers.
+    private var taps: [Float]
+    private var frac: Double = 0
+    private var primed = false
+
+    init(inputRate: Double, outputRate: Double, channelCount: Int) {
+        let cc = max(1, channelCount)
+        self.channelCount = cc
+        let inR = (inputRate.isFinite && inputRate > 0) ? inputRate : Double(PCMFormat.airplay.sampleRate)
+        let outR = (outputRate.isFinite && outputRate > 0) ? outputRate : inR
+        let r = inR / outR
+        self.ratio = r
+        self.isIdentity = abs(r - 1.0) < 1e-12
+        self.taps = [Float](repeating: 0, count: 4 * cc)
+    }
+
+    /// Resample `frameCount` interleaved input frames (buffer length ≥
+    /// `frameCount · channelCount`) to freshly-returned interleaved output at the
+    /// output rate. Empty only when the very first call can't prime — a first
+    /// block shorter than the 3-frame lookahead, which real converter blocks never
+    /// are (guarded so a pathological tiny first buffer drops rather than traps).
+    func resample(input: UnsafePointer<Float>, frameCount: Int) -> [Float] {
+        let cc = channelCount
+        guard frameCount > 0 else { return [] }
+        if isIdentity {
+            return Array(UnsafeBufferPointer(start: input, count: frameCount * cc))
+        }
+
+        // Upper bound on outputs producible from this block (see class note): the
+        // loop always exhausts the input (`break outer`) before hitting this cap,
+        // so no input frame is ever dropped; the tail is trimmed after.
+        let maxOutFrames = Int((Double(frameCount) / ratio).rounded(.up)) + 4
+        var out = [Float](repeating: 0, count: maxOutFrames * cc)
+        var produced = 0
+
+        out.withUnsafeMutableBufferPointer { ob in
+            guard let obase = ob.baseAddress else { return }
+            taps.withUnsafeMutableBufferPointer { tp in
+                guard let d0 = tp.baseAddress else { return }
+                let d1 = d0 + cc, d2 = d0 + 2 * cc, d3 = d0 + 3 * cc
+                var inIdx = 0
+
+                // Prime once: d0 = 0 (implicit pre-start history), d1/d2/d3 = the
+                // first three input frames. `output[0]` then collapses to d1 =
+                // input[0] at frac 0 — the exact-anchor property.
+                if !primed {
+                    guard frameCount >= 3 else { return }
+                    for ch in 0..<cc {
+                        d0[ch] = 0
+                        d1[ch] = input[ch]
+                        d2[ch] = input[cc + ch]
+                        d3[ch] = input[2 * cc + ch]
+                    }
+                    inIdx = 3
+                    frac = 0
+                    primed = true
+                }
+
+                outer: while produced < maxOutFrames {
+                    // Advance the window until frac ∈ [0, 1). If the block runs out
+                    // mid-advance, stop and preserve the register + frac for the
+                    // next call (seamless resume, no extrapolation past the taps).
+                    while frac >= 1.0 {
+                        if inIdx >= frameCount { break outer }
+                        let src = inIdx * cc
+                        for ch in 0..<cc {
+                            d0[ch] = d1[ch]; d1[ch] = d2[ch]; d2[ch] = d3[ch]
+                            d3[ch] = input[src + ch]
+                        }
+                        inIdx += 1
+                        frac -= 1.0
+                    }
+                    let f = Float(frac)
+                    let dst = obase + produced * cc
+                    for ch in 0..<cc {
+                        let x0 = d0[ch], x1 = d1[ch], x2 = d2[ch], x3 = d3[ch]
+                        let a = -0.5 * x0 + 1.5 * x1 - 1.5 * x2 + 0.5 * x3
+                        let b = x0 - 2.5 * x1 + 2.0 * x2 - 0.5 * x3
+                        let c = -0.5 * x0 + 0.5 * x2
+                        dst[ch] = ((a * f + b) * f + c) * f + x1
+                    }
+                    produced += 1
+                    frac += ratio
+                }
+            }
+        }
+
+        out.removeLast((maxOutFrames - produced) * cc)
+        return out
+    }
+}
 
 /// Every way native capture can fail, shaped so a UI can render an actionable
 /// message and the state machine can surface it.

@@ -892,21 +892,34 @@ public func makeBackend(
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
         // T-BACKEND: builds the delayed local sink ("play everywhere") the first
-        // time the selection is Mac + ≥1 AirPlay device. Constructed at the
-        // AirPlay engine's own format (44.1 kHz / 2ch) — T-FANOUT feeds it the
-        // SAME already-converted PCM it hands the engine, reusing that
-        // conversion pipeline rather than running a second resample pass at the
-        // sink's own 48 kHz default. `presentationDelayMs` reads the backend's
-        // OWN live `startBufferMs` (T-ENGINE-DELAY / R4) so a later buffer-size
-        // change moves local playback with it, rather than a stale copy of the
-        // value at launch.
+        // time the selection is Mac + ≥1 AirPlay device. Rendered at the DEFAULT
+        // OUTPUT DEVICE's own native rate (T3 Part B), read here at construction so
+        // opening the sink's `AVAudioEngine` never renegotiates the device between
+        // 48 and 44.1 kHz — the renegotiation that silenced AirPlay when the Mac
+        // was added to a Mac+AirPlay set. `NativeCaptureCoordinator` base-resamples
+        // the 44.1 kHz airplay feed UP to this rate once before the ring. The read
+        // uses `kAudioHardwarePropertyDefaultOutputDevice` (never
+        // `DefaultSystemOutput`); if it fails we fall back to the sink's own
+        // 48 kHz default (the common built-in rate). Read ONCE per sink
+        // construction — a later default-device change is handled by the sink's
+        // own lifecycle rebuild, not a live rate follow (deferred).
+        // `presentationDelayMs` reads the backend's OWN live `startBufferMs`
+        // (T-ENGINE-DELAY / R4) so a later buffer-size change moves local playback
+        // with it, rather than a stale copy of the value at launch.
         // userOffsetMs: T-OFFSET-UI's manual ms bias (Settings › Audio ›
         // Advanced), read LIVE from `AppSettings` on every (re)anchor/rebuild —
         // never a stale copy captured at launch — so a change takes effect on
         // the next connect or lifecycle rebuild.
         nativeBackend.syncedLocalSinkFactory = {
-            SyncedLocalSink(
-                renderSampleRate: 44_100,
+            let deviceNativeRate: Double
+            if let rate = try? LocalOutputLatency.defaultOutputDeviceNominalSampleRate(),
+               rate.isFinite, rate > 0 {
+                deviceNativeRate = rate
+            } else {
+                deviceNativeRate = 48_000
+            }
+            return SyncedLocalSink(
+                renderSampleRate: deviceNativeRate,
                 channelCount: 2,
                 presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs },
                 userOffsetMs: { AppSettings().syncOffsetMs })

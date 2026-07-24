@@ -96,13 +96,13 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap: FakeTap,
         sink: SpySink,
         converter: FakeConverter,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] }
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { tap },
             sink: sink,
             makeConverter: { _ in converter },
-            resolvePID: resolvePID,
+            resolveProcessSet: resolveProcessSet,
             muteBehavior: .mutedWhenTapped
         )
     }
@@ -321,7 +321,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
@@ -342,7 +342,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         coordinator.updateRouting(
@@ -370,7 +370,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         coordinator.updateRouting(
@@ -393,7 +393,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         coordinator.updateRouting(
@@ -417,7 +417,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         // Only a user-excluded app, no routes yet.
@@ -439,7 +439,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         coordinator.start()
         let route = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
@@ -460,7 +460,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
 
         // Not capturing yet — updateRouting must not create a tap.
         coordinator.updateRouting(

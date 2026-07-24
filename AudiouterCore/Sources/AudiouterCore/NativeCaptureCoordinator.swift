@@ -80,14 +80,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private let makeConverter: @Sendable (TapFormat) -> PCMConverting
     private let muteBehavior: TapMuteBehavior
 
-    /// Bundle ID -> running pid, for the exclusion list (T4). AppKit-only
-    /// (`NSRunningApplication`), so `AudiouterCore` cannot resolve
-    /// this itself (package rule, `AudiouterCore/AGENTS.md`) —
-    /// mirrors `PerAppCaptureCoordinator`'s injected `resolvePID` exactly.
-    /// Defaults to "nothing resolves," which reproduces today's
-    /// always-empty exclusion list until an AppKit-importing layer supplies
-    /// the real resolver (T6).
-    private let resolvePID: @Sendable (_ bundleID: String) -> pid_t?
+    /// Bundle ID -> the app's full process set (main + audio-playing children),
+    /// for the exclusion list (T4 / W1-T1). AppKit-only enumeration, so
+    /// `AudiouterCore` cannot resolve this itself (package rule,
+    /// `AudiouterCore/AGENTS.md`) — mirrors `PerAppCaptureCoordinator`'s injected
+    /// `resolveProcessSet` exactly. Excluding the FULL set (not just the main
+    /// pid) is what keeps a browser/Electron app's audio-playing child out of
+    /// the whole-system mix (findings R2/R14). Defaults to "nothing resolves,"
+    /// which reproduces today's always-empty exclusion list until an
+    /// AppKit-importing layer supplies the real resolver.
+    private let resolveProcessSet: AppProcessResolver
 
     // MARK: State (confined to `queue`)
 
@@ -144,12 +146,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///   - engine: the ``AirPlayEngine`` to feed. `write(pcm:pts:)` is the only
     ///     method used (nonisolated, fire-and-forget), so the sink is the engine
     ///     itself via ``AirPlayEngine`` conforming to ``PCMSink``.
-    ///   - resolvePID: bundle ID -> running pid, for the live exclusion list
-    ///     (T4 — apps individually routed elsewhere, or user-excluded via
-    ///     Settings, must not double up into the system-wide mix). Defaults
-    ///     to "nothing resolves" (today's behavior: an always-empty
+    ///   - resolveProcessSet: bundle ID -> the app's process set, for the live
+    ///     exclusion list (T4 — apps individually routed elsewhere, or
+    ///     user-excluded via Settings, must not double up into the system-wide
+    ///     mix). Defaults to "nothing resolves" (today's behavior: an always-empty
     ///     exclusion list) until an AppKit-importing layer wires the real
-    ///     resolver (T6).
+    ///     resolver.
     ///   - name: a short label used for the private tap/aggregate device name.
     ///   - muteBehavior: `.mutedWhenTapped` (default) silences local playback
     ///     while capturing — matching the native-path intent (audio goes to the
@@ -157,7 +159,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     #if canImport(AudioToolbox)
     public convenience init(
         engine: AirPlayEngine,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         name: String = "Audiouter",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
@@ -171,7 +173,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             },
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
-            resolvePID: resolvePID,
+            resolveProcessSet: resolveProcessSet,
             muteBehavior: muteBehavior
         )
     }
@@ -183,13 +185,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> SystemAudioTap,
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
         self.makeTap = makeTap
         self.sink = sink
         self.makeConverter = makeConverter
-        self.resolvePID = resolvePID
+        self.resolveProcessSet = resolveProcessSet
         self.muteBehavior = muteBehavior
     }
 
@@ -345,14 +347,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     /// Resolve the live excluded-bundle-ID set to pids via the injected
-    /// ``resolvePID`` closure. Best-effort: a bundle ID with no resolvable
-    /// running process (not launched, or the AppKit lookup misses) is
-    /// silently dropped rather than failing tap creation — the whole-system
-    /// tap must still succeed even if one excluded app isn't
-    /// pid-resolvable yet. MUST be called while holding `queue`
+    /// ``resolveProcessSet`` closure. Each bundle ID resolves to its FULL process
+    /// set (main + audio-playing children), so excluding e.g. Chrome excludes its
+    /// audio helper too (findings R2/R14) — not just the main pid. Best-effort: a
+    /// bundle ID with no resolvable running process (not launched, or the AppKit
+    /// lookup misses) contributes nothing rather than failing tap creation — the
+    /// whole-system tap must still succeed even if one excluded app isn't
+    /// resolvable yet. MUST be called while holding `queue`
     /// (`currentExcludedBundleIDs` is queue-confined).
     private func resolveExcludedPIDs() -> Set<pid_t> {   // must hold `queue`
-        Set(currentExcludedBundleIDs.compactMap(resolvePID))
+        Set(currentExcludedBundleIDs.flatMap(resolveProcessSet))
     }
 
     // MARK: Buffer delivery (tap IOProc thread → convert → engine)

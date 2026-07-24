@@ -376,7 +376,7 @@ final class NativeBackendTests: XCTestCase {
     private func makeBackend(
         systemVolume: SystemVolumeControlling = FakeSystemVolume(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
@@ -384,7 +384,7 @@ final class NativeBackendTests: XCTestCase {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery,
-            systemVolume: systemVolume, connectVolume: connectVolume, resolvePID: resolvePID,
+            systemVolume: systemVolume, connectVolume: connectVolume, resolveProcessSet: resolveProcessSet,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture)
         return (backend, engine, discovery)
@@ -392,7 +392,7 @@ final class NativeBackendTests: XCTestCase {
 
     /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
     /// throws, so a coordinator built over it takes every bundle ID all the way
-    /// to `.capturing` — unlike the default `resolvePID`-returns-nil setup
+    /// to `.capturing` — unlike the default `resolveProcessSet`-returns-empty setup
     /// (`PIDRecorder`), which fails fast at `.appNotRunning` by design and is
     /// what most of this file uses to exercise routing TOPOLOGY independent of
     /// real capture. Tests that need `.routedApps`/the mixer to reflect an app
@@ -411,7 +411,7 @@ final class NativeBackendTests: XCTestCase {
     /// `.capturing` (T8) — pass as `injectedPerAppCapture:` to `makeBackend`.
     private func workingPerAppCapture() -> PerAppCaptureCoordinator {
         PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { AlwaysSucceedsTap() }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
     }
 
     /// Thread-safe recorder for the bundle IDs a per-app capture asked to resolve —
@@ -422,9 +422,9 @@ final class NativeBackendTests: XCTestCase {
         private let lock = NSLock()
         private var _asked: [String] = []
         var asked: [String] { lock.withLock { _asked } }
-        func resolve(_ bundleID: String) -> pid_t? {
+        func resolve(_ bundleID: String) -> [pid_t] {
             lock.withLock { _asked.append(bundleID) }
-            return nil
+            return []
         }
     }
 
@@ -2820,7 +2820,7 @@ final class NativeBackendTests: XCTestCase {
     /// via the engine's per-app `addOutput(_:streamId:)`.
     func testAppRouteBindsDeviceToNonZeroStream() async {
         let pids = PIDRecorder()
-        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        let (backend, engine, discovery) = makeBackend(resolveProcessSet: { pids.resolve($0) })
         defer { backend.stop() }
         let device = ap2Device()
         await startAndDiscover(backend, engine, discovery, device)
@@ -2851,7 +2851,7 @@ final class NativeBackendTests: XCTestCase {
     /// the RTSP reconnect).
     func testAppRouteToAirPlay1OnlyDeviceIsRefused() async {
         let pids = PIDRecorder()
-        let (backend, engine, discovery) = makeBackend(resolvePID: { pids.resolve($0) })
+        let (backend, engine, discovery) = makeBackend(resolveProcessSet: { pids.resolve($0) })
         defer { backend.stop() }
         let device = ap1Device()
         await startAndDiscover(backend, engine, discovery, device)
@@ -2952,7 +2952,7 @@ final class NativeBackendTests: XCTestCase {
     /// name on a route change, and fires AGAIN with the updated app list when a
     /// second app is added to the same device.
     ///
-    /// Uses `workingPerAppCapture()` (T8), not the default `resolvePID`-returns-nil
+    /// Uses `workingPerAppCapture()` (T8), not the default `resolveProcessSet`-returns-empty
     /// setup: `.routedApps` now reflects apps that are ACTUALLY capturing, not just
     /// routed intent (T8 excludes a `.failed` bundle ID — e.g. `.appNotRunning`,
     /// which the default setup always hits immediately — from the mixer topology so
@@ -3045,7 +3045,7 @@ final class NativeBackendTests: XCTestCase {
                 tap.onRegister = { bundleID in registry.register(bundleID, tap) }
                 return tap
             },
-            resolvePID: { _ in 4242 },
+            resolveProcessSet: { _ in [4242] },
             muteBehavior: .mutedWhenTapped)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
@@ -3114,12 +3114,12 @@ final class NativeBackendTests: XCTestCase {
     /// whole-system stream's own device.
     func testUpdateAppRoutesExcludesRoutedAppFromSystemMixWhileSelectedDevicesActive() async {
         let pids: [String: pid_t] = ["com.routed": 111, "com.other": 222]
-        let resolvePID: @Sendable (String) -> pid_t? = { pids[$0] }
-        let (backend, engine, discovery) = makeBackend(resolvePID: resolvePID)
+        let resolveProcessSet: AppProcessResolver = { bid in pids[bid].map { [$0] } ?? [] }
+        let (backend, engine, discovery) = makeBackend(resolveProcessSet: resolveProcessSet)
         let tap = RecordingSystemTap()
         let coordinator = NativeCaptureCoordinator(
             makeTap: { tap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
-            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+            resolveProcessSet: resolveProcessSet, muteBehavior: .mutedWhenTapped)
         backend.captureCoordinator = coordinator
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -3414,12 +3414,12 @@ final class NativeBackendTests: XCTestCase {
     func testProcessNotYetAudibleBoundedRetryRecoversAndRejoinsMixerTopology() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 2)
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
@@ -3450,12 +3450,12 @@ final class NativeBackendTests: XCTestCase {
     func testProcessNotYetAudibleRetriesPastOldCapOfFiveAttempts() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 7)
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
@@ -3482,12 +3482,12 @@ final class NativeBackendTests: XCTestCase {
         // Never succeeds within the test window — every attempt fails.
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 10_000)
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
@@ -3537,12 +3537,12 @@ final class NativeBackendTests: XCTestCase {
     func testRebindRecoveryRetriesThenSucceedsWithinBoundedAttempts() async {
         let tap = RebindTriggerTap()
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
@@ -3586,12 +3586,12 @@ final class NativeBackendTests: XCTestCase {
     func testRebindRecoveryGivesUpAfterMaxAttempts() async {
         let tap = RebindTriggerTap()
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            resolvePID: { _ in 4242 }, injectedPerAppCapture: perAppCapture,
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
@@ -3711,10 +3711,10 @@ final class NativeBackendTests: XCTestCase {
     /// against the REAL `NativeCaptureCoordinator` (exclusion observed end to end)
     /// with a scripted per-app tap + a local-playback spy.
     func testCurrentDeviceRouteExcludesAppFromSystemMixAndStartsLocalStream() async {
-        let resolvePID: @Sendable (String) -> pid_t? = { $0 == "com.local" ? 111 : nil }
+        let resolveProcessSet: AppProcessResolver = { $0 == "com.local" ? [111] : [] }
         // Per-app tap that always reaches `.capturing` (no real Core Audio).
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { AlwaysSucceedsTap() }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
 
         // Real whole-system coordinator over a recording tap, so its exclusion set
@@ -3722,7 +3722,7 @@ final class NativeBackendTests: XCTestCase {
         let systemTap = RecordingSystemTap()
         let coordinator = NativeCaptureCoordinator(
             makeTap: { systemTap }, sink: NoOpSink(), makeConverter: { _ in PassthroughConverter() },
-            resolvePID: resolvePID, muteBehavior: .mutedWhenTapped)
+            resolveProcessSet: resolveProcessSet, muteBehavior: .mutedWhenTapped)
         backend.captureCoordinator = coordinator
         let localPlayback = SpyLocalPlayback()
         backend.localPlaybackEngine = localPlayback
@@ -3770,7 +3770,7 @@ final class NativeBackendTests: XCTestCase {
     /// low-latency path) maps the 0–100 int onto the engine's 0.0…1.0 contract.
     func testSetLocalPlaybackVolumeReachesLocalEngine() async {
         let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, resolvePID: { _ in 4242 }, muteBehavior: .mutedWhenTapped)
+            makeTap: { AlwaysSucceedsTap() }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
         let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
         let localPlayback = SpyLocalPlayback()
         backend.localPlaybackEngine = localPlayback
@@ -3836,7 +3836,7 @@ final class NativeBackendTests: XCTestCase {
                 tap.onRegister = { bundleID in registry.register(bundleID, tap) }
                 return tap
             },
-            resolvePID: { _ in 4242 },
+            resolveProcessSet: { _ in [4242] },
             muteBehavior: muteBehavior)
     }
 

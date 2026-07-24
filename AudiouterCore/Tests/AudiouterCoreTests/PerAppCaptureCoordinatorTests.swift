@@ -7,7 +7,7 @@ import AudioToolbox
 
 /// Hermetic tests for ``PerAppCaptureCoordinator`` (T3). Every seam is
 /// injected — a fake ``ProcessAudioTap`` factory (no TCC, no aggregate
-/// device, no real Core Audio) and a scripted `resolvePID` closure (no
+/// device, no real Core Audio) and a scripted `resolveProcessSet` closure (no
 /// `NSRunningApplication`) — so the whole per-bundle-ID state machine runs
 /// hermetically. Mirrors ``NativeCaptureCoordinatorTests``' doubles/pattern.
 final class PerAppCaptureCoordinatorTests: XCTestCase {
@@ -97,7 +97,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let spy = BufferSpy()
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 4242 },
+            resolveProcessSet: { _ in [4242] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -149,7 +149,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { factory.make() },
-            resolvePID: { bundleID in bundleID == "com.example.a" ? 111 : 222 },
+            resolveProcessSet: { bundleID in bundleID == "com.example.a" ? [111] : [222] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -183,12 +183,12 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tapB.teardowns, 1)
     }
 
-    // MARK: - resolvePID failure surfaces as .failed(.appNotRunning), retryable.
+    // MARK: - resolveProcessSet failure surfaces as .failed(.appNotRunning), retryable.
 
     func testUnresolvedBundleIDSurfacesAppNotRunning() {
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { FakeProcessTap() },
-            resolvePID: { _ in nil },
+            resolveProcessSet: { _ in [] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.missing")
@@ -208,7 +208,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         tap.startError = .processNotYetAudible(bundleID: "com.example.silent")
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 999 },
+            resolveProcessSet: { _ in [999] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.silent")
@@ -242,7 +242,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testUnavailableProcessTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { UnavailableProcessTap() },
-            resolvePID: { _ in 1 },
+            resolveProcessSet: { _ in [1] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.old")
@@ -268,7 +268,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let resolvedPid = PidBox(500)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in resolvedPid.get() },
+            resolveProcessSet: { _ in [resolvedPid.get()] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
@@ -298,7 +298,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let tap = FakeProcessTap()
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 4242 },
+            resolveProcessSet: { _ in [4242] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
@@ -361,9 +361,9 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let nextBundleID = NSMutableString(string: "")
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { factory.make(for: nextBundleID as String) },
-            resolvePID: { bundleID in
+            resolveProcessSet: { bundleID in
                 nextBundleID.setString(bundleID)
-                return bundleID == "com.example.paused" ? 100 : 200
+                return bundleID == "com.example.paused" ? [100] : [200]
             },
             muteBehavior: .mutedWhenTapped
         )
@@ -404,7 +404,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let tap = FakeProcessTap()
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 1 },
+            resolveProcessSet: { _ in [1] },
             muteBehavior: .mutedWhenTapped
         )
 
@@ -425,7 +425,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         let tap = FakeProcessTap()
         var coordinator: PerAppCaptureCoordinator? = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 1 },
+            resolveProcessSet: { _ in [1] },
             muteBehavior: .mutedWhenTapped
         )
         coordinator?.start(bundleID: "com.example.music")

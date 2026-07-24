@@ -829,14 +829,15 @@ public enum BackendKind {
 /// Pass `nil` (the default) to resolve the backend via
 /// ``BackendKind/resolved(explicit:environment:)`` — explicit arg → the
 /// `AIRPLAY_BACKEND` env var → `.native`.
-/// - Parameter resolvePID: bundle ID → running app's pid, for per-app capture
-///   (T6/T7). Core can't import AppKit (`NSRunningApplication`), so this is
-///   threaded in from the AppKit layer (`AppDelegate`). Defaults to "nothing
-///   resolves", which keeps the per-app path inert (no pid ⇒ no tap) for callers
-///   that don't supply it — every non-native backend ignores it entirely.
+/// - Parameter resolveProcessSet: bundle ID → the app's full process set (main +
+///   audio-playing children), for per-app capture and exclusion (W1-T1,
+///   ``AppProcessResolver``). Core can't enumerate `NSRunningApplication`, so
+///   this is threaded in from the AppKit layer (`AppDelegate`). Defaults to
+///   "nothing resolves", which keeps the per-app path inert (empty set ⇒ no tap)
+///   for callers that don't supply it — every non-native backend ignores it.
 public func makeBackend(
     _ kind: BackendKind? = nil,
-    resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+    resolveProcessSet: @escaping AppProcessResolver = { _ in [] }
 ) -> OutputBackend {
     switch BackendKind.resolved(explicit: kind) {
     case .mock:
@@ -877,15 +878,15 @@ public func makeBackend(
         let startBufferMs = nativeStartBufferMs()
         let engine = AirPlayEngine(
             config: EngineConfig(startBufferMs: startBufferMs))
-        // Bundle ID → running pid, supplied by the caller (T7: `AppDelegate` passes
-        // an `NSRunningApplication`-backed resolver; other callers get the "nothing
-        // resolves" default). Shared by BOTH the per-app capture (owned by
-        // NativeBackend) and the whole-system tap so their exclusion/capture views
-        // agree.
-        let nativeBackend = NativeBackend(engine: engine, resolvePID: resolvePID)
+        // Bundle ID → the app's full process set, supplied by the caller
+        // (`AppDelegate` passes a `ProcessSetResolver`-backed resolver; other
+        // callers get the "nothing resolves" default). Shared by BOTH the per-app
+        // capture (owned by NativeBackend) and the whole-system tap so their
+        // exclusion/capture views agree.
+        let nativeBackend = NativeBackend(engine: engine, resolveProcessSet: resolveProcessSet)
         nativeBackend.seedStartBufferMs(startBufferMs)
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(
-            engine: engine, resolvePID: resolvePID)
+            engine: engine, resolveProcessSet: resolveProcessSet)
         // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()

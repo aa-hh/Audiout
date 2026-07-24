@@ -42,15 +42,10 @@ import AudioToolbox
 /// `NSRunningApplication`") needs AppKit (`NSRunningApplication` /
 /// `NSWorkspace` live in the AppKit framework). `AudiouterCore` must
 /// never import AppKit (package rule, `AudiouterCore/AGENTS.md`), so
-/// the resolver is an injected closure (`resolvePID`) rather than a built-in
-/// call. Whichever AppKit-importing layer wires this coordinator in (a later
-/// task) supplies something like:
-/// ```swift
-/// { bundleID in
-///     NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-///         .first?.processIdentifier
-/// }
-/// ```
+/// the resolver is an injected closure (`resolveProcessSet`,
+/// ``AppProcessResolver``) rather than a built-in call. Whichever
+/// AppKit-importing layer wires this coordinator in supplies a
+/// ``ProcessSetResolver`` (bundle ID → the app's full main+children pid set).
 ///
 /// ## Known edge cases (do not "fix" these with speculative logic)
 /// - A pid that has never opened an audio stream cannot be translated to a
@@ -99,7 +94,12 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // MARK: Injected dependencies
 
     private let makeTap: @Sendable () -> ProcessAudioTap
-    private let resolvePID: @Sendable (_ bundleID: String) -> pid_t?
+    /// Bundle ID → the app's full process set (main + audio-playing children),
+    /// ordered main-first (W1-T1, ``AppProcessResolver``). This coordinator
+    /// still taps a SINGLE process per slot (the `.first` pid) — teaching it to
+    /// tap the whole set is W1-T2 — but the set is resolved here so that work
+    /// has it available and so relaunch/child-spawn pick up new pids.
+    private let resolveProcessSet: AppProcessResolver
     private let muteBehavior: TapMuteBehavior
 
     // MARK: State (confined to `queue`)
@@ -168,9 +168,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
     /// Production initializer: wires the real per-process Core Audio tap.
     /// - Parameters:
-    ///   - resolvePID: bundle ID -> running pid. Must be supplied by an
-    ///     AppKit-importing layer (`NSRunningApplication`); Core cannot do
-    ///     this itself. Returns `nil` if no running app matches.
+    ///   - resolveProcessSet: bundle ID -> the app's process set (main +
+    ///     helper/child pids), ordered main-first. Must be supplied by an
+    ///     AppKit-importing layer; Core cannot enumerate `NSRunningApplication`
+    ///     itself. Empty if no running app matches.
     ///   - name: a short label used for the private tap/aggregate device
     ///     names (one aggregate per active bundle ID, named `"PerAppTap-
     ///     <name>-<bundleID>"`).
@@ -179,7 +180,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     ///     (its audio goes to the redirect target, not the built-in speakers).
     #if canImport(AudioToolbox)
     public convenience init(
-        resolvePID: @escaping @Sendable (String) -> pid_t?,
+        resolveProcessSet: @escaping AppProcessResolver,
         name: String = "AirPlayController",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
@@ -191,7 +192,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return UnavailableProcessTap()
                 }
             },
-            resolvePID: resolvePID,
+            resolveProcessSet: resolveProcessSet,
             muteBehavior: muteBehavior
         )
     }
@@ -202,11 +203,11 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// real tap, real Core Audio, or a real running app).
     init(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
-        resolvePID: @escaping @Sendable (String) -> pid_t?,
+        resolveProcessSet: @escaping AppProcessResolver,
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
         self.makeTap = makeTap
-        self.resolvePID = resolvePID
+        self.resolveProcessSet = resolveProcessSet
         self.muteBehavior = muteBehavior
     }
 
@@ -311,7 +312,9 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // slot.
 
     private func beginStart(bundleID: String) {
-        guard let pid = resolvePID(bundleID) else {
+        // W1-T1: resolve the app's full process set; this coordinator still taps
+        // the main process only (`.first`). W1-T2 teaches it to tap the whole set.
+        guard let pid = resolveProcessSet(bundleID).first else {
             queue.sync {
                 guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return }
                 transition(slot, bundleID: bundleID, to: .failed(.appNotRunning(bundleID: bundleID)))
@@ -384,7 +387,9 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         }
         claim.old?.teardown()
 
-        guard let pid = resolvePID(bundleID) else {
+        // W1-T1: re-resolve the process set (the app may have relaunched with new
+        // pids); still taps the main process only until W1-T2.
+        guard let pid = resolveProcessSet(bundleID).first else {
             AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FAILED: app not running (pid unresolved)")
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
@@ -578,8 +583,8 @@ public protocol ProcessAudioTap: AnyObject {
 /// actionable message and the state machine can decide whether a retry is
 /// sensible (``isRetryable``).
 public enum PerAppCaptureError: Error, Equatable, Sendable {
-    /// `resolvePID` found no running app with this bundle ID (not launched
-    /// yet, or quit). Retryable — `start(bundleID:)` again once it's running.
+    /// `resolveProcessSet` found no running process for this bundle ID (not
+    /// launched yet, or quit). Retryable — `start(bundleID:)` again once running.
     case appNotRunning(bundleID: String)
     /// The pid resolved, but Core Audio has no process object for it yet —
     /// it has never opened an audio stream (documented `dev/audiocap` edge
@@ -639,7 +644,7 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
 //
 // Compiled only where AudioToolbox is available (macOS). The unit test suite
 // exercises the state machine through a fake ProcessAudioTap and a scripted
-// resolvePID closure, and never touches these.
+// resolveProcessSet closure, and never touches these.
 
 #if canImport(AudioToolbox)
 

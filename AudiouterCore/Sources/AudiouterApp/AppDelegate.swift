@@ -33,15 +33,57 @@ func audiouterEmergencyWriteStderr(_ message: String) {
     }
 }
 
-/// Resolve a bundle ID to the pid of a running instance, or nil if it isn't
-/// running (T7). This is the real per-app-capture resolver the native backend
-/// needs: Core can't import AppKit (`NSRunningApplication`), so the AppKit layer
-/// supplies it via `makeBackend(resolvePID:)`. A free `@Sendable` closure (not an
-/// instance method) so it can be used in `AppDelegate`'s `backend` property
-/// initializer, which runs before `self` exists.
-private let resolveRunningAppPID: @Sendable (String) -> pid_t? = { bundleID in
-    NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        .first?.processIdentifier
+/// Resolve a bundle ID to the FULL set of pids that make up that app — its main
+/// process AND any audio-playing helper/child processes (W1-T1). This is the real
+/// per-app-capture / exclusion resolver the native backend needs: Core can't
+/// import AppKit, so the AppKit layer supplies it via
+/// `makeBackend(resolveProcessSet:)`.
+///
+/// The grouping is done by ``ProcessSetResolver`` over the live Core Audio
+/// process-object list (bundle-ID prefix match — Chrome helpers carry
+/// `com.google.Chrome.helper…`, Firefox children carry the parent identity),
+/// with a responsible-pid walk for helpers whose own bundle ID doesn't
+/// prefix-match. The walk uses the SPI `responsibility_get_pid_for_pid` when
+/// available and is best-effort (returns nil ⇒ prefix match only, which already
+/// covers the common browsers). `NSRunningApplication` supplies a fallback for
+/// the app's own main pid so a not-yet-audible app (no audio process object yet)
+/// still resolves its main process.
+///
+/// A free `@Sendable` closure (not an instance method) so it can be used in
+/// `AppDelegate`'s `backend` property initializer, which runs before `self`.
+///
+/// The responsible-pid SPI is resolved via `dlsym` (RTLD_DEFAULT) rather than
+/// a link-time symbol — it lives in a private library and isn't always
+/// available to link against, so a runtime lookup keeps the app linkable and
+/// simply degrades to prefix-match-only when the symbol is absent. Same pattern
+/// the app uses for other SPIs (`TCCAccessPreflight`).
+private typealias ResponsiblePIDFn = @convention(c) (pid_t) -> pid_t
+private let responsiblePIDForPID: ResponsiblePIDFn? = {
+    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2 /* RTLD_DEFAULT */),
+                          "responsibility_get_pid_for_pid") else { return nil }
+    return unsafeBitCast(sym, to: ResponsiblePIDFn.self)
+}()
+
+private let resolveRunningAppProcessSet: @Sendable (String) -> [pid_t] = { bundleID in
+    let base = ProcessSetResolver(
+        enumerate: ProcessSetResolver.systemEnumerator(),
+        responsiblePID: { pid in
+            guard let fn = responsiblePIDForPID else { return nil }
+            let owner = fn(pid)
+            return (owner > 0 && owner != pid) ? owner : nil
+        })
+    var pids = base.pids(forBundleID: bundleID)
+    // Fallback: an app that hasn't opened an audio stream yet has no process
+    // object in the list, so include its NSRunningApplication main pid(s) too
+    // (deduped, appended after any audio-process pids so `.first` stays the
+    // main process). This preserves the pre-Wave-1 "resolve the main pid"
+    // behaviour for apps that aren't audible yet.
+    let seen = Set(pids)
+    for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+        let pid = app.processIdentifier
+        if pid > 0 && !seen.contains(pid) { pids.append(pid) }
+    }
+    return pids
 }
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
@@ -56,9 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
     /// Everything downstream holds an `OutputBackend`, never a concrete type.
-    /// `resolvePID` threads the real `NSRunningApplication`-backed resolver into
-    /// the native backend's per-app capture path (T7).
-    private let backend: OutputBackend = makeBackend(resolvePID: resolveRunningAppPID)
+    /// `resolveProcessSet` threads the real process-set resolver (W1-T1) into
+    /// the native backend's per-app capture + exclusion paths.
+    private let backend: OutputBackend = makeBackend(resolveProcessSet: resolveRunningAppProcessSet)
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).

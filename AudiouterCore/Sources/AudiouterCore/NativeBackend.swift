@@ -126,7 +126,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // `updateAppRoutes(_:excludedBundleIDs:)` is the single external entry point that
     // feeds a fresh routing table in (T7 calls it from AppRoutingController changes).
 
-    /// One process tap per app currently routed to a specific device. `resolvePID`
+    /// One process tap per app currently routed to a specific device. `resolveProcessSet`
     /// is injected (Core can't import AppKit / `NSRunningApplication`); it defaults
     /// to "nothing resolves", so until T7 threads a real resolver in, `start` lands
     /// each bundle ID in `.failed(.appNotRunning)` without touching Core Audio.
@@ -358,7 +358,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //     (a per-process tap on a dead pid doesn't error or EOF) — the only
     //     detection is `NSWorkspace.didTerminateApplicationNotification`, which
     //     Core can't call itself. `handleAppTerminated(bundleID:)` is the AppKit
-    //     boundary's forwarding target (mirrors the `resolvePID` injection).
+    //     boundary's forwarding target (mirrors the `resolveProcessSet` injection).
     //  2. The DEVICE a route targets disappears. Already flows end-to-end through
     //     the existing generic pipeline — `AppRoutingController.handleDeviceUnavailable`
     //     (fired from `PopoverController.update(devices:)`, PLAN decision 7) resets
@@ -507,7 +507,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `DiscoverySource` stay internal-facing (tests inject doubles); no engine or
     /// OwnTone type leaks into the public surface.
     ///
-    /// `resolvePID` maps a bundle ID to the running app's pid (for per-app capture,
+    /// `resolveProcessSet` maps a bundle ID to the app's full process set (for per-app capture,
     /// T6). It defaults to "nothing resolves" because Core can't import AppKit; the
     /// AppKit-importing layer (T7's `AppDelegate`) threads the real
     /// `NSRunningApplication`-backed resolver in. It flows to BOTH the per-app
@@ -516,12 +516,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public convenience init(
         engine: AirPlayEngine,
         discovery: NativeDiscovery = NativeDiscovery(),
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] }
     ) {
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
-            resolvePID: resolvePID)
+            resolveProcessSet: resolveProcessSet)
     }
 
     /// Injectable designated initializer (internal — tests pass a spy engine and an
@@ -532,14 +532,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// init (and `makeBackend`) stay unchanged; tests inject a fake and drive the
     /// local row with no audio hardware in the loop.
     ///
-    /// `resolvePID` is threaded into the per-app capture coordinator constructed
+    /// `resolveProcessSet` is threaded into the per-app capture coordinator constructed
     /// here (T6). Its default (`{ _ in nil }`) keeps the per-app path inert for
     /// every existing test: with no pid ever resolving, `perAppCapture.start` fails
     /// fast (`.appNotRunning`) and never opens a Core Audio tap — so the routing
     /// TOPOLOGY (`addOutput(_:streamId:)` bindings + `.routedApps` events), which is
     /// derived purely from the route table, still exercises fully.
     ///
-    /// `perAppCapture` is normally built internally from `resolvePID` (production
+    /// `perAppCapture` is normally built internally from `resolveProcessSet` (production
     /// shape); tests that need to script per-app tap behavior (T8: a quit mid-stream,
     /// a `.processNotYetAudible` failure/recovery) instead construct a
     /// ``PerAppCaptureCoordinator`` over a fake ``ProcessAudioTap`` themselves and
@@ -553,7 +553,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discoverySource: DiscoverySource,
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
@@ -565,13 +565,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.discovery = discoverySource
         self.systemVolume = systemVolume
         self.connectVolumeProvider = connectVolume
-        self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolvePID: resolvePID)
+        self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(resolveProcessSet: resolveProcessSet)
         // The metering-only tap (T3, third `.appLevel` source): its OWN coordinator,
         // built `.unmuted` and with a distinct aggregate-device name so it never
-        // collides with `perAppCapture`. Same injected `resolvePID`. Tests can
+        // collides with `perAppCapture`. Same injected `resolveProcessSet`. Tests can
         // script it via `injectedMeteringCapture` (mirrors `injectedPerAppCapture`).
         self.meteringCapture = injectedMeteringCapture
-            ?? PerAppCaptureCoordinator(resolvePID: resolvePID, name: "AudiouterMeter", muteBehavior: .unmuted)
+            ?? PerAppCaptureCoordinator(resolveProcessSet: resolveProcessSet, name: "AudiouterMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
@@ -1592,7 +1592,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a routed app's process quits mid-stream). `AppDelegate` observes
     /// `NSWorkspace.didTerminateApplicationNotification` and calls this with the
     /// terminated app's bundle ID — Core can't observe AppKit notifications itself,
-    /// mirroring the `resolvePID` injection.
+    /// mirroring the `resolveProcessSet` injection.
     ///
     /// A no-op unless `bundleID` currently has an active `.device(id:)` route: the
     /// PERSISTED route survives the quit (the silent-fallback-to-`.noRedirect`
@@ -1621,7 +1621,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (T4, bug fix: relaunching a routed app did not restart its capture).
     /// `AppDelegate` observes `NSWorkspace.didLaunchApplicationNotification` and
     /// calls this; Core can't observe AppKit notifications itself, mirroring the
-    /// `handleAppTerminated` / `resolvePID` injection pattern.
+    /// `handleAppTerminated` / `resolveProcessSet` injection pattern.
     ///
     /// Only acts when `bundleID` currently has an active `.device(id:)` route —
     /// a non-routed app launch is silently ignored. On a match it:

@@ -108,6 +108,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Confined to `queue`. See dev/notes/stability-audit-2026-07-18.md §C6.
     private var pendingDeviceChange = false
 
+    /// W2-T1 (fixes R10): the `(deviceID, nominalRate)` key the CURRENT live tap
+    /// was last (re)built against, per ``handleNominalSampleRateChanged``'s own
+    /// bookkeeping. `nil` until the first rate notification (or a fresh identity
+    /// rebuild, which resets it) — the same shape ``lastExcludedPIDs`` uses for
+    /// the exclusion side. A notification whose `(deviceID, rate)` matches this
+    /// baseline triggers ZERO Core Audio work; this is the loop-breaker that
+    /// keeps a naive rate listener from reintroducing the coreaudiod CPU storm
+    /// (see the CPU/coreaudiod-storm diagnosis: unconditional rebuild-on-every-
+    /// notification is exactly the failure mode being guarded against here).
+    /// Confined to `queue`.
+    private var lastNominalSampleRateKey: (deviceID: UInt32, rate: Double)?
+
     /// Whether RMS should be computed and handed to `onLevel` (T-GATE). `false`
     /// until ``setMeteringActive(_:)`` first flips it on — the popover isn't shown
     /// yet at coordinator construction, so there's nobody to render a meter for.
@@ -306,6 +318,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let newTap = makeTap()
         newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+        newTap.onNominalSampleRateChanged = { [weak self] deviceID, rate in
+            self?.handleNominalSampleRateChanged(deviceID: deviceID, rate: rate)
+        }
 
         do {
             // Blocking HAL work OUTSIDE the lock.
@@ -359,6 +374,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         queue.sync {
             self.tap = nil
             self.converter = nil
+            self.lastNominalSampleRateKey = nil // W2-T1: stale baseline must not survive a stop/restart
             self.transition(to: .idle)
         }
     }
@@ -614,6 +630,44 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Delegates to ``recreateTap()`` — the same "tear down + recreate while
     /// capturing" machinery T4 reuses for an exclusion-list change.
     private func handleDeviceChange() {
+        // A genuine identity change means the tap is about to be rebuilt against
+        // a (possibly) different physical device, so the rate-guard baseline —
+        // keyed on THIS device's id — is no longer meaningful. Reset it rather
+        // than carry a stale device id forward: the next rate notification for
+        // the new device always passes through once (correct — we don't yet
+        // know its rate), and dedup resumes normally after that.
+        queue.async { self.lastNominalSampleRateKey = nil }
+        recreateTap()
+    }
+
+    /// W2-T1 (fixes R10): the tapped output device renegotiated its nominal
+    /// sample rate (44.1 ↔ 48 kHz) — classically triggered by another app
+    /// grabbing the mic and forcing voice-processing mode. A process tap kept
+    /// alive through that renegotiation keeps delivering buffers at full cadence
+    /// but goes SILENT (all-zero PCM); the identity listener never fires because
+    /// the default output device's UID is unchanged. This is the whole-system
+    /// port of ``PerAppCaptureCoordinator``'s existing per-app fix — same
+    /// recovery (a full tap rebuild via ``recreateTap()``, which re-reads the
+    /// tap's real ASBD and lands a fresh `.capturing(format')`), plus the
+    /// `(deviceID, nominalRate)` compare-before-rebuild loop-breaker the per-app
+    /// side doesn't need (its rebuild is already gated by per-slot state, while
+    /// this whole-system path is the one implicated in the CPU-storm diagnosis).
+    /// An unchanged `(deviceID, rate)` — a duplicate or spurious HAL
+    /// notification — does ZERO Core Audio work. Internal (not `private`) so
+    /// tests can drive it directly, mirroring ``handleMembershipChange()``.
+    func handleNominalSampleRateChanged(deviceID: UInt32, rate: Double) {
+        let shouldRebuild: Bool = queue.sync {
+            if let last = lastNominalSampleRateKey, last.deviceID == deviceID, last.rate == rate {
+                return false
+            }
+            lastNominalSampleRateKey = (deviceID: deviceID, rate: rate)
+            return true
+        }
+        guard shouldRebuild else {
+            AudioDiag.log("NCC nominal-sample-rate notification for device \(deviceID) unchanged at \(rate)Hz — skipping rebuild")
+            return
+        }
+        AudioDiag.log("NCC nominal-sample-rate changed on tapped device \(deviceID) -> \(rate)Hz — triggering rebuild")
         recreateTap()
     }
 
@@ -664,6 +718,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let newTap = makeTap()
         newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+        newTap.onNominalSampleRateChanged = { [weak self] deviceID, rate in
+            self?.handleNominalSampleRateChanged(deviceID: deviceID, rate: rate)
+        }
 
         do {
             let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
@@ -846,6 +903,16 @@ public protocol SystemAudioTap: AnyObject {
     /// Called when the default output device changes (the tap follows it, so its
     /// format may change and it must be recreated).
     var onDefaultDeviceChanged: (@Sendable () -> Void)? { get set }
+    /// Called when the TAPPED device's `kAudioDevicePropertyNominalSampleRate`
+    /// changes (W2-T1, fixes R10) — e.g. another app grabbing the mic forces
+    /// voice-processing mode and renegotiates the output rate. Distinct from
+    /// ``onDefaultDeviceChanged``: the device's UID is unchanged, so that
+    /// listener never fires, yet the tap goes silent (all-zero buffers) until
+    /// rebuilt. Carries the tapped device's id and its new nominal rate so the
+    /// caller can apply a `(deviceID, nominalRate)` compare-before-rebuild guard
+    /// — an unconditional rebuild-on-every-notification would reintroduce the
+    /// coreaudiod CPU storm.
+    var onNominalSampleRateChanged: (@Sendable (_ deviceID: UInt32, _ nominalRate: Double) -> Void)? { get set }
 
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
@@ -938,6 +1005,7 @@ struct EngineSink: PCMSink {
 final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    var onNominalSampleRateChanged: (@Sendable (UInt32, Double) -> Void)?
 
     func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
         throw NativeCaptureError.osUnsupported(minimum: "14.2")
@@ -972,6 +1040,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    var onNominalSampleRateChanged: (@Sendable (UInt32, Double) -> Void)?
 
     private let name: String
     private var tapID: AudioObjectID = kAudioObjectUnknown
@@ -981,6 +1050,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     private var format = TapFormat(
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
+
+    /// W2-T1 (fixes R10): the actual output device the aggregate is pinned to —
+    /// set once ``createAggregate()`` resolves it. The nominal-sample-rate
+    /// listener is registered directly on THIS device (mirrors
+    /// `PerAppCaptureCoordinator`'s `tappedOutputDeviceID`), not globally, so it
+    /// only ever fires for the device we actually tap.
+    private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`
     /// below). Resampled once at `startIOProc()` (i.e. every tap create/recreate,
@@ -1015,6 +1092,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             try createAggregate()
             try startIOProc()
             installDefaultDeviceListener()
+            installSampleRateListener()
         } catch {
             // Any step after the tap/aggregate was created leaves live system
             // objects; tear them down before propagating so we never orphan a
@@ -1131,6 +1209,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
         }
+        self.tappedOutputDeviceID = outputID // W2-T1: the rate listener registers on this
         let aggregateUID = UUID().uuidString
 
         let description: [String: Any] = [
@@ -1262,10 +1341,66 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         deviceChangeBlock = nil
     }
 
+    // MARK: Nominal-sample-rate listener (W2-T1, fixes R10 — port of the
+    // documented process-tap silent-buffer fix already applied to
+    // `PerAppCaptureCoordinator`)
+    //
+    // A process tap keeps delivering buffers at full cadence but goes SILENT
+    // (all-zero PCM) when the tapped output device renegotiates its nominal
+    // sample rate (44.1 ↔ 48 kHz) — classically triggered by another app taking
+    // the mic and forcing voice-processing mode (a known, Apple-unresolved Core
+    // Audio behaviour). The only reliable recovery is a full teardown + rebuild
+    // of the tap AND aggregate, exactly what `recreateTap()` already performs
+    // for a device-identity change. The catch: this rate change happens with
+    // the default output device's UID UNCHANGED, so
+    // `kAudioHardwarePropertyDefaultOutputDevice` never fires. Listening for
+    // `kAudioDevicePropertyNominalSampleRate` on the actual tapped device
+    // catches it and drives the same rebuild via `onNominalSampleRateChanged`
+    // — carrying the device id + new rate so the coordinator can apply its
+    // `(deviceID, nominalRate)` compare-before-rebuild guard.
+    private func installSampleRateListener() {
+        guard tappedOutputDeviceID != kAudioObjectUnknown else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            let deviceID = self.tappedOutputDeviceID
+            guard deviceID != kAudioObjectUnknown else { return }
+            var rateAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var rate: Double = 0
+            var size = UInt32(MemoryLayout<Double>.size)
+            let err = AudioObjectGetPropertyData(deviceID, &rateAddress, 0, nil, &size, &rate)
+            guard err == noErr, rate.isFinite, rate > 0 else { return }
+            self.onNominalSampleRateChanged?(deviceID, rate)
+        }
+        self.sampleRateBlock = block
+        AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, listenerQueue, block)
+    }
+
+    private func removeSampleRateListener() {
+        guard let block = sampleRateBlock, tappedOutputDeviceID != kAudioObjectUnknown else {
+            sampleRateBlock = nil
+            return
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, listenerQueue, block)
+        sampleRateBlock = nil
+    }
+
     // MARK: Teardown (order matters: stop → destroy IOProc → destroy aggregate → destroy tap)
 
     func teardown() {
         removeDefaultDeviceListener()
+        removeSampleRateListener()
+        tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
             _ = AudioDeviceStop(aggregateID, proc)
             _ = AudioDeviceDestroyIOProcID(aggregateID, proc)

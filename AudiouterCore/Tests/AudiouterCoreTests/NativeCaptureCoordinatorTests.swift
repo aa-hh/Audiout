@@ -25,6 +25,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     private final class FakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onNominalSampleRateChanged: (@Sendable (UInt32, Double) -> Void)?
 
         let lock = NSLock()
         var format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
@@ -59,6 +60,9 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
+        func fireNominalSampleRateChanged(deviceID: UInt32, rate: Double) {
+            onNominalSampleRateChanged?(deviceID, rate)
+        }
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
@@ -868,6 +872,96 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(clamped.tv_nsec, 0)
     }
     #endif
+
+    // MARK: - W2-T1: nominal-sample-rate listener (fixes R10)
+
+    /// (a) A nominal-rate change on the tapped device triggers EXACTLY ONE
+    /// guarded rebuild — the silent-buffer recovery path (finding R10: a
+    /// process tap keeps delivering all-zero buffers when the output device
+    /// renegotiates its rate, e.g. a Zoom/FaceTime call grabbing the mic).
+    func testNominalSampleRateChangeTriggersExactlyOneRebuild() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        let createsAfterStart = tap.creates
+        XCTAssertTrue(stateIsCapturing(coordinator, sampleRate: 48000))
+
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+
+        XCTAssertEqual(tap.creates, createsAfterStart + 1,
+                       "a genuine rate change recreates the tap exactly once")
+        XCTAssertEqual(tap.teardowns, 1, "the stale (silent) tap must be torn down")
+        coordinator.stop()
+    }
+
+    /// (b) THE regression-prevention property: an unchanged/repeated identical
+    /// rate notification triggers ZERO rebuilds. A naive listener that rebuilds
+    /// on every notification — even a duplicate for an unchanged rate — is
+    /// exactly the failure mode that caused a confirmed coreaudiod CPU storm
+    /// elsewhere in this codebase; the `(deviceID, nominalRate)`
+    /// compare-before-rebuild guard is the loop-breaker.
+    func testUnchangedNominalSampleRateTriggersZeroRebuilds() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        let createsAfterStart = tap.creates
+
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        XCTAssertEqual(tap.creates, createsAfterStart + 1)
+        let createsAfterFirstChange = tap.creates
+
+        // Duplicate notification for the SAME device at the SAME rate — must
+        // not trigger a second rebuild.
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+
+        XCTAssertEqual(tap.creates, createsAfterFirstChange,
+                       "no rebuild for a repeated, unchanged rate notification")
+        coordinator.stop()
+    }
+
+    /// (c) A rate change reported for an unrelated/untapped device has no
+    /// effect — the `(deviceID, nominalRate)` key, not the rate alone, gates
+    /// the rebuild, so a notification about some OTHER device's rate can never
+    /// masquerade as a change to the tapped device.
+    func testNominalSampleRateChangeOnUnrelatedDeviceHasNoEffect() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        coordinator.start()
+        let createsAfterStart = tap.creates
+
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        let createsAfterChange = tap.creates
+        XCTAssertEqual(createsAfterChange, createsAfterStart + 1)
+
+        // A DIFFERENT device reporting the SAME rate is still a distinct key —
+        // must still be treated as a change (proves the guard is keyed on the
+        // tuple, not the rate alone)...
+        tap.fireNominalSampleRateChanged(deviceID: 99, rate: 44100)
+        XCTAssertEqual(tap.creates, createsAfterChange + 1,
+                       "a different device id at the same rate is still a genuine change")
+
+        // ...but repeating THAT exact (deviceID, rate) again is a true no-op.
+        let createsAfterSecondDevice = tap.creates
+        tap.fireNominalSampleRateChanged(deviceID: 99, rate: 44100)
+        XCTAssertEqual(tap.creates, createsAfterSecondDevice,
+                       "repeating the same (deviceID, rate) key is a no-op")
+        coordinator.stop()
+    }
+
+    /// A rate notification must only ever act while CAPTURING — one that lands
+    /// while idle (no tap started) does nothing, mirroring the membership-diff
+    /// idle guard.
+    func testNominalSampleRateChangeWhileIdleIsNoOp() {
+        let tap = FakeTap()
+        _ = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        tap.fireNominalSampleRateChanged(deviceID: 42, rate: 44100)
+        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a rate notification must not create one")
+    }
 
     // MARK: - RMS metering (pure).
 

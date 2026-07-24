@@ -160,6 +160,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   write `.standard`) instead of the shared globals. `.githooks/pre-commit`
   Guard 3 warns when a newly added test line reaches those globals; a line that
   genuinely must touch one takes a trailing `isolation-ok` comment.
+- **`Telemetry.log(...)` is always-on** (gated only by `HeadlessRuntime.isActive`,
+  never an env var), non-blocking, and must never call back into a caller. Never
+  call it from the IOProc/render path — only from the (non-realtime) decision
+  points around it. It auto-neutralizes under tests; don't add a per-suite
+  workaround, and don't reach for its `_resetForTesting`/`_installTestSink` seams
+  outside `TelemetryTests`.
 
 ## Map
 
@@ -191,3 +197,4 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
+| `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |

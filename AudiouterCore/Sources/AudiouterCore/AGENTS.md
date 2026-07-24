@@ -99,7 +99,7 @@ Redirecting one app to a specific device:
 | Dependency | Usage |
 |---|---|
 | `AirPlayEngine` | Vendored/local package driving the native AirPlay 2 protocol; `NativeBackend` and `LocalPlaybackEngine` are its main callers here. |
-| `PTPHelperXPC` (or equivalent XPC seam) | Talks to the privileged PTP helper daemon via `PTPHelperService`/`SMAppServicePTPHelper`. |
+| `PTPHelperService` / `SMAppServicePTPHelper` | Talks to the privileged PTP helper daemon (see [PTPHelperService.swift](PTPHelperService.swift)). |
 
 ## Tests
 

@@ -1710,6 +1710,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard !devices.isEmpty else { return }
         AudioDiag.log("RESET whole-system AirPlay session for \(devices.count) device(s) (tap rebuilt)")
 
+        // Teardown re-check (Fix A): a `stop()` or `handleSystemWillSleep` can land
+        // AFTER Phase 0's snapshot. Phases 1–2 run OUTSIDE `stateQueue`, so — mirroring
+        // `convergeDevice`'s under-lock re-read before every engine op — re-check
+        // `started && !suspended` before touching the engine. If we're tearing down,
+        // release the claimed slots and bail rather than rebinding an engine mid-teardown.
+        // Before the removes this is best-effort hygiene (teardown issues its own
+        // removes anyway); the barrier for the normal case is unchanged.
+        guard resetShouldProceedElseReleaseSlots(devices) else { return }
+
         // Phase 1: remove ALL first (barrier). Every output must detach before any
         // re-add so a re-add can't rejoin the surviving stale-anchor master session.
         await withTaskGroup(of: Void.self) { group in
@@ -1717,6 +1726,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 group.addTask { [weak self] in try? await self?.engine.removeOutput(d.outputID) }
             }
         }
+        // Teardown re-check (Fix A, the load-bearing one): re-read under the lock RIGHT
+        // before the re-add. If a `stop()` (started→false; `converging`/`added`/
+        // `desiredOn`/`failedGate` all cleared) or `handleSystemWillSleep`
+        // (suspended→true; outputs being removed for a clean RTSP teardown) interleaved
+        // during Phase 1, re-adding here would strand a fresh, untracked engine/RTSP
+        // session on an engine being torn down — and a failed re-add's Phase-3 branch
+        // would write a stale `failedGate.insert`/`.failed` AFTER `stop()` cleared it,
+        // leaking a park into the next session. Instead release the claimed slots (the
+        // device stays reconvergeable: `stop()` already cleared everything, and
+        // `handleSystemDidWake` re-kicks `convergeDevice` on the now-free slot) with NO
+        // stale failure write, and bail.
+        guard resetShouldProceedElseReleaseSlots(devices) else { return }
+
         // Phase 2: re-add ALL against the fresh tap stream (clean RTP anchor),
         // recording which re-adds failed (D4 best-effort partial-failure).
         var failed: Set<String> = []
@@ -1775,6 +1797,33 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         for (outputID, value) in toPush { try? await engine.setVolume(outputID, value) }
         for (id, outputID) in requeues {
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        }
+    }
+
+    /// Fix A teardown-race guard shared by both barrier phases of
+    /// ``resetWholeSystemAirPlaySession()``. Re-reads `started && !suspended` under
+    /// `stateQueue` and, if we're tearing down, releases the `converging` slots this
+    /// reset claimed in Phase 0 — atomically, in the SAME critical section as the check,
+    /// so a `stop()`/sleep can't slip between the two. Returns `true` to proceed, `false`
+    /// to bail.
+    ///
+    /// Releasing the slot (not parking it) is the whole point: the device must be
+    /// reconvergeable next session. After `stop()` (`converging` already `removeAll()`ed)
+    /// the removes are harmless no-ops; after `handleSystemWillSleep` (which clears
+    /// `added` but NOT `converging`) they are ESSENTIAL — ``handleSystemDidWake()`` only
+    /// re-kicks `convergeDevice` for a device whose slot is free (`!converging.contains`),
+    /// so a slot left held here would strand the device silent across the wake. Crucially
+    /// this writes NO `failedGate`/`.failed`: a stale park inserted after `stop()` cleared
+    /// the gate would leak into the next session. On any thread (acquires `stateQueue`).
+    private func resetShouldProceedElseReleaseSlots(
+        _ devices: [(id: String, outputID: OutputID)]
+    ) -> Bool {
+        stateQueue.sync {
+            guard self.started, !self.suspended else {
+                for d in devices { self.converging.remove(d.id) }
+                return false
+            }
+            return true
         }
     }
 
@@ -2623,6 +2672,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // other gate decision) so the Mac isn't left muted by a tap streaming into
             // dead sockets. `expectedSelected` is untouched.
             self.captureRunning = false
+            // W3-T3: capture just stopped (above) — clear the double-path guard note on
+            // the true→false edge, exactly as `stop()` does. Sleep hits neither
+            // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
+            // the note would strand ON while nothing streams (a UI-truth lie) whenever a
+            // narrow wake-with-selection-gone sequence leaves `reconcileCaptureGate` an
+            // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
+            // the `clearSilenceOverride()` above.
+            self.clearSystemAirPlayGuard()
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }

@@ -84,6 +84,13 @@ final class NativeBackendTests: XCTestCase {
         /// and NativeBackend's post-success write (medium finding).
         var onAddOutputBody: (@Sendable (OutputID) -> Void)?
 
+        /// Optional hook run INSIDE `removeOutput`'s op body, after the remove is
+        /// recorded but before it returns. Mirrors `onAddOutputBody` — lets a Fix A
+        /// test interleave a `stop()` / `handleSystemWillSleep()` DURING the whole-system
+        /// reset's Phase-1 barrier removes (which run OFF `stateQueue`), so the reset's
+        /// Phase-2 re-check observes the teardown that landed after its Phase-0 snapshot.
+        var onRemoveOutputBody: (@Sendable (OutputID) -> Void)?
+
         /// Artificial per-op latency (ns). Used by the toggle-spam test to force
         /// slow op completions to race fast toggle flips, so a broken (unserialized)
         /// converge would issue overlapping ops for the same device.
@@ -129,6 +136,8 @@ final class NativeBackendTests: XCTestCase {
         func removeOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
+                let hook = self.lock.withLock { self.onRemoveOutputBody }
+                hook?(id)
                 if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
             }
         }
@@ -3267,6 +3276,72 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(backend.devices.first { $0.id == device.id }?.isSelected == true)
     }
 
+    /// Fix W3-T3 (adversarial finding W3-T3): the double-path note must be CLEARED on
+    /// sleep, exactly as `handleSystemWillSleep` already clears the silence-override
+    /// banner. Sleep drives `captureRunning` false but hits neither
+    /// `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without the added
+    /// `clearSystemAirPlayGuard()` the note strands ON while nothing streams. Verified
+    /// end-to-end via the narrow strand sequence: note active → sleep → wake with the
+    /// selection gone (`reconcileCaptureGate` early-returns, capture stays off).
+    func testSystemAirPlayGuardClearedOnSleep() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "Guard Sleep Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }   // note active while streaming
+        XCTAssertTrue(capture.isCapturing)
+
+        // Sleep must emit the note-clear on the true→false edge (mirroring
+        // `clearSilenceOverride()`), else `captureRunning` goes false while the note
+        // strands ON — a UI-truth lie.
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: { backend.handleSystemWillSleep() }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "sleep must emit the double-path note-clear")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive,
+                       "the double-path note must not strand ON across sleep")
+
+        // The strand sequence's tail: wake with the selection gone. `reconcileCaptureGate`
+        // early-returns (nothing to stream), so the note must simply STAY cleared.
+        backend.setOutputSet([])
+        backend.handleSystemDidWake()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive,
+                       "the note stays cleared after a wake with the selection gone (no re-strand)")
+    }
+
+    /// Fix W3-T3 idempotency guard: sleep must NOT emit a spurious note-clear when the
+    /// note was never active — the added `clearSystemAirPlayGuard()` only emits on a
+    /// genuine true→false edge. Here the system default is NOT AirPlay-class, so the
+    /// note never fires and sleep must stay silent on that channel.
+    func testSleepEmitsNoGuardClearWhenNoteWasNeverActive() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { false })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "No-Note Sleep Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+
+        let box = EventBox()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 30_000_000)   // let the subscription register
+        backend.handleSystemWillSleep()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        try? await Task.sleep(nanoseconds: 150_000_000)   // give any spurious emit time to arrive
+        task.cancel()
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.isEmpty,
+                      "sleep must not emit a spurious note-clear when the note was never active (\(noteEvents.count) seen)")
+    }
+
     // MARK: Helpers
 
     /// A hermetic silence-watchdog timer: records every scheduled countdown instead
@@ -4336,6 +4411,106 @@ final class NativeBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertTrue(engine.addedIDs.isEmpty, "nothing is streaming whole-system — the reset must be a no-op")
         XCTAssertTrue(engine.removedIDs.isEmpty)
+    }
+
+    /// Fix A (adversarial finding 1.A): a `handleSystemWillSleep()` that lands AFTER the
+    /// whole-system reset's Phase-0 snapshot — during its Phase-1 barrier removes, which
+    /// run OUTSIDE `stateQueue` — must make the reset's Phase-2 re-check detect the
+    /// teardown (`suspended == true`), SKIP the re-add (no stray engine/RTSP session on
+    /// an engine being torn down), and RELEASE the claimed `converging` slot so the
+    /// device stays reconvergeable. Without the re-check the reset re-adds outputs into
+    /// a suspending backend and (since `handleSystemWillSleep` does NOT clear
+    /// `converging`) leaks the slot, stranding the device silent across the wake.
+    func testWholeSystemResetSkipsReaddAndReleasesSlotWhenSleepInterleaves() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reset-Sleep Race Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        await pollUntil { !backend.test_isConverging }   // the connect released its own slot
+
+        // One-shot: the FIRST removeOutput is the reset's Phase-1 barrier remove (the
+        // connect was an add). Fire sleep from inside it — off `stateQueue`, exactly the
+        // window Fix A guards — so `suspended` flips true before the reset's Phase-2 re-add.
+        let sleptOnce = LockedBool(false)
+        engine.onRemoveOutputBody = { [weak backend] _ in
+            guard !sleptOnce.get() else { return }
+            sleptOnce.set(true)
+            backend?.handleSystemWillSleep()
+        }
+
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 1,
+                       "exactly one connect add precedes the reset")
+
+        capture.fireTapRecreated()
+
+        // Phase 1 removes → the hook sleeps → the Phase-2 re-check sees `suspended` and
+        // BAILS: it releases the converging slot and never re-adds.
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        await pollUntil { sleptOnce.get() }
+        await pollUntil { !backend.test_isConverging }   // slot released cleanly (not leaked)
+
+        // Give a (buggy) re-add every chance to appear, then prove it never did — the
+        // SpyEngine records EVERY addOutput call, so a Phase-2 attempt would show as a
+        // second add regardless of success.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 1,
+                       "a teardown detected at the Phase-2 re-check must SKIP the re-add")
+        if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+            XCTFail("bailing on teardown must not write a `.failed`/stale park")
+        }
+
+        // Reconvergeable next session: waking re-kicks `convergeDevice` on the FREED slot
+        // (`handleSystemDidWake` only kicks a device whose slot is free), re-adding it —
+        // proof the slot wasn't leaked and no stale `failedGate` blocks the re-add.
+        engine.onRemoveOutputBody = nil
+        backend.handleSystemDidWake()
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count == 2 }
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 2,
+                       "the freed slot lets the device reconverge on wake")
+    }
+
+    /// Fix A, the `started == false` half + the stale-`failedGate` concern: a `stop()`
+    /// interleaved during the reset's Phase-1 removes (which clears
+    /// `converging`/`added`/`desiredOn`/`failedGate` and sets `started = false`) must
+    /// make the Phase-2 re-check BAIL. `addFailures` is armed so that IF the reset ever
+    /// reached Phase 2, its re-add would throw and drive the Phase-3 failed-branch — the
+    /// ONLY place the reset writes `failedGate` — inserting a stale park AFTER `stop()`
+    /// cleared it (leaking into the next session). Because the SpyEngine records the id
+    /// even on a throwing add, "no second add" proves Phase 2 never ran and therefore
+    /// no stale `failedGate` was written.
+    func testWholeSystemResetBailsWithoutStaleFailedGateWhenStopInterleaves() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reset-Stop Race Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        await pollUntil { !backend.test_isConverging }
+
+        // A Phase-2 re-add (if it wrongly ran) would THROW, driving the stale-failedGate
+        // branch — and would still be RECORDED by the SpyEngine as a second add.
+        engine.addFailures = [device.outputID.rawValue]
+
+        let stoppedOnce = LockedBool(false)
+        engine.onRemoveOutputBody = { [weak backend] _ in
+            guard !stoppedOnce.get() else { return }
+            stoppedOnce.set(true)
+            backend?.stop()   // started → false; converging/added/desiredOn/failedGate cleared
+        }
+
+        capture.fireTapRecreated()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }   // reset Phase-1 remove ran
+        await pollUntil { stoppedOnce.get() }
+        // Let the reset finish bailing (and stop() finish its own teardown).
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 1,
+                       "a stop() detected at the Phase-2 re-check must SKIP the re-add — no addOutput "
+                       + "on a torn-down engine, so the stale-failedGate branch is unreachable")
     }
 
     /// T8 edge case 2 (device disappears while routed), driven through the REAL

@@ -385,6 +385,35 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.stop()
     }
 
+    /// W1-T3: a bundle ID that resolves to a FULL process set (main + audio-
+    /// playing children, e.g. a browser's helper processes) must have EVERY
+    /// pid in that set excluded from the whole-system mix — not just the
+    /// first/main pid — or the child's audio leaks into the system tap
+    /// alongside its own per-app-routed destination (R2/R14).
+    func testMultiProcessBundleExcludesEveryPIDFromSystemMix() {
+        let tap = FakeTap()
+        // A fake browser: main pid + two audio-playing helper/child pids.
+        let browserPIDs: [pid_t] = [111, 222, 333]
+        let pids: [String: [pid_t]] = ["com.browser.app": browserPIDs, "com.app.b": [999]]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids[bid] ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [
+                AppRoute(bundleID: "com.browser.app", displayName: "Browser", destination: .device(id: "speaker-1")),
+                AppRoute(bundleID: "com.app.b", displayName: "App B", destination: .currentDevice),
+            ],
+            excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.excludedPIDs, Set(browserPIDs),
+                       "ALL of the browser's process-set pids (main + both helpers) must be excluded, "
+                       + "not just the first/main pid")
+        XCTAssertFalse(tap.excludedPIDs.contains(999), ".currentDevice apps stay in the system mix")
+        coordinator.stop()
+    }
+
     /// `.noRedirect` (the new default/unset state) is exclusion-equivalent to
     /// `.currentDevice`: neither is ever excluded from the system-wide tap. An
     /// app left "unset" must not be accidentally dropped from the system mix.

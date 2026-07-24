@@ -28,7 +28,9 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var startError: PerAppCaptureError?
         private(set) var createCount = 0
         private(set) var teardownCount = 0
-        private(set) var lastPid: pid_t?
+        private(set) var lastPids: [pid_t]?
+        /// Convenience for tests that only care about the main (first) pid.
+        var lastPid: pid_t? { lastPids?.first }
         private(set) var lastBundleID: String?
 
         /// Test-only hook invoked synchronously at the START of `createAndStart`
@@ -39,8 +41,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         /// the caller's thread in this fake.
         var onCreateAndStart: (() -> Void)?
 
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastPid = pid; lastBundleID = bundleID; lock.unlock()
+        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastPids = pids; lastBundleID = bundleID; lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             return format
@@ -125,6 +127,37 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         // a bundle ID that was never started reports .idle identically to one
         // that was started then fully stopped.
         XCTAssertEqual(coordinator.state(for: "com.example.never-started"), .idle)
+    }
+
+    // MARK: - W1-T2: a multi-process app (main + helper pids) taps the WHOLE resolved set.
+
+    func testMultiProcessAppTapsFullResolvedProcessSetNotJustMainPid() {
+        let tap = FakeProcessTap()
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            // Main pid 4242, plus two helper/child pids (e.g. a browser's GPU
+            // and renderer helpers) — main-first, per W1-T1's AppProcessResolver
+            // contract.
+            resolveProcessSet: { _ in [4242, 5001, 5002] },
+            muteBehavior: .mutedWhenTapped
+        )
+
+        coordinator.start(bundleID: "com.example.browser")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.browser") { return true }; return false }
+
+        XCTAssertEqual(
+            tap.lastPids, [4242, 5001, 5002],
+            "the tap must be created with every resolved pid (main + children), not just the main pid")
+
+        // A device-change rebuild must re-resolve and tap the (possibly
+        // changed) full set again, not silently narrow back to one pid.
+        tap.fireDeviceChange()
+        waitFor { tap.creates >= 2 }
+        XCTAssertEqual(
+            tap.lastPids, [4242, 5001, 5002],
+            "a device-change rebuild must also tap the full resolved process set")
+
+        coordinator.stop(bundleID: "com.example.browser")
     }
 
     // MARK: - Multiple bundle IDs coexist independently: separate taps, no cross-talk.
@@ -233,7 +266,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableProcessTapSurfacesOSUnsupported() {
         let tap = UnavailableProcessTap()
-        XCTAssertThrowsError(try tap.createAndStart(pid: 1, bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
+        XCTAssertThrowsError(try tap.createAndStart(pids: [1], bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
             XCTAssertEqual(error as? PerAppCaptureError, .osUnsupported(minimum: "14.2"))
         }
         XCTAssertFalse(PerAppCaptureError.osUnsupported(minimum: "14.2").isRetryable)

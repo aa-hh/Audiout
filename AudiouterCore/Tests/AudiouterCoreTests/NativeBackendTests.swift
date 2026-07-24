@@ -401,7 +401,7 @@ final class NativeBackendTests: XCTestCase {
     private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         }
         func teardown() {}
@@ -451,7 +451,7 @@ final class NativeBackendTests: XCTestCase {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
         var onRegister: (@Sendable (String) -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             onRegister?(bundleID)
             return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
         }
@@ -515,7 +515,7 @@ final class NativeBackendTests: XCTestCase {
         private var attempts = 0
         let failuresBeforeSuccess: Int
         init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             let n = lock.withLock { attempts += 1; return attempts }
             if n <= failuresBeforeSuccess {
                 throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
@@ -3523,7 +3523,7 @@ final class NativeBackendTests: XCTestCase {
     private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         }
         func teardown() {}

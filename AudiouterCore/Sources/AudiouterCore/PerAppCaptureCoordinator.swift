@@ -95,10 +95,13 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
     private let makeTap: @Sendable () -> ProcessAudioTap
     /// Bundle ID → the app's full process set (main + audio-playing children),
-    /// ordered main-first (W1-T1, ``AppProcessResolver``). This coordinator
-    /// still taps a SINGLE process per slot (the `.first` pid) — teaching it to
-    /// tap the whole set is W1-T2 — but the set is resolved here so that work
-    /// has it available and so relaunch/child-spawn pick up new pids.
+    /// ordered main-first (W1-T1, ``AppProcessResolver``). W1-T2: the coordinator
+    /// taps the WHOLE resolved set per slot (one `CATapDescription` covering every
+    /// process object that translates), so a browser or Electron app whose audio
+    /// comes from a child process is captured too. Live membership changes
+    /// (a child spawning/dying mid-stream) are NOT diffed here — that's W1-T4;
+    /// this only resolves + taps the set at tap-creation time (initial `start`
+    /// and every `handleDeviceChange` rebuild).
     private let resolveProcessSet: AppProcessResolver
     private let muteBehavior: TapMuteBehavior
 
@@ -312,9 +315,12 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // slot.
 
     private func beginStart(bundleID: String) {
-        // W1-T1: resolve the app's full process set; this coordinator still taps
-        // the main process only (`.first`). W1-T2 teaches it to tap the whole set.
-        guard let pid = resolveProcessSet(bundleID).first else {
+        // W1-T2: resolve the app's full process set and tap ALL of it (main +
+        // child/helper processes), not just the main pid — a browser or
+        // Electron app that plays audio from a child process would otherwise
+        // go silent when routed (R1, R2, R9, R14).
+        let pids = resolveProcessSet(bundleID)
+        guard !pids.isEmpty else {
             queue.sync {
                 guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return }
                 transition(slot, bundleID: bundleID, to: .failed(.appNotRunning(bundleID: bundleID)))
@@ -334,7 +340,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         tap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
 
         do {
-            let format = try tap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
+            let format = try tap.createAndStart(pids: pids, bundleID: bundleID, muteBehavior: muteBehavior)
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     tap.teardown() // a stop() (or a second start()) raced in — don't leak this tap
@@ -387,9 +393,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         }
         claim.old?.teardown()
 
-        // W1-T1: re-resolve the process set (the app may have relaunched with new
-        // pids); still taps the main process only until W1-T2.
-        guard let pid = resolveProcessSet(bundleID).first else {
+        // W1-T2: re-resolve the process set (the app may have relaunched with new
+        // pids, or spawned/lost helpers) and tap the full set.
+        let pids = resolveProcessSet(bundleID)
+        guard !pids.isEmpty else {
             AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FAILED: app not running (pid unresolved)")
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
@@ -403,7 +410,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
 
         do {
-            let format = try newTap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
+            let format = try newTap.createAndStart(pids: pids, bundleID: bundleID, muteBehavior: muteBehavior)
             AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) RECREATED ok, new format \(format.sampleRate)/\(format.channels)ch")
             let replay: Bool = queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
@@ -563,16 +570,17 @@ public protocol ProcessAudioTap: AnyObject {
     /// pinned to it, so it must be recreated).
     var onDefaultDeviceChanged: (@Sendable () -> Void)? { get set }
 
-    /// Translate `pid` to a Core Audio process object, create a tap scoped to
-    /// just that process, read its REAL format, build the aggregate device,
-    /// register the IOProc, and start it. Returns the tap's real captured
-    /// format. `bundleID` is passed through only for error messages/logging —
-    /// no Core Audio identity is derived from it. Throws
-    /// ``PerAppCaptureError``, most commonly
-    /// ``PerAppCaptureError/processNotYetAudible(bundleID:)`` (the pid has
-    /// never opened an audio stream — retryable) or `.tapCreationFailed`
+    /// Translate every pid in `pids` (main + children, main-first, W1-T1) to a
+    /// Core Audio process object, create a SINGLE tap covering all of them
+    /// (`CATapDescription(stereoMixdownOfProcesses:)`), read its REAL format,
+    /// build the aggregate device, register the IOProc, and start it. Returns
+    /// the tap's real captured format. `bundleID` is passed through only for
+    /// error messages/logging — no Core Audio identity is derived from it.
+    /// Throws ``PerAppCaptureError``, most commonly
+    /// ``PerAppCaptureError/processNotYetAudible(bundleID:)`` (none of `pids`
+    /// has opened an audio stream yet — retryable) or `.tapCreationFailed`
     /// (most likely TCC not yet granted).
-    func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat
+    func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat
 
     /// Stop and destroy the IOProc, aggregate device, and tap (in that
     /// order). Idempotent and non-throwing so teardown always completes.
@@ -655,7 +663,7 @@ final class UnavailableProcessTap: ProcessAudioTap, @unchecked Sendable {
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
 
-    func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+    func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
         throw PerAppCaptureError.osUnsupported(minimum: "14.2")
     }
 
@@ -707,9 +715,9 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     /// idempotent and guards each object id, so a double teardown is safe.
     deinit { teardown() }
 
-    func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+    func createAndStart(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
         do {
-            try createTapAndReadFormat(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
+            try createTapAndReadFormat(pids: pids, bundleID: bundleID, muteBehavior: muteBehavior)
             try createAggregate(bundleID: bundleID)
             try startIOProc()
             installDefaultDeviceListener()
@@ -726,7 +734,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
 
     // MARK: Tap creation + ASBD read
 
-    private func createTapAndReadFormat(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws {
+    private func createTapAndReadFormat(pids: [pid_t], bundleID: String, muteBehavior: TapMuteBehavior) throws {
         // COLD-PROMPT GUARD (see ``SystemAudioCaptureTCC``): creating a process
         // tap is what surfaces the macOS audio-capture prompt. A per-app route
         // restored at launch must NOT trigger that prompt cold — only the Setup
@@ -737,12 +745,30 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.tapCreationFailed(
                 reason: "audio capture not authorized — awaiting the Setup grant")
         }
-        let processObjectID = try Self.translateProcessObject(pid: pid, bundleID: bundleID)
 
-        // Stereo mixdown of just this one process (dev/audiocap TapEngine
-        // .processes / stereoMixdownOfProcesses path) — the per-app analogue
-        // of CoreAudioSystemTap's whole-system CATapDescription.
-        let desc = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
+        // W1-T2: translate EVERY pid in the resolved set (main + children) to a
+        // Core Audio process object and tap all of them at once, so a browser
+        // or Electron app whose audio plays from a child process is actually
+        // captured. The main pid (pids[0], W1-T1 orders main-first) must
+        // translate or we surface the ordinary retryable
+        // `.processNotYetAudible`/tap-creation error exactly as before; a
+        // child that hasn't opened an audio stream yet (very common — most
+        // helper processes never play audio) is silently skipped rather than
+        // failing the whole tap.
+        guard let mainPid = pids.first else {
+            throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
+        }
+        var processObjectIDs = [try Self.translateProcessObject(pid: mainPid, bundleID: bundleID)]
+        for childPid in pids.dropFirst() {
+            if let objID = try? Self.translateProcessObject(pid: childPid, bundleID: bundleID) {
+                processObjectIDs.append(objID)
+            }
+        }
+
+        // Stereo mixdown of the whole resolved process set (dev/audiocap
+        // TapEngine .processes / stereoMixdownOfProcesses path) — the per-app
+        // analogue of CoreAudioSystemTap's whole-system CATapDescription.
+        let desc = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
         desc.uuid = UUID()
         desc.muteBehavior = muteBehavior == .mutedWhenTapped ? .mutedWhenTapped : .unmuted
         self.tapDescription = desc

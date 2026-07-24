@@ -4,6 +4,10 @@
 import XCTest
 @testable import AudiouterCore
 
+#if canImport(AudioToolbox)
+import AudioToolbox
+#endif
+
 /// Tests for ``LocalPlaybackEngine`` — specifically the per-app RMS metering
 /// hook (T10, the Current-Device app-bar meter): ``LocalPlaybackEngine/onAppLevel``
 /// + ``LocalPlaybackEngine/setMeteringActive(_:)``. These drive the REAL
@@ -310,4 +314,48 @@ final class LocalPlaybackEngineTests: XCTestCase {
                        "a single, isolated notification must still recover on its own — the debounce " +
                        "delays and coalesces, it must never indefinitely postpone recovery")
     }
+
+    // MARK: - shouldFollowRealDefault (pure device-selection decision, Q2 fix)
+
+#if canImport(AudioToolbox)
+    /// The pure decision behind ``LocalPlaybackEngine/resolveLocalOutputDeviceID()``
+    /// (the Q2 Bluetooth/USB fix): given the transport type of the Mac's real
+    /// default output, local playback FOLLOWS every real LOCAL transport — the
+    /// whole point of the fix is that a Bluetooth headset or USB DAC set as the
+    /// Mac's default is no longer wrongly forced onto the built-in speakers. This
+    /// mirrors the pure-decision-vs-live-read split of `TapRebuildDecision`, so it
+    /// is tested directly with no live Core Audio, no real default device, and no
+    /// (un-synthesizable) real AirPlay endpoint.
+    func testShouldFollowRealDefaultFollowsEveryLocalTransport() {
+        for transport in [
+            kAudioDeviceTransportTypeBuiltIn,
+            kAudioDeviceTransportTypeBluetooth,
+            kAudioDeviceTransportTypeBluetoothLE,
+            kAudioDeviceTransportTypeUSB,
+            kAudioDeviceTransportTypeThunderbolt,
+            kAudioDeviceTransportTypeHDMI,
+            kAudioDeviceTransportTypeDisplayPort,
+            kAudioDeviceTransportTypePCI,
+            kAudioDeviceTransportTypeFireWire,
+            kAudioDeviceTransportTypeAVB,
+            kAudioDeviceTransportTypeAggregate,
+            kAudioDeviceTransportTypeVirtual,
+            kAudioDeviceTransportTypeUnknown,
+        ] {
+            XCTAssertTrue(
+                LocalPlaybackEngine.shouldFollowRealDefault(transportType: transport),
+                "transport \(transport) is a real local output — local playback must FOLLOW the real default there")
+        }
+    }
+
+    /// The single refusal: an AirPlay default output is the genuine feedback-loop
+    /// case, so local playback must NOT follow it (the resolver falls back to
+    /// built-in instead). This is the anti-feedback guard, and AirPlay is the ONLY
+    /// transport it rejects.
+    func testShouldFollowRealDefaultRefusesAirPlay() {
+        XCTAssertFalse(
+            LocalPlaybackEngine.shouldFollowRealDefault(transportType: kAudioDeviceTransportTypeAirPlay),
+            "an AirPlay default output must NOT be followed — the feedback-loop guard falls back to built-in")
+    }
+#endif
 }

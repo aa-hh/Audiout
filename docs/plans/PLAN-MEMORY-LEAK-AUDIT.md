@@ -1,6 +1,7 @@
 # Plan — Memory-leak & daily-impact audit (coreaudiod growth on per-app redirect)
 
-Status: **COMPLETE — ready for execution approval** · Branch: `claude/memory-leak-investigation-396ac3` · Backend: **native**
+Status: **Waves 1-2 EXECUTED + COMMITTED** (`a10defd`) · Wave 3 (Firefox plan) in progress · Wave 4 pending
+Branch: `claude/memory-leak-investigation-396ac3` · Backend: **native**
 Investigation: 9 subsystem audits (8 complete + 1 partial with residual scoped as W0.3), every High finding independently staff-verified at source by the session lead.
 
 ## Symptom (user report, 2026-07-23)
@@ -183,6 +184,27 @@ engine C registry out-of-band prune (A9-F5); `DeviceIconController.onChange` cha
 `GroupRowView` dead-code delete; `updateAppRoutes` plan-ordering atomicity note (F8); IOProc
 per-callback `Data` allocation churn (perf, RT hygiene); popover metering-tap churn per toggle
 (E9 — revisit only if T5 counters show it mattering).
+
+**Surfaced during Wave 1-2 execution (new, not in the original audit):**
+- `GroupController.memberState` has no real per-device-removal hook to prune on today (T12
+  finding) — the class never subscribes to `BackendEvent`/caches a device list at all; the
+  nearest candidate signal, `BackendEvent.deviceRemoved`, would be WRONG to prune on (it
+  signals an ordinary offline blip, not permanent removal — pruning there drops a
+  reconnecting device's mute state, a real regression). Left as a comment at the
+  declaration; needs a genuine device-lifecycle signal this class doesn't have before it's
+  actionable.
+- `AirPlayEngine`'s C device registry (outputs.c) still doesn't prune a device that fails
+  out-of-band after disappearing from mDNS (A9-F5, unchanged — bounded by distinct device
+  ids ever seen, not urgent).
+- `swift test --parallel` flaked on 4 different, unrelated, pre-existing timing tests across
+  this session under unusually heavy concurrent-agent CPU load (`testMuteStashAndRestore`,
+  `testLevelEmissionIsCoalescedToDisplayCadence`, `testCaptureCrashOverBudgetSurfacesError`
+  ×2) while serial `swift test` stayed 907-917/917 clean every single time — see
+  `test-suite-parallel-default.md` memory note. Not a regression from anything in this plan;
+  same root-cause category as the already-fixed `waitFor` 2s→8s poll-ceiling widening
+  documented there. Worth widening those 3 tests' own timeouts in a future pass if it
+  recurs on a quieter machine (i.e. confirm it's genuinely load-correlated, not something
+  else) — not done here since it's out of scope for a memory-leak audit.
 
 ## Parallelization summary
 - **W0:** 3 lanes parallel (Alec ∥ merge ∥ residual audit).

@@ -5,6 +5,22 @@ import XCTest
 import AudioToolbox
 #endif
 
+/// A hermetic ``AudioProcessResolver`` (T3,
+/// `docs/plans/PLAN-FIREFOX-ROUTING-LEAK.md`): `childrenByParent` scripts an
+/// EXPLICIT (possibly empty) process tree and there are never any live Core
+/// Audio process objects — no real `sysctl`/HAL call, matching this file's
+/// fakes-everywhere discipline (mirrors ``AudioProcessResolver``'s own doc:
+/// "tests can hand the resolver an arbitrary fake object list with no real
+/// HAL"). The default (empty tree) reproduces the pre-T3 single-pid behavior
+/// exactly: `descendantPIDs(ofPID:)` always includes the root pid itself, so
+/// with no scripted children a resolved pid widens to just itself.
+private func fakeProcessResolver(childrenByParent: [pid_t: [pid_t]] = [:]) -> AudioProcessResolver {
+    AudioProcessResolver(
+        enumerateAudioProcessObjects: { [] },
+        snapshotProcessTree: { ProcessTreeSnapshot(childrenByParent: childrenByParent) }
+    )
+}
+
 /// Hermetic tests for ``NativeCaptureCoordinator`` (T-NB-CAPTURE-1). Every seam is
 /// injected — a fake ``SystemAudioTap`` (no TCC, no aggregate device), a spy
 /// ``PCMSink`` (records forwarded buffers + their pts), and a fake
@@ -96,13 +112,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap: FakeTap,
         sink: SpySink,
         converter: FakeConverter,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = fakeProcessResolver()
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { tap },
             sink: sink,
             makeConverter: { _ in converter },
             resolvePID: resolvePID,
+            processResolver: processResolver,
             muteBehavior: .mutedWhenTapped
         )
     }
@@ -471,6 +489,83 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
         XCTAssertEqual(tap.excludedPIDs, [111], "the previously-computed exclusion set is applied on start()")
+        coordinator.stop()
+    }
+
+    // MARK: - T3: exclusion widens a bundle's single main pid to its FULL
+    // process family (docs/plans/PLAN-FIREFOX-ROUTING-LEAK.md) via an
+    // injected AudioProcessResolver, so a multi-process app's real
+    // (audio-producing) child no longer leaks into the whole-system mix.
+
+    /// Regression guard: a single-process excluded app (no children anywhere
+    /// in the live process tree) still excludes EXACTLY its own one pid —
+    /// the pre-existing single-pid behavior must be unaffected by the
+    /// widening. The scripted tree even has an unrelated pid's children, to
+    /// prove the walk is scoped to the excluded app's own family and not
+    /// "whatever happens to be in the tree."
+    func testSingleProcessExcludedAppStillExcludesExactlyOnePID() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let resolver = fakeProcessResolver(childrenByParent: [999: [998]])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] }, processResolver: resolver)
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.excludedPIDs, [111],
+                       "a single-process app with no children in the live tree still excludes exactly its own pid")
+        coordinator.stop()
+    }
+
+    /// The fix: a multi-process excluded app (the Firefox shape) — whose
+    /// MAIN pid resolves via `resolvePID` but whose real audio comes from a
+    /// CHILD process — now excludes the child's (and grandchild's) pid too,
+    /// not just the main one. Before T3 the whole-system tap's exclusion
+    /// list only ever contained the (often silent) main pid, so the audible
+    /// child kept leaking into the system mix.
+    func testMultiProcessExcludedAppExcludesDescendantPIDsToo() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["org.mozilla.firefox": 500]
+        // 500 (main) -> 501 (content/audio child) -> 502 (grandchild):
+        // exercises more than one BFS hop, not just a direct child.
+        let resolver = fakeProcessResolver(childrenByParent: [500: [501], 501: [502]])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] }, processResolver: resolver)
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["org.mozilla.firefox"])
+
+        XCTAssertEqual(tap.excludedPIDs, [500, 501, 502],
+                       "the whole-system tap must exclude the app's FULL process family — main pid AND every "
+                       + "descendant, not just the (possibly silent) main pid — this is the Firefox leak fix")
+        coordinator.stop()
+    }
+
+    /// Best-effort semantics preserved under the widened path: a bundle ID
+    /// `resolvePID` cannot resolve at all (app not running) contributes
+    /// NOTHING to the exclusion set, and does not break resolution — or
+    /// widening — for any OTHER excluded bundle.
+    func testUnresolvableBundleContributesNothingAndDoesNotBreakOtherBundles() {
+        let tap = FakeTap()
+        // "com.app.ghost" deliberately has NO entry in `pids` -> resolvePID
+        // returns nil for it.
+        let pids: [String: pid_t] = ["com.app.a": 111]
+        let resolver = fakeProcessResolver(childrenByParent: [111: [112]])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolvePID: { pids[$0] }, processResolver: resolver)
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.a", "com.app.ghost"])
+
+        XCTAssertEqual(tap.excludedPIDs, [111, 112],
+                       "an unresolvable bundle ID contributes nothing, and does not prevent a sibling excluded "
+                       + "bundle's (widened) pid family from being excluded")
         coordinator.stop()
     }
 

@@ -12,8 +12,8 @@ import AudioToolbox
 #endif
 
 /// The seam ``NativeBackend`` drives to play a `.currentDevice`-routed app's
-/// audio locally on the Mac's built-in speakers as an INDEPENDENT stream with
-/// its own volume (Bug T2). It is the local-playback analogue of
+/// audio locally on the Mac's real default output device as an INDEPENDENT
+/// stream with its own volume (Bug T2). It is the local-playback analogue of
 /// ``AppRouteMixer`` + ``EngineControlling``: where the mixer sums per-app
 /// captures into AirPlay streams and the engine sends them to a receiver, this
 /// takes the SAME per-app captured buffers and renders them to the Mac's own
@@ -98,22 +98,92 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 
 /// The concrete ``LocalPlaybackControlling``: an `AVAudioEngine` graph with one
 /// ``AVAudioPlayerNode`` per `.currentDevice` app, each connected to the engine's
-/// main mixer, playing to the Mac's BUILT-IN output device.
+/// main mixer, playing to the Mac's real default output device (with the one
+/// anti-feedback guard below).
 ///
-/// ## Built-in output, NOT the default output (deliberate)
-/// The engine is pinned to the built-in speakers via
-/// ``builtInOutputDeviceID()`` + `outputNode.auAudioUnit.setDeviceID`. It must
-/// NOT follow `kAudioHardwarePropertyDefaultOutputDevice`: that default may BE
-/// an AirPlay device (the user is streaming the whole system to Sonos), and a
-/// "Current Device" pick means "play here, on the Mac itself" — sending it to
-/// the AirPlay default would defeat the point (and could feed the AirPlay tap in
-/// a loop). If no built-in device is found, it falls back to whatever hardware
+/// ## Follow the real default output — EXCEPT when it's an AirPlay endpoint
+/// A "Current Device" pick means "play here, on the Mac itself." The engine pins
+/// its output (`outputNode.auAudioUnit.setDeviceID`) to the Mac's REAL current
+/// default output — `kAudioHardwarePropertyDefaultOutputDevice`, the same
+/// selector the capture side reads (house rule, AGENTS.md) — so a user who has
+/// legitimately set Bluetooth headphones or a USB DAC as their Mac's output
+/// hears "Current Device" apps on THAT hardware, not wrongly forced onto the
+/// built-in speakers. ``resolveLocalOutputDeviceID()`` performs the resolution;
+/// ``shouldFollowRealDefault(transportType:)`` is its pure decision.
+///
+/// The ONE refusal is the genuine feedback-loop case: if that default output is
+/// itself an AirPlay endpoint (`kAudioDeviceTransportTypeAirPlay`), the engine
+/// does NOT follow it — it falls back to ``builtInOutputDeviceID()`` (exactly
+/// today's behavior in that one case). Sending local playback to an AirPlay
+/// default would defeat "play here on the Mac" AND could feed the whole-system
+/// AirPlay tap in a loop. Any failed read (no default resolvable, unreadable
+/// transport type) falls back to built-in too: uncertainty must never let us
+/// follow a possibly-AirPlay default into a loop. If neither a followable
+/// default nor a built-in device resolves, the engine keeps whatever hardware
 /// default `AVAudioEngine` chose (best effort).
 ///
-/// This is distinct from the per-app CAPTURE selector rule: the tap follows
-/// `kAudioHardwarePropertyDefaultOutputDevice` (house rule, AGENTS.md), because
-/// it must capture from wherever the app is actually playing; PLAYBACK pins to
-/// built-in because that's where "Current Device" must be heard.
+/// NB — what an AirPlay *default* can (and can't) mean here: this app NEVER sets
+/// the system default output device. It only ever TAPS/captures whatever the
+/// user or macOS already chose (its own capture aggregates are
+/// `kAudioAggregateDeviceIsPrivateKey`, never selectable as a system output; and
+/// grep confirms no `AudioObjectSetPropertyData` on the default-output selector
+/// anywhere in the package). So an AirPlay *default* observed here can only be a
+/// macOS-native AirPlay pick (System Settings ▸ Sound ▸ choosing an AirPlay
+/// receiver as output), which macOS supports entirely outside this app — the
+/// guard protects against THAT, never against anything this app itself does to
+/// the default device (it does nothing).
+///
+/// ## Known live-behaviour findings (T5 adversarial review, 2026-07-24) — NOT
+/// yet resolved; documented so a live tester and future maintainer expect them.
+///   - **One extra reconnect ~300 ms after every output-device switch (new to
+///     the follow-real-default change).** `pinResolvedOutputDevice()` runs inside
+///     config-change recovery and calls `setDeviceID`, which itself posts an
+///     `AVAudioEngineConfigurationChange` (this class asserts that behaviour
+///     above) -> a second debounced recovery. It SELF-TERMINATES after two cycles
+///     (the compare-before-set skips the redundant re-pin), so the cost is one
+///     brief audible tick per switch, not a hang -- the same accepted-glitch class
+///     as the ~1 s reconnect on a routing-set change. Termination rests on
+///     `resolveLocalOutputDeviceID()` eventually agreeing with the
+///     `auAudioUnit.deviceID` readback; there is no iteration cap, so a device
+///     that persistently fails to apply yet still perturbs could in principle
+///     re-pin at ~3 Hz. Not observed; the live test should confirm whether
+///     `setDeviceID` posts a config change on real hardware at all (if it does
+///     NOT, this finding is moot AND the compare-before-set guards nothing -- one
+///     of the two is true).
+///   - **No-built-in fallback fails OPEN to an AirPlay default (PRE-EXISTING,
+///     not introduced by this change).** On a Mac with NO built-in output
+///     (Studio/Pro/headless) whose default IS a macOS-native AirPlay pick:
+///     resolve refuses AirPlay -> `builtInOutputDeviceID()` returns nil -> the pin
+///     is skipped -> the engine renders to its own unpinned default, which is that
+///     AirPlay device -- the very feedback case the guard exists to prevent. The
+///     OLD hard-pin-built-in code had the identical "no built-in -> don't pin ->
+///     engine on its default" behaviour, so this is a latent pre-existing gap, not
+///     a regression. Correct resolution has a PRODUCT component ("play on this
+///     Mac" is ill-defined on a Mac with no built-in speaker) -- deferred to a
+///     decision + live confirmation, not fixed blind on this fragile path.
+///   - Transport-type alone can't detect a VIRTUAL device bridging to AirPlay
+///     (BlackHole/Loopback-style, `kAudioDeviceTransportTypeVirtual`, so followed).
+///     Real but niche; won't affect a normal Sonos/HomePod test.
+///
+/// ## Following stays current via the EXISTING config-change recovery path
+/// The initial pin happens once, in ``configureOutputDevice()`` (guarded by
+/// `configuredDevice`, from `startEngineOnGraphQueue`). To keep "follow the real
+/// default" true OVER TIME — e.g. the user unplugs their Bluetooth headphones
+/// mid-playback, or flips the System Settings output — the engine re-resolves
+/// and re-pins inside ``handleConfigurationChangeOnGraphQueue()``, deliberately
+/// NOT via a new device-change listener. This is the minimal correct hook: a
+/// device unplug / default-output switch ALREADY fires an
+/// `AVAudioEngineConfigurationChange` on its own (that notification is precisely
+/// why the recovery path exists and stops the engine), so re-running the
+/// resolution there keeps the pin current with zero parallel live-monitoring
+/// infrastructure. ``pinResolvedOutputDevice()`` compares-before-setting (like
+/// the capture side's ``TapRebuildDecision`` device guard) so a redundant re-pin
+/// to the same device can't itself spin a config-change storm.
+///
+/// This is distinct from the per-app CAPTURE selector rule only in the AirPlay
+/// guard: CAPTURE always follows `kAudioHardwarePropertyDefaultOutputDevice`
+/// (house rule) because it must tap wherever the app actually plays; PLAYBACK
+/// follows the same selector too, but refuses the one AirPlay case above.
 ///
 /// ## Sample-rate conversion is the engine's job, not ours
 /// Each player node is connected to the main mixer using that app's real tap
@@ -278,7 +348,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// `true` and let `play()` hit a stopped engine (an uncatchable abort).
     private func startEngineOnGraphQueue() throws {
         guard !(stateLock.withLock { engineRunning }) else { return }
-        configureBuiltInOutput()
+        configureOutputDevice()
         // Touch the main mixer so it (and its main-mixer→output connection) is
         // instantiated before start; starting with no player inputs is silent
         // and correct — players attach/connect afterward while it runs.
@@ -357,6 +427,15 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                 return
             }
         }
+        // Re-resolve + re-pin the output device HERE (not via a separate
+        // listener): a config change is ALSO how a default-output switch reaches
+        // this engine — unplugging Bluetooth headphones, or flipping the System
+        // Settings output, fires one on its own — so this recovery path is where
+        // "follow the real default" stays current over time. `pinResolvedOutputDevice`
+        // compares-before-setting, so a config change that did NOT move the default
+        // re-pins to the same device and no-ops, never spinning a storm. See the
+        // class doc's "Following stays current…" section.
+        pinResolvedOutputDevice()
         _ = engine.mainMixerNode
         engine.prepare()
         do {
@@ -711,23 +790,44 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     // MARK: Built-in output device
 
-    /// Pin the engine's output to the built-in speakers (once). Best effort:
-    /// if there is no built-in device or the set fails, the engine keeps its
-    /// own default output. MUST run on `graphQueue` (called from
-    /// `startEngineOnGraphQueue`); `configuredDevice` is touched only there.
-    private func configureBuiltInOutput() {
+    /// Pin the engine's output device ONCE per engine lifecycle (guarded by
+    /// `configuredDevice`) to the Mac's real default output — unless that default
+    /// is an AirPlay endpoint, in which case built-in (see the class doc and
+    /// ``resolveLocalOutputDeviceID()``). MUST run on `graphQueue` (called from
+    /// `startEngineOnGraphQueue`); `configuredDevice` is touched only there. The
+    /// ONGOING follow AFTER this initial pin is handled by
+    /// ``handleConfigurationChangeOnGraphQueue()``, not here.
+    private func configureOutputDevice() {
         guard !configuredDevice else { return }
         configuredDevice = true
+        pinResolvedOutputDevice()
+    }
+
+    /// Resolve the correct local output device (``resolveLocalOutputDeviceID()``)
+    /// and pin the engine's output node to it — but ONLY if it differs from what's
+    /// already pinned. The compare-before-set mirrors the capture side's
+    /// compare-before-rebuild guard (``TapRebuildDecision``): re-pinning to the
+    /// SAME device during config-change recovery could otherwise fire yet another
+    /// `AVAudioEngineConfigurationChange` and spin a rebuild storm. MUST run on
+    /// `graphQueue` (both call sites — `configureOutputDevice` and the config-change
+    /// recovery handler — are graphQueue-confined). Best effort: on any failure it
+    /// logs and leaves the engine's current output untouched (the same soft-fail
+    /// contract the old built-in-only pin had).
+    private func pinResolvedOutputDevice() {
         #if canImport(AudioToolbox)
-        guard let deviceID = Self.builtInOutputDeviceID() else {
-            AudioDiag.log("LPE.configureBuiltInOutput: NO built-in device found; using engine default")
+        guard let deviceID = Self.resolveLocalOutputDeviceID() else {
+            AudioDiag.log("LPE.pinResolvedOutputDevice: NO local output device resolved; using engine default")
+            return
+        }
+        guard engine.outputNode.auAudioUnit.deviceID != deviceID else {
+            AudioDiag.log("LPE.pinResolvedOutputDevice: already pinned to \(deviceID); no change")
             return
         }
         do {
             try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
-            AudioDiag.log("LPE.configureBuiltInOutput: pinned to built-in device \(deviceID)")
+            AudioDiag.log("LPE.pinResolvedOutputDevice: pinned to device \(deviceID)")
         } catch {
-            AudioDiag.log("LPE.configureBuiltInOutput: setDeviceID(\(deviceID)) FAILED: \(error)")
+            AudioDiag.log("LPE.pinResolvedOutputDevice: setDeviceID(\(deviceID)) FAILED: \(error)")
         }
         #endif
     }
@@ -755,6 +855,58 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             if transportType(device) == kAudioDeviceTransportTypeBuiltIn { return device }
         }
         return nil
+    }
+
+    /// Resolve which device local playback should pin to: the Mac's REAL current
+    /// default output (``defaultOutputDeviceID()``) UNLESS its transport type is
+    /// AirPlay — the one feedback-loop case ``shouldFollowRealDefault(transportType:)``
+    /// refuses — in which case fall back to ``builtInOutputDeviceID()``. Every
+    /// failed read also falls back to built-in: if the default can't be resolved,
+    /// or its transport type can't be read, we must NOT risk following a
+    /// possibly-AirPlay default into a loop, and built-in is the safe local
+    /// target. This is the function that replaced ``builtInOutputDeviceID()``'s
+    /// former role as the sole output pin (Q2, the Bluetooth/USB fix).
+    static func resolveLocalOutputDeviceID() -> AudioObjectID? {
+        guard let defaultID = defaultOutputDeviceID() else { return builtInOutputDeviceID() }
+        guard let transport = transportType(defaultID),
+              shouldFollowRealDefault(transportType: transport) else {
+            return builtInOutputDeviceID()
+        }
+        return defaultID
+    }
+
+    /// Pure decision (mirrors ``TapRebuildDecision`` in `NativeCaptureCoordinator`):
+    /// given a default output device's transport type, should local playback
+    /// FOLLOW it? AirPlay (`kAudioDeviceTransportTypeAirPlay`) is the ONLY transport
+    /// refused — the genuine feedback-loop case; every real local transport
+    /// (built-in, Bluetooth, USB, Thunderbolt, HDMI, aggregate, virtual, unknown, …)
+    /// is followed. Kept pure + `static` — no live Core Audio read — so the
+    /// follow/fall-back branch is unit-testable directly, without a real default
+    /// device or a real AirPlay endpoint (which cannot be synthesized against live
+    /// Core Audio in a test).
+    static func shouldFollowRealDefault(transportType: UInt32) -> Bool {
+        transportType != kAudioDeviceTransportTypeAirPlay
+    }
+
+    /// The Mac's REAL current default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice` off the system object) — the
+    /// exact selector `PerAppCaptureCoordinator.defaultOutputDeviceID()` and
+    /// `NativeCaptureCoordinator.defaultOutputDeviceID()` read (house rule,
+    /// AGENTS.md), mirrored here in this file's optional-returning style (like
+    /// ``builtInOutputDeviceID()`` / ``transportType(_:)``). `nil` if it can't be
+    /// read. Deliberately NOT `kAudioHardwarePropertyDefaultSystemOutputDevice`
+    /// (the alert-sound device) — the same selector rule the capture side keeps.
+    static func defaultOutputDeviceID() -> AudioObjectID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID) == noErr,
+            deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return deviceID
     }
 
     private static func hasOutputStreams(_ device: AudioObjectID) -> Bool {

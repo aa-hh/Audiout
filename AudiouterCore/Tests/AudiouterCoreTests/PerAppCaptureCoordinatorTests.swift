@@ -31,6 +31,19 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         private(set) var lastPid: pid_t?
         private(set) var lastBundleID: String?
 
+        /// Real storage for the protocol's ``ProcessAudioTap/targetProcessObjects``
+        /// (overriding the default no-op) — the coordinator assigns this from its
+        /// resolver BEFORE `createAndStart`, so recording it proves the resolved
+        /// process-object set actually reached the tap.
+        private var _targetProcessObjects: Set<AudioObjectID> = []
+        var targetProcessObjects: Set<AudioObjectID> {
+            get { lock.withLock { _targetProcessObjects } }
+            set { lock.withLock { _targetProcessObjects = newValue } }
+        }
+        /// The `targetProcessObjects` seen by the MOST RECENT `createAndStart`.
+        private(set) var lastTargetProcessObjects: Set<AudioObjectID>?
+        var lastTargets: Set<AudioObjectID>? { lock.withLock { lastTargetProcessObjects } }
+
         /// Test-only hook invoked synchronously at the START of `createAndStart`
         /// (before the scripted `startError`/return), i.e. while the coordinator's
         /// slot is `.creatingTap`. Lets a test inject a `fireDeviceChange()` call
@@ -40,7 +53,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var onCreateAndStart: (() -> Void)?
 
         func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastPid = pid; lastBundleID = bundleID; lock.unlock()
+            lock.lock()
+            createCount += 1; lastPid = pid; lastBundleID = bundleID
+            lastTargetProcessObjects = _targetProcessObjects
+            lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             return format
@@ -475,6 +491,128 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
         coordinator.stop(bundleID: "com.example.music")
     }
+
+    // MARK: - T2 (PLAN-FIREFOX-ROUTING-LEAK): the per-app tap targets the FULL
+    // process-object set resolved across the app's process tree, not just the
+    // main pid's object; an empty resolution surfaces the retryable
+    // `.processNotYetAudible` WITHOUT ever building a zero-process tap. The
+    // single-pid state-machine tests above are the unchanged regression guard —
+    // they run on the injected default (one object per pid) resolver.
+
+    #if canImport(AudioToolbox)
+
+    /// Records the pids the injected resolver was asked about, returning a fixed
+    /// object set — proof of "called with the right pid, and its result reached
+    /// the tap."
+    private final class ResolverSpy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _asked: [pid_t] = []
+        private let result: Set<AudioObjectID>
+        init(returning result: Set<AudioObjectID>) { self.result = result }
+        func resolve(_ pid: pid_t) -> Set<AudioObjectID> {
+            lock.withLock { _asked.append(pid) }
+            return result
+        }
+        var asked: [pid_t] { lock.withLock { _asked } }
+    }
+
+    /// A mutable resolver result so a test can flip empty -> non-empty and prove
+    /// the `.processNotYetAudible` retry re-resolves.
+    private final class ObjectsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Set<AudioObjectID>
+        init(_ value: Set<AudioObjectID>) { self.value = value }
+        func get() -> Set<AudioObjectID> { lock.withLock { value } }
+        func set(_ newValue: Set<AudioObjectID>) { lock.withLock { value = newValue } }
+    }
+
+    /// Single-process app: resolves to exactly ONE object, and THAT one reaches
+    /// the tap — the pre-widening behavior, preserved for the common case (Q3).
+    func testSingleProcessAppTargetsExactlyItsOneProcessObject() {
+        let tap = FakeProcessTap()
+        let pid: pid_t = 800
+        // AudioProcessResolver returns {root's object} for a childless process.
+        let single: Set<AudioObjectID> = [8080]
+        let spy = ResolverSpy(returning: single)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolvePID: { _ in pid },
+            resolveProcessObjects: { spy.resolve($0) },
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.single")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.single") { return true }; return false }
+
+        XCTAssertEqual(spy.asked, [pid], "the resolver is invoked once, with the app's main pid")
+        XCTAssertEqual(tap.lastTargets, single,
+                       "a single-process app resolves to exactly one process object — unchanged from the pre-widening behavior")
+        coordinator.stop(bundleID: "com.example.single")
+    }
+
+    /// Multi-process browser (main pid + child pids, audio living in a child):
+    /// the tap must target the FULL resolved set — the Firefox leak fix. The main
+    /// pid's object alone would have captured silence.
+    func testMultiProcessAppTargetsFullResolvedProcessObjectSet() {
+        let tap = FakeProcessTap()
+        let mainPID: pid_t = 700
+        // main's object + two child objects, as the resolver yields for a real
+        // multi-process browser.
+        let fullSet: Set<AudioObjectID> = [7001, 7002, 7003]
+        let spy = ResolverSpy(returning: fullSet)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolvePID: { _ in mainPID },
+            resolveProcessObjects: { spy.resolve($0) },
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { if case .capturing = coordinator.state(for: "org.mozilla.firefox") { return true }; return false }
+
+        XCTAssertEqual(spy.asked, [mainPID], "the resolver is invoked with the app's MAIN pid; it widens to the tree")
+        XCTAssertEqual(
+            tap.lastTargets, fullSet,
+            "the FULL multi-process object set (main + children) must reach the tap description — "
+            + "not just the main pid's object, which is the whole point of the routing-leak fix")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    /// Empty resolution (nothing in the tree is audible yet): surface the
+    /// retryable `.processNotYetAudible` and build NO tap (the coordinator throws
+    /// before any CATapDescription). Then a retry, once a process becomes
+    /// audible, re-resolves and reaches `.capturing`.
+    func testEmptyResolutionSurfacesProcessNotYetAudibleWithoutBuildingATapThenRetries() {
+        let tap = FakeProcessTap()
+        let box = ObjectsBox([])  // no audible process in the tree yet
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            resolvePID: { _ in 900 },
+            resolveProcessObjects: { _ in box.get() },
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.silent")
+        waitFor {
+            if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.silent") { return true }
+            return false
+        }
+        XCTAssertEqual(coordinator.state(for: "com.example.silent"),
+                       .failed(.processNotYetAudible(bundleID: "com.example.silent")),
+                       "an empty resolution must surface the RETRYABLE .processNotYetAudible, not a hard failure")
+        XCTAssertEqual(tap.creates, 0,
+                       "no tap may be created for an empty process set — the coordinator throws BEFORE building any CATapDescription")
+        XCTAssertTrue(PerAppCaptureError.processNotYetAudible(bundleID: "x").isRetryable)
+
+        // The app becomes audible; start() from .failed re-resolves (now non-empty)
+        // and reaches .capturing, tapping the now-live object.
+        box.set([9001])
+        coordinator.start(bundleID: "com.example.silent")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.silent") { return true }; return false }
+        XCTAssertEqual(coordinator.state(for: "com.example.silent"), .capturing(tap.format))
+        XCTAssertEqual(tap.lastTargets, [9001], "the retry taps the now-audible process object")
+        XCTAssertEqual(tap.creates, 1, "exactly one tap is created — only after the resolution became non-empty")
+        coordinator.stop(bundleID: "com.example.silent")
+    }
+
+    #endif
 
     // MARK: - Compare-before-rebuild decision (TapRebuildDecision): the pure logic
     // BOTH per-app listener guards call after their live HAL read. Testing the

@@ -18,12 +18,15 @@ import AudioToolbox
 /// `dev/audiocap`:
 ///   - `TapEngine.stereoMixdownOfProcesses` (`dev/audiocap/Sources/audiocap/TapEngine.swift`)
 ///     → `CoreAudioProcessTap.createTapAndReadFormat` below.
-///   - `translatePIDToProcessObject` (`dev/audiocap/Sources/audiocap/CAHelpers.swift`)
-///     → `CoreAudioProcessTap.translateProcessObject` below.
+/// The prototype's single `translatePIDToProcessObject` step is superseded: the
+/// coordinator now resolves the FULL process-object set for the app's process
+/// tree (its injected ``AudioProcessResolver``, `resolveProcessObjects`) and
+/// hands it to the tap via ``ProcessAudioTap/targetProcessObjects``, so a
+/// multi-process browser's audio-producing child is captured too.
 /// The aggregate-device / IOProc / teardown-order machinery is reused nearly
 /// verbatim from ``NativeCaptureCoordinator``'s `CoreAudioSystemTap` (the
-/// per-app tap is just scoped to one process object instead of the whole
-/// system) — including its `mHostTime -> CLOCK_MONOTONIC` pts rebase
+/// per-app tap now scopes to the app's full process-object set instead of the
+/// whole system) — including its `mHostTime -> CLOCK_MONOTONIC` pts rebase
 /// (`CoreAudioSystemTap.timespec(fromHostTime:)`, called directly rather than
 /// duplicated) and its device-UID helper (`CoreAudioSystemTap.readDeviceUID`).
 ///
@@ -53,11 +56,13 @@ import AudioToolbox
 /// ```
 ///
 /// ## Known edge cases (do not "fix" these with speculative logic)
-/// - A pid that has never opened an audio stream cannot be translated to a
-///   Core Audio process object yet. `translateProcessObject` surfaces this as
-///   the distinct, retryable ``PerAppCaptureError/processNotYetAudible(bundleID:)``
-///   (not a crash, not lumped in with a generic tap-creation failure) so a
-///   caller can retry `start(bundleID:)` once the app starts playing audio.
+/// - An app whose process tree has no audio-producing process yet resolves to
+///   an EMPTY process-object set. The coordinator's empty-resolution guard
+///   surfaces this as the distinct, retryable
+///   ``PerAppCaptureError/processNotYetAudible(bundleID:)`` (not a crash, not a
+///   tap over zero processes, not lumped in with a generic tap-creation
+///   failure) so a caller can retry `start(bundleID:)` once the app starts
+///   playing audio.
 /// - A denied or never-granted TCC (system-audio-recording) permission
 ///   yields a *successful* tap that silently delivers all-zero buffers —
 ///   Core Audio does not report this as an error. This coordinator therefore
@@ -100,6 +105,18 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
     private let makeTap: @Sendable () -> ProcessAudioTap
     private let resolvePID: @Sendable (_ bundleID: String) -> pid_t?
+    /// Widens a single main pid to the FULL set of live Core Audio process
+    /// objects across that app's process tree (T2, `PLAN-FIREFOX-ROUTING-LEAK`).
+    /// A multi-process browser (Firefox/Chrome) emits its audio from a *child*
+    /// process, so tapping only the main pid's object captures nothing — this
+    /// closure (backed by ``AudioProcessResolver`` in production, a fake in
+    /// tests) returns every audio-relevant object so the tap mixes all of them.
+    /// An EMPTY result means no process in the tree has opened an audio stream
+    /// yet — the direct multi-process analogue of the old single-pid translate
+    /// returning `kAudioObjectUnknown` — and is surfaced as the same retryable
+    /// ``PerAppCaptureError/processNotYetAudible(bundleID:)``. Injected in the
+    /// exact style of ``makeTap`` / ``resolvePID``.
+    private let resolveProcessObjects: @Sendable (_ pid: pid_t) -> Set<AudioObjectID>
     private let muteBehavior: TapMuteBehavior
 
     // MARK: State (confined to `queue`)
@@ -183,6 +200,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         name: String = "AirPlayController",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
+        // The real live-system resolver: bundle main pid -> full set of Core
+        // Audio process objects across the app's process tree. Captured once and
+        // shared across every start()/handleDeviceChange() resolution.
+        let processResolver = AudioProcessResolver()
         self.init(
             makeTap: {
                 if #available(macOS 14.2, *) {
@@ -192,6 +213,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 }
             },
             resolvePID: resolvePID,
+            resolveProcessObjects: { processResolver.resolveAudioProcessObjects(forPID: $0) },
             muteBehavior: muteBehavior
         )
     }
@@ -200,13 +222,21 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// Injectable designated initializer (internal — tests pass a fake tap
     /// factory and a scripted resolver so the state machine runs without a
     /// real tap, real Core Audio, or a real running app).
+    ///
+    /// `resolveProcessObjects` defaults to a single-process resolution (one
+    /// object per pid) so the many existing state-machine tests that predate the
+    /// multi-process widening keep constructing this initializer unchanged; the
+    /// production convenience initializer always injects the real
+    /// ``AudioProcessResolver``, and multi-process tests inject their own fake.
     init(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         resolvePID: @escaping @Sendable (String) -> pid_t?,
+        resolveProcessObjects: @escaping @Sendable (pid_t) -> Set<AudioObjectID> = { [AudioObjectID(bitPattern: $0)] },
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
         self.makeTap = makeTap
         self.resolvePID = resolvePID
+        self.resolveProcessObjects = resolveProcessObjects
         self.muteBehavior = muteBehavior
     }
 
@@ -319,6 +349,21 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             return
         }
 
+        // Widen the main pid to EVERY audio process object in the app's tree
+        // (T2). An empty set means nothing in the tree is audible yet: surface
+        // the SAME retryable `.processNotYetAudible` the old single-pid translate
+        // did, and — crucially — do NOT create a tap over zero processes (an
+        // empty stereo-mixdown is undefined). This guard is what "throws before
+        // reaching CATapDescription" for the multi-process case.
+        let processObjects = resolveProcessObjects(pid)
+        guard !processObjects.isEmpty else {
+            queue.sync {
+                guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return }
+                transition(slot, bundleID: bundleID, to: .failed(.processNotYetAudible(bundleID: bundleID)))
+            }
+            return
+        }
+
         let proceed: Bool = queue.sync {
             guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return false }
             transition(slot, bundleID: bundleID, to: .creatingTap)
@@ -329,6 +374,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         let tap = makeTap()
         tap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
         tap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
+        tap.targetProcessObjects = processObjects
 
         do {
             let format = try tap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
@@ -407,9 +453,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             return
         }
 
+        // Re-widen against the (possibly relaunched) pid. An empty set here means
+        // the app stopped producing audio during the device change — surface the
+        // retryable `.processNotYetAudible` rather than rebuild a zero-process tap.
+        let processObjects = resolveProcessObjects(pid)
+        guard !processObjects.isEmpty else {
+            AudioDiag.log("PAC.handleDeviceChange bundle=\(bundleID) FAILED: no audio process objects yet (processNotYetAudible)")
+            queue.sync {
+                guard let slot = slots[bundleID], case .creatingTap = slot.state else { return }
+                transition(slot, bundleID: bundleID, to: .failed(.processNotYetAudible(bundleID: bundleID)))
+            }
+            return
+        }
+
         let newTap = makeTap()
         newTap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
+        newTap.targetProcessObjects = processObjects
 
         do {
             let format = try newTap.createAndStart(pid: pid, bundleID: bundleID, muteBehavior: muteBehavior)
@@ -448,8 +508,9 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // MARK: System-wide resume self-heal (T3)
     //
     // A routed app that was paused (or hadn't yet played audio) fails to tap
-    // with `.processNotYetAudible`: the pid exists but has no Core Audio process
-    // object yet, so `translateProcessObject` returns `kAudioObjectUnknown`.
+    // with `.processNotYetAudible`: the pid exists but no process in its tree has
+    // a Core Audio process object yet, so `resolveProcessObjects` returns an
+    // empty set and the coordinator's empty-resolution guard trips.
     // T2's capped-exponential backoff already re-probes such a slot forever, so
     // correctness is covered — but the backoff can idle up to its 10 s cap
     // between probes, which is a visible lag between "app resumes audio" and
@@ -575,20 +636,43 @@ public protocol ProcessAudioTap: AnyObject {
     /// pinned to it, so it must be recreated).
     var onDefaultDeviceChanged: (@Sendable () -> Void)? { get set }
 
-    /// Translate `pid` to a Core Audio process object, create a tap scoped to
-    /// just that process, read its REAL format, build the aggregate device,
-    /// register the IOProc, and start it. Returns the tap's real captured
-    /// format. `bundleID` is passed through only for error messages/logging —
-    /// no Core Audio identity is derived from it. Throws
-    /// ``PerAppCaptureError``, most commonly
-    /// ``PerAppCaptureError/processNotYetAudible(bundleID:)`` (the pid has
-    /// never opened an audio stream — retryable) or `.tapCreationFailed`
-    /// (most likely TCC not yet granted).
+    /// The FULL set of Core Audio process objects this tap must mix down —
+    /// every audio-relevant process across the routed app's process tree, not
+    /// just the main pid's object (T2, `PLAN-FIREFOX-ROUTING-LEAK`). The
+    /// coordinator resolves this via its injected ``AudioProcessResolver`` and
+    /// assigns it (already guaranteed non-empty) BEFORE ``createAndStart``,
+    /// mirroring how it wires `onBuffer` / `onDefaultDeviceChanged` first. A
+    /// default no-op implementation is provided in an extension below so the
+    /// unit-test fakes that drive ``createAndStart`` directly — and never build
+    /// a real `CATapDescription` — don't have to model it; only the production
+    /// ``CoreAudioProcessTap`` stores and uses it.
+    var targetProcessObjects: Set<AudioObjectID> { get set }
+
+    /// Build a tap over ``targetProcessObjects`` (assigned just before this
+    /// call), read its REAL format, build the aggregate device, register the
+    /// IOProc, and start it. Returns the tap's real captured format. `pid` and
+    /// `bundleID` are passed through only for logging/error messages — the Core
+    /// Audio identity comes from ``targetProcessObjects``, not from them. Throws
+    /// ``PerAppCaptureError``, most commonly `.tapCreationFailed` (most likely
+    /// TCC not yet granted); the "pid not yet audible" case is now caught
+    /// upstream by the coordinator's empty-resolution guard
+    /// (``PerAppCaptureError/processNotYetAudible(bundleID:)``, retryable), with
+    /// a defensive re-check here in the production tap.
     func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat
 
     /// Stop and destroy the IOProc, aggregate device, and tap (in that
     /// order). Idempotent and non-throwing so teardown always completes.
     func teardown()
+}
+
+public extension ProcessAudioTap {
+    /// Default no-op ``targetProcessObjects`` so test fakes that only script
+    /// ``createAndStart`` conform unchanged; the production ``CoreAudioProcessTap``
+    /// overrides it with real storage.
+    var targetProcessObjects: Set<AudioObjectID> {
+        get { [] }
+        set { }
+    }
 }
 
 /// Every way per-app capture can fail. Shaped so a UI can render an
@@ -697,6 +781,11 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
 
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    /// The full set of Core Audio process objects to mix down — assigned by
+    /// ``PerAppCaptureCoordinator`` (from its injected ``AudioProcessResolver``)
+    /// just before ``createAndStart``, and guaranteed non-empty by the
+    /// coordinator's empty-resolution guard.
+    var targetProcessObjects: Set<AudioObjectID> = []
 
     private let name: String
     private var tapID: AudioObjectID = kAudioObjectUnknown
@@ -753,12 +842,26 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             throw PerAppCaptureError.tapCreationFailed(
                 reason: "audio capture not authorized — awaiting the Setup grant")
         }
-        let processObjectID = try Self.translateProcessObject(pid: pid, bundleID: bundleID)
 
-        // Stereo mixdown of just this one process (dev/audiocap TapEngine
-        // .processes / stereoMixdownOfProcesses path) — the per-app analogue
-        // of CoreAudioSystemTap's whole-system CATapDescription.
-        let desc = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
+        // Defense in depth: the coordinator already resolves the full
+        // process-object set and refuses to reach here on an empty resolution
+        // (surfacing the retryable `.processNotYetAudible`). Never hand
+        // `CATapDescription` a zero-process list anyway — an empty stereo mixdown
+        // is undefined — so re-assert the invariant and surface the SAME retryable
+        // error if it is ever violated.
+        let processObjects = targetProcessObjects
+        guard !processObjects.isEmpty else {
+            throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
+        }
+        AudioDiag.log("PAC building process tap for pid \(pid) (\(bundleID)) over \(processObjects.count) process object(s)")
+
+        // Stereo mixdown of EVERY process object in the app's tree — was a single
+        // translated object, which missed a multi-process browser's audio-producing
+        // child (the Firefox leak, `PLAN-FIREFOX-ROUTING-LEAK`).
+        // `CATapDescription(stereoMixdownOfProcesses:)` already takes an array, and
+        // `muteBehavior` is a description-level property, so muting applies uniformly
+        // across the whole listed process set.
+        let desc = CATapDescription(stereoMixdownOfProcesses: Array(processObjects))
         desc.uuid = UUID()
         desc.muteBehavior = muteBehavior == .mutedWhenTapped ? .mutedWhenTapped : .unmuted
         self.tapDescription = desc
@@ -790,36 +893,6 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             bitsPerSample: Int(readASBD.mBitsPerChannel),
             isFloat: (readASBD.mFormatFlags & kAudioFormatFlagIsFloat) != 0,
             isInterleaved: (readASBD.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0)
-    }
-
-    /// Port of `dev/audiocap/Sources/audiocap/CAHelpers.swift`'s
-    /// `translatePIDToProcessObject`: translate a pid to its Core Audio
-    /// process `AudioObjectID` via `kAudioHardwarePropertyTranslatePIDToProcessObject`
-    /// on the system object, with the pid passed as the property qualifier.
-    /// A pid that exists but has never opened an audio stream has no process
-    /// object yet — that is the documented, retryable edge case, surfaced as
-    /// `.processNotYetAudible` (NOT a crash, NOT lumped into a generic
-    /// tap-creation failure).
-    private static func translateProcessObject(pid: pid_t, bundleID: String) throws -> AudioObjectID {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var pidQualifier = pid
-        var objID: AudioObjectID = kAudioObjectUnknown
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        let err = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address,
-            UInt32(MemoryLayout<pid_t>.size), &pidQualifier,
-            &size, &objID)
-        guard err == noErr else {
-            throw PerAppCaptureError.tapCreationFailed(
-                reason: "translate pid \(pid) (\(bundleID)) -> process object failed (\(err))")
-        }
-        guard objID != kAudioObjectUnknown else {
-            throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
-        }
-        return objID
     }
 
     // MARK: Aggregate device
@@ -890,8 +963,8 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     /// The CURRENT nominal sample rate (Hz) of `deviceID`, read fresh off the
     /// HAL. Used ONLY by `installSampleRateListener`'s compare-before-rebuild
     /// guard to tell a genuine rate renegotiation from a no-op notification.
-    /// Mirrors the property-read shape used by `translateProcessObject` /
-    /// `defaultOutputDeviceID` (address struct + single `AudioObjectGetPropertyData`
+    /// Mirrors the property-read shape used by `defaultOutputDeviceID`
+    /// (address struct + single `AudioObjectGetPropertyData`
     /// + `err == noErr` guard). Throws on a failed read so the caller's `try?`
     /// yields `nil`, which `TapRebuildDecision.shouldRebuild(currentRate:...)`
     /// treats as "changed" (fires) — a failed read is never evidence of "no change."

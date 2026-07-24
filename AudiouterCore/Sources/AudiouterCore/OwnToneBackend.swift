@@ -884,8 +884,16 @@ public func makeBackend(
         // agree.
         let nativeBackend = NativeBackend(engine: engine, resolvePID: resolvePID)
         nativeBackend.seedStartBufferMs(startBufferMs)
+        // processResolver: widens each `resolvePID`-found main pid to that app's
+        // full live process family (T1/T3, PLAN-FIREFOX-ROUTING-LEAK.md) — a
+        // multi-process app's real audio producer is often a CHILD pid, so the
+        // whole-system tap's exclusion list must cover the family, not just the
+        // main pid, or a redirected browser leaks into the system mix. Explicit
+        // here (rather than relying on the initializer's own real-resolver
+        // default) so the production wiring is visible at the call site, same
+        // discipline as `resolvePID` above.
         nativeBackend.captureCoordinator = NativeCaptureCoordinator(
-            engine: engine, resolvePID: resolvePID)
+            engine: engine, resolvePID: resolvePID, processResolver: AudioProcessResolver())
         // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()

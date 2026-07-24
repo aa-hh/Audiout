@@ -3500,6 +3500,40 @@ final class NativeBackendTests: XCTestCase {
                       "after the bounded retry recovers the capture, the device must be bound to the app's stream")
     }
 
+    /// W1-T7 (Gap 2, R9): a routed-and-therefore-excluded app that is routed
+    /// BEFORE it is audible double-sends briefly — its pid can't be translated to
+    /// a Core Audio process object until it plays audio, so the whole-system tap's
+    /// exclusion list doesn't actually exclude it yet. The moment its per-app tap
+    /// recovers to `.capturing`, `handlePerAppCaptureHealthChange` must re-resolve
+    /// the system-tap exclusion for that bundle ID (reusing W1-T5's
+    /// `refreshExcludedProcessSet`) so the leak window closes. Scripts a tap that
+    /// fails `.processNotYetAudible` twice then succeeds, and asserts the exclusion
+    /// refresh fires for the routed bundle ID once it becomes audible.
+    func testExclusionReResolvesWhenRoutedAppBecomesAudible() async {
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 2)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, resolveProcessSet: { _ in [4242] }, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            resolveProcessSet: { _ in [4242] }, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "R9 Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // Once the tap fails twice then recovers to `.capturing`, the exclusion
+        // re-resolve must have fired for the now-audible routed bundle ID.
+        await pollUntil(timeout: 5) { capture.refreshedBundleIDs.contains("com.foo") }
+        XCTAssertTrue(capture.refreshedBundleIDs.contains("com.foo"),
+                      "the routed app's exclusion must be re-resolved once it becomes audible (R9)")
+    }
+
     /// T2 fix: `.processNotYetAudible` retries INDEFINITELY (capped-exponential
     /// backoff), no longer giving up after the old hardcoded cap of 5 attempts
     /// (`processNotYetAudibleMaxRetries` was removed). Scripts 7 scripted

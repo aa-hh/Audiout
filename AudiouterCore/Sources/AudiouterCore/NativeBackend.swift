@@ -1404,6 +1404,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // its now-desynced RTP anchor unless we explicitly reset it.
                 resetAirPlaySessionForRoutedApp(bundleID: bundleID)
             }
+            // W1-T7 (Gap 2, R9): the moment a routed-and-therefore-excluded app
+            // becomes audible, its per-app tap reaches `.capturing` here. Until
+            // this instant its pid could NOT be translated to a Core Audio
+            // process object, so the whole-system tap's exclusion list did not
+            // actually exclude it — its audio was double-sent (to its own device
+            // AND into the system mix). The system tap doesn't re-resolve on its
+            // own for this case (the app's PID set is unchanged, so Gap 1's
+            // membership diff correctly finds no change — only the pid's
+            // TRANSLATABILITY changed). Force the exclusion re-resolve now, reusing
+            // W1-T5's relaunch mechanism: it no-ops unless `bundleID` is actually
+            // excluded/routed-away, so it's cheap for a bundle that turns out not
+            // to be excluded (a `.currentDevice` app, or metering-only capture).
+            captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {

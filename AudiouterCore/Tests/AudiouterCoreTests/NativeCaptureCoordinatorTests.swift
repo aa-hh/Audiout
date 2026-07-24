@@ -604,6 +604,149 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
     }
 
+    // MARK: - W1-T7 (Gap 1): live exclusion-membership diffing (debounced, compare-before-rebuild)
+
+    #if canImport(AudioToolbox)
+
+    /// Thread-safe mutable process set for the resolver closure, so a test can
+    /// model an EXCLUDED browser spawning/killing an audio child between
+    /// process-list notifications. Mirrors `PerAppCaptureCoordinatorTests.PidSetBox`.
+    private final class PidSetBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [pid_t]
+        init(_ value: [pid_t]) { self.value = value }
+        func get() -> [pid_t] { lock.withLock { value } }
+        func set(_ newValue: [pid_t]) { lock.withLock { value = newValue } }
+    }
+
+    private func makeCoordinator(
+        tap: FakeTap,
+        sink: SpySink,
+        converter: FakeConverter,
+        resolveProcessSet: @escaping AppProcessResolver,
+        membershipDebounceInterval: DispatchTimeInterval
+    ) -> NativeCaptureCoordinator {
+        NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: sink,
+            makeConverter: { _ in converter },
+            resolveProcessSet: resolveProcessSet,
+            muteBehavior: .mutedWhenTapped,
+            membershipDebounceInterval: membershipDebounceInterval)
+    }
+
+    /// (a) An EXCLUDED app spawns a new audio-playing child mid-session (no
+    /// relaunch, no bundle-ID change) → the new child pid is picked up and the
+    /// tap is recreated EXACTLY ONCE with the expanded exclusion set, so the new
+    /// child's audio stops leaking into the whole-system mix.
+    func testExcludedAppSpawningChildMidSessionIsAddedToExclusionExactlyOnce() {
+        let tap = FakeTap()
+        let box = PidSetBox([111]) // the excluded browser, main pid only so far
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { _ in box.get() },
+            membershipDebounceInterval: .milliseconds(300))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        // A new tab starts playing: a fresh audio child appears under the SAME
+        // bundle ID. No relaunch, no union change — only the live process set grew.
+        box.set([111, 222])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
+                       "a genuine membership change recreates the tap exactly once")
+        XCTAssertEqual(tap.excludedPIDs, [111, 222],
+                       "the newly-spawned audio child is now excluded from the system mix")
+
+        // Idempotence: re-diffing the now-settled set does no further work.
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
+                       "the settled set must not trigger a second rebuild")
+        coordinator.stop()
+    }
+
+    /// (b) THE regression-prevention property: an unchanged excluded-pid set — a
+    /// duplicate process-list notification, or churn in some UNRELATED app —
+    /// triggers ZERO rebuilds. A wrong equality check here would reintroduce the
+    /// coreaudiod CPU storm from rebuild thrashing (the loop-breaker invariant).
+    func testUnchangedExclusionSetTriggersZeroRebuilds() {
+        let tap = FakeTap()
+        let box = PidSetBox([111, 222])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { _ in box.get() },
+            membershipDebounceInterval: .milliseconds(300))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        let createsAfterExclude = tap.creates
+
+        // Resolver keeps returning the identical set (including a reorder, which
+        // is NOT a change under set semantics).
+        coordinator.handleMembershipChange()
+        box.set([222, 111]) // same members, different order
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterExclude,
+                       "no rebuild for an unchanged (or merely reordered) exclusion set")
+        coordinator.stop()
+    }
+
+    /// A membership diff must only ever act while CAPTURING — a diff that lands
+    /// while idle (no tap) does nothing.
+    func testMembershipDiffWhileIdleIsNoOp() {
+        let tap = FakeTap()
+        let box = PidSetBox([111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { _ in box.get() },
+            membershipDebounceInterval: .milliseconds(300))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        box.set([111, 222])
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a membership diff must not create one")
+    }
+
+    /// Rapid spawn/kill/spawn churn within the debounce window coalesces to a
+    /// single settled diff — one rebuild against the FINAL set, not one per Core
+    /// Audio notification. Driven through the real debounced
+    /// `handleProcessListChanged` entry point with a short injected interval.
+    func testRapidExclusionChurnWithinDebounceWindowCoalescesToOneRebuild() {
+        let tap = FakeTap()
+        let box = PidSetBox([111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { _ in box.get() },
+            membershipDebounceInterval: .milliseconds(60))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
+        let createsAfterExclude = tap.creates
+
+        // A burst of three notifications inside the 60ms window, settling on
+        // [111, 333].
+        box.set([111, 222]); coordinator.handleProcessListChanged()
+        box.set([111]);      coordinator.handleProcessListChanged()
+        box.set([111, 333]); coordinator.handleProcessListChanged()
+
+        waitFor { tap.creates >= createsAfterExclude + 1 }
+        // Give any (erroneously) uncoalesced extra rebuilds a chance to appear.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1,
+                       "the burst must coalesce to a single settled rebuild, not one per notification")
+        XCTAssertEqual(tap.excludedPIDs, [111, 333],
+                       "the coalesced diff applies the SETTLED exclusion set")
+        coordinator.stop()
+    }
+
+    #endif
+
     // MARK: - Idempotency: start() while capturing is a no-op; stop() from idle is a no-op.
 
     func testStartIsIdempotentAndStopFromIdleIsNoOp() {

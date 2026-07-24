@@ -256,3 +256,60 @@ All tasks completed and merged to `claude/dropout-fix-integration`:
 - [ ] **T9** — Health signal test ✓
 
 **Test suite:** `swift test --parallel` reports 988/988 green.
+
+---
+
+## 7. Follow-up fix — T2 latency regression: reset only on a device/rate rebuild
+
+**Symptom (Alec, live by-ear):** music already playing on the Mac; adding an
+AirPlay device connects fast, then a **long silence** before audio comes out of
+the AirPlay device — on **every** connect (first or Nth), while everything after
+the connect (switching, play/pause, volume) stays snappy.
+
+**Root cause — a structural misclassification in §1.2's recapture detection.**
+T2 recognised a tap REBUILD as "a later `.capturing` in the same capture epoch"
+(`everCapturedWholeSystem` / `handleWholeSystemCaptureHealthChange`) and, on any
+such rebuild, reset every stream-0 AirPlay session (removeOutput → addOutput).
+But a rebuild is a NORMAL part of a Mac+AirPlay connect: attaching the
+synced-local sink adds its own render pid to the whole-system tap's exclusion set
+(`NativeBackend.attachSyncedLocalSink` → `setSyncedLocalSink(_:renderProcessPID:)`
+→ `recreateTap`), which recreates the tap and emits a second `.capturing` on
+**every** connect — with the tapped device and its clock unchanged, i.e. the
+receivers' RTP timeline intact. T2 could not tell that benign rebuild apart from
+the genuine nominal-rate-renegotiation rebuild, so it fired a redundant full RTP
+re-establish (removeOutput → addOutput) after each already-fast connect: exactly
+"connects fast, then a long silence." It is unconditional (independent of any
+real 44.1↔48 kHz change — confirmed by a standalone Core Audio probe: creating
+the aggregate and opening an `AVAudioEngine` on the built-in device did NOT fire
+the nominal-rate listener), which is why every reconnect is equally slow.
+
+**Fix — distinguish the rebuild cause.** `recreateTap(cause:)` now carries a
+`RebuildCause`:
+- `.deviceOrRateChange` — from `handleDeviceChange()` (the default-device /
+  nominal-sample-rate listener). The tapped device's clock moved, so the rebuild
+  DOES desync the receivers and MUST reset. Fires the new
+  `NativeCaptureCoordinator.onDeviceRateRebuild` callback on a successful commit.
+- `.exclusionChange` — from `updateRouting(...)` / `setSyncedLocalSink(...)`. The
+  device/clock is unchanged; the receivers stay in sync, so NO reset. Never fires
+  `onDeviceRateRebuild`.
+
+`NativeBackend` wires `captureCoordinator?.onDeviceRateRebuild` →
+`resetAirPlaySessionForWholeSystem` and drops the `.capturing`-count heuristic
+(`everCapturedWholeSystem` + `handleWholeSystemCaptureHealthChange` removed). The
+dropout the reset was built for still recovers (a real rate renegotiation goes
+through `handleDeviceChange` → `.deviceOrRateChange`); the pitch fix and the
+mid-rebuild C6 replay (which conservatively replays as `.deviceOrRateChange`) are
+untouched.
+
+**Tests:**
+- `NativeCaptureCoordinatorTests.testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes`
+  — an exclusion-set rebuild (`updateRouting`) does NOT fire `onDeviceRateRebuild`;
+  a `fireDeviceChange()` rebuild fires it exactly once. (The faithful regression.)
+- `NativeBackendTests.testWholeSystemConnectWithoutDeviceRateRebuildDoesNotResetSession`
+  and `...testWholeSystemDeselectReselectCycleDoesNotResetSession` — a plain
+  connect / reconnect issues no rebind-recovery removeOutput→addOutput.
+- The former recapture tests now drive `capture.fireDeviceRateRebuild()` instead
+  of a second `.capturing`, asserting the reset still fires exactly once on a
+  genuine device/rate rebuild.
+
+**Test suite:** `swift test --parallel` reports 998/998 green.

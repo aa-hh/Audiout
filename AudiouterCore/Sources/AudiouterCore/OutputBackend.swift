@@ -119,7 +119,7 @@ public enum BackendEvent: Sendable, Equatable {
 
     /// A whole-system or per-app AirPlay stream's health, derived from the same
     /// recapture/rebind detection ``NativeBackend`` already runs to self-heal a
-    /// tap rebuild (T2's `handleWholeSystemCaptureHealthChange` /
+    /// tap rebuild (T2's `onDeviceRateRebuild`-driven whole-system reset /
     /// `handlePerAppCaptureHealthChange`) — this is a signal-only echo of that
     /// detection, not a new receiver-side probe. `id` is the affected device's
     /// ID (the granularity `enqueueRebindRecovery`/`rebindRecoveryGen` already

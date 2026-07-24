@@ -2816,7 +2816,7 @@ final class NativeBackendTests: XCTestCase {
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onLevel: (@Sendable (Float) -> Void)?
-        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
+        private var _onDeviceRateRebuild: (@Sendable () -> Void)?
         private var _ops: [String] = []
         private var _meteringActive = false
 
@@ -2824,24 +2824,27 @@ final class NativeBackendTests: XCTestCase {
             get { lock.withLock { _onLevel } }
             set { lock.withLock { _onLevel = newValue } }
         }
-        /// Whole-system tap lifecycle seam (T2): the real coordinator fires this on
-        /// every state transition. Stored so a test can drive a simulated
-        /// first-capture / tap-rebuild (`.capturing → … → .capturing`) without a
-        /// real Core Audio tap, then assert the backend's session-reset response.
-        var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? {
-            get { lock.withLock { _onStateChange } }
-            set { lock.withLock { _onStateChange = newValue } }
+        /// Whole-system tap device/rate-rebuild seam (T2): the real coordinator
+        /// fires this ONLY when a device/nominal-rate change rebuilt the tap — the
+        /// rebuild that desyncs the AirPlay RTP timeline. Stored so a test can drive
+        /// a simulated device/rate rebuild without a real Core Audio tap, then assert
+        /// the backend's session-reset response. A benign exclusion-set rebuild (the
+        /// synced-local sink attach) is faithfully modelled by simply NOT firing this.
+        var onDeviceRateRebuild: (@Sendable () -> Void)? {
+            get { lock.withLock { _onDeviceRateRebuild } }
+            set { lock.withLock { _onDeviceRateRebuild = newValue } }
         }
         func start() { lock.withLock { _ops.append("start") } }
         func stop() { lock.withLock { _ops.append("stop") } }
         func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
 
-        /// Fire a lifecycle transition exactly as the real coordinator's
-        /// `transition(to:)` does (T2), so a test can simulate a whole-system tap
-        /// rebuild and observe `NativeBackend`'s recapture handling.
-        func fireStateChange(_ state: NativeCaptureCoordinator.State) {
-            let handler = lock.withLock { _onStateChange }
-            handler?(state)
+        /// Fire a device/nominal-rate rebuild exactly as the real coordinator does
+        /// from `recreateTap(cause: .deviceOrRateChange)` (T2), so a test can
+        /// simulate the rate-renegotiation rebuild and observe `NativeBackend`'s
+        /// session-reset response.
+        func fireDeviceRateRebuild() {
+            let handler = lock.withLock { _onDeviceRateRebuild }
+            handler?()
         }
 
         /// Every start/stop, in the order they executed.
@@ -2862,12 +2865,6 @@ final class NativeBackendTests: XCTestCase {
 
     // MARK: Whole-system tap rebuild → AirPlay session reset (T2)
 
-    /// A `.capturing` state carrying an arbitrary tap format, for driving the
-    /// whole-system lifecycle seam.
-    private func capturingState() -> NativeCaptureCoordinator.State {
-        .capturing(TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
-    }
-
     /// Bring a selected AP2 device to actually-streaming (`added`) so a whole-system
     /// session reset has a live stream-0 session to rebind.
     private func startSelectAndStream(
@@ -2884,11 +2881,16 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { engine.addedIDs.contains(device.outputID) }
     }
 
-    /// The FIRST `.capturing` of a capture epoch is the initial start, NOT a
-    /// rebuild — it must not reset any AirPlay session (the device was just added
-    /// by `convergeDevice`). So no extra removeOutput/addOutput beyond the one
-    /// converge issued.
-    func testWholeSystemFirstCaptureDoesNotResetSession() async {
+    /// A plain connect — the tap starts and reaches `.capturing`, the device is
+    /// added by `convergeDevice` — must NOT reset any AirPlay session. The
+    /// coordinator only fires `onDeviceRateRebuild` for a device/nominal-rate
+    /// rebuild; the benign tap rebuilds that happen on a normal Mac+AirPlay connect
+    /// (attaching the synced-local sink adds its render pid to the exclusion set,
+    /// recreating the tap) are `.exclusionChange` and never fire it. Modelled here
+    /// by NOT firing `onDeviceRateRebuild`: no removeOutput→addOutput beyond the
+    /// single converge add. This is the regression guard for "connects fast, then a
+    /// long silence" — a redundant reset on every connect.
+    func testWholeSystemConnectWithoutDeviceRateRebuildDoesNotResetSession() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device()
@@ -2898,32 +2900,31 @@ final class NativeBackendTests: XCTestCase {
         let addsBefore = engine.addedIDs.filter { $0 == device.outputID }.count
         XCTAssertEqual(addsBefore, 1, "converge added the device exactly once")
 
-        capture.fireStateChange(capturingState())   // first capture of the epoch
-        // Give any (erroneous) rebind a chance to run.
+        // No device/rate rebuild fired (a plain connect, or a benign exclusion-set
+        // rebuild): give any erroneous rebind a chance to run, then prove none did.
         try? await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 1,
-                       "first .capturing must NOT rebind — no extra addOutput")
+                       "a connect without a device/rate rebuild must NOT rebind — no extra addOutput")
         XCTAssertTrue(engine.removedIDs.filter { $0 == device.outputID }.isEmpty,
-                      "first .capturing must NOT rebind — no removeOutput")
+                      "a connect without a device/rate rebuild must NOT rebind — no removeOutput")
     }
 
-    /// A tap REBUILD — a later `.capturing` in the same epoch (the nominal-sample-
-    /// rate renegotiation) — resets every streaming Selected Device's whole-system
-    /// (stream-0) session: exactly one removeOutput→addOutput per device, on the
-    /// single-stream `addOutput(_:)` (NOT the per-app `addOutput(_:streamId:)`).
-    func testWholeSystemRecaptureRebindsSelectedDeviceExactlyOnce() async {
+    /// A device/nominal-rate rebuild (`onDeviceRateRebuild`, fired by the
+    /// coordinator's `recreateTap(cause: .deviceOrRateChange)`) resets every
+    /// streaming Selected Device's whole-system (stream-0) session: exactly one
+    /// removeOutput→addOutput per device, on the single-stream `addOutput(_:)` (NOT
+    /// the per-app `addOutput(_:streamId:)`).
+    func testWholeSystemDeviceRateRebuildRebindsSelectedDeviceExactlyOnce() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device()
         await startSelectAndStream(backend, engine, discovery, capture, device)
         defer { backend.stop() }
 
-        capture.fireStateChange(capturingState())   // first capture: arms the epoch
-        try? await Task.sleep(nanoseconds: 100_000_000)
         let streamAddsBefore = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
 
-        capture.fireStateChange(capturingState())   // RE-capture: tap rebuilt
+        capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
         await pollUntil { engine.removedIDs.contains(device.outputID) }
 
         XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, 1,
@@ -2947,9 +2948,6 @@ final class NativeBackendTests: XCTestCase {
         await startSelectAndStream(backend, engine, discovery, capture, device)
         defer { backend.stop() }
 
-        capture.fireStateChange(capturingState())   // first capture: arms the epoch
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
         // Subscribe BEFORE firing the recapture so neither signal can be missed,
         // and collect until BOTH the in-flight `true` and the resolved `false`
         // have arrived for this device.
@@ -2963,7 +2961,7 @@ final class NativeBackendTests: XCTestCase {
                 return false
             }
             return sawRecovering && sawCleared
-        } after: { capture.fireStateChange(self.capturingState()) }   // RE-capture: tap rebuilt
+        } after: { capture.fireDeviceRateRebuild() }   // device/rate change rebuilt the tap
 
         let healthEvents: [Bool] = events.compactMap {
             if case .streamHealth(let id, let recovering) = $0, id == device.id { return recovering }
@@ -2974,29 +2972,35 @@ final class NativeBackendTests: XCTestCase {
                        + "then recovering:false only once that rebind actually succeeds — in that order")
     }
 
-    /// After a FULL stop (the tap goes `.idle`, e.g. the capture gate deselected the
-    /// last receiver), the epoch ends: the NEXT `.capturing` is a fresh first-capture
-    /// and must NOT be mistaken for a rebuild — otherwise a normal deselect→reselect
-    /// would spuriously rebind. `.idle` clears the recapture flag.
-    func testWholeSystemCaptureIdleResetsRecaptureEpoch() async {
+    /// A normal deselect→reselect cycle must NOT trigger a whole-system session
+    /// reset. Each reselect starts the tap afresh (it reaches `.capturing` again)
+    /// and re-attaches the synced-local sink (a benign `.exclusionChange` rebuild) —
+    /// none of which fire `onDeviceRateRebuild`. Only the deselect's own
+    /// `convergeDevice` removeOutput and the reselect's own addOutput should appear;
+    /// no extra rebind-recovery removeOutput→addOutput. This is the "every reconnect
+    /// is equally slow" scenario: without cause-based gating, each reconnect's benign
+    /// rebuild would fire a redundant session reset.
+    func testWholeSystemDeselectReselectCycleDoesNotResetSession() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device()
         await startSelectAndStream(backend, engine, discovery, capture, device)
         defer { backend.stop() }
 
-        capture.fireStateChange(capturingState())   // first capture
-        capture.fireStateChange(.idle)              // full stop — epoch ends
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        let addsBefore = engine.addedIDs.filter { $0 == device.outputID }.count
+        // Deselect, then reselect — a full reconnect cycle.
+        backend.setOutputSet([])
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        let removesAfterDeselect = engine.removedIDs.filter { $0 == device.outputID }.count
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count >= 2 }
 
-        capture.fireStateChange(capturingState())   // fresh first-capture of a NEW epoch
+        // Give any erroneous rebind-recovery a chance to run.
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, addsBefore,
-                       "a first-capture after .idle must not rebind")
-        XCTAssertTrue(engine.removedIDs.filter { $0 == device.outputID }.isEmpty,
-                      "a first-capture after .idle must not removeOutput")
+        XCTAssertEqual(engine.removedIDs.filter { $0 == device.outputID }.count, removesAfterDeselect,
+                       "reconnect must NOT add a rebind-recovery removeOutput on top of the deselect's own")
+        XCTAssertEqual(engine.addedIDs.filter { $0 == device.outputID }.count, 2,
+                       "reconnect adds exactly once (initial converge + reselect converge) — no reset re-add")
     }
 
     /// T2/T4 single-flight: a SECOND whole-system recapture arriving while the
@@ -3019,12 +3023,10 @@ final class NativeBackendTests: XCTestCase {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
-        capture.fireStateChange(capturingState())   // first capture: arms the epoch
-
         // Recapture #1: force its addOutput to fail so a 0.3s backoff retry gets
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
-        capture.fireStateChange(capturingState())
+        capture.fireDeviceRateRebuild()
         await pollUntil { engine.removedIDs.filter { $0 == device.outputID }.count >= 1 }
         let addsAfterFirstAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
@@ -3033,7 +3035,7 @@ final class NativeBackendTests: XCTestCase {
         // generation and cancel its pending `DispatchWorkItem`). Let its own fresh
         // attempt succeed.
         engine.addFailures = []
-        capture.fireStateChange(capturingState())
+        capture.fireDeviceRateRebuild()
         await pollUntil(timeout: 5) {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFirstAttempt
         }
@@ -3079,14 +3081,11 @@ final class NativeBackendTests: XCTestCase {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
-        capture.fireStateChange(capturingState())   // first capture: arms the epoch
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
         // Slow every subsequent engine op so the recovery's remove→add pair has a
         // wide window for a concurrent deselect to try to land inside it.
         engine.opDelayNanos = 150_000_000
 
-        capture.fireStateChange(capturingState())   // RE-capture: enqueues recovery
+        capture.fireDeviceRateRebuild()   // device/rate rebuild: enqueues recovery
         // Give the recovery a moment to actually start (claim `converging`,
         // issue its removeOutput) before the deselect races it.
         try? await Task.sleep(nanoseconds: 30_000_000)
@@ -3133,9 +3132,6 @@ final class NativeBackendTests: XCTestCase {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
-        capture.fireStateChange(capturingState())   // first capture: arms the epoch
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
         // Slow every subsequent engine op so the deselect's removeOutput is still
         // in flight (holding `converging`) when the recapture fires.
         engine.opDelayNanos = 150_000_000
@@ -3145,7 +3141,7 @@ final class NativeBackendTests: XCTestCase {
         backend.setOutputSet([])                        // deselect: claims `converging`, slow removeOutput starts
         try? await Task.sleep(nanoseconds: 30_000_000)   // let it actually start
         backend.setOutputSet([device.id])                // re-select while still converging — only updates desiredOn
-        capture.fireStateChange(capturingState())        // recapture races the in-flight toggle: must bow out
+        capture.fireDeviceRateRebuild()                  // device/rate rebuild races the in-flight toggle: must bow out
 
         // Wait for the requeued reselect's addOutput to actually land (the real
         // signal of full convergence — `Device.isSelected` is written a step

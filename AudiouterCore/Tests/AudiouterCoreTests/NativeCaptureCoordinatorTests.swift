@@ -608,6 +608,111 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
     }
 
+    // MARK: - W1-T7 Fix 1: refreshExcludedProcessSet must compare-before-rebuild
+    // (the coreaudiod CPU-storm regression it previously reintroduced)
+
+    /// THE storm-prevention property (W1-T7 Fix 1). `refreshExcludedProcessSet`
+    /// is wired by R9 (`handlePerAppCaptureHealthChange`) to fire on EVERY per-app
+    /// tap `.capturing` transition. With N routed apps re-reaching `.capturing`
+    /// after one output-device sample-rate renegotiation, the OLD unconditional
+    /// `recreateTap()` drove N full whole-system teardown/recreates on an UNCHANGED
+    /// excluded set — the amplified coreaudiod rebuild storm the compare-before-
+    /// rebuild discipline exists to prevent. A refresh whose resolved exclusion set
+    /// is unchanged must now do ZERO Core Audio work, no matter how many fire.
+    func testRefreshOnUnchangedExclusionSetTriggersZeroRebuilds() {
+        let tap = FakeTap()
+        let pids: [String: pid_t] = ["com.app.excluded": 111]
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids[bid].map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        // Simulate the storm: many `.capturing` health-change refreshes for the
+        // excluded bundle, all on the SAME unchanged pid.
+        for _ in 0..<8 {
+            coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        }
+        XCTAssertEqual(tap.creates, createsAfterExclude,
+                       "an unchanged excluded set must do ZERO rebuilds however many refreshes fire — the storm cannot reignite")
+        coordinator.stop()
+    }
+
+    /// A GENUINE pid change (a real relaunch: old pid dead, fresh pid) must still
+    /// rebuild — but EXACTLY ONCE — and a second refresh on the settled pid is a
+    /// no-op. Complements the R14 relaunch tests above by pinning the rebuild count
+    /// to exactly one (the guard must not suppress a real change, nor rebuild
+    /// twice).
+    func testRefreshOnGenuinePIDChangeRebuildsExactlyOnce() {
+        let tap = FakeTap()
+        let pids = MutablePIDMap(["com.app.excluded": 111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+        let createsAfterExclude = tap.creates
+
+        pids.set("com.app.excluded", 456)
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine pid change rebuilds exactly once")
+        XCTAssertEqual(tap.excludedPIDs, [456], "the relaunched app's fresh pid is excluded")
+
+        // Settled: refresh again on the same pid → no further Core Audio work.
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled pid must not rebuild again")
+        coordinator.stop()
+    }
+
+    /// A FAILED rebuild must not leave a baseline that suppresses the next real
+    /// change (W1-T7 Fix 1 — the baseline is written ONLY on a successful commit).
+    /// A relaunch's rebuild fails mid-flight → the coordinator surfaces `.failed`;
+    /// after recovery via `start()` the compare guard is NOT wedged: an unchanged
+    /// set still no-ops and a genuine later change still rebuilds exactly once.
+    func testFailedRebuildDoesNotSuppressNextRealExclusionChange() {
+        let tap = FakeTap()
+        let pids = MutablePIDMap(["com.app.excluded": 111])
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            resolveProcessSet: { bid in pids.get(bid).map { [$0] } ?? [] })
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        XCTAssertEqual(tap.excludedPIDs, [111])
+
+        // The relaunch's rebuild fails (createAndStart throws) → `.failed`.
+        tap.startError = .deviceLost(reason: "gone")
+        pids.set("com.app.excluded", 456)
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+        XCTAssertEqual(coordinator.state, .failed(.deviceLost(reason: "gone")))
+
+        // Recover: app now stable on 456. start() from `.failed` re-derives the
+        // baseline from the LIVE set — proving the failed attempt didn't wedge it.
+        tap.startError = nil
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(tap.excludedPIDs, [456], "recovery excludes the current pid")
+        let createsAfterRecover = tap.creates
+
+        // Unchanged set after recovery → no rebuild (baseline is correct, not stale).
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterRecover, "settled set after recovery must not rebuild")
+
+        // A genuine NEW change is still applied — the earlier failure did not
+        // permanently suppress future rebuilds.
+        pids.set("com.app.excluded", 789)
+        coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
+        XCTAssertEqual(tap.creates, createsAfterRecover + 1, "a real change after a prior failure still rebuilds once")
+        XCTAssertEqual(tap.excludedPIDs, [789])
+        coordinator.stop()
+    }
+
     // MARK: - W1-T7 (Gap 1): live exclusion-membership diffing (debounced, compare-before-rebuild)
 
     #if canImport(AudioToolbox)
@@ -746,6 +851,79 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
                        "the burst must coalesce to a single settled rebuild, not one per notification")
         XCTAssertEqual(tap.excludedPIDs, [111, 333],
                        "the coalesced diff applies the SETTLED exclusion set")
+        coordinator.stop()
+    }
+
+    // MARK: - W1-T7 Fix 2: react to a pid's TRANSLATABILITY, not just pid-set membership
+
+    /// A translator whose "translatable" pid set the test can grow at will —
+    /// models an EXCLUDED-only app whose main pid is pre-seeded into the exclusion
+    /// union while SILENT (present, but NOT yet translatable to a Core Audio
+    /// process object) and then becomes translatable on the SAME pid when it
+    /// starts playing.
+    private final class TranslatabilityBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var translatable: Set<pid_t>
+        init(_ initial: Set<pid_t>) { self.translatable = initial }
+        func setTranslatable(_ pids: Set<pid_t>) { lock.withLock { translatable = pids } }
+        /// Object id for a pid == its bit pattern, but ONLY if currently
+        /// translatable; an untranslatable pid contributes nothing (mirrors the
+        /// real tap skipping a pid with no audio process object yet).
+        func translate(_ pids: Set<pid_t>) -> Set<UInt32> {
+            lock.withLock { Set(pids.filter { translatable.contains($0) }.map { UInt32(bitPattern: $0) }) }
+        }
+    }
+
+    /// THE Fix 2 leak: an EXCLUDED-ONLY app (denylisted, NOT routed → no per-app
+    /// tap) whose main pid is pre-seeded into the exclusion union while silent. The
+    /// resolved PID SET never changes — the pid was always present — so the OLD
+    /// raw-pid membership compare found no change and never rebuilt, and the app's
+    /// audio leaked into the whole-system mix the moment it became audible. With
+    /// the compare key now the TRANSLATED OBJECT set, the pid becoming translatable
+    /// (silent→audible on the SAME pid) IS a change → the tap rebuilds and the
+    /// app is re-excluded. Steady state (no translatability change) stays a no-op,
+    /// so Fix 1's loop-breaker is preserved.
+    func testUntranslatablePIDBecomingTranslatableReExcludesApp() {
+        let tap = FakeTap()
+        // The excluded-only app's main pid is ALWAYS resolved (the production
+        // NSRunningApplication fallback pre-seeds it even while silent)…
+        let resolvedPIDs = PidSetBox([111])
+        // …but it is NOT translatable to a Core Audio object until it plays.
+        let translate = TranslatabilityBox([]) // 111 present but untranslatable
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: SpySink(),
+            makeConverter: { _ in FakeConverter() },
+            resolveProcessSet: { _ in resolvedPIDs.get() },
+            translatePIDs: { translate.translate($0) },
+            muteBehavior: .mutedWhenTapped,
+            membershipDebounceInterval: .milliseconds(300))
+
+        coordinator.start()
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
+        // The pid is handed to the tap, but the exclusion OBJECT set (the baseline)
+        // is empty — nothing translates yet, so the app currently leaks.
+        XCTAssertEqual(tap.excludedPIDs, [111], "the pid is passed to the tap, but isn't a translatable object yet")
+        let createsBefore = tap.creates
+
+        // Steady-state churn with NO translatability change → ZERO rebuilds
+        // (Fix 1's loop-breaker must not be defeated by the object-compare key).
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, createsBefore, "no translatability change → zero rebuilds")
+
+        // The app starts playing: the SAME main pid becomes translatable. The
+        // resolved pid set is UNCHANGED ([111]) — the old compare would miss this.
+        translate.setTranslatable([111])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsBefore + 1,
+                       "a pid becoming translatable (silent→audible on the same pid) must rebuild exactly once")
+        XCTAssertEqual(tap.excludedPIDs, [111],
+                       "the now-translatable app is (re-)excluded from the system mix")
+
+        // Settled: a further diff with no translatability change is a no-op.
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, createsBefore + 1, "the settled translatable set must not rebuild again")
         coordinator.stop()
     }
 

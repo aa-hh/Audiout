@@ -50,6 +50,24 @@ import AVFoundation
 /// conversion). Unit tests drive the whole machine hermetically: create → push
 /// buffers with advancing `mHostTime` → assert converted-and-forwarded →
 /// device-change → stop → error surfaced — WITHOUT a real tap or a real engine.
+
+/// Translates a set of pids to the Core Audio process-object ids the tap will
+/// actually exclude (W1-T7 Fix 2). A pid that can't be translated YET — an app
+/// pre-seeded into the exclusion union while still SILENT, before it has opened
+/// an audio stream and gained a process object — contributes NOTHING, exactly as
+/// the tap's own ``CoreAudioSystemTap`` translation skips it. Injected so the
+/// exclusion compare-before-rebuild key can be the TRANSLATED object set (see
+/// ``NativeCaptureCoordinator/lastExcludedObjects``) rather than the raw resolved
+/// pid set: that is what lets the coordinator react to a pid becoming translatable
+/// (an excluded app going silent→audible on the SAME pid), a change the raw pid
+/// set is blind to. The designated initializer defaults it to an IDENTITY mapping
+/// (`pid → UInt32(pid)`) so a test that doesn't model translatability sees the
+/// object compare behave exactly like the old pid compare; the production
+/// initializer overrides it with the real
+/// `kAudioHardwarePropertyTranslatePIDToProcessObject` call. Returns `UInt32`
+/// (== `AudioObjectID`) so no Core Audio type leaks into the seam.
+public typealias PIDTranslator = @Sendable (Set<pid_t>) -> Set<UInt32>
+
 public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     // MARK: State machine
@@ -91,6 +109,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// AppKit-importing layer supplies the real resolver.
     private let resolveProcessSet: AppProcessResolver
 
+    /// pids → Core Audio process objects, the set actually handed to the tap as
+    /// its exclusion list. See ``PIDTranslator`` for why the exclusion
+    /// compare-before-rebuild key is this TRANSLATED set (W1-T7 Fix 2). Pure —
+    /// touches no queue-confined state — so it is safe to call OUTSIDE ``queue``.
+    private let translatePIDs: PIDTranslator
+
     // MARK: State (confined to `queue`)
 
     private let queue = DispatchQueue(label: "NativeCaptureCoordinator.state")
@@ -111,8 +135,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// W2-T1 (fixes R10): the `(deviceID, nominalRate)` key the CURRENT live tap
     /// was last (re)built against, per ``handleNominalSampleRateChanged``'s own
     /// bookkeeping. `nil` until the first rate notification (or a fresh identity
-    /// rebuild, which resets it) — the same shape ``lastExcludedPIDs`` uses for
-    /// the exclusion side. A notification whose `(deviceID, rate)` matches this
+    /// rebuild, which resets it) — the same shape ``lastExcludedObjects`` uses
+    /// for the exclusion side. A notification whose `(deviceID, rate)` matches this
     /// baseline triggers ZERO Core Audio work; this is the loop-breaker that
     /// keeps a naive rate listener from reintroducing the coreaudiod CPU storm
     /// (see the CPU/coreaudiod-storm diagnosis: unconditional rebuild-on-every-
@@ -134,16 +158,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// that's already running without going through a recreate.
     private var currentExcludedBundleIDs: Set<String> = []
 
-    /// W1-T7 (Gap 1): the excluded-process pid set that the CURRENT live tap
-    /// was last built/recreated against — the compare-before-rebuild key for
-    /// live-membership diffing on the EXCLUSION side (the whole-system analogue
-    /// of ``PerAppCaptureCoordinator``'s per-slot `lastTappedPIDs`). Recorded on
-    /// every successful `.capturing` transition (initial `start()`, device-change
-    /// recreate, exclusion-change recreate). A process-object-list notification
-    /// whose freshly-resolved excluded-pid union equals this value triggers ZERO
-    /// Core Audio work — the same regression-prevention property (the CPU-storm
-    /// loop-breaker) that guards the per-app side. Confined to `queue`.
-    private var lastExcludedPIDs: Set<pid_t> = []
+    /// W1-T7 (Gap 1 + Fix 2): the excluded-process OBJECT set that the CURRENT
+    /// live tap was last built/recreated against — the compare-before-rebuild key
+    /// for BOTH exclusion-refresh entry points (``refreshExcludedProcessSet`` and
+    /// ``handleMembershipChange``). It is the TRANSLATED set (pids → Core Audio
+    /// process objects), NOT the raw resolved pid set, so a pid that flips from
+    /// untranslatable→translatable — an excluded app going silent→audible on the
+    /// same pid — registers as a change and rebuilds (Fix 2), while steady-state
+    /// churn with no translatability change registers as no change and does ZERO
+    /// Core Audio work (Fix 1 / the CPU-storm loop-breaker). Recorded ONLY on a
+    /// SUCCESSFUL `.capturing` transition (initial `start()`, device-change
+    /// recreate, exclusion-change recreate) — a failed rebuild never advances it,
+    /// so it can't suppress a later needed rebuild. Confined to `queue`.
+    private var lastExcludedObjects: Set<UInt32> = []
 
     // MARK: Live-membership diffing on the exclusion side (W1-T7, Gap 1)
     //
@@ -154,7 +181,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     // disconnecting (browsers churn it constantly as tabs open/close), so
     // notifications are DEBOUNCED onto a dedicated serial queue and only the
     // last one in a burst runs the diff, and the diff COMPARES-BEFORE-REBUILD
-    // against `lastExcludedPIDs` so an unchanged set does zero Core Audio work.
+    // against `lastExcludedObjects` so an unchanged set does zero Core Audio work.
     // The concrete leak this closes: an EXCLUDED app (a routed-away or
     // user-excluded browser) spawns a new audio child mid-session without
     // relaunching — that child was never in the exclusion list, so its audio
@@ -231,6 +258,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         name: String = "Audiouter",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
+        // The exclusion compare-before-rebuild key is the TRANSLATED object set
+        // (W1-T7 Fix 2), so production must translate with the SAME Core Audio
+        // call the tap uses to build its exclusion list. Gated on 14.2 — the same
+        // floor the process-tap API needs; below it capture can't run anyway
+        // (``UnavailableSystemTap``), so an empty translator is harmless.
+        let translatePIDs: PIDTranslator
+        if #available(macOS 14.2, *) {
+            translatePIDs = { Self.translatePIDsToProcessObjects($0) }
+        } else {
+            translatePIDs = { _ in [] }
+        }
         self.init(
             makeTap: {
                 if #available(macOS 14.2, *) {
@@ -242,6 +280,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
             resolveProcessSet: resolveProcessSet,
+            translatePIDs: translatePIDs,
             muteBehavior: muteBehavior
         )
     }
@@ -254,6 +293,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
         resolveProcessSet: @escaping AppProcessResolver = { _ in [] },
+        translatePIDs: @escaping PIDTranslator = { pids in Set(pids.map { UInt32(bitPattern: $0) }) },
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
@@ -261,6 +301,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         self.sink = sink
         self.makeConverter = makeConverter
         self.resolveProcessSet = resolveProcessSet
+        self.translatePIDs = translatePIDs
         self.muteBehavior = muteBehavior
         self.membershipDebounceInterval = membershipDebounceInterval
     }
@@ -326,6 +367,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // Blocking HAL work OUTSIDE the lock.
             let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
             try Self.validate(format)
+            // Translate the pids the tap was just built with into the object set
+            // it actually excludes — the compare-before-rebuild baseline (W1-T7
+            // Fix 2). Done OUTSIDE the lock (a HAL property read); recorded only on
+            // the SUCCESS commit below, so a failed create never advances it.
+            let committedObjects = translatePIDs(claim.excludedPIDs)
             let orphan: SystemAudioTap? = queue.sync {
                 // A stop() may have raced in while we were creating: don't clobber an
                 // idle/stopping state with a fresh capturing one — stop() wins.
@@ -334,7 +380,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
-                self.lastExcludedPIDs = claim.excludedPIDs // W1-T7 compare-before-rebuild baseline
+                self.lastExcludedObjects = committedObjects // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
                 return nil
             }
@@ -425,30 +471,90 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap()
     }
 
-    /// Force the whole-system tap to re-resolve pids for the CURRENT
-    /// excluded-bundle-ID set and rebuild, if `bundleID` is actually in that
-    /// set (R14). `updateRouting`'s no-op guard only recreates when the
-    /// bundle-ID UNION changes — a relaunched excluded-or-routed app keeps
-    /// the same bundle ID, so that guard never fires even though the app's
-    /// underlying pids did (old pid died, a fresh one took its place). This
-    /// bypasses that guard directly: it doesn't touch
-    /// `currentExcludedBundleIDs` at all, it just asks `recreateTap()` to
-    /// rebuild against a freshly-resolved pid set, which is exactly what
-    /// picks up the relaunched process. A no-op (no rebuild) if `bundleID`
-    /// isn't currently excluded/routed-away, or if the tap isn't
-    /// `.capturing` yet (the next `start()` resolves fresh anyway).
+    /// Re-resolve pids for the CURRENT excluded-bundle-ID set and rebuild the
+    /// whole-system tap IF that changes the exclusion set — but only if `bundleID`
+    /// is actually excluded/routed-away (R14). `updateRouting`'s no-op guard only
+    /// recreates when the bundle-ID UNION changes; a relaunched excluded-or-routed
+    /// app keeps the same bundle ID, so that guard never fires even though the
+    /// app's underlying pids did (old pid died, a fresh one took its place). This
+    /// bypasses that guard — but NOT the compare-before-rebuild loop-breaker.
     ///
-    /// Callers: `NativeBackend.handleAppLaunched`, unconditionally on every
-    /// app-launch notification — cheap to call for a bundle ID that turns
-    /// out not to matter, since the `contains` check below makes the whole
-    /// thing a no-op in that case.
+    /// W1-T7 Fix 1 (the CPU-storm regression this method previously reintroduced):
+    /// it USED to call `recreateTap()` UNCONDITIONALLY whenever `bundleID` was
+    /// excluded and the tap was `.capturing`, consulting no baseline. R9 wires
+    /// `NativeBackend.handlePerAppCaptureHealthChange` to call this on EVERY
+    /// per-app tap `.capturing` transition, so a single output-device sample-rate
+    /// renegotiation (the Zoom/mic event) that rebuilds N per-app taps drove N
+    /// unconditional whole-system teardown/recreates against an UNCHANGED excluded
+    /// set — exactly the amplified coreaudiod rebuild storm the compare-before-
+    /// rebuild discipline exists to prevent. It now routes through the SAME guard
+    /// `handleMembershipChange` uses (``rebuildIfExclusionObjectsChanged``): an
+    /// unchanged exclusion OBJECT set does ZERO Core Audio work; a genuine relaunch
+    /// (different pids/objects) still rebuilds exactly once.
+    ///
+    /// Callers: `NativeBackend.handleAppLaunched` and
+    /// `handlePerAppCaptureHealthChange`, cheap to call for a bundle ID that turns
+    /// out not to matter (the `contains` gate no-ops it) or whose exclusion set is
+    /// unchanged (the compare-before-rebuild guard no-ops it).
     public func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+        let isExcludedAndCapturing: Bool = queue.sync {
+            guard case .capturing = _state else { return false }
+            return currentExcludedBundleIDs.contains(bundleID)
+        }
+        guard isExcludedAndCapturing else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
+    /// The compare-before-rebuild core shared by BOTH exclusion-refresh entry
+    /// points — ``refreshExcludedProcessSet(forRelaunchedBundleID:)`` (relaunch /
+    /// per-app-health triggers, W1-T7 Fix 1) and ``handleMembershipChange()``
+    /// (process-list churn, W1-T7 Gap 1 / Fix 2). Re-resolves the excluded
+    /// bundle-ID union to pids, TRANSLATES those pids to the Core Audio process
+    /// objects the tap actually excludes, and rebuilds ONLY if that OBJECT set
+    /// differs from the baseline the live tap was built against
+    /// (``lastExcludedObjects``).
+    ///
+    /// Comparing the TRANSLATED OBJECT set — not the raw resolved pid set — is
+    /// what holds BOTH Wave-1 exclusion fixes simultaneously:
+    ///
+    ///  - **Fix 1 (loop-breaker, no CPU storm):** a `.capturing` refresh whose
+    ///    exclusion pids/objects are unchanged does ZERO Core Audio work, so the
+    ///    N-times-amplified rebuild storm above cannot reignite.
+    ///  - **Fix 2 (excluded app can't leak):** an excluded-only app pre-seeded
+    ///    into the union while SILENT has an untranslatable main pid — it
+    ///    contributes no object. When it becomes audible on the SAME pid, the raw
+    ///    pid set is unchanged (the old compare saw no change and never rebuilt,
+    ///    leaking its audio into the mix), but the OBJECT set gains a member, so
+    ///    this rebuilds and the now-translatable object lands in the tap's
+    ///    exclusion list.
+    ///
+    /// The two hold together because the single compare key — the translated
+    /// object set — moves on exactly the events that must trigger a rebuild
+    /// (a pid appearing/disappearing OR becoming translatable) and on nothing
+    /// else (steady-state `.capturing` churn on the same translatable set).
+    ///
+    /// Resolve+translate run OUTSIDE the lock (they enumerate AppKit / read the
+    /// HAL); the decision is re-checked under the lock against the CURRENT
+    /// `lastExcludedObjects` so a racing `updateRouting`/rebuild isn't clobbered.
+    /// The baseline is advanced only on a successful `recreateTap()` commit, so a
+    /// failed rebuild can't leave a stale baseline that suppresses a later one.
+    private func rebuildIfExclusionObjectsChanged() {
+        let snapshot: (bundleIDs: Set<String>, oldObjects: Set<UInt32>)? = queue.sync {
+            guard case .capturing = _state else { return nil }
+            return (currentExcludedBundleIDs, lastExcludedObjects)
+        }
+        guard let snapshot, !snapshot.bundleIDs.isEmpty else { return }
+
+        let newObjects = translatePIDs(Set(snapshot.bundleIDs.flatMap(resolveProcessSet)))
+
         let needsRecreate: Bool = queue.sync {
-            guard currentExcludedBundleIDs.contains(bundleID) else { return false }
-            if case .capturing = _state { return true }
-            return false
+            guard case .capturing = _state else { return false }
+            guard currentExcludedBundleIDs == snapshot.bundleIDs else { return false }
+            guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD (translated objects)
+            return true
         }
         guard needsRecreate else { return }
+        AudioDiag.log("NativeCapture exclusion objects changed: \(snapshot.oldObjects.sorted()) -> \(newObjects.sorted()) — rebuilding")
         recreateTap()
     }
 
@@ -461,8 +567,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     // `refreshExcludedProcessSet` only on an explicit app-launch notification.
     // This path listens to the same system-wide process-object-list notification
     // ``PerAppCaptureCoordinator`` uses and, on a genuine change to the resolved
-    // excluded-pid union, recreates the tap — debounced, and guarded by
-    // `lastExcludedPIDs` compare-before-rebuild so an unchanged set costs nothing.
+    // excluded-object set, recreates the tap — debounced, and guarded by
+    // `lastExcludedObjects` compare-before-rebuild so an unchanged set costs
+    // nothing (W1-T7 Gap 1 / Fix 2 — see ``rebuildIfExclusionObjectsChanged``).
 
     #if canImport(AudioToolbox)
     /// Arm the system-wide process-object-list listener. Idempotent — a no-op
@@ -523,14 +630,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Re-resolve the excluded-bundle-ID union's pid set and compare it against
-    /// the set the live tap was last built against (`lastExcludedPIDs`). On a
-    /// genuine change — a new audio child appeared inside an excluded app, or an
-    /// excluded child went away — recreate the tap so the exclusion list is
-    /// correct. An UNCHANGED set (a duplicate notification, or churn in an
-    /// unrelated app) does ZERO Core Audio work: this is the regression-prevention
-    /// property (the CPU-storm loop-breaker) that keeps browser churn from
-    /// thrashing coreaudiod. Runs on ``membershipQueue``.
+    /// Re-resolve the excluded-bundle-ID union and, on a genuine change to the
+    /// TRANSLATED object set the tap excludes, recreate the tap so the exclusion
+    /// list is correct — a new audio child appeared inside an excluded app, an
+    /// excluded child went away, OR (Fix 2) an already-present excluded pid became
+    /// translatable by starting to play. An UNCHANGED object set (a duplicate
+    /// notification, or churn in an unrelated app) does ZERO Core Audio work: the
+    /// regression-prevention property (the CPU-storm loop-breaker) that keeps
+    /// browser churn from thrashing coreaudiod. Delegates to the shared
+    /// ``rebuildIfExclusionObjectsChanged()`` (which itself does the snapshot /
+    /// resolve-outside-lock / re-check-under-lock dance and runs on
+    /// ``membershipQueue`` when invoked from the debounced diff).
     ///
     /// Recreate — rather than an in-place tap update like the per-app side — is
     /// deliberate: the whole-system exclusion tap is rebuilt as a unit anyway
@@ -541,29 +651,38 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Internal (not `private`) purely so tests can drive a diff pass
     /// deterministically without waiting out the real debounce timer.
     func handleMembershipChange() {
-        // Snapshot the excluded-bundle-ID set + current baseline under the lock,
-        // but do the (potentially blocking / AppKit) resolve OUTSIDE it.
-        let snapshot: (bundleIDs: Set<String>, oldPIDs: Set<pid_t>)? = queue.sync {
-            guard case .capturing = _state else { return nil }
-            return (currentExcludedBundleIDs, lastExcludedPIDs)
-        }
-        guard let snapshot, !snapshot.bundleIDs.isEmpty else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
 
-        let newSet = Set(snapshot.bundleIDs.flatMap(resolveProcessSet))
-
-        let needsRecreate: Bool = queue.sync {
-            // Re-check under the lock: still capturing, the excluded set hasn't
-            // been swapped out from under us (an `updateRouting` racing in owns
-            // its own recreate), and the resolved union genuinely differs from
-            // what the live tap was built against.
-            guard case .capturing = _state else { return false }
-            guard currentExcludedBundleIDs == snapshot.bundleIDs else { return false }
-            guard newSet != lastExcludedPIDs else { return false } // COMPARE-BEFORE-REBUILD
-            return true
+    /// The real pid → Core Audio process-object translation backing the
+    /// production ``PIDTranslator`` seam (wired by the `engine:` convenience
+    /// init). Same `kAudioHardwarePropertyTranslatePIDToProcessObject` call
+    /// ``CoreAudioSystemTap`` uses to build the tap's exclusion list, so the
+    /// coordinator's compare-before-rebuild key is the SAME translated object set
+    /// the tap actually excludes (W1-T7 Fix 2). A pid that doesn't translate yet
+    /// (app not audible) contributes nothing — mirrors the tap's own skip. Returns
+    /// `UInt32` (== `AudioObjectID`) so the seam stays Core-Audio-type-free.
+    @available(macOS 14.2, *)
+    static func translatePIDsToProcessObjects(_ pids: Set<pid_t>) -> Set<UInt32> {
+        guard !pids.isEmpty else { return [] }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var result: Set<UInt32> = []
+        for pid in pids {
+            var pidQualifier = pid
+            var objID: AudioObjectID = kAudioObjectUnknown
+            var size = UInt32(MemoryLayout<AudioObjectID>.size)
+            let err = AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address,
+                UInt32(MemoryLayout<pid_t>.size), &pidQualifier,
+                &size, &objID)
+            if err == noErr, objID != kAudioObjectUnknown {
+                result.insert(objID)
+            }
         }
-        guard needsRecreate else { return }
-        AudioDiag.log("NativeCapture exclusion membership changed: \(snapshot.oldPIDs.sorted()) -> \(newSet.sorted())")
-        recreateTap()
+        return result
     }
     #endif
 
@@ -725,6 +844,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         do {
             let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
             try Self.validate(format)
+            // Translated object set the tap was just built with — the
+            // compare-before-rebuild baseline (W1-T7 Fix 2), computed OUTSIDE the
+            // lock and recorded only on the SUCCESS commit so a failed rebuild
+            // never advances it.
+            let committedObjects = translatePIDs(claim.excludedPIDs)
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
@@ -738,7 +862,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
-                self.lastExcludedPIDs = claim.excludedPIDs // W1-T7 compare-before-rebuild baseline
+                self.lastExcludedObjects = committedObjects // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
                 // STABILITY(C6): a rebuild trigger landed while we were rebuilding —
                 // replay it once now that we're capturing again, coalescing however

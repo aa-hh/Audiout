@@ -198,6 +198,30 @@ the honest stopgap if (a) slips.
   smoke test; CPU-storm T8/T10 (arrives inside Wave 2); memory-leak audit
   waves proceed on their own plan (shared tap-lifecycle code — coordinate
   merges, single live session per the single-instance PTP rule).
+- **Finding 5 — Chrome channel over-match in `ProcessSetResolver`
+  (DEFERRED to this wave, not yet fixed):** `ProcessSetResolver.pids(forBundleID:)`
+  groups helpers by a bare dotted-prefix match — a candidate bundle ID matches the
+  target when it equals it OR `hasPrefix(bundleID + ".")`. That prefix
+  over-captures Chrome *channel* siblings: `com.google.Chrome.canary`,
+  `com.google.Chrome.beta`, and `com.google.Chrome.dev` all begin with
+  `com.google.Chrome.`, so routing (or excluding) regular `com.google.Chrome`
+  also sweeps in Chrome Canary/Beta/Dev — a wrong-device + silenced-app bug
+  (their audio is captured/excluded as if they were the routed app's helpers).
+  - **False confidence in the guard test:** `ProcessSetResolverTests`
+    (`testChromeHelpersGroupToParentByPrefix` / `testExactBundleIDIsNotPrefixMatchedIntoAnotherApp`)
+    asserts non-match against the string `com.google.ChromeCanary` (no dot).
+    That correctly does NOT match `com.google.Chrome.` — but it is **not the real
+    channel bundle id**. The actual id is `com.google.Chrome.canary` (dotted),
+    which DOES hit the prefix and IS over-matched; the real over-matching id is
+    currently untested, so the suite looks like it guards this and does not.
+  - **Fix direction (when this wave runs):** replace the bare dotted-prefix with
+    a known-helper-infix allowlist (e.g. require the sub-identifier to contain
+    `.helper`, which real Chrome/Firefox render/GPU helpers carry) OR gate helper
+    grouping behind responsible-pid confirmation instead of string prefix; and
+    fix the test to use the real dotted id `com.google.Chrome.canary` (asserting
+    it does NOT group under `com.google.Chrome`). Do NOT change
+    `ProcessSetResolver.swift` behavior before this wave — the Wave-1 exclusion
+    fixes deliberately left it untouched.
 
 ---
 

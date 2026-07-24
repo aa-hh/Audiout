@@ -1345,6 +1345,31 @@ public actor AirPlayEngine {
     /// fires off-actor on the CompletionRegistry timer queue. Clears the leaked
     /// callback slot and, if the device still has a live session, resets its
     /// `callback_id` so a late completion can't resolve a reused slot's op.
+    ///
+    /// A9-F4 (slot-cleanup ORDERING — why a late cleanup can't clobber the NEXT
+    /// op's slot). Three composed facts close the race, so `tracked: false` here
+    /// is safe:
+    ///   1. Per-id serialization (B5.1): the next op on this SAME `id` cannot arm
+    ///      until the timed-out `startOp` returns and its `defer releaseOp(id)`
+    ///      fires. A DIFFERENT-id op can never take this slot or device meanwhile:
+    ///      the leaked slot stays occupied (cb != NULL) until this clear runs, so
+    ///      `outputs_callback_add`'s first-free scan skips it; and `device_cb_set`
+    ///      only touches THIS timed-out device.
+    ///   2. Enqueue-before-resume: the `onTimeout` closure calls this (enqueuing
+    ///      the cleanup) STRICTLY BEFORE it `cont.resume(throwing: .opTimedOut)`.
+    ///      The next same-id op can only arm AFTER that resume propagates (throw ->
+    ///      defer releaseOp -> wake waiter -> next startOp -> enqueue body), so the
+    ///      cleanup is enqueued strictly before the next op's body is enqueued.
+    ///   3. FIFO engine-thread queue: `EngineThread.enqueue` schedules via
+    ///      `event_base_once(base, -1, EV_TIMEOUT, …, tv=NULL)`, which libevent 2.x
+    ///      deliberately makes ORDER-PRESERVING (it routes a NULL/zero timeout to
+    ///      `event_active` on the priority's FIFO active queue, NOT the timer
+    ///      min-heap — see libevent's own "so let's make it fast (and
+    ///      order-preserving)" comment). Same priority => activation order ==
+    ///      execution order, so (2)'s cleanup runs before the next op's body.
+    /// Headless mode is even stronger: the cleanup runs INLINE before the resume,
+    /// so it completes before `startOp` returns. Regression:
+    /// `SlotCleanupOrderingTests` locks facts (1)+(2) via the headless inline path.
     private nonisolated func scheduleSlotCleanup(callbackId: Int32, id: OutputID) {
         let cleanup: () -> Void = {
             outputs_callback_clear(callbackId)

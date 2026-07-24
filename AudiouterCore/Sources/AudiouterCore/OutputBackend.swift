@@ -204,11 +204,19 @@ public protocol OutputBackend: AnyObject {
     /// Also the entry point for the connection state machine: ids newly in the
     /// set move to `.connecting` (verified later to `.connected`); ids leaving
     /// the set drop to `.off` — **unless** they're currently `.failed`, in
-    /// which case that state is sticky and survives the removal (the popover
-    /// uses this exact call to clean up a failed toggle's membership without
-    /// erasing the warning it's showing). Re-adding a `.failed` id is the retry
-    /// path and moves it back to `.connecting`
-    /// (`dev/notes/p1-connection-status-brief.md` §1/§3).
+    /// which case that state is sticky and survives the removal.
+    ///
+    /// Retry (`dev/notes/p1-connection-status-brief.md` §1/§3): re-adding an id
+    /// that had been dropped is one way to retry a `.failed` device — but as of
+    /// R12/W2-T3, `.failed` no longer drops the id from the desired set at all
+    /// (the popover's "Try again" keeps Selected-Devices/group intent through a
+    /// failure), so the *ordinary* retry call now arrives here with the id
+    /// ALREADY present, unchanged. Conforming backends must still treat that as
+    /// a fresh attempt: re-check each requested id's CURRENT `connectionState`
+    /// (not just whether membership changed) and re-kick anything `.off` or
+    /// `.failed` back to `.connecting`. `OwnToneBackend` does this naturally
+    /// (it re-evaluates every id on every call); `NativeBackend`/`MockBackend`
+    /// detect the "already desired, still `.failed`" case explicitly.
     func setOutputSet(_ ids: Set<String>)
 }
 

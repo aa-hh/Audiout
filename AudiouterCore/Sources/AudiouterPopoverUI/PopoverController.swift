@@ -911,14 +911,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // MARK: Connection failures + diagnosis panels (brief §7.3)
     //
     // The backend owns the connection state machine; the popover reacts to its
-    // TRANSITIONS. On `→ .failed` it (a) removes the device from the Selected
-    // Devices set — the honest toggle animates back OFF via ordinary membership
-    // repaint, and the backend keeps `.failed` sticky through the resulting
-    // cleanup `setOutputSet` (§1) so the warning survives — and (b) auto-expands
-    // the diagnosis panel ONCE for that failure episode. On `→ .connected` /
-    // `→ .off` any panel for the id is torn down. "Try again" re-adds membership
-    // (the toggle-on path IS the retry path). The panel is purely auto-driven off
-    // these transitions — the manual warning-button toggle was retired 2026-07-17.
+    // TRANSITIONS. On `→ .failed` it auto-expands the diagnosis panel ONCE for
+    // that failure episode — it does NOT touch the Selected Devices / group
+    // membership set (R12, W2-T3): a device that fails a reconnect KEEPS the
+    // user's selection intent, exactly like a still-selected device that's
+    // merely unavailable. Two things pick up the slack instead of a silent
+    // unselect: the silence watchdog (W2-T2) keeps the Mac audible if this was
+    // the only/last connected device, and the backend's converge loop re-kicks
+    // automatically once discovery reports the device reachable again
+    // (`NativeBackend.addOrUpdate`'s `desiredOn`-driven re-kick) — no user
+    // action required. On `→ .connected` / `→ .off` any panel for the id is
+    // torn down. "Try again" re-adds membership (the toggle-on path IS the
+    // retry path, and remains a no-op if the device was never removed). The
+    // panel is purely auto-driven off these transitions — the manual
+    // warning-button toggle was retired 2026-07-17.
 
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
@@ -944,9 +950,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 // (re)opening. This is what re-surfaces the panel on a
                 // "Try again → fails again" (`.failed → .connecting → .failed`).
                 dismissedDiagnosisIDs.remove(device.id)
-                if groupController?.isSpeakerSelected(device.id) == true {
-                    groupController?.setDeviceSelected(device.id, false)
-                }
                 openDiagnosisIDs.insert(device.id)
             case .connected, .off:
                 // Leaving `.failed` ends the episode — clear both the open intent
@@ -1016,10 +1019,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         reconcileDiagnosisPanels(animated: true)
     }
 
-    /// "Try again": re-adding the id to the Selected Devices set IS the retry
-    /// path (§1 — a `.failed` id re-appearing in `setOutputSet` → `.connecting`).
+    /// "Try again": under R12 (W2-T3) the id is normally ALREADY selected/a
+    /// group member (`.failed` no longer drops it), so this can't ride a
+    /// plain `setDeviceSelected(id, true)` off→on edge any more —
+    /// `GroupController.retryConnection(for:)` is the dedicated entry point
+    /// that re-applies routing regardless, so the backend gets another
+    /// `setOutputSet` call and can re-kick the `.failed` id back to
+    /// `.connecting`. Same call whether `id` is a Selected-Devices member or
+    /// an active group's member (Groups and Selected Devices behave
+    /// identically here).
     private func retryConnection(for id: String) {
-        let result = groupController?.setDeviceSelected(id, true) ?? .ok
+        let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
     }
 

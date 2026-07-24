@@ -287,6 +287,43 @@ public final class GroupController {
         }
     }
 
+    /// Force a fresh connection attempt for `id` — what the diagnosis panel's
+    /// "Try again" calls (R12/W2-T3).
+    ///
+    /// Before R12, retry rode `setDeviceSelected(id, true)`: a `.failed` id had
+    /// been dropped from the desired set as failure *cleanup*, so re-adding it
+    /// was a genuine off→on membership edge that reached `applyRouting()`
+    /// naturally. R12 stopped that cleanup — `.failed` keeps the id in the
+    /// desired set (Selected Devices OR an active group's members) so the
+    /// user's intent survives the failure — which means the id is usually
+    /// ALREADY present by the time "Try again" fires. `setDeviceSelected`'s own
+    /// no-op guard would swallow that call before it ever reached the backend.
+    /// This bypasses that guard and re-applies routing unconditionally, so
+    /// `OutputBackend.setOutputSet` is called again and can re-kick a `.failed`
+    /// id (see that method's doc for the "already-desired retry" contract each
+    /// backend implements).
+    ///
+    /// Handles both membership shapes identically (Groups and Selected Devices
+    /// behave the same under R12): `id` already in `selectedDeviceIDs`, or
+    /// already a member of the currently-active group. Falls back to the
+    /// ordinary add path (`setDeviceSelected(id, true)`) if `id` isn't
+    /// currently desired by either — shouldn't normally happen from the retry
+    /// button, but keeps this safe as a general-purpose entry point.
+    @discardableResult
+    public func retryConnection(for id: String) -> SelectionResult {
+        if selectedDeviceIDs.contains(id) {
+            if mainOut == .selectedDevices { applyRouting() }
+            return .ok
+        }
+        if case .group(let groupID) = mainOut,
+           let group = groups.first(where: { $0.id == groupID }),
+           group.memberIDs.contains(id) {
+            applyRouting()
+            return .ok
+        }
+        return setDeviceSelected(id, true)
+    }
+
     /// Whether the local Mac may currently be toggled ON — false when it would
     /// mix with AirPlay devices (so the UI can disable its toggle with a
     /// tooltip). Removing an already-selected local device is always fine.

@@ -5,8 +5,15 @@ final class GroupControllerTests: XCTestCase {
 
     /// Deterministic backend: no discovery stagger, no timers, pre-populated
     /// synchronously via a blocking discovery wait (mirrors MockBackendTests).
-    private func makeBackend(_ fleet: [Device] = .demoFleet) async throws -> MockBackend {
-        let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
+    /// `connectScripts` (default none) lets a caller exercise the connection
+    /// state machine (fail/retry choreography) the same way
+    /// `PopoverControllerTests.makeScriptedPopover` does.
+    private func makeBackend(
+        _ fleet: [Device] = .demoFleet,
+        connectScripts: [String: ConnectScript] = [:]
+    ) async throws -> MockBackend {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
+                                  simulatesDropouts: false, connectScripts: connectScripts)
         let stream = backend.makeEventStream()
         let expectation = expectation(description: "fleet discovered")
         let box = CountBox()
@@ -75,6 +82,75 @@ final class GroupControllerTests: XCTestCase {
         _ = controller.setDeviceSelected("office", false)
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(backend.devices.first { $0.id == "office" }?.isSelected == true)
+    }
+
+    /// Poll `backend` until `id`'s connection state satisfies `predicate`
+    /// (mirrors `PopoverControllerTests.waitForConnectionState`).
+    private func waitForConnectionState(
+        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
+        _ predicate: (ConnectionState) -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let device = backend.devices.first(where: { $0.id == id }),
+               predicate(device.connectionState) { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for \(id)'s connection state")
+    }
+
+    private func isFailed(_ state: ConnectionState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    /// R12/W2-T3 — `retryConnection(for:)`, the Selected-Devices branch: a
+    /// `.failed` device is never removed from `selectedDeviceIDs` any more, so
+    /// the ONLY way "Try again" can reach the backend is this dedicated call
+    /// (a plain `setDeviceSelected(id, true)` would be a same-state no-op).
+    /// Membership must stay untouched throughout — retry is a backend-facing
+    /// re-kick, not a model mutation.
+    func testRetryConnectionForSelectedDeviceReconnectsWithoutTouchingMembership() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+        controller.setMainOut(.selectedDevices)
+
+        _ = controller.setDeviceSelected("office", true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "R12: still selected despite the failure")
+
+        _ = controller.retryConnection(for: "office")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "retry never touches membership")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertTrue(controller.isSpeakerSelected("office"))
+    }
+
+    /// R12/W2-T3 — `retryConnection(for:)`, the active-GROUP branch: a group
+    /// member that fails is never dropped from the group (group membership was
+    /// never touched by connection state to begin with), so retry must
+    /// re-activate the group rather than mistake this for a Selected-Devices
+    /// id. Confirms Groups and Selected Devices behave identically for retry.
+    func testRetryConnectionForActiveGroupMemberReconnectsWithoutTouchingMembership() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+        try controller.saveGroup(Group(id: "g1", name: "Office Pair", memberIDs: ["office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        XCTAssertEqual(controller.activeGroupID, "g1", "still the active group despite the failure")
+        XCTAssertFalse(controller.isSpeakerSelected("office"),
+                       "a pure group member is never in the ad-hoc Selected-Devices set")
+
+        _ = controller.retryConnection(for: "office")
+        XCTAssertEqual(controller.activeGroupID, "g1", "retry never touches group membership/activation")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertEqual(controller.activeGroupID, "g1")
     }
 
     func testDefaultSelectionIsLocalPassthrough() async throws {

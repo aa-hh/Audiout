@@ -1121,6 +1121,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
                 let previous = self.desiredOn[id]
                 self.desiredOn[id] = wantOn
+
+                // R12/W2-T3: `.failed` no longer drops the id from the desired
+                // set (the popover's "Try again" keeps Selected-Devices intent
+                // through a failure — it never toggles membership off first), so
+                // a retry now arrives here with `wantOn` UNCHANGED (already
+                // `true`) rather than as an off→on edge. Detect that case
+                // explicitly and treat it as a fresh attempt too — this mirrors
+                // OwnToneBackend's `setOutputSet`, which never gated retry on a
+                // membership delta in the first place: it re-checks every id's
+                // CURRENT `connectionState` on every call and re-kicks anything
+                // `.off`/`.failed` regardless of whether that id was already in
+                // the requested set.
+                var isRetryOfFailed = false
+                if wantOn, previous == true, case .failed? = self.known[id]?.connectionState {
+                    isRetryOfFailed = true
+                }
+
                 // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
                 // `setOutputSet`): a device newly desired ON goes `.connecting`
                 // immediately, before the engine op resolves, so the UI spinner is
@@ -1130,12 +1147,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // back to `.off` right away — NativeBackend has no "sticky failed
                 // survives deselect" behavior (its park is cleared on toggle
                 // unconditionally, above), so the connection dot follows suit.
-                if previous != wantOn {
+                if previous != wantOn || isRetryOfFailed {
                     self.setConnectionState(wantOn ? .connecting : .off, for: id)
                 }
-                // Kick only if the desired changed AND no loop is already running for
-                // this id (a running loop re-reads `desiredOn` when its op settles).
-                if previous != wantOn, !self.converging.contains(id) {
+                // Kick if the desired state changed, OR this is a same-membership
+                // retry of a `.failed` device (R12) — AND no loop is already
+                // running for this id (a running loop re-reads `desiredOn` when
+                // its op settles).
+                if (previous != wantOn || isRetryOfFailed), !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
                 }

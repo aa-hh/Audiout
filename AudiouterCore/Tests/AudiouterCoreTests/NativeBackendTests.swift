@@ -2257,6 +2257,85 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertEqual(d?.isSelected, true)
     }
 
+    /// R12 / W2-T3: verifies the plan's "the converge loop already re-kicks on
+    /// discovery updates" claim directly against `NativeBackend`, with NO user
+    /// re-toggle at all — unlike `testConnectionStateRecoveryClearsFailedThenReconnects`
+    /// above, which drives recovery via a second `setOutputSet` call. Now that the
+    /// popover no longer auto-unselects on `.failed` (R12), `desiredOn[id]` stays
+    /// true forever through a failure, so `addOrUpdate`'s rediscovery re-kick
+    /// (`streamableNow && desiredOn[id] == true && !added && !converging &&
+    /// !failedGate`) is the ONLY thing that has to fire to bring the device back —
+    /// confirming the popover fix is safe to lean on it.
+    func testFailedDeviceReconvergesOnRediscoveryWithoutUserAction() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "SelfHealer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        XCTAssertEqual(backend.test_expectedSelected, [device.id],
+                       "R12: intent (expectedSelected) is untouched by the failure")
+
+        // The receiver comes back and the engine stops NACKing — simulate ONLY
+        // rediscovery, no `setOutputSet` re-call (the popover under R12 never
+        // makes one on `.failed`).
+        engine.addFailures = []
+        discovery.fire(.updated(device))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected,
+                       "rediscovery alone re-converged the still-desired device")
+        XCTAssertEqual(d?.isSelected, true)
+    }
+
+    /// R12/W2-T3, the explicit "Try again" path (as opposed to the rediscovery
+    /// path above): `GroupController.retryConnection(for:)` re-issues
+    /// `setOutputSet` with the SAME set — the id was never removed — so
+    /// `NativeBackend` must detect "already desired, still `.failed`" itself
+    /// and re-kick, rather than skipping because `previous == wantOn`.
+    func testRetryOfFailedWithUnchangedSetStillReconverges() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:34", name: "TryAgainer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+
+        // The receiver recovers, but nothing re-discovers it — only an explicit
+        // "Try again" re-issues the SAME output set (the id was already in it).
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected,
+                       "a same-membership retry call must still reconnect a .failed device")
+        XCTAssertEqual(d?.isSelected, true)
+    }
+
     /// toggle-off → off: deselecting a connected device must clear the dot back to
     /// `.off` (NativeBackend has no sticky-failed-survives-deselect behavior — its
     /// failure park is unconditionally cleared on any toggle, so the connection dot

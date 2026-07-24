@@ -1,6 +1,10 @@
 import XCTest
 @testable import AudiouterCore
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 #if canImport(AudioToolbox)
 import AudioToolbox
 #endif
@@ -32,10 +36,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         private(set) var createCount = 0
         private(set) var teardownCount = 0
         private(set) var started = false
-        /// The `excludedPIDs` passed to the MOST RECENT `createAndStart` call
-        /// (T4) — lets a test assert the tap was (re)created with the right
-        /// exclusion set without needing a real Core Audio process object.
-        private(set) var lastExcludedPIDs: Set<pid_t> = []
+        /// The `excludedProcessObjectIDs` passed to the MOST RECENT
+        /// `createAndStart` call (T4/leak-fix) — lets a test assert the tap
+        /// was (re)created with the right exclusion set without needing a
+        /// real Core Audio process object.
+        private(set) var lastExcludedProcessObjectIDs: Set<AudioObjectID> = []
 
         /// Test-only hook invoked synchronously at the START of `createAndStart`
         /// (before the scripted `startError`/return), i.e. while the coordinator
@@ -45,8 +50,8 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         /// the caller's thread in this fake. Mirrors ``FakeProcessTap``.
         var onCreateAndStart: (() -> Void)?
 
-        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastExcludedPIDs = excludedPIDs; lock.unlock()
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastExcludedProcessObjectIDs = excludedProcessObjectIDs; lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             lock.lock(); started = true; lock.unlock()
@@ -62,7 +67,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
-        var excludedPIDs: Set<pid_t> { lock.withLock { lastExcludedPIDs } }
+        var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { lastExcludedProcessObjectIDs } }
     }
 
     /// Records every forwarded (pcm, pts) pair.
@@ -92,17 +97,37 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
     // MARK: Helpers
 
+    /// A scripted ``AudioProcessEnumerating``: hands back a fixed process list
+    /// (and parent-pid map) so an ``AudioProcessResolver`` built on it resolves
+    /// deterministically, with no live Core Audio.
+    private struct FakeProcessEnumerator: AudioProcessEnumerating {
+        let processes: [RawAudioProcess]
+        var parents: [pid_t: pid_t] = [:]
+        func enumerateProcesses() -> [RawAudioProcess] { processes }
+        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
+    }
+
+    /// Convenience: an ``AudioProcessResolver`` where each bundle id resolves to
+    /// exactly ONE process object, at `pid = objectID` — the shape every
+    /// pre-multi-process test used before the leak fix.
+    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+        }
+        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+    }
+
     private func makeCoordinator(
         tap: FakeTap,
         sink: SpySink,
         converter: FakeConverter,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil }
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses())
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { tap },
             sink: sink,
             makeConverter: { _ in converter },
-            resolvePID: resolvePID,
+            processResolver: processResolver,
             muteBehavior: .mutedWhenTapped
         )
     }
@@ -205,7 +230,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableSystemTapSurfacesOSUnsupported() {
         let tap = UnavailableSystemTap()
-        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedPIDs: [])) { error in
+        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedProcessObjectIDs: [])) { error in
             XCTAssertEqual(error as? NativeCaptureError, .osUnsupported(minimum: "14.2"))
         }
     }
@@ -315,23 +340,22 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     // not leak into the whole-system mix tap).
 
     /// Changing the routed-apps set recreates the capturing tap with the
-    /// correctly updated exclusion pid list.
-    func testUpdateRoutingRecreatesTapWithUpdatedExclusionPIDs() {
+    /// correctly updated exclusion object-id list.
+    func testUpdateRoutingRecreatesTapWithUpdatedExclusionObjectIDs() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedPIDs, [], "no routes yet — nothing excluded")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "no routes yet — nothing excluded")
 
         let routes = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
         coordinator.updateRouting(appRoutes: routes, excludedBundleIDs: [])
 
         XCTAssertEqual(tap.creates, 2, "a route change while capturing recreates the tap")
-        XCTAssertEqual(tap.excludedPIDs, [111], "the newly-routed app's pid is excluded from the system mix")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the newly-routed app's process object is excluded from the system mix")
         coordinator.stop()
     }
 
@@ -339,16 +363,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// from the exclusion list — it re-enters the system mix.
     func testAppFlippedBackToCurrentDeviceReentersSystemMix() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.excludedPIDs, [111])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
         let createsAfterRoute = tap.creates
 
         // The route flips back to .currentDevice — "no redirect."
@@ -357,20 +380,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             excludedBundleIDs: [])
 
         XCTAssertGreaterThan(tap.creates, createsAfterRoute, "the tap is recreated again on the flip back")
-        XCTAssertEqual(tap.excludedPIDs, [], "an app back on .currentDevice must re-enter the system mix")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "an app back on .currentDevice must re-enter the system mix")
         coordinator.stop()
     }
 
-    /// A `.device`-routed app's pid never appears in the system-mix tap's
-    /// exclusion-blind spot — i.e. it IS present in the exclusion list
-    /// (so it can never double-send: once to its own destination via
-    /// per-app capture, and again via this whole-system mixdown).
-    func testDeviceRoutedAppPIDNeverLeaksIntoSystemMix() {
+    /// A `.device`-routed app's process object never appears in the
+    /// system-mix tap's exclusion-blind spot — i.e. it IS present in the
+    /// exclusion list (so it can never double-send: once to its own
+    /// destination via per-app capture, and again via this whole-system
+    /// mixdown).
+    func testDeviceRoutedAppProcessNeverLeaksIntoSystemMix() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.b": 222]))
 
         coordinator.start()
         coordinator.updateRouting(
@@ -380,20 +403,19 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertTrue(tap.excludedPIDs.contains(111), "the .device-routed app's pid must be excluded (no double-send)")
-        XCTAssertFalse(tap.excludedPIDs.contains(222), ".currentDevice apps stay in the system mix")
+        XCTAssertTrue(tap.excludedProcessObjectIDs.contains(111), "the .device-routed app's process must be excluded (no double-send)")
+        XCTAssertFalse(tap.excludedProcessObjectIDs.contains(222), ".currentDevice apps stay in the system mix")
         coordinator.stop()
     }
 
     /// `.noRedirect` (the new default/unset state) is exclusion-equivalent to
     /// `.currentDevice`: neither is ever excluded from the system-wide tap. An
     /// app left "unset" must not be accidentally dropped from the system mix.
-    func testNoRedirectAppPIDStaysInSystemMixJustLikeCurrentDevice() {
+    func testNoRedirectAppStaysInSystemMixJustLikeCurrentDevice() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.b": 222, "com.app.c": 333]))
 
         coordinator.start()
         coordinator.updateRouting(
@@ -404,7 +426,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.excludedPIDs, [111],
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111],
                        "only the .device-routed app is excluded; both local states (.currentDevice AND "
                        + ".noRedirect) stay in the system mix identically")
         coordinator.stop()
@@ -414,21 +436,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// and composes correctly (UNION) with route-based exclusion.
     func testUserExcludedAppsComposeWithRouteBasedExclusion() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111, "com.app.c": 333]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.app.c": 333]))
 
         coordinator.start()
         // Only a user-excluded app, no routes yet.
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedPIDs, [333])
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [333])
 
         // Add a routed app on top — the union must include BOTH.
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedPIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
         coordinator.stop()
     }
 
@@ -436,10 +457,9 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// not recreate the tap on every unrelated tick.
     func testUpdateRoutingIsNoOpWhenUnionUnchanged() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
         let route = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
@@ -457,10 +477,9 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// the computed exclusion set is applied on the NEXT `start()`.
     func testUpdateRoutingWhileIdleAppliesOnNextStart() {
         let tap = FakeTap()
-        let pids: [String: pid_t] = ["com.app.a": 111]
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            resolvePID: { pids[$0] })
+            processResolver: singleProcessResolver(["com.app.a": 111]))
 
         // Not capturing yet — updateRouting must not create a tap.
         coordinator.updateRouting(
@@ -470,7 +489,65 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedPIDs, [111], "the previously-computed exclusion set is applied on start()")
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the previously-computed exclusion set is applied on start()")
+        coordinator.stop()
+    }
+
+    /// THE LEAK FIX (T3): a multi-process app (Firefox-shaped — a silent main
+    /// process plus an audio-emitting child with no bundle id of its own) must
+    /// have BOTH process objects excluded from the whole-system mix. Excluding
+    /// only the main process (the old single-pid behavior) named the wrong
+    /// process and left the real audio leaking into the system mix alongside
+    /// wherever it was redirected to.
+    func testMultiProcessBundleExclusionUnionsAllProcessObjects() {
+        let tap = FakeTap()
+        let mainPID: pid_t = 100
+        let childPID: pid_t = 200
+        let processResolver = AudioProcessResolver(enumerator: FakeProcessEnumerator(
+            processes: [
+                RawAudioProcess(objectID: 1, pid: mainPID, bundleID: "org.mozilla.firefox"),
+                RawAudioProcess(objectID: 2, pid: childPID, bundleID: nil),
+            ],
+            parents: [childPID: mainPID]))
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(), processResolver: processResolver)
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2],
+            "both the silent main process AND the audio-emitting child must be excluded — "
+            + "excluding only the main process is exactly the leak this primitive exists to fix")
+        coordinator.stop()
+    }
+
+    /// The multi-process union composes correctly across MULTIPLE excluded
+    /// bundle ids: each bundle's full process set contributes to the union,
+    /// with no cross-bundle bleed.
+    func testMultiProcessUnionAcrossMultipleExcludedBundles() {
+        let tap = FakeTap()
+        let processResolver = AudioProcessResolver(enumerator: FakeProcessEnumerator(
+            processes: [
+                RawAudioProcess(objectID: 1, pid: 100, bundleID: "org.mozilla.firefox"),
+                RawAudioProcess(objectID: 2, pid: 200, bundleID: nil),
+                RawAudioProcess(objectID: 3, pid: 300, bundleID: "com.google.Chrome"),
+            ],
+            parents: [200: 100]))
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(), processResolver: processResolver)
+
+        coordinator.start()
+        coordinator.updateRouting(
+            appRoutes: [
+                AppRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox", destination: .device(id: "speaker-1")),
+                AppRoute(bundleID: "com.google.Chrome", displayName: "Chrome", destination: .device(id: "speaker-2")),
+            ],
+            excludedBundleIDs: [])
+
+        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2, 3],
+            "the union spans every excluded bundle's full process set")
         coordinator.stop()
     }
 

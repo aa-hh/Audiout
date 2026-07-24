@@ -19,18 +19,26 @@ import AVFoundation
 /// `AirPlayEngineTests.ShimUnitTests` — "Goertzel spike ~400x over neighbouring
 /// bins"). We reuse it here, fully synthetic: a fake ``SystemAudioTap`` models
 /// Core Audio's per-process capture-with-exclusion by summing only the tones of
-/// processes NOT in the tap's `excludedPIDs`. No real audio, no `AVAudioEngine`
-/// start, no hardware — exactly the offline harness the plan's verify step calls
-/// for.
+/// processes NOT in the tap's excluded process-object set. No real audio, no
+/// `AVAudioEngine` start, no hardware — exactly the offline harness the plan's
+/// verify step calls for.
+///
+/// Post-Firefox-routing-leak-fix, the real coordinator excludes by
+/// ``AudioObjectID`` (resolved from a pid via ``AudioProcessResolver``), not raw
+/// pid directly — this fake models that one level too, via a scripted
+/// pid → `AudioObjectID` resolver, so the self-exclude assertions exercise the
+/// SAME resolution path production code does.
 final class SyncedLocalFanoutTests: IsolatedTestCase {
 
     // MARK: Doubles
 
     /// A fake whole-system tap that models the ONE property under test: it captures
-    /// the mix of every process EXCEPT those in `excludedPIDs`. Each "process" is a
-    /// pid emitting a pure tone; `deliverMix` sums the non-excluded tones into an
-    /// interleaved-Float32 44100/2ch buffer and fires `onBuffer`, exactly as a real
-    /// process tap would deliver the system mix minus the excluded processes.
+    /// the mix of every process EXCEPT those whose object id is in
+    /// `excludedProcessObjectIDs`. Each "process" is a pid (mapped to an
+    /// `AudioObjectID` one-for-one via `objectID(for:)`) emitting a pure tone;
+    /// `deliverMix` sums the non-excluded tones into an interleaved-Float32
+    /// 44100/2ch buffer and fires `onBuffer`, exactly as a real process tap would
+    /// deliver the system mix minus the excluded processes.
     private final class FeedbackFakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
@@ -43,15 +51,20 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         private let lock = NSLock()
         /// pid → tone frequency present in that process's output.
         private var _processes: [pid_t: Double] = [:]
-        private var _excluded: Set<pid_t> = []
+        private var _excluded: Set<AudioObjectID> = []
         private var _createCount = 0
 
+        /// One-for-one, deterministic pid → object-id mapping for this fake:
+        /// `AudioObjectID(pid)`, so tests can assert exclusion either way.
+        static func objectID(for pid: pid_t) -> AudioObjectID { AudioObjectID(pid) }
+
         func setProcesses(_ p: [pid_t: Double]) { lock.withLock { _processes = p } }
-        var excludedPIDs: Set<pid_t> { lock.withLock { _excluded } }
+        var excludedObjectIDs: Set<AudioObjectID> { lock.withLock { _excluded } }
+        func excludes(pid: pid_t) -> Bool { excludedObjectIDs.contains(Self.objectID(for: pid)) }
         var creates: Int { lock.withLock { _createCount } }
 
-        func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
-            lock.withLock { _createCount += 1; _excluded = excludedPIDs }
+        func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+            lock.withLock { _createCount += 1; _excluded = excludedProcessObjectIDs }
             return format
         }
         func teardown() {}
@@ -62,7 +75,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         func deliverMix(frames: Int, phaseStart: Int, pts: timespec) {
             let (procs, exc) = lock.withLock { (_processes, _excluded) }
             var interleaved = [Float](repeating: 0, count: frames * Self.channels)
-            for (pid, freq) in procs where !exc.contains(pid) {
+            for (pid, freq) in procs where !exc.contains(Self.objectID(for: pid)) {
                 for f in 0..<frames {
                     let t = Double(phaseStart + f) / Self.sampleRate
                     let v = Float(0.5 * sin(2.0 * Double.pi * freq * t))
@@ -73,6 +86,20 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             let data = interleaved.withUnsafeBufferPointer { Data(buffer: $0) }
             onBuffer?(CapturedBuffer(channelData: [data], frameCount: frames, pts: pts))
         }
+    }
+
+    /// A scripted ``AudioProcessEnumerating`` reporting exactly one process object
+    /// per pid this test cares about, via the same deterministic mapping the fake
+    /// tap uses (`FeedbackFakeTap.objectID(for:)`) — so
+    /// `processResolver.resolve(pid:)` inside the real coordinator resolves the
+    /// sink's render pid to the SAME object id the fake tap checks for exclusion.
+    private final class ScriptedEnumerator: AudioProcessEnumerating {
+        let pids: [pid_t]
+        init(pids: [pid_t]) { self.pids = pids }
+        func enumerateProcesses() -> [RawAudioProcess] {
+            pids.map { RawAudioProcess(objectID: FeedbackFakeTap.objectID(for: $0), pid: $0, bundleID: nil) }
+        }
+        func parentPID(of pid: pid_t) -> pid_t? { nil }
     }
 
     /// Records every forwarded (pcm, pts) pair — what actually reached the engine.
@@ -172,6 +199,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             makeTap: { tap },
             sink: engineSink,
             makeConverter: { AVFormatConverter(from: $0) },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID, otherAppPID])),
             muteBehavior: .mutedWhenTapped)
 
         // Attach the delayed local sink, declaring its render process pid. Done
@@ -181,7 +209,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         waitForCapturing(coordinator)
 
         // The whole-system tap was created excluding the sink's render process (R2).
-        XCTAssertTrue(tap.excludedPIDs.contains(sinkRenderPID),
+        XCTAssertTrue(tap.excludes(pid: sinkRenderPID),
                       "the sink's render process must be excluded from the whole-system tap")
 
         // Deliver the mix the tap would actually capture (non-excluded processes
@@ -221,12 +249,13 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             makeTap: { tap },
             sink: engineSink,
             makeConverter: { AVFormatConverter(from: $0) },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID, otherAppPID])),
             muteBehavior: .mutedWhenTapped)
 
         // No sink attached → no self-exclude → the sink's process stays in the mix.
         coordinator.start()
         waitForCapturing(coordinator)
-        XCTAssertFalse(tap.excludedPIDs.contains(sinkRenderPID))
+        XCTAssertFalse(tap.excludes(pid: sinkRenderPID))
 
         let frames = 4_096
         let buffers = 8
@@ -256,6 +285,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             makeTap: { tap },
             sink: engineSink,
             makeConverter: { _ in FixedConverter() },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
             muteBehavior: .mutedWhenTapped)
         coordinator.start()
         waitForCapturing(coordinator)
@@ -299,19 +329,16 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             makeTap: { tap },
             sink: engineSink,
             makeConverter: { _ in FixedConverter() },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
             muteBehavior: .mutedWhenTapped)
         coordinator.start()
         waitForCapturing(coordinator)
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertFalse(tap.excludedPIDs.contains(sinkRenderPID))
+        XCTAssertFalse(tap.excludes(pid: sinkRenderPID))
 
         coordinator.setSyncedLocalSink(localSink, renderProcessPID: sinkRenderPID)
-        waitFor { self.tap(tap, excludes: self.sinkRenderPID) }
+        waitFor { tap.excludes(pid: self.sinkRenderPID) }
         XCTAssertEqual(tap.creates, 2, "attaching a sink while capturing recreates the tap")
-        XCTAssertTrue(tap.excludedPIDs.contains(sinkRenderPID))
-    }
-
-    private func tap(_ t: FeedbackFakeTap, excludes pid: pid_t) -> Bool {
-        t.excludedPIDs.contains(pid)
+        XCTAssertTrue(tap.excludes(pid: sinkRenderPID))
     }
 }

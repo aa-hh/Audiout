@@ -52,6 +52,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **Resolving a bundle ID for per-app capture or whole-system exclusion MUST
+  resolve to the FULL set of Core Audio processes, not a single pid.** Multi-process
+  browsers emit audio from child/helper processes whose pids differ from the main
+  app, and Core Audio reports no bundle id for those children. Shortcutting to
+  single-pid resolution misses the real audio source — the routed app becomes
+  inaudible and its audio leaks into the system mix. Both coordinators inject
+  `AudioProcessResolver` for this reason.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -60,6 +67,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `.currentDevice` to mean "is redirected"; use `AppRouteDestination.isDeviceRoute`
   (true only for `.device`), the single source of truth for "actually routed
   away."
+- **`.currentDevice` local playback follows the Mac's real default output device
+  (Bluetooth, USB, HDMI, built-in, etc.), re-resolved on each cold start.**
+  ANTI-FEEDBACK GUARD: it refuses to follow a default whose transport is AirPlay
+  or virtual/aggregate — those are exactly the transports this app may be streaming
+  the whole-system mix INTO, so following them loops local playback straight back
+  into the capture. If no safe default exists, it falls back to built-in speakers.
+  Don't hardcode built-in (wrong when Bluetooth is selected), but don't blindly
+  follow any default (creates feedback loops).
 - **Every real (re)connect must reseed the engine volume from the Mac's current
   system level** (0% when unreadable): the engine's volume field is
   zero-initialized and 0 maps to ≈ −30 dB (silent), so a connect that pushes no
@@ -166,6 +181,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |

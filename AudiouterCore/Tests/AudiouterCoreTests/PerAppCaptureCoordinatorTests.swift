@@ -5,10 +5,11 @@ import XCTest
 import AudioToolbox
 #endif
 
-/// Hermetic tests for ``PerAppCaptureCoordinator`` (T3). Every seam is
-/// injected — a fake ``ProcessAudioTap`` factory (no TCC, no aggregate
-/// device, no real Core Audio) and a scripted `resolvePID` closure (no
-/// `NSRunningApplication`) — so the whole per-bundle-ID state machine runs
+/// Hermetic tests for ``PerAppCaptureCoordinator`` (T3, T2 full-process-set).
+/// Every seam is injected — a fake ``ProcessAudioTap`` factory (no TCC, no
+/// aggregate device, no real Core Audio) and an ``AudioProcessResolver``
+/// built over a scripted ``FakeProcessEnumerator`` (no `NSRunningApplication`,
+/// no live Core Audio) — so the whole per-bundle-ID state machine runs
 /// hermetically. Mirrors ``NativeCaptureCoordinatorTests``' doubles/pattern.
 final class PerAppCaptureCoordinatorTests: XCTestCase {
 
@@ -16,8 +17,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     /// A tap the test drives directly: `createAndStart` returns a scripted
     /// format (or throws a scripted error), and `pushBuffer`/`fireDeviceChange`
-    /// inject the IOProc-thread callbacks. Records the pid/bundleID it was
-    /// started with and teardown calls, so leaks and cross-app bleed are
+    /// inject the IOProc-thread callbacks. Records the resolved processes/bundleID
+    /// it was started with and teardown calls, so leaks and cross-app bleed are
     /// observable.
     private final class FakeProcessTap: ProcessAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
@@ -28,7 +29,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         var startError: PerAppCaptureError?
         private(set) var createCount = 0
         private(set) var teardownCount = 0
-        private(set) var lastPid: pid_t?
+        private(set) var lastProcesses: Set<AudioProcess>?
         private(set) var lastBundleID: String?
 
         /// Test-only hook invoked synchronously at the START of `createAndStart`
@@ -39,8 +40,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         /// the caller's thread in this fake.
         var onCreateAndStart: (() -> Void)?
 
-        func createAndStart(pid: pid_t, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            lock.lock(); createCount += 1; lastPid = pid; lastBundleID = bundleID; lock.unlock()
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            lock.lock(); createCount += 1; lastProcesses = processes; lastBundleID = bundleID; lock.unlock()
             onCreateAndStart?()
             if let startError { throw startError }
             return format
@@ -55,6 +56,52 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
+    }
+
+    /// A scriptable ``AudioProcessEnumerating`` fake: hands back whatever
+    /// `RawAudioProcess` array is currently set, with no parent-pid chain
+    /// (every process reports its own bundle id directly) unless a test
+    /// overrides `parents`/`bundleIDForPID`. Lets a test build an
+    /// ``AudioProcessResolver`` whose `resolve(bundleID:)` result it fully
+    /// controls, without any live Core Audio.
+    private final class FakeProcessEnumerator: AudioProcessEnumerating, @unchecked Sendable {
+        let lock = NSLock()
+        var processes: [RawAudioProcess] = []
+        var parents: [pid_t: pid_t] = [:]
+
+        func enumerateProcesses() -> [RawAudioProcess] { lock.withLock { processes } }
+        func parentPID(of pid: pid_t) -> pid_t? { lock.withLock { parents[pid] } }
+
+        func setProcesses(_ new: [RawAudioProcess]) { lock.withLock { processes = new } }
+    }
+
+    /// Builds an ``AudioProcessResolver`` over a `FakeProcessEnumerator` seeded
+    /// with a single process object (`objectID`/`pid`) reporting `bundleID` as
+    /// its own — the common single-process-per-app test shape. Returns the
+    /// enumerator too so a test can mutate it later (e.g. simulate a relaunch
+    /// with a new pid, or the app quitting).
+    private func makeResolver(
+        bundleID: String, objectID: AudioObjectID, pid: pid_t
+    ) -> (resolver: AudioProcessResolver, enumerator: FakeProcessEnumerator) {
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses([RawAudioProcess(objectID: objectID, pid: pid, bundleID: bundleID)])
+        return (AudioProcessResolver(enumerator: enumerator), enumerator)
+    }
+
+    /// Builds an ``AudioProcessResolver`` over a `FakeProcessEnumerator` seeded
+    /// with exactly the given processes (own-bundle-id reporting) — for tests
+    /// that need multiple bundle IDs' processes coexisting in one enumerator.
+    private func makeResolver(processes: [RawAudioProcess]) -> (resolver: AudioProcessResolver, enumerator: FakeProcessEnumerator) {
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses(processes)
+        return (AudioProcessResolver(enumerator: enumerator), enumerator)
+    }
+
+    /// An ``AudioProcessResolver`` whose enumerator always reports zero
+    /// processes — every `resolve(bundleID:)` call returns the empty set,
+    /// simulating "not running / not yet audible".
+    private func emptyResolver() -> AudioProcessResolver {
+        AudioProcessResolver(enumerator: FakeProcessEnumerator())
     }
 
     /// Records every (bundleID, buffer) delivery.
@@ -95,9 +142,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testStartForwardsTaggedBuffersThenStopTearsDownAndClearsState() {
         let tap = FakeProcessTap()
         let spy = BufferSpy()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 4242)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 4242 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -106,7 +154,7 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         waitFor { coordinator.state(for: "com.example.music") == .capturing(tap.format) }
         XCTAssertEqual(coordinator.state(for: "com.example.music"), .capturing(tap.format))
         XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.lastPid, 4242)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 10, pid: 4242)])
         XCTAssertEqual(tap.lastBundleID, "com.example.music")
         XCTAssertEqual(coordinator.capturingBundleIDs, ["com.example.music"])
 
@@ -125,6 +173,41 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         // a bundle ID that was never started reports .idle identically to one
         // that was started then fully stopped.
         XCTAssertEqual(coordinator.state(for: "com.example.never-started"), .idle)
+    }
+
+    // MARK: - T2: a bundle ID that resolves to MULTIPLE process objects (the
+    // Firefox/Chrome multi-process-browser shape — a main process plus a
+    // nil-bundle-id audio child attributed via the parent-pid walk) gets ONE
+    // tap that is a mixdown of ALL of them, not just the main process. This is
+    // the actual leak fix: tapping only the main process silently misses the
+    // child the audio actually comes from.
+
+    func testMultiProcessBundleMixesDownAllResolvedProcessesIntoOneTap() {
+        let tap = FakeProcessTap()
+        let firefox = "org.mozilla.firefox"
+        let enumerator = FakeProcessEnumerator()
+        enumerator.setProcesses([
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: firefox),   // main process
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: nil)        // silent audio child
+        ])
+        enumerator.parents = [701: 700]
+        let resolver = AudioProcessResolver(enumerator: enumerator)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+
+        coordinator.start(bundleID: firefox)
+        waitFor { if case .capturing = coordinator.state(for: firefox) { return true }; return false }
+
+        XCTAssertEqual(tap.creates, 1, "one tap for the bundle ID, mixing down every resolved process")
+        XCTAssertEqual(tap.lastProcesses, [
+            AudioProcess(objectID: 20, pid: 700),
+            AudioProcess(objectID: 21, pid: 701)
+        ], "both the main process and the nil-bundle-id audio child must be tapped")
+
+        coordinator.stop(bundleID: firefox)
     }
 
     // MARK: - Multiple bundle IDs coexist independently: separate taps, no cross-talk.
@@ -146,10 +229,14 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         }
         let factory = KeyedFactory()
         let spy = BufferSpy()
+        let (resolver, _) = makeResolver(processes: [
+            RawAudioProcess(objectID: 1, pid: 111, bundleID: "com.example.a"),
+            RawAudioProcess(objectID: 2, pid: 222, bundleID: "com.example.b")
+        ])
 
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { factory.make() },
-            resolvePID: { bundleID in bundleID == "com.example.a" ? 111 : 222 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.onBuffer = { bundleID, buffer in spy.record(bundleID, buffer) }
@@ -162,8 +249,8 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(factory.byInsertionOrder.count, 2)
         let tapA = factory.byInsertionOrder[0]
         let tapB = factory.byInsertionOrder[1]
-        XCTAssertEqual(tapA.lastPid, 111)
-        XCTAssertEqual(tapB.lastPid, 222)
+        XCTAssertEqual(tapA.lastProcesses, [AudioProcess(objectID: 1, pid: 111)])
+        XCTAssertEqual(tapB.lastProcesses, [AudioProcess(objectID: 2, pid: 222)])
 
         tapA.pushBuffer(buffer(hostTime: 1_000_000_000, frames: 4))
         tapB.pushBuffer(buffer(hostTime: 1_000_000_000, frames: 8))
@@ -183,22 +270,24 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tapB.teardowns, 1)
     }
 
-    // MARK: - resolvePID failure surfaces as .failed(.appNotRunning), retryable.
+    // MARK: - An empty AudioProcessResolver result (T2) surfaces as
+    // .failed(.processNotYetAudible), retryable — the resolver can't tell "not
+    // running" apart from "running but silent", so both retry the same way.
 
-    func testUnresolvedBundleIDSurfacesAppNotRunning() {
+    func testEmptyResolvedProcessSetSurfacesProcessNotYetAudible() {
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { FakeProcessTap() },
-            resolvePID: { _ in nil },
+            processResolver: emptyResolver(),
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.missing")
         waitFor {
-            if case .failed(.appNotRunning) = coordinator.state(for: "com.example.missing") { return true }
+            if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.missing") { return true }
             return false
         }
         XCTAssertEqual(coordinator.state(for: "com.example.missing"),
-                       .failed(.appNotRunning(bundleID: "com.example.missing")))
-        XCTAssertTrue(PerAppCaptureError.appNotRunning(bundleID: "x").isRetryable)
+                       .failed(.processNotYetAudible(bundleID: "com.example.missing")))
+        XCTAssertTrue(PerAppCaptureError.processNotYetAudible(bundleID: "x").isRetryable)
     }
 
     // MARK: - Tap-creation failure (e.g. processNotYetAudible) surfaces as .failed AND tears down.
@@ -206,9 +295,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     func testProcessNotYetAudibleSurfacesErrorAndTearsDown() {
         let tap = FakeProcessTap()
         tap.startError = .processNotYetAudible(bundleID: "com.example.silent")
+        let (resolver, _) = makeResolver(bundleID: "com.example.silent", objectID: 1, pid: 999)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 999 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.silent")
@@ -233,16 +323,18 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     #if canImport(AudioToolbox)
     func testUnavailableProcessTapSurfacesOSUnsupported() {
         let tap = UnavailableProcessTap()
-        XCTAssertThrowsError(try tap.createAndStart(pid: 1, bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
+        let processes: Set<AudioProcess> = [AudioProcess(objectID: 1, pid: 1)]
+        XCTAssertThrowsError(try tap.createAndStart(processes: processes, bundleID: "com.example.old", muteBehavior: .mutedWhenTapped)) { error in
             XCTAssertEqual(error as? PerAppCaptureError, .osUnsupported(minimum: "14.2"))
         }
         XCTAssertFalse(PerAppCaptureError.osUnsupported(minimum: "14.2").isRetryable)
     }
 
     func testUnavailableProcessTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
+        let (resolver, _) = makeResolver(bundleID: "com.example.old", objectID: 1, pid: 1)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { UnavailableProcessTap() },
-            resolvePID: { _ in 1 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.old")
@@ -254,36 +346,30 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     }
     #endif
 
-    // MARK: - Default-device change recreates the tap, re-resolving the pid.
+    // MARK: - Default-device change recreates the tap, re-resolving the process set.
 
-    func testDeviceChangeRecreatesTapAndReResolvesPID() {
-        final class PidBox: @unchecked Sendable {
-            let lock = NSLock()
-            private var value: pid_t
-            init(_ value: pid_t) { self.value = value }
-            func get() -> pid_t { lock.withLock { value } }
-            func set(_ newValue: pid_t) { lock.withLock { value = newValue } }
-        }
+    func testDeviceChangeRecreatesTapAndReResolvesProcessSet() {
         let tap = FakeProcessTap()
-        let resolvedPid = PidBox(500)
+        let (resolver, enumerator) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in resolvedPid.get() },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
         waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
-        XCTAssertEqual(tap.lastPid, 500)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 10, pid: 500)])
 
-        // The app relaunched with a new pid before the device change fired.
-        resolvedPid.set(501)
+        // The app relaunched with a new pid (and object id) before the device change fired.
+        enumerator.setProcesses([RawAudioProcess(objectID: 11, pid: 501, bundleID: "com.example.music")])
         tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         tap.fireDeviceChange()
         waitFor {
             if case .capturing(let f) = coordinator.state(for: "com.example.music") { return f.sampleRate == 44100 }
             return false
         }
-        XCTAssertEqual(tap.lastPid, 501, "device-change recreation re-resolves the pid")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 11, pid: 501)],
+                       "device-change recreation re-resolves the process set")
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on device change")
         XCTAssertGreaterThanOrEqual(tap.creates, 2)
 
@@ -296,9 +382,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testDeviceChangeDuringRebuildIsCoalescedAndReplayed() {
         let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 4242)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 4242 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start(bundleID: "com.example.music")
@@ -355,24 +442,27 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
             }
         }
         let factory = Factory(tapA, tapB)
-        // makeTap has no bundleID param, so route by the pid the resolver hands
-        // back: paused -> 100 (tapA), old -> 200 (tapB). The factory returns the
-        // right fake per next-started bundle ID via a tiny shared box.
+        let (resolver, _) = makeResolver(processes: [
+            RawAudioProcess(objectID: 1, pid: 100, bundleID: "com.example.paused"),
+            RawAudioProcess(objectID: 2, pid: 200, bundleID: "com.example.old")
+        ])
+        // makeTap has no bundleID param, so route by which bundle ID the test
+        // is currently driving through the coordinator — the fake tap the
+        // resolver hands processes for is not otherwise observable from here.
         let nextBundleID = NSMutableString(string: "")
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { factory.make(for: nextBundleID as String) },
-            resolvePID: { bundleID in
-                nextBundleID.setString(bundleID)
-                return bundleID == "com.example.paused" ? 100 : 200
-            },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
 
+        nextBundleID.setString("com.example.paused")
         coordinator.start(bundleID: "com.example.paused")
         waitFor {
             if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.paused") { return true }
             return false
         }
+        nextBundleID.setString("com.example.old")
         coordinator.start(bundleID: "com.example.old")
         waitFor {
             if case .failed(.osUnsupported) = coordinator.state(for: "com.example.old") { return true }
@@ -382,7 +472,9 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
         // The paused app resumes: its next tap creation will succeed.
         tapA.startError = nil
 
-        // A process connected to / disconnected from the audio system.
+        // A process connected to / disconnected from the audio system. The
+        // re-drive replays start(bundleID: "com.example.paused") internally.
+        nextBundleID.setString("com.example.paused")
         coordinator.handleProcessListChanged()
 
         // The retryable slot self-heals to .capturing...
@@ -402,9 +494,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testStartIsIdempotentAndStopOnUnstartedBundleIDIsNoOp() {
         let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
         let coordinator = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 1 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
 
@@ -423,9 +516,10 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
     func testCoordinatorDeinitTearsDownRemainingTaps() {
         let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
         var coordinator: PerAppCaptureCoordinator? = PerAppCaptureCoordinator(
             makeTap: { tap },
-            resolvePID: { _ in 1 },
+            processResolver: resolver,
             muteBehavior: .mutedWhenTapped
         )
         coordinator?.start(bundleID: "com.example.music")

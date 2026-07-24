@@ -1,6 +1,10 @@
 import Foundation
 import AirPlayEngine
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 #if canImport(AudioToolbox)
 import AudioToolbox
 import AVFoundation
@@ -80,14 +84,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private let makeConverter: @Sendable (TapFormat) -> PCMConverting
     private let muteBehavior: TapMuteBehavior
 
-    /// Bundle ID -> running pid, for the exclusion list (T4). AppKit-only
-    /// (`NSRunningApplication`), so `AudiouterCore` cannot resolve
-    /// this itself (package rule, `AudiouterCore/AGENTS.md`) —
-    /// mirrors `PerAppCaptureCoordinator`'s injected `resolvePID` exactly.
-    /// Defaults to "nothing resolves," which reproduces today's
+    /// Bundle ID -> the FULL set of live Core Audio process objects (main +
+    /// every child/helper) for the exclusion list (T4/T-LEAK-FIX). A
+    /// multi-process browser (Firefox, Chrome) emits audio from a CHILD
+    /// process with no bundle id of its own, so resolving to a single pid
+    /// (the old shape) named the silent main process and left the real
+    /// audio child leaking into the whole-system mix. `AudioProcessResolver`
+    /// itself is pure Core Audio + Darwin, but its `bundleIDForPID` closure
+    /// is AppKit-only (`NSRunningApplication`), so `AudiouterCore` cannot
+    /// construct the fully-wired resolver itself (package rule,
+    /// `AudiouterCore/AGENTS.md`) — mirrors `PerAppCaptureCoordinator`'s
+    /// injected resolver exactly. Defaults to a resolver over an empty
+    /// enumerator ("nothing resolves"), which reproduces today's
     /// always-empty exclusion list until an AppKit-importing layer supplies
-    /// the real resolver (T6).
-    private let resolvePID: @Sendable (_ bundleID: String) -> pid_t?
+    /// the real one (T6).
+    private let processResolver: AudioProcessResolver
 
     // MARK: State (confined to `queue`)
 
@@ -125,8 +136,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// process, since the sink is an in-process `AVAudioEngine`. Both queue-confined
     /// and set together via ``setSyncedLocalSink(_:renderProcessPID:)``.
     ///
-    /// `syncedLocalRenderPID` is unioned into every tap's `excludedPIDs`
-    /// (``resolveExcludedPIDs()``) so the whole-system tap never re-captures the
+    /// `syncedLocalRenderPID` is resolved to its process object and unioned into
+    /// every tap's exclusion set (``resolveExcludedProcessObjectIDs()``) so the
+    /// whole-system tap never re-captures the
     /// sink's own delayed output as an echo (plan risk R2 / brief §8). Because the
     /// tap is `.mutedWhenTapped`, excluding our process ALSO keeps that delayed
     /// output audible while the raw system mix stays muted — exactly the intent.
@@ -159,12 +171,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///   - engine: the ``AirPlayEngine`` to feed. `write(pcm:pts:)` is the only
     ///     method used (nonisolated, fire-and-forget), so the sink is the engine
     ///     itself via ``AirPlayEngine`` conforming to ``PCMSink``.
-    ///   - resolvePID: bundle ID -> running pid, for the live exclusion list
-    ///     (T4 — apps individually routed elsewhere, or user-excluded via
-    ///     Settings, must not double up into the system-wide mix). Defaults
-    ///     to "nothing resolves" (today's behavior: an always-empty
-    ///     exclusion list) until an AppKit-importing layer wires the real
-    ///     resolver (T6).
+    ///   - processResolver: bundle ID -> the full set of live Core Audio
+    ///     process objects, for the live exclusion list (T4 — apps
+    ///     individually routed elsewhere, or user-excluded via Settings,
+    ///     must not double up into the system-wide mix). Defaults to a
+    ///     resolver that always resolves to the empty set (today's
+    ///     behavior: an always-empty exclusion list) until an
+    ///     AppKit-importing layer wires the real one (T6).
     ///   - name: a short label used for the private tap/aggregate device name.
     ///   - muteBehavior: `.mutedWhenTapped` (default) silences local playback
     ///     while capturing — matching the native-path intent (audio goes to the
@@ -172,7 +185,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     #if canImport(AudioToolbox)
     public convenience init(
         engine: AirPlayEngine,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         name: String = "Audiouter",
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
@@ -186,7 +199,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             },
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
-            resolvePID: resolvePID,
+            processResolver: processResolver,
             muteBehavior: muteBehavior
         )
     }
@@ -198,13 +211,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> SystemAudioTap,
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
-        resolvePID: @escaping @Sendable (String) -> pid_t? = { _ in nil },
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         muteBehavior: TapMuteBehavior = .mutedWhenTapped
     ) {
         self.makeTap = makeTap
         self.sink = sink
         self.makeConverter = makeConverter
-        self.resolvePID = resolvePID
+        self.processResolver = processResolver
         self.muteBehavior = muteBehavior
     }
 
@@ -226,11 +239,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     public func start() {
         // Claim: only proceed from idle/failed; move to .creatingTap and snapshot
         // the exclusion pids (queue-confined) under a SHORT lock.
-        let claim: (proceed: Bool, excludedPIDs: Set<pid_t>) = queue.sync {
+        let claim: (proceed: Bool, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
-                return (true, resolveExcludedPIDs())
+                return (true, resolveExcludedProcessObjectIDs())
             default:
                 return (false, []) // already in flight — idempotent
             }
@@ -244,7 +257,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         do {
             // Blocking HAL work OUTSIDE the lock.
-            let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
+            let format = try newTap.createAndStart(
+                muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
             let orphan: SystemAudioTap? = queue.sync {
                 // A stop() may have raced in while we were creating: don't clobber an
@@ -386,20 +400,31 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Resolve the live excluded-bundle-ID set to pids via the injected
-    /// ``resolvePID`` closure. Best-effort: a bundle ID with no resolvable
-    /// running process (not launched, or the AppKit lookup misses) is
-    /// silently dropped rather than failing tap creation — the whole-system
-    /// tap must still succeed even if one excluded app isn't
-    /// pid-resolvable yet. MUST be called while holding `queue`
-    /// (`currentExcludedBundleIDs` is queue-confined).
-    private func resolveExcludedPIDs() -> Set<pid_t> {   // must hold `queue`
-        var pids = Set(currentExcludedBundleIDs.compactMap(resolvePID))
-        // T-FANOUT self-exclude (R2): keep the delayed local sink's own render
-        // process out of the whole-system tap so its output isn't re-captured as
-        // an echo — and (since the tap is `.mutedWhenTapped`) stays audible.
-        if let renderPID = syncedLocalRenderPID { pids.insert(renderPID) }
-        return pids
+    /// Resolve the live excluded-bundle-ID set to the UNION of every
+    /// resolved bundle's FULL Core Audio process-object set (main + every
+    /// child/helper) via the injected ``processResolver`` — the fix for the
+    /// multi-process leak: a bundle id that resolves to only its silent main
+    /// process previously left the real audio-emitting child unexcluded.
+    /// Best-effort: a bundle ID with no resolvable process yet (not
+    /// launched, or not yet audible) contributes nothing rather than failing
+    /// tap creation — the whole-system tap must still succeed even if one
+    /// excluded app isn't resolvable yet. MUST be called while holding
+    /// `queue` (`currentExcludedBundleIDs` is queue-confined).
+    ///
+    /// Also unions in the synced local sink's own render process object, by
+    /// EXACT pid (``AudioProcessResolver/resolve(pid:)``, no bundle-id
+    /// attribution needed since we already know the pid directly) — T-FANOUT
+    /// self-exclude (R2): keeps the delayed local sink's own render process out
+    /// of the whole-system tap so its output isn't re-captured as an echo, and
+    /// (since the tap is `.mutedWhenTapped`) stays audible.
+    private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
+        var result = currentExcludedBundleIDs.reduce(into: Set<AudioObjectID>()) { result, bundleID in
+            result.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
+        }
+        if let renderPID = syncedLocalRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        return result
     }
 
     // MARK: Buffer delivery (tap IOProc thread → convert → engine)
@@ -428,8 +453,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // sink, widened to interleaved Float32 — ONE capture, two consumers. Gated
         // exactly like metering below: a nil sink (play-everywhere off) means no
         // fan-out. The sink's own scheduling holds it phase-aligned with AirPlay;
-        // its render process is self-excluded from this tap (``resolveExcludedPIDs``)
-        // so this fanned-out audio can't loop back as an echo.
+        // its render process is self-excluded from this tap
+        // (``resolveExcludedProcessObjectIDs()``) so this fanned-out audio can't
+        // loop back as an echo.
         if let syncedSink {
             Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink)
         }
@@ -452,9 +478,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     /// Tear the current tap down and recreate it — against the (possibly
-    /// new) default output device, and always with the LIVE exclusion pid
-    /// set (``resolveExcludedPIDs()``, re-resolved fresh so a stale pid from
-    /// before an app relaunch is never carried forward). Shared by two
+    /// new) default output device, and always with the LIVE exclusion process-
+    /// object set (``resolveExcludedProcessObjectIDs()``, re-resolved fresh so a
+    /// stale process object from before an app relaunch is never carried
+    /// forward). Shared by two
     /// triggers: ``handleDeviceChange()`` (the tap's own
     /// `onDefaultDeviceChanged`) and ``updateRouting(appRoutes:excludedBundleIDs:)``
     /// (the routed/excluded bundle-ID set changed while capturing). Only
@@ -476,7 +503,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // mean the LAST notification can be the one that would otherwise be
         // dropped, leaving the tap rebuilt against a stale device/rate. See
         // dev/notes/stability-audit-2026-07-18.md §C6.
-        let claim: (proceed: Bool, old: SystemAudioTap?, excludedPIDs: Set<pid_t>) = queue.sync {
+        let claim: (proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
             guard case .capturing = _state else {
                 if case .creatingTap = _state {
                     pendingDeviceChange = true
@@ -487,7 +514,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.tap = nil
             self.converter = nil          // stop forwarding buffers through the dying tap
             self.transition(to: .creatingTap)
-            return (true, t, resolveExcludedPIDs())
+            return (true, t, resolveExcludedProcessObjectIDs())
         }
         // Not capturing (racing a stop()/failure): nothing to do.
         guard claim.proceed else { return }
@@ -500,7 +527,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
 
         do {
-            let format = try newTap.createAndStart(muteBehavior: muteBehavior, excludedPIDs: claim.excludedPIDs)
+            let format = try newTap.createAndStart(
+                muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
@@ -702,6 +730,18 @@ public enum TapMuteBehavior: Sendable {
     case mutedWhenTapped
 }
 
+/// A no-op ``AudioProcessEnumerating``: reports no live processes, so an
+/// ``AudioProcessResolver`` built on it always resolves every bundle id to the
+/// empty set. Backs ``NativeCaptureCoordinator``'s default ``AudioProcessResolver``
+/// — "nothing resolves" — until an AppKit-importing layer injects the real,
+/// fully-wired one (T6). `public` (not `internal`) because it backs a default
+/// argument value in `NativeCaptureCoordinator`'s `public` convenience init.
+public struct EmptyAudioProcessEnumerator: AudioProcessEnumerating {
+    public init() {}
+    public func enumerateProcesses() -> [RawAudioProcess] { [] }
+    public func parentPID(of pid: pid_t) -> pid_t? { nil }
+}
+
 /// The Core Audio process-tap seam. The production impl (``CoreAudioSystemTap``)
 /// drives `CATapDescription` / `AudioHardwareCreateProcessTap` + an aggregate
 /// device; tests inject a fake that pushes ``CapturedBuffer``s on demand.
@@ -715,13 +755,13 @@ public protocol SystemAudioTap: AnyObject {
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
     /// ``NativeCaptureError`` on failure (most commonly TCC not granted).
-    /// - Parameter excludedPIDs: pids to leave OUT of the whole-system mix
-    ///   (T4 — apps individually routed elsewhere, or user-excluded via
-    ///   Settings). A pid that can't be translated to a Core Audio process
-    ///   object yet is silently skipped rather than failing tap creation —
-    ///   see ``CoreAudioSystemTap``'s implementation. Empty = the whole
-    ///   system, unchanged from pre-T4 behavior.
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat
+    /// - Parameter excludedProcessObjectIDs: Core Audio process objects to leave
+    ///   OUT of the whole-system mix (T4 — apps individually routed elsewhere, or
+    ///   user-excluded via Settings). Already resolved to the FULL per-bundle
+    ///   process set (main + every child/helper — see
+    ///   ``AudioProcessResolver``) by the caller, so no further pid translation
+    ///   happens here. Empty = the whole system, unchanged from pre-T4 behavior.
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat
 
     /// Stop and destroy the IOProc, aggregate device, and tap (in that order).
     /// Idempotent and non-throwing so teardown always completes.
@@ -820,7 +860,7 @@ final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
 
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
         throw NativeCaptureError.osUnsupported(minimum: "14.2")
     }
 
@@ -890,9 +930,9 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// id, so a double teardown is safe.
     deinit { teardown() }
 
-    func createAndStart(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws -> TapFormat {
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
         do {
-            try createTapAndReadFormat(muteBehavior: muteBehavior, excludedPIDs: excludedPIDs)
+            try createTapAndReadFormat(muteBehavior: muteBehavior, excludedProcessObjectIDs: excludedProcessObjectIDs)
             try createAggregate()
             try startIOProc()
             installDefaultDeviceListener()
@@ -908,7 +948,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     // MARK: Tap creation + ASBD read
 
-    private func createTapAndReadFormat(muteBehavior: TapMuteBehavior, excludedPIDs: Set<pid_t>) throws {
+    private func createTapAndReadFormat(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws {
         // COLD-PROMPT GUARD (see ``SystemAudioCaptureTCC``): creating the tap is
         // what surfaces the macOS audio-capture prompt. Never do that
         // automatically — only the Setup screen's explicit "Allow…" may. If the
@@ -921,10 +961,11 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         // Whole-system stereo mixdown, excluding apps that are individually
         // routed elsewhere or user-excluded (T4 — avoids the double-send bug:
         // a routed app's audio going to its own destination AND leaking into
-        // this system mix). Empty exclusion list = the whole system, exactly
-        // pre-T4 behavior.
-        let excludedProcessObjects = Self.translateExcludedProcessObjects(excludedPIDs)
-        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludedProcessObjects)
+        // this system mix). The caller has already resolved each excluded
+        // bundle id to its FULL Core Audio process-object set (main + every
+        // child/helper, via ``AudioProcessResolver``) — no pid translation
+        // needed here. Empty exclusion set = the whole system, unchanged.
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: Array(excludedProcessObjectIDs))
         desc.uuid = UUID()
         desc.muteBehavior = muteBehavior == .mutedWhenTapped ? .mutedWhenTapped : .unmuted
         self.tapDescription = desc
@@ -967,38 +1008,6 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     }
 
     private var asbd = AudioStreamBasicDescription()
-
-    /// Best-effort pid → Core Audio process-object translation for the
-    /// exclusion list (T4). Mirrors
-    /// `PerAppCaptureCoordinator.CoreAudioProcessTap.translateProcessObject`
-    /// (same `kAudioHardwarePropertyTranslatePIDToProcessObject` call) but
-    /// folded down to non-throwing + batch: a pid that doesn't resolve yet
-    /// (app not launched, or hasn't opened an audio stream) is silently
-    /// skipped rather than failing the WHOLE global tap — losing one app's
-    /// exclusion for a moment is far better than losing system audio
-    /// capture entirely.
-    private static func translateExcludedProcessObjects(_ pids: Set<pid_t>) -> [AudioObjectID] {
-        guard !pids.isEmpty else { return [] }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var result: [AudioObjectID] = []
-        result.reserveCapacity(pids.count)
-        for pid in pids {
-            var pidQualifier = pid
-            var objID: AudioObjectID = kAudioObjectUnknown
-            var size = UInt32(MemoryLayout<AudioObjectID>.size)
-            let err = AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject), &address,
-                UInt32(MemoryLayout<pid_t>.size), &pidQualifier,
-                &size, &objID)
-            if err == noErr, objID != kAudioObjectUnknown {
-                result.append(objID)
-            }
-        }
-        return result
-    }
 
     private func createAggregate() throws {
         guard let desc = tapDescription else {

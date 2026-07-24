@@ -33,16 +33,19 @@ func audiouterEmergencyWriteStderr(_ message: String) {
     }
 }
 
-/// Resolve a bundle ID to the pid of a running instance, or nil if it isn't
-/// running (T7). This is the real per-app-capture resolver the native backend
-/// needs: Core can't import AppKit (`NSRunningApplication`), so the AppKit layer
-/// supplies it via `makeBackend(resolvePID:)`. A free `@Sendable` closure (not an
-/// instance method) so it can be used in `AppDelegate`'s `backend` property
-/// initializer, which runs before `self` exists.
-private let resolveRunningAppPID: @Sendable (String) -> pid_t? = { bundleID in
-    NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        .first?.processIdentifier
-}
+/// The real per-app-capture process resolver the native backend needs: Core
+/// can't import AppKit (`NSRunningApplication`), so the AppKit layer builds it
+/// and supplies it via `makeBackend(resolver:)`. `bundleIDForPID` is the one
+/// AppKit-only step (`AudioProcessResolver`'s own doc comment) — everything
+/// else (enumerating Core Audio process objects, walking parent pids) is pure
+/// Core Audio + Darwin and lives in `AudioProcessResolver` itself. A free
+/// value (not an instance property) so it can be used in `AppDelegate`'s
+/// `backend` property initializer, which runs before `self` exists.
+private let audioProcessResolver = AudioProcessResolver(
+    enumerator: CoreAudioProcessEnumerator(),
+    bundleIDForPID: { pid in
+        NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    })
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
@@ -56,9 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
     /// Everything downstream holds an `OutputBackend`, never a concrete type.
-    /// `resolvePID` threads the real `NSRunningApplication`-backed resolver into
-    /// the native backend's per-app capture path (T7).
-    private let backend: OutputBackend = makeBackend(resolvePID: resolveRunningAppPID)
+    /// `resolver` threads the real `AudioProcessResolver` (AppKit-backed
+    /// `bundleIDForPID`) into the native backend's per-app capture AND
+    /// whole-system-exclusion paths.
+    private let backend: OutputBackend = makeBackend(resolver: audioProcessResolver)
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).

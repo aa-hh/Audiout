@@ -309,16 +309,26 @@ public final class GroupController {
     /// ordinary add path (`setDeviceSelected(id, true)`) if `id` isn't
     /// currently desired by either — shouldn't normally happen from the retry
     /// button, but keeps this safe as a general-purpose entry point.
+    ///
+    /// `selectedDeviceIDs` and an active group's `memberIDs` are INDEPENDENT
+    /// sets — a device can sit in both at once (selected individually, then
+    /// also swept into a group that later becomes Main Out). What must decide
+    /// which re-kick fires is which routing is ACTUALLY live right now, i.e.
+    /// `mainOut` itself — not "which membership set happens to contain `id`
+    /// first". So the active-group check runs BEFORE the Selected-Devices
+    /// early return (R12 rediscovery fixup): a `.failed` device that is both
+    /// selected AND a member of the currently-active group must re-kick via
+    /// the group path, since that's the routing actually in effect.
     @discardableResult
     public func retryConnection(for id: String) -> SelectionResult {
-        if selectedDeviceIDs.contains(id) {
-            if mainOut == .selectedDevices { applyRouting() }
-            return .ok
-        }
         if case .group(let groupID) = mainOut,
            let group = groups.first(where: { $0.id == groupID }),
            group.memberIDs.contains(id) {
             applyRouting()
+            return .ok
+        }
+        if selectedDeviceIDs.contains(id) {
+            if mainOut == .selectedDevices { applyRouting() }
             return .ok
         }
         return setDeviceSelected(id, true)

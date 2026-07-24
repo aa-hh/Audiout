@@ -153,6 +153,55 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(controller.activeGroupID, "g1")
     }
 
+    /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
+    /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
+    /// whichever membership set happens to contain `id` first.
+    /// `selectedDeviceIDs` and an active group's `memberIDs` are independent
+    /// sets: a device can be in BOTH (selected individually, then also a
+    /// member of a group that later becomes Main Out). Before the fix, the
+    /// Selected-Devices branch ran first, matched on `selectedDeviceIDs`
+    /// membership alone, saw `mainOut != .selectedDevices`, skipped
+    /// `applyRouting()`, and returned `.ok` anyway — a dead retry that never
+    /// reached the backend even though the button reported success. This
+    /// drives the connect script's SECOND attempt (`.connect`) only if the
+    /// group re-kick actually fires `setOutputSet` again; the old order would
+    /// leave `office` parked in `.failed` forever and this test would time out.
+    func testRetryConnectionForDeviceInBothSelectedDevicesAndActiveGroupUsesGroupRouting() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+
+        // A group containing "office" becomes Main Out first — this is attempt
+        // #1 (the scripted failure) and it's the ONLY thing driving the backend
+        // so far.
+        try controller.saveGroup(Group(id: "g1", name: "Office Pair", memberIDs: ["office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        try await waitForConnectionState(backend, id: "office", isFailed)
+
+        // NOW compose "office" into Selected Devices too. Main Out is still the
+        // group, so `setDeviceSelected`'s own live-apply guard does NOT fire —
+        // this only changes membership, no extra backend call, no extra
+        // attempt consumed. The two membership sets now overlap while the
+        // group remains the one actually routing.
+        _ = controller.setDeviceSelected("office", true)
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "now also in Selected Devices (independent set)")
+        XCTAssertEqual(controller.activeGroupID, "g1", "Main Out is still the group — this is what's actually routing")
+        XCTAssertTrue(isFailed(backend.devices.first { $0.id == "office" }!.connectionState),
+                      "still failed — composing membership must not have re-kicked anything yet")
+
+        // The retry button is the only thing left that can consume attempt #2
+        // (`.connect`). Under the pre-fix branch order this call is a dead
+        // no-op (matches `selectedDeviceIDs` first, sees `mainOut != .selectedDevices`,
+        // never calls `applyRouting()`) and this assertion times out.
+        _ = controller.retryConnection(for: "office")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "retry never touches Selected-Devices membership")
+        XCTAssertEqual(controller.activeGroupID, "g1", "retry never touches group membership/activation")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertEqual(controller.activeGroupID, "g1")
+    }
+
     func testDefaultSelectionIsLocalPassthrough() async throws {
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()

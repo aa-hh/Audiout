@@ -400,6 +400,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// stream_id-0 output set), which this never touches.
     private var streamBindings: [String: UInt32] = [:]
 
+    /// The destination sets `handleDestinationSetsChanged` last ran with, cached so
+    /// device DISCOVERY can re-drive the binding for a target that wasn't known yet
+    /// when the routes were applied (see the re-drive in `addOrUpdate`). Cached
+    /// rather than re-read from `routeMixer.destinationSets` because that accessor
+    /// takes the MIXER's queue, and this is read while already holding `stateQueue`
+    /// — the cache keeps the discovery path single-queue. Written only inside
+    /// `handleDestinationSetsChanged`'s own `stateQueue` critical section.
+    private var lastDestinationSets: [AppRouteMixer.DestinationSet] = []
+
     /// deviceID → the sorted app display names last published via `.routedApps`, so
     /// the event fires only when a device's live app mapping actually changes.
     private var routedAppNames: [String: [String]] = [:]
@@ -2390,6 +2399,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     private func handleDestinationSetsChanged(_ sets: [AppRouteMixer.DestinationSet]) {
         stateQueue.sync {
+            // Remember the topology so a LATER device discovery can re-drive this
+            // binding pass for a target that wasn't discovered yet (see
+            // `addOrUpdate`'s per-app re-drive).
+            self.lastDestinationSets = sets
             // --- .routedApps diff (UI signal; independent of device discovery) ---
             var newAppNames: [String: [String]] = [:]
             for set in sets {
@@ -3238,6 +3251,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.converging.insert(id)
             // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        }
+
+        // PER-APP redirect recovery (counterpart to the whole-system re-kick
+        // above). A redirect TARGET is deliberately NOT in `desiredOn` — T7 keeps
+        // app-route targets out of the whole-system output set — so the recovery
+        // above can never cover it. Meanwhile `handleDestinationSetsChanged` binds
+        // "only for discovered devices": a route restored at LAUNCH is applied
+        // ~tens of ms in, long before Bonjour finds the target, so the device was
+        // silently dropped from the binding pass with nothing to re-drive it. The
+        // app then captured audio that went nowhere — a redirect that stayed
+        // SILENT until the user re-picked the destination by hand.
+        //
+        // So: once a targeted device becomes streamable and engine-registered, if
+        // it still has no per-app stream binding, re-run the binding pass with the
+        // cached topology. Idempotent for devices already bound (same stream ⇒ no
+        // op); the newly-discovered one now passes the `outputIDs != nil` filter
+        // and gets its `.bind`.
+        if streamableNow,
+           self.outputIDs[id] != nil,
+           self.streamBindings[id] == nil,
+           self.lastDestinationSets.contains(where: { $0.deviceIDs.contains(id) }) {
+            let sets = self.lastDestinationSets
+            AudioDiag.log("per-app redirect target \(id) discovered after its route was applied — re-driving stream binding")
+            Telemetry.log(.airplay, "app_route_rebind_on_discovery", ["device": id])
+            // MUST hop OFF `stateQueue`: we are already inside it here, and
+            // `handleDestinationSetsChanged` takes it with `.sync`.
+            DispatchQueue.global().async { [weak self] in
+                self?.handleDestinationSetsChanged(sets)
+            }
         }
     }
 

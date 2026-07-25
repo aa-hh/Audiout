@@ -129,6 +129,11 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         /// silently dropped — see `handleDeviceChange(bundleID:)` and
         /// dev/notes/stability-audit-2026-07-18.md §C6.
         var pendingDeviceChange = false
+        /// W1-T4: the process-OBJECT set this slot's LIVE tap was last built
+        /// against — the per-slot compare-before-rebuild baseline for live
+        /// membership diffing (``handleMembershipChange()``). Recorded on each
+        /// successful `.capturing` commit; an unchanged resolve does ZERO work.
+        var lastTappedProcessObjects: Set<AudioObjectID> = []
     }
 
     private let queue = DispatchQueue(label: "PerAppCaptureCoordinator.state")
@@ -154,6 +159,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     #endif
+
+    /// W1-T4 live-membership diffing: a dedicated DEBOUNCED serial queue owning the
+    /// diff timer, DISTINCT from ``queue`` (``handleMembershipChange`` reaches into
+    /// state via `queue.sync`, which would deadlock if run on `queue`). The same
+    /// process-object-list listener that re-drives dead slots (the resume
+    /// self-heal) ALSO schedules a debounced diff here so a browser tab spawning a
+    /// new audio child mid-session — while its slot is already `.capturing` — is
+    /// picked up too, not just a fully-dead slot resuming.
+    private let membershipQueue = DispatchQueue(label: "PerAppCaptureCoordinator.membership")
+    /// The pending coalesced diff. Confined to ``membershipQueue``; cancelled and
+    /// replaced by each notification in the debounce window so a rapid
+    /// spawn/kill/spawn burst collapses to one diff pass.
+    private var membershipDiffWork: DispatchWorkItem?
+    /// How long to wait for process-list churn to settle before diffing.
+    /// Injectable so tests can shrink it; production coalesces a burst of tab
+    /// open/close notifications into one diff.
+    private let membershipDebounceInterval: DispatchTimeInterval
 
     /// Fired on every per-bundle-ID state transition. Called on the
     /// coordinator's internal queue.
@@ -224,12 +246,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
-        installsProcessListListener: Bool = true
+        installsProcessListListener: Bool = true,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
         self.installsProcessListListener = installsProcessListListener
+        self.membershipDebounceInterval = membershipDebounceInterval
     }
 
     /// Tears down every still-active tap. A backstop against leaking system
@@ -244,6 +268,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         // and `deinit` cannot run concurrently with one (same argument
         // ``SystemOutputVolume.deinit`` makes).
         removeProcessListListenerLocked()
+        membershipQueue.sync { membershipDiffWork?.cancel(); membershipDiffWork = nil }
         #endif
         let leftover = queue.sync { slots.values.compactMap { $0.tap } }
         leftover.forEach { $0.teardown() }
@@ -362,6 +387,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return
                 }
                 slot.tap = tap
+                slot.lastTappedProcessObjects = Set(processes.map(\.objectID)) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
             }
         } catch {
@@ -462,6 +488,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return false
                 }
                 slot.tap = newTap
+                slot.lastTappedProcessObjects = Set(processes.map(\.objectID)) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
                 // STABILITY(C6): a device-change notification landed while we were
                 // rebuilding — replay it once now that we're capturing again,
@@ -576,15 +603,84 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// notification in CI isn't possible without live Core Audio churn. Behavior
     /// is unchanged; this is only an access-level seam.
     func handleProcessListChanged() {
+        // (1) Resume self-heal (T3): re-drive dead-but-retryable slots IMMEDIATELY
+        // — a latency path (an app just resumed audio), so NOT debounced.
         let toRetry: [String] = queue.sync {
             slots.compactMap { key, slot -> String? in
                 guard case .failed(let error) = slot.state, error.isRetryable else { return nil }
                 return key
             }
         }
-        guard !toRetry.isEmpty else { return }
-        AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
-        for bundleID in toRetry { start(bundleID: bundleID) }
+        if !toRetry.isEmpty {
+            AudioDiag.log("PAC resume-listener fired — re-driving \(toRetry.count) dead slot(s): \(toRetry)")
+            for bundleID in toRetry { start(bundleID: bundleID) }
+        }
+
+        // (2) Live-membership diffing (W1-T4): a browser opening/closing a tab
+        // spawns/kills an audio child, changing the process set an ALREADY
+        // capturing slot should tap. Coalesce a burst onto `membershipQueue` and
+        // diff once it settles. Distinct from (1), which only re-drives DEAD slots.
+        scheduleMembershipDiff()
+    }
+
+    /// Coalesce process-list notifications: cancel any pending diff and arm a fresh
+    /// one ``membershipDebounceInterval`` out, so a rapid spawn/kill/spawn burst
+    /// collapses to one diff pass. Runs on ``membershipQueue`` (never ``queue``) so
+    /// the `queue.sync` inside the diff cannot deadlock.
+    private func scheduleMembershipDiff() {
+        membershipQueue.async { [weak self] in
+            guard let self else { return }
+            self.membershipDiffWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.handleMembershipChange() }
+            self.membershipDiffWork = work
+            self.membershipQueue.asyncAfter(deadline: .now() + self.membershipDebounceInterval, execute: work)
+        }
+    }
+
+    /// Diff every currently-capturing slot's resolved process-object set against
+    /// the set its live tap was last built against (``Slot/lastTappedProcessObjects``).
+    /// For each slot whose set genuinely changed, recreate its tap against the
+    /// fresh set via ``handleDeviceChange(bundleID:)`` (the proven rebuild path —
+    /// re-resolves + rebuilds + records a fresh baseline). A slot whose set is
+    /// unchanged — the overwhelmingly common case under tab churn — is skipped with
+    /// ZERO Core Audio work (the CPU-storm loop-breaker). Internal (not private) so
+    /// tests can drive a diff pass without waiting out the real debounce timer.
+    func handleMembershipChange() {
+        // Snapshot each capturing slot's baseline under the lock, then resolve
+        // (which enumerates the HAL) OUTSIDE it.
+        let baselines: [(bundleID: String, oldObjects: Set<AudioObjectID>)] = queue.sync {
+            slots.compactMap { key, slot in
+                guard case .capturing = slot.state else { return nil }
+                return (key, slot.lastTappedProcessObjects)
+            }
+        }
+        guard !baselines.isEmpty else { return }
+
+        for baseline in baselines {
+            let newObjects = Set(processResolver.resolve(bundleID: baseline.bundleID).map(\.objectID))
+            // Empty = the app fully quit (even its main process is gone). Do NOT
+            // churn a healthy slot to `.failed` from here — leave that to the
+            // device-change/backoff paths; a transient empty resolve during churn
+            // shouldn't tear a capturing slot down.
+            guard !newObjects.isEmpty else { continue }
+            // COMPARE-BEFORE-REBUILD: unchanged membership → zero work.
+            guard newObjects != baseline.oldObjects else { continue }
+            // Re-check under the lock that the slot is still capturing against the
+            // SAME baseline (a concurrent stop()/device-change may have moved it, or
+            // already rebuilt it) before recreating.
+            let stillStale: Bool = queue.sync {
+                guard let slot = slots[baseline.bundleID], case .capturing = slot.state else { return false }
+                return slot.lastTappedProcessObjects == baseline.oldObjects
+            }
+            guard stillStale else { continue }
+            AudioDiag.log("PAC membership changed for \(baseline.bundleID): \(baseline.oldObjects.count) -> \(newObjects.count) objects — recreating")
+            Telemetry.log(.capturePA, "membership_changed", ["bundleID": baseline.bundleID, "objectCount": "\(newObjects.count)"])
+            // Recreate via the proven device-change machinery: it re-resolves the
+            // set itself, tears the old tap down, rebuilds, and records the fresh
+            // baseline. Exactly one rebuild per genuine change (this tap has no
+            // in-place update path).
+            handleDeviceChange(bundleID: baseline.bundleID)
+        }
     }
     #endif
 

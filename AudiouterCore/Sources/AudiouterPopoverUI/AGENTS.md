@@ -6,7 +6,7 @@ The menu-bar popover UI (pure AppKit). `PopoverController` owns the `NSPopover`,
 
 ## Rules
 
-- Reacts only to `Device.connectionState` EDGES, not polling: `→ .failed` drops the device from Selected Devices and auto-expands its diagnosis panel once per episode; `guess → diagnosed` is the same episode and must not re-run cleanup.
+- Reacts only to `Device.connectionState` EDGES, not polling: `→ .failed` auto-expands its diagnosis panel once per episode; `guess → diagnosed` is the same episode and must not re-run cleanup. `→ .failed` does NOT drop the device from Selected Devices / a group (R12, W2-T3 — keep intent, always) — the silence watchdog covers audibility and the backend's converge loop re-selects automatically on rediscovery.
 - Diagnosis panels auto-drive off `.failed` edges — `openDiagnosisIDs` is the open intent; a user ✕ records into `dismissedDiagnosisIDs` for the current episode, so no repaint/rebuild or mid-episode re-report resurrects a dismissed panel. A fresh `→ .failed` edge is a NEW episode: it clears the dismissal and re-expands. "Try again" is just re-adding to Selected Devices.
 - Every delegate callback mutates then calls `rebuild()`; rows aren't mutated in place after a structural change, except the refreshers used for mid-open repaints.
 - Collapse state is keyed by the exact card header string — collapse calls must pass the same title the card was built with.

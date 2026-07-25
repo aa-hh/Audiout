@@ -667,6 +667,69 @@ final class PopoverPanelViewController: NSViewController {
         }
     }
 
+    // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
+
+    private weak var bannerLabel: NSTextField?
+
+    /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
+    /// card — used by the generalized silence watchdog to say "Speakers unreachable
+    /// — playing on this Mac. Will resume automatically." A stock system-orange
+    /// rounded inset card with a warning glyph and a wrapping label; system colors
+    /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
+    /// host re-applies it at the tail of every `rebuild()`.
+    func setBanner(_ text: String?) {
+        if let existing = stackView.arrangedSubviews.first(where: { $0 is SilenceFallbackBannerView }) {
+            stackView.removeArrangedSubview(existing)
+            existing.removeFromSuperview()
+        }
+        bannerLabel = nil
+        guard let text else { return }
+        let banner = SilenceFallbackBannerView(
+            text: text,
+            maxTextWidth: panelWidth - 2 * Self.cardMargin - 28 - 30)
+        bannerLabel = banner.label
+        stackView.insertArrangedSubview(banner, at: 0)
+        NSLayoutConstraint.activate([
+            banner.leadingAnchor.constraint(equalTo: stackView.leadingAnchor, constant: Self.cardMargin),
+            banner.trailingAnchor.constraint(equalTo: stackView.trailingAnchor, constant: -Self.cardMargin),
+        ])
+    }
+
+    /// Test-only: the banner's copy, or `nil` when no banner is shown.
+    var test_bannerText: String? { bannerLabel?.stringValue }
+
+    // MARK: System-AirPlay guard note (Wave 3 W3-T3)
+
+    private weak var systemAirPlayNoteLabel: NSTextField?
+
+    /// Show (or, with `nil`, clear) the "double-path audio" informational note,
+    /// PINNED above every card alongside (never at the same time as — the two
+    /// conditions are mutually exclusive, see `NativeBackend.reconcileCaptureGate`)
+    /// the silence-fallback banner above. Mirrors `setBanner`'s shape exactly,
+    /// keyed on `SystemAirPlayNoteBannerView` instead so the two banners never
+    /// interfere with each other's add/remove. `clearRows()` drops it along with
+    /// the cards, so the host re-applies it at the tail of every `rebuild()`.
+    func setSystemAirPlayNote(_ text: String?) {
+        if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
+            stackView.removeArrangedSubview(existing)
+            existing.removeFromSuperview()
+        }
+        systemAirPlayNoteLabel = nil
+        guard let text else { return }
+        let note = SystemAirPlayNoteBannerView(
+            text: text,
+            maxTextWidth: panelWidth - 2 * Self.cardMargin - 28 - 30)
+        systemAirPlayNoteLabel = note.label
+        stackView.insertArrangedSubview(note, at: 0)
+        NSLayoutConstraint.activate([
+            note.leadingAnchor.constraint(equalTo: stackView.leadingAnchor, constant: Self.cardMargin),
+            note.trailingAnchor.constraint(equalTo: stackView.trailingAnchor, constant: -Self.cardMargin),
+        ])
+    }
+
+    /// Test-only: the note's copy, or `nil` when no note is shown.
+    var test_systemAirPlayNoteText: String? { systemAirPlayNoteLabel?.stringValue }
+
     /// Wire the header bar's three icon buttons (task A + the Quit button that
     /// replaced the removed footer, 2026-07-14).
     func setHeaderActions(onOpenGroupsEditor: @escaping () -> Void,

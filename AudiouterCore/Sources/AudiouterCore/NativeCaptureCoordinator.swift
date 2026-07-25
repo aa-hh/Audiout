@@ -111,6 +111,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// whole feature (the default for tests that aren't about it).
     private let workgroup: AudioIOWorkgroupJoining?
 
+    /// Test-only opt-out for the W1-T7 Gap 1 process-object-list listener: `false`
+    /// skips ever registering the real HAL listener on `start()`, so a hermetic
+    /// suite that drives ``handleMembershipChange()``/``handleProcessListChanged()``
+    /// directly never touches Core Audio and never has a live listener fire
+    /// mid-test. Defaults to `true` — production behavior, unchanged.
+    private let installsProcessListListener: Bool
+
     // MARK: State (confined to `queue`)
 
     private let queue = DispatchQueue(label: "NativeCaptureCoordinator.state")
@@ -233,6 +240,63 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// DRIFT corrector at ratio ≈ 1; base conversion is a distinct step here.
     private var syncedLocalBaseResampler: SyncedLocalBaseResampler?
 
+    /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
+    /// was last built/recreated against — the compare-before-rebuild key for the
+    /// two exclusion-refresh entry points that can fire WITHOUT a bundle-ID-union
+    /// change: ``refreshExcludedProcessSet(forRelaunchedBundleID:)`` (an excluded
+    /// app relaunched) and ``handleMembershipChange()`` (an excluded app spawned or
+    /// dropped an audio child mid-session). Because ``resolveExcludedProcessObjectIDs()``
+    /// only yields objects for processes that currently HAVE a Core Audio object, an
+    /// excluded app going silent→audible on the SAME pid moves this set — so the
+    /// object-level compare also catches the "excluded app becomes audible" leak a
+    /// bundle-ID-only compare misses. Recorded ONLY on a SUCCESSFUL `.capturing`
+    /// commit (initial `start()` or a `recreateTap()`); a failed rebuild never
+    /// advances it, so it can't suppress a later needed rebuild. Confined to `queue`.
+    private var lastExcludedObjects: Set<AudioObjectID> = []
+
+    // MARK: Live-membership diffing on the exclusion side (W1-T7, Gap 1)
+    //
+    // Closes the mid-session leak `updateRouting`/`refreshExcludedProcessSet` both
+    // miss: an ALREADY-excluded app (a routed-away or user-excluded browser) spawns
+    // a new audio child WITHOUT relaunching — that child was never in the exclusion
+    // list, so its audio leaks into the whole-system mix until some unrelated rebuild
+    // trigger. A system-wide process-object-list listener fires once per process
+    // connecting/disconnecting (browsers churn it as tabs open/close), so
+    // notifications are DEBOUNCED onto a dedicated serial queue and only the last one
+    // in a burst runs the diff; the diff COMPARES-BEFORE-REBUILD against
+    // `lastExcludedObjects` so an unchanged resolved object set does ZERO Core Audio
+    // work (the CPU-storm loop-breaker). A genuine change recreates the tap as a
+    // benign `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
+
+    #if canImport(AudioToolbox)
+    /// System-wide "a process's audio object appeared/disappeared" listener.
+    /// Registered ONCE, lazily, on the first `start()` and removed in `deinit`
+    /// — paired add/remove, no leak (same structural discipline as
+    /// ``PerAppCaptureCoordinator``'s resume listener). Touched only on ``queue``.
+    private var processListBlock: AudioObjectPropertyListenerBlock?
+
+    /// The one address the block is registered on. A `let` so add and remove
+    /// can never drift apart.
+    private static let processObjectListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    #endif
+
+    /// Dedicated DEBOUNCED serial queue owning the membership-diff timer.
+    /// DISTINCT from ``queue`` on purpose: `handleMembershipChange` reaches into
+    /// the state via `queue.sync`, which would deadlock if it were itself
+    /// running on `queue`. Mirrors ``PerAppCaptureCoordinator``'s `membershipQueue`.
+    private let membershipQueue = DispatchQueue(label: "NativeCaptureCoordinator.membership")
+    /// The pending coalesced diff. Confined to ``membershipQueue``. Cancelled and
+    /// replaced by each new notification inside the debounce window, so a rapid
+    /// spawn/kill/spawn burst collapses to a single diff pass.
+    private var membershipDiffWork: DispatchWorkItem?
+    /// How long to wait for process-list churn to settle before diffing.
+    /// Injectable so tests can shrink it; production default coalesces a burst
+    /// of tab open/close notifications into one rebuild.
+    private let membershipDebounceInterval: DispatchTimeInterval
+
     /// Fired on every state transition so a UI (or a test) can observe the
     /// lifecycle. Called on the coordinator's internal queue.
     public var onStateChange: (@Sendable (State) -> Void)?
@@ -246,7 +310,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///
     /// Deliberately NOT fired for a rebuild caused by an exclusion-set change
     /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
-    /// ``setSyncedLocalSink(_:renderProcessPID:)``). Those are benign,
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) — UNLESS that rebuild is observed
+    /// to have re-anchored the clock anyway (the device or nominal rate the new tap
+    /// came up on differs from the outgoing tap's), which the cause alone cannot
+    /// report: the default output device can move in the window where neither the old
+    /// nor the new tap holds a listener. Those are otherwise benign,
     /// backend-initiated parts of NORMAL connect/route setup — in particular,
     /// attaching the synced-local sink adds its render pid to the exclusion set,
     /// which recreates the tap on EVERY Mac+AirPlay connect. The output device and
@@ -326,7 +394,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
-        workgroup: AudioIOWorkgroupJoining? = nil
+        workgroup: AudioIOWorkgroupJoining? = nil,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300),
+        installsProcessListListener: Bool = true
     ) {
         self.makeTap = makeTap
         self.sink = sink
@@ -334,6 +404,24 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
         self.workgroup = workgroup
+        self.membershipDebounceInterval = membershipDebounceInterval
+        self.installsProcessListListener = installsProcessListListener
+    }
+
+    /// Tears down the process-object-list listener installed by the first
+    /// `start()` (W1-T7, Gap 1). Symmetric removal — the block captures `self`
+    /// weakly, so a block mid-flight holds a strong reference and `deinit` cannot
+    /// run concurrently with one (same argument ``PerAppCaptureCoordinator.deinit``
+    /// makes). The tap itself is torn down by its own `deinit` backstop. Does NOT
+    /// additionally drop workgroup membership here — `stop()` already does that
+    /// on every path this coordinator's owner is expected to use, and deinit
+    /// running ahead of a `stop()` call is a pre-existing gap in the T7 workgroup
+    /// feature, not something this merge should silently paper over.
+    deinit {
+        #if canImport(AudioToolbox)
+        removeProcessListListenerLocked()
+        membershipQueue.sync { membershipDiffWork?.cancel(); membershipDiffWork = nil }
+        #endif
     }
 
     // MARK: Public lifecycle (idempotent)
@@ -356,6 +444,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // Claim: only proceed from idle/failed; move to .creatingTap and snapshot
         // the exclusion pids (queue-confined) under a SHORT lock.
         let claim: (proceed: Bool, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
+            #if canImport(AudioToolbox)
+            // First start of this coordinator's life arms the system-wide
+            // process-object-list listener (idempotent) — the signal that drives
+            // live exclusion-membership diffing (W1-T7, Gap 1). Doing it here, not
+            // in `init`, keeps a coordinator that never starts from touching the HAL.
+            installProcessListListenerLocked()
+            #endif
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
@@ -385,6 +480,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.publishBufferSnapshot()
+                self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
                 return nil
             }
@@ -604,6 +700,140 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         return result
     }
 
+    // MARK: - Live exclusion-membership diffing (W1-T7, Gap 1 / Fix 1)
+
+    /// Re-check an ALREADY-excluded bundle ID's process set after it may have
+    /// relaunched or its per-app capture health changed (W1-T7 Fix 1 / R14). A
+    /// relaunch gives the app a fresh pid, so the old resolved process object is
+    /// gone and the whole-system tap's exclusion list is stale until it's rebuilt
+    /// against the new process set. Cheap to call for a bundle ID that turns out
+    /// not to be excluded (the `contains` gate no-ops it) or whose resolved object
+    /// set is unchanged (the compare-before-rebuild guard no-ops it). Called by
+    /// `NativeBackend.handleAppLaunched` / `handlePerAppCaptureHealthChange`.
+    public func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+        let isExcludedAndCapturing: Bool = queue.sync {
+            guard case .capturing = _state else { return false }
+            return currentExcludedBundleIDs.contains(bundleID)
+        }
+        guard isExcludedAndCapturing else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
+    /// The compare-before-rebuild core shared by BOTH exclusion-refresh entry
+    /// points — ``refreshExcludedProcessSet(forRelaunchedBundleID:)`` (relaunch /
+    /// per-app-health triggers, W1-T7 Fix 1) and ``handleMembershipChange()``
+    /// (process-list churn, W1-T7 Gap 1). Re-resolves the live excluded set to the
+    /// Core Audio process OBJECTS the tap actually excludes and rebuilds ONLY if
+    /// that object set differs from the baseline the live tap was built against
+    /// (``lastExcludedObjects``) — so an unchanged set (a duplicate notification,
+    /// or churn in an unrelated app) does ZERO Core Audio work (the CPU-storm
+    /// loop-breaker), while a genuine change (a new audio child appeared inside an
+    /// excluded app, one went away, or an excluded app became audible on the same
+    /// pid) rebuilds exactly once. The resolve runs OUTSIDE the lock (it enumerates
+    /// the HAL); the decision is re-checked under the lock against the CURRENT
+    /// `currentExcludedBundleIDs`/`syncedLocalRenderPID` so a racing
+    /// `updateRouting`/`setSyncedLocalSink` isn't clobbered. The baseline advances
+    /// only on a successful `recreateTap()` commit, so a failed rebuild can't leave
+    /// a stale baseline that suppresses a later one. Recreates as a benign
+    /// `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
+    private func rebuildIfExclusionObjectsChanged() {
+        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?)? = queue.sync {
+            guard case .capturing = _state else { return nil }
+            return (currentExcludedBundleIDs, syncedLocalRenderPID)
+        }
+        guard let snapshot else { return }
+
+        // Resolve OUTSIDE the lock (enumerates the HAL) — the same off-lock
+        // discipline `recreateTap` keeps for its create.
+        var newObjects = snapshot.bundleIDs.reduce(into: Set<AudioObjectID>()) { acc, bundleID in
+            acc.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
+        }
+        if let renderPID = snapshot.renderPID {
+            newObjects.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+
+        let needsRecreate: Bool = queue.sync {
+            guard case .capturing = _state else { return false }
+            // Inputs unchanged since the snapshot, else a concurrent
+            // updateRouting/setSyncedLocalSink already owns the rebuild.
+            guard currentExcludedBundleIDs == snapshot.bundleIDs,
+                  syncedLocalRenderPID == snapshot.renderPID else { return false }
+            guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD
+            return true
+        }
+        guard needsRecreate else { return }
+        AudioDiag.log("NativeCapture exclusion objects changed (\(lastExcludedObjects.count) -> \(newObjects.count)) — rebuilding")
+        Telemetry.log(.captureWS, "exclusion_membership_changed", ["objectCount": "\(newObjects.count)"])
+        recreateTap(cause: .exclusionChange)
+    }
+
+    #if canImport(AudioToolbox)
+    /// Arm the system-wide process-object-list listener (Gap 1). Idempotent — a
+    /// no-op once installed. MUST hold ``queue``. The block is dispatched by the
+    /// HAL on an INTERNAL thread (`nil` dispatch queue), NOT on ``queue``: the
+    /// handler debounces onto ``membershipQueue`` (which then does `queue.sync`),
+    /// so running the block on `queue` would risk the same re-entrancy the per-app
+    /// coordinator avoids the same way.
+    private func installProcessListListenerLocked() {   // must hold `queue`
+        guard installsProcessListListener else { return }
+        guard processListBlock == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleProcessListChanged()
+        }
+        var address = Self.processObjectListAddress
+        let err = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        guard err == noErr else {
+            AudioDiag.log("NativeCapture exclusion-membership listener install FAILED (\(err))")
+            return
+        }
+        processListBlock = block
+        AudioDiag.log("NativeCapture exclusion-membership listener armed (process-object-list)")
+    }
+
+    /// Symmetric removal. MUST hold ``queue`` (or run in `deinit`, where no block
+    /// can be concurrently live — see the `deinit` note).
+    private func removeProcessListListenerLocked() {
+        guard let block = processListBlock else { return }
+        var address = Self.processObjectListAddress
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
+        processListBlock = nil
+    }
+    #endif
+
+    /// A process connected to / disconnected from the audio system. Coalesce a
+    /// burst of these onto ``membershipQueue`` and diff once settled. Internal
+    /// (not `private`) so tests can drive the debounced entry point hermetically —
+    /// firing a real `kAudioHardwarePropertyProcessObjectList` notification in CI
+    /// isn't possible without live Core Audio churn.
+    func handleProcessListChanged() {
+        scheduleMembershipDiff()
+    }
+
+    /// Coalesce process-list notifications: cancel any pending diff and arm a fresh
+    /// one ``membershipDebounceInterval`` out, so a rapid spawn/kill/spawn burst
+    /// collapses to a single diff pass. Runs on ``membershipQueue`` (never
+    /// ``queue``) so the `queue.sync` inside the diff cannot deadlock.
+    private func scheduleMembershipDiff() {
+        membershipQueue.async { [weak self] in
+            guard let self else { return }
+            self.membershipDiffWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.handleMembershipChange() }
+            self.membershipDiffWork = work
+            self.membershipQueue.asyncAfter(deadline: .now() + self.membershipDebounceInterval, execute: work)
+        }
+    }
+
+    /// Re-resolve the excluded set and, on a genuine change to the process objects
+    /// the tap excludes, recreate it — closing the mid-session leak where an
+    /// already-excluded app spawns a new audio child WITHOUT relaunching (W1-T7
+    /// Gap 1). Internal (not `private`) so tests can drive a diff pass
+    /// deterministically without waiting out the real debounce timer.
+    func handleMembershipChange() {
+        rebuildIfExclusionObjectsChanged()
+    }
+
     // MARK: Buffer delivery (tap IOProc thread → convert → engine)
 
     /// Freeze the four queue-confined fields ``handleBuffer(_:)`` needs into a
@@ -716,8 +946,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// device's clock out from under the live RTP sessions and desyncs the
     /// receivers; an exclusion-set change
     /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
-    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but leaves the
-    /// device and its clock — and thus the receivers' timeline — untouched.
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but is EXPECTED
+    /// to leave the device and its clock — and thus the receivers' timeline —
+    /// untouched. "Expected", not guaranteed: ``recreateTap(cause:)`` verifies it
+    /// against the tap that actually came up and resets anyway if the clock moved, so
+    /// this cause is the default assumption, never the last word.
     enum RebuildCause { case deviceOrRateChange, exclusionChange }
 
     /// Tear the current tap down and recreate it — against the (possibly
@@ -748,8 +981,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // mean the LAST notification can be the one that would otherwise be
         // dropped, leaving the tap rebuilt against a stale device/rate. See
         // dev/notes/stability-audit-2026-07-18.md §C6.
-        let claim: (proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
-            guard case .capturing = _state else {
+        let claim: (
+            proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>,
+            previousRate: Int?, previousDeviceID: AudioObjectID?
+        ) = queue.sync {
+            guard case .capturing(let oldFormat) = _state else {
                 if case .creatingTap = _state {
                     pendingDeviceChange = true
                     // Telemetry (T2): STABILITY(C6) coalescing point — a
@@ -758,14 +994,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // "rebuild_replay" line logged once it's replayed below).
                     Telemetry.log(.captureWS, "rebuild_coalesced", ["reason": "already_rebuilding"])
                 }
-                return (false, nil, [])
+                return (false, nil, [], nil, nil)
             }
             let t = self.tap
             self.tap = nil
             self.converter = nil          // stop forwarding buffers through the dying tap
             self.publishBufferSnapshot()  // ...and make that visible to the RT path NOW
             self.transition(to: .creatingTap)
-            return (true, t, resolveExcludedProcessObjectIDs())
+            // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
+            // clears it — the baseline the post-commit compare needs to tell a
+            // re-anchor from a like-for-like rebuild.
+            return (true, t, resolveExcludedProcessObjectIDs(), oldFormat.sampleRate, t?.tappedDeviceID)
         }
         // Not capturing (racing a stop()/failure): nothing to do.
         guard claim.proceed else { return }
@@ -818,6 +1057,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.publishBufferSnapshot()
+                self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
                 // STABILITY(C6): a rebuild trigger landed while we were rebuilding —
                 // replay it once now that we're capturing again, coalescing however
@@ -844,7 +1084,36 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // re-establish (see `onDeviceRateRebuild`). Fired OFF the lock, matching
             // the "no HAL/handler work under `queue`" discipline the rest of this
             // method keeps.
-            if commit.orphan == nil, cause == .deviceOrRateChange {
+            //
+            // ...OR when the rebuild demonstrably re-anchored the clock anyway,
+            // whatever it was nominally for. The cause alone cannot be trusted: the
+            // default output device can move inside the window between the old tap's
+            // `teardown()` (which takes its device listener with it) and the new tap
+            // arming its own. Nobody delivers that notification, so an
+            // `.exclusionChange` rebuild — a plain connect, an exclusion toggle —
+            // silently comes back up on a DIFFERENT device's clock with the receivers
+            // still on the old timeline, and stays silent until some later device/rate
+            // event happens to fire a reset. Comparing what the outgoing tap was
+            // anchored to against what the incoming one landed on closes that window
+            // with a fact instead of an assumption. A tap that doesn't report its
+            // device (`nil`) abstains from the identity half, leaving the rate compare.
+            let rateMoved = claim.previousRate.map { $0 != format.sampleRate } ?? false
+            let deviceMoved: Bool = {
+                guard let before = claim.previousDeviceID, let after = newTap.tappedDeviceID
+                else { return false }
+                return before != after
+            }()
+            if commit.orphan == nil, cause == .deviceOrRateChange || rateMoved || deviceMoved {
+                if cause == .exclusionChange {
+                    // Worth its own line: an exclusion-cause rebuild that turned out to
+                    // re-anchor is exactly the silent-dropout window this compare exists
+                    // to catch, and nothing else in the trail would show it.
+                    Telemetry.log(.captureWS, "rebuild_reanchored", [
+                        "cause": "exclusionChange",
+                        "rateMoved": rateMoved ? "true" : "false",
+                        "deviceMoved": deviceMoved ? "true" : "false",
+                    ])
+                }
                 onDeviceRateRebuild?()
             }
             if commit.replay {
@@ -1163,10 +1432,20 @@ public protocol SystemAudioTap: AnyObject {
     /// implementation; real hardware behaviour is not assertable hermetically
     /// anyway (plan risk #6).
     var workgroupDeviceID: AudioObjectID? { get }
+
+    /// The output device this tap is currently anchored to, or nil when it isn't
+    /// running / can't say. Read by ``NativeCaptureCoordinator`` across a rebuild to
+    /// tell whether the tap actually re-anchored onto a DIFFERENT device's clock —
+    /// which no rebuild *cause* can be trusted to report, because the default output
+    /// device can move inside the window where the old tap is already torn down and
+    /// the new one hasn't armed its listener yet. Defaulted to nil so a fake that
+    /// doesn't model device identity keeps working (the compare simply abstains).
+    var tappedDeviceID: AudioObjectID? { get }
 }
 
 public extension SystemAudioTap {
     var workgroupDeviceID: AudioObjectID? { nil }
+    var tappedDeviceID: AudioObjectID? { nil }
 }
 
 /// The audio I/O workgroup seam (T7). Implemented in production by
@@ -1468,6 +1747,13 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+
+    /// The device this tap is anchored to (``SystemAudioTap/tappedDeviceID``), or nil
+    /// before `createAndStart` resolved one / after `teardown()` cleared it.
+    var tappedDeviceID: AudioObjectID? {
+        let id = tappedOutputDeviceID
+        return id == kAudioObjectUnknown ? nil : id
+    }
     private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`

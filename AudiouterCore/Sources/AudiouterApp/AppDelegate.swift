@@ -172,6 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// placeholder master-volume value the status symbol tracks.
     private var devicesByID: [String: Device] = [:]
 
+    /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
+    /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
+    /// bookkeeping — kept here too because the status item's idle/streaming
+    /// decision (`MenuBarStatus.isStreaming`) needs it and has no other route
+    /// to it (the popover's copy is private). An empty `appNames` clears the
+    /// entry for that device, same discipline as the popover's copy.
+    private var routedAppNamesByDeviceID: [String: [String]] = [:]
+
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -277,17 +285,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
-        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
-        // "Selected Devices" (not just which AirPlay devices are) to detect
-        // "play everywhere" — `GroupController.applyRouting` always filters the
-        // local device out of what it hands `backend.setOutputSet`, so that call
-        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
-        // existing public read that does; wire it in once, here, right after
-        // both are constructed. `backend as? NativeBackend` is nil for
-        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
-        // `LatencyConfigurable` optional-capability pattern used below.
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
+        // what Main Out points at (not just which AirPlay devices are) to detect
+        // "play everywhere" — neither `GroupController.applyRouting` nor
+        // `activateGroup` ever hands the local device to `backend.setOutputSet`,
+        // so that call alone can't carry this. `isMainOutMember(_:)` is the read
+        // that answers it for BOTH Main Out targets; wire it in once, here, right
+        // after both are constructed. Deliberately NOT `isSpeakerSelected(_:)`,
+        // which sees only the Selected Devices set: under a group target that
+        // both fails to arm the sink for a group containing the Mac and arms it
+        // for an AirPlay-only group whose Mac is merely still sitting in the
+        // untargeted Selected Devices set. For `.selectedDevices` the two are the
+        // same read, so this is a group-path-only change.
+        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // matching the `MeteringControlling`/`LatencyConfigurable`
+        // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
-            self?.groupController?.isSpeakerSelected(id) ?? false
+            self?.groupController?.isMainOutMember(id) ?? false
         }
 
         // Construct the production AppRoutingController explicitly (T-11), using
@@ -329,10 +343,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
+        // A persisted `.device` redirect must never survive a full Audiouter
+        // restart (simplification of the app-quit reset, scaled to every route
+        // at once) — mirrors the existing "the live routing set is not
+        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
+        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
+        // below so the backend never sees a stale `.device` route even
+        // transiently at launch.
+        appRouting.clearAllDeviceRoutes()
         // Seed the backend with the persisted route table + excluded set (T7). A
-        // prune above would already have pushed via `onRoutesDidChange`, but that
-        // fires only when something changed — this unconditional push syncs the
-        // loaded routes even when nothing was pruned.
+        // prune/clear above would already have pushed via `onRoutesDidChange`, but
+        // that fires only when something changed — this unconditional push syncs
+        // the loaded routes even when nothing was pruned/cleared.
         pushAppRoutesToBackend()
 
         // A routed app quitting now RESETS its route (product decision 2026-07-22):
@@ -940,6 +962,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // every other event — this call only updates state, it doesn't repaint
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+            if appNames.isEmpty {
+                routedAppNamesByDeviceID.removeValue(forKey: deviceID)
+            } else {
+                routedAppNamesByDeviceID[deviceID] = appNames
+            }
             log("event: \(describe(event))")
         case .routedAppRunning(let bundleID, let isRunning):
             // T4 (bug fix): a routed app quit or relaunched — update the popover's
@@ -952,6 +979,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // playback so the actual song responds. No device model to repaint — this
             // targets whatever app is playing — so handle it and return.
             mediaKeyController.handle(command)
+            log("event: \(describe(event))")
+            return
+        case .localFallbackActive(let active):
+            // The generalized silence watchdog (R11) un-gated (or re-gated) whole-system
+            // capture: nothing the user selected stayed connected, so the Mac fell back
+            // to local playback (or a device reconnected and audio moved back). Show or
+            // clear the popover banner; the selection intent is untouched, so no device
+            // model changed — handle it and return.
+            popoverController.setLocalFallbackActive(active)
+            log("event: \(describe(event))")
+            return
+        case .systemDefaultIsAirPlayActive(let active):
+            // W3-T3: the macOS system default output is (or stopped being)
+            // AirPlay-class while we're actively streaming — double-path/echo
+            // risk. Purely informational: show or clear the popover note; no
+            // device model changed, no audio path is altered — handle it and
+            // return.
+            popoverController.setSystemAirPlayNoteActive(active)
             log("event: \(describe(event))")
             return
         case .streamHealth:
@@ -971,6 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
         statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
     }
@@ -997,6 +1043,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         case .remoteTransport(let command):
             return "remoteTransport(\(command)) — driving Mac media playback"
+        case .localFallbackActive(let active):
+            return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
+        case .systemDefaultIsAirPlayActive(let active):
+            return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
         case .streamHealth(let id, let recovering):
             return "streamHealth(\(id), recovering: \(recovering))"
         }

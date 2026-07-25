@@ -18,13 +18,18 @@ import AudiouterSharedUI
 /// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
 /// design feedback 2026-07-18: groups and devices share the identical
 /// large-icon header, the only difference being that a group's TITLE is
-/// editable and a device's is not):
-/// - a large (``DeviceIconWellView/size``pt) group icon with the shared
-///   Contacts-style hover scrim; clicking it opens the icon picker;
-/// - the group name as an editable borderless title field (centered under the
-///   icon, capped width — commits on Return/focus loss, like a Finder rename);
+/// editable and a device's is not; every shared number lives in
+/// ``GroupsPaneLayout``):
+/// - a HEADER SECTION holding the large (``DeviceIconWellView/size``pt) group
+///   icon and the group's name SIDE BY SIDE (design review 2026-07-25 — they
+///   used to stack, which cost 30 pt of a pane that was overflowing its own
+///   window); clicking the icon opens the icon picker;
+/// - the name itself is an inline rename field: a real `NSTextField` wearing
+///   the ``WarmNameFieldCell`` skin (filled, bordered, trailing pencil), which
+///   commits on Return/focus loss, reverts on Escape, and restores the previous
+///   name when emptied — a Finder rename in a box;
 /// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
-///   (per HIG — checkboxes for membership, not switches);
+///   (per HIG — checkboxes for membership, not switches), in a second section;
 /// - a "Delete group…" `NSButton`.
 ///
 /// Edits write straight through the injected `GroupController`
@@ -40,46 +45,17 @@ import AudiouterSharedUI
 /// group edit behind a separate "Save" step.
 public final class GroupEditorViewController: NSViewController {
 
-    /// Caps the form's content column width so long rows/fields don't stretch
-    /// edge-to-edge in a wide window.
-    private static let contentMaxWidth: CGFloat = 400
-
-    /// The pane's LEFT SPINE gutter (Warm Signal v4 §Call-1): every piece of
-    /// content — icon well, title, "Speakers", each row's icon, the delete
-    /// button — starts at this inset, leaving the lane to its left owned
-    /// entirely by the rail. v4 is explicit that the gutter is kept clear by
-    /// MOVING THE TITLES, not by threading the rail around them; this constant
-    /// is that move. Derived from the popover's own grid so the two surfaces
-    /// can't drift: it already reserves `railGutterCenterX` plus the node radius
-    /// plus `busNodeClearance`.
-    private static let railContentInset = PopoverColumnGrid.firstElementLeading(indented: false)
-
-    /// Leading edge of the membership grouped-list container, measured from the
-    /// column's own leading edge. Placed just past the rail's widest point — a
-    /// selected node's right edge (`railGutterCenterX + busNodeDiameterSelected
-    /// / 2`) — plus a small gap, so the spine runs in clean pane background and
-    /// never sits inside the container's fill. Derived from the shared grid, so
-    /// widening the gutter moves the container in lockstep instead of silently
-    /// overlapping the nodes.
-    private static let wellLeadingInset: CGFloat =
-        PopoverColumnGrid.railGutterCenterX + PopoverColumnGrid.busNodeDiameterSelected / 2 + 4
-
-    /// Inset from the header section's top/bottom borders to the icon and
-    /// title. Deliberately roomier than the list section's `verticalPadding`:
-    /// the header holds one tall icon over one short title, so tight padding
-    /// left the name looking pinned to the bottom edge of a mostly-empty box.
-    private static let headerPadding: CGFloat = 14
-
     /// The continuous membership-rail spine, drawn ONCE for the whole pane on
     /// top of everything else so it reads unbroken where it crosses the header
     /// band and the "Speakers" label's row. Non-interactive.
     ///
-    /// Its leading edge is pinned to the CONTAINER's, and the membership rows'
-    /// leading edges are pinned there too — that alignment is load-bearing:
-    /// `BusRailOverlayView` draws the spine at the literal
+    /// ANCHORING TRAP: its leading edge is pinned to the COLUMN's, and the
+    /// membership rows' leading edges are pinned there too — that alignment is
+    /// load-bearing: `BusRailOverlayView` draws the spine at the literal
     /// `PopoverColumnGrid.railGutterCenterX` in its own coordinate space, while
     /// each row places its node at that same x from the ROW's leading edge. Move
-    /// one without the other and the nodes float off the line.
+    /// one without the other and the nodes float off the line by exactly the
+    /// difference (`test_nodeCenterXInOverlaySpace` is the guard).
     private let railOverlay = BusRailOverlayView()
 
     private let groupController: GroupController
@@ -103,18 +79,39 @@ public final class GroupEditorViewController: NSViewController {
     private let nameField = NSTextField(string: "")
     private let membershipStack = NSStackView()
     /// The checklist's recessed background + inter-row hairlines (T5) — see
-    /// ``GroupedSectionView`` below. Sits BEHIND `membershipStack` in z-order.
+    /// ``GroupedSectionView``. Sits BEHIND `membershipStack` in z-order.
+    /// NAME IS LOAD-BEARING: `GroupsWindowTextColorLockTests` reaches this
+    /// stored property by reflection (the type is internal, the property is
+    /// private) to sample the real drawn fill/divider colours.
     private let membershipWell = GroupedSectionView()
-    /// The header's own bounded section (icon + title), the sibling of
-    /// ``membershipWell``. Holds no rows, so it draws fill + border only — the
-    /// rail climbs out of the list section and lands on the TITLE inside this
-    /// one, which is what visually ties the members to the group they belong to.
+    /// The header's own bounded section (icon + title side by side), the
+    /// sibling of ``membershipWell``. Holds no rows, so it draws fill + border
+    /// only — the rail climbs out of the list section and lands on the icon
+    /// well inside this one, which is what visually ties the members to the
+    /// group they belong to.
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
 
-    /// Width cap for the editable title field (design feedback 2026-07-18:
-    /// the full-width Name bar was "unnecessarily long").
-    private static let titleFieldMaxWidth: CGFloat = 260
+    /// Floor for the rename field's width. An editable `NSTextField` has NO
+    /// intrinsic width, so without this a field whose width is otherwise driven
+    /// by its (measured) content can be squeezed to nothing — it rendered
+    /// invisible once already (snapshot-caught 2026-07-18). REQUIRED priority,
+    /// deliberately: the field may overflow its section by a hair on a
+    /// pathologically narrow pane rather than vanish.
+    private static let titleFieldMinWidth: CGFloat = 140
+
+    /// The rename field's live width, recomputed from the name it holds
+    /// (an editable field has no intrinsic width to hug with, so the hug is
+    /// measured by hand). Optional, not required, so the "never wider than its
+    /// section" cap wins for a long name and the min-width floor wins for a
+    /// short one.
+    private var nameFieldWidth: NSLayoutConstraint?
+
+    /// The pointer-hover tracking area over the rename field. The field itself
+    /// stays a STOCK `NSTextField` (the skin is a cell — `WarmNameFieldCell`),
+    /// so the tracking area is owned here rather than by an `NSTextField`
+    /// subclass; `mouseEntered`/`mouseExited` below are its callbacks.
+    private var nameFieldTracking: NSTrackingArea?
 
     /// Kept alive across a picker session so it can be dismissed/replaced;
     /// nil when no picker is currently presented.
@@ -152,22 +149,40 @@ public final class GroupEditorViewController: NSViewController {
             self.presentIconPicker(anchoredTo: self.iconWell)
         }
 
-        // The editable title: styled like the detail pane's name label (header
-        // parity) but a real first responder. Borderless label-look that edits
-        // in place — bezel-less so the text baseline sits exactly where the
-        // static label's does (the bezeled field drew its text visibly
-        // off-center — live-test feedback 2026-07-18).
+        // The inline rename field. STILL A REAL `NSTextField` — first
+        // responder, field editor, Return/Escape, selection and VoiceOver all
+        // stock; only the DRAWING is ours. The cell swap happens FIRST, before
+        // any configuration, so the settings below land on the new cell (the
+        // same ordering `MembershipRowView` uses for `InvisibleSwitchCell` and
+        // `DeviceRowView` for `WarmFaderCell`).
+        nameField.cell = WarmNameFieldCell()
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
         nameField.font = Tokens.Font.heading
+        nameField.textColor = Tokens.Color.label
         nameField.alignment = .natural   // left-aligned (LTR) to match the column
+        nameField.isEditable = true
+        nameField.isSelectable = true
+        // Bezel-less/background-less: `WarmNameFieldCell` paints the fill and
+        // border itself so both re-resolve per appearance on every paint
+        // (a bezel would also draw its text visibly off-centre — live-test
+        // feedback 2026-07-18).
+        nameField.isBordered = false
         nameField.isBezeled = false
         nameField.drawsBackground = false
         nameField.usesSingleLineMode = true
         nameField.lineBreakMode = .byTruncatingTail
+        nameField.setAccessibilityLabel("Group name")
         nameField.target = self
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
+        // Hover is a neutral wash + a pencil step-up, never a geometry change
+        // (R7). Owned here because the field is stock — see `nameFieldTracking`.
+        let tracking = NSTrackingArea(rect: .zero,
+                                      options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+        nameField.addTrackingArea(tracking)
+        nameFieldTracking = tracking
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -191,9 +206,10 @@ public final class GroupEditorViewController: NSViewController {
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
-        // The form column: capped to `contentMaxWidth`, leading-aligned,
-        // pinned below the safe area. Everything hangs off this column's
-        // edges rather than the container's, so the cap applies uniformly.
+        // The form column: symmetric margins off the pane, ELASTIC up to
+        // `GroupsPaneLayout.contentMaxWidth`. Everything hangs off this
+        // column's edges rather than the container's, so both sections and the
+        // rail move together.
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -206,7 +222,7 @@ public final class GroupEditorViewController: NSViewController {
         // their dividers inset by the same gutter reserve every child uses.
         for well in [headerWell, membershipWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
-            well.contentLeadingInset = Self.railContentInset
+            well.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
             column.addSubview(well)
         }
         for v in [iconWell, nameField, speakersLabel, membershipStack] {
@@ -220,61 +236,105 @@ public final class GroupEditorViewController: NSViewController {
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(railOverlay)
 
+        // The column STRETCHES with the pane: this pushes it out to the
+        // trailing margin, the required `<=` cap stops it at
+        // `contentMaxWidth`, and the required `<=` margin keeps it inside the
+        // pane at any width. Without this fill the sections hugged their
+        // ~277 pt intrinsic content and left a dead strip beside them.
+        let columnFill = column.trailingAnchor.constraint(
+            equalTo: container.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
+        columnFill.priority = .defaultHigh
+
+        // The rename field HUGS its name — measured by hand, since an editable
+        // `NSTextField` has no intrinsic width to hug with (see
+        // ``updateNameFieldWidth()``). Optional, so the cap below wins for a
+        // long name and the required floor wins for a short one.
+        //
+        // PRIORITY IS LOAD-BEARING: below `.defaultLow`, which is where the
+        // split view holds its divider. At `.defaultHigh` a long group name was
+        // satisfied by growing the whole content pane — the split view happily
+        // squeezed the sidebar past its own minimum thickness to give the field
+        // the width it asked for. A preference this weak can never move the
+        // window's furniture; it only fills space the pane already has.
+        let titleWidth = nameField.widthAnchor.constraint(
+            equalToConstant: Self.titleFieldMinWidth)
+        titleWidth.priority = NSLayoutConstraint.Priority(240)
+        nameFieldWidth = titleWidth
+
+        // …and never overflows its section. Priority 999 rather than required:
+        // on a pathologically narrow pane the REQUIRED min-width floor wins
+        // instead of AppKit breaking one of two required constraints at random
+        // (and logging about it).
+        let titleCap = nameField.trailingAnchor.constraint(
+            lessThanOrEqualTo: headerWell.trailingAnchor,
+            constant: -GroupsPaneLayout.contentTrailingInset)
+        titleCap.priority = NSLayoutConstraint.Priority(999)
+
         NSLayoutConstraint.activate([
-            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
-            // The column starts at the container's own leading edge — the 16pt
-            // margin moved INTO `railContentInset`, which every child below
-            // applies, so the rail gets an exclusive lane to their left.
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            column.widthAnchor.constraint(
-                lessThanOrEqualToConstant: Self.contentMaxWidth + Self.railContentInset),
-            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor,
+                                        constant: GroupsPaneLayout.columnTopInset),
+            // SYMMETRIC margins (design review 2026-07-25). The column used to
+            // start at the pane's own leading edge, with the whole left margin
+            // living inside `contentLeadingInset` — which put the bordered
+            // sections flush against the window edge on one side only.
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                            constant: GroupsPaneLayout.columnInset),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor,
+                                             constant: -GroupsPaneLayout.columnTrailingInset),
+            column.widthAnchor.constraint(lessThanOrEqualToConstant: GroupsPaneLayout.contentMaxWidth),
+            columnFill,
 
-            // Header parity with DeviceDetailViewController: left-aligned large
-            // icon, left-aligned (editable) title beneath it, BOTH panes using
-            // the same `railContentInset` so switching sidebar selection doesn't
-            // shift the header sideways (design review 2026-07-25 — it used to
-            // jump ~22.5pt because only this pane reserved the gutter).
-            // Inset by the header's own padding so the icon doesn't touch its
-            // top border.
+            // HEADER, SIDE BY SIDE (design review 2026-07-25): icon BESIDE the
+            // name, not above it — 30 pt of reclaimed height on a pane that was
+            // overflowing its own window. Header parity with
+            // `DeviceDetailViewController` is geometric: both panes read the
+            // same `GroupsPaneLayout` numbers, so switching sidebar selection
+            // never shifts the header (it used to jump ~22.5 pt sideways).
             iconWell.topAnchor.constraint(equalTo: column.topAnchor,
-                                          constant: Self.headerPadding),
+                                          constant: GroupsPaneLayout.headerPadding),
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                              constant: Self.railContentInset),
+                                              constant: GroupsPaneLayout.contentLeadingInset),
 
-            nameField.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
-            nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                               constant: Self.railContentInset),
-            // FIXED width, not a cap: an EDITABLE text field has no intrinsic
-            // width, so a "<=" alone lets auto layout collapse it to zero (it
+            nameField.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+                                               constant: GroupsPaneLayout.iconToTitleGap),
+            nameField.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            nameField.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.titleFieldHeight),
+            // REQUIRED floor: an editable text field has no intrinsic width, so
+            // without this auto layout is free to collapse it to zero (it
             // rendered invisible — snapshot-caught 2026-07-18).
-            nameField.widthAnchor.constraint(equalToConstant: Self.titleFieldMaxWidth),
+            nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.titleFieldMinWidth),
+            titleWidth,
+            titleCap,
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
             speakersLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor, constant: 14),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                   constant: Self.railContentInset),
+                                                   constant: GroupsPaneLayout.contentLeadingInset),
 
             // The header section: wraps the icon + title, padded off both, and
             // spans the column's full width so the rail lands INSIDE it.
             headerWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             headerWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             headerWell.topAnchor.constraint(equalTo: column.topAnchor),
-            headerWell.bottomAnchor.constraint(equalTo: nameField.bottomAnchor,
-                                               constant: Self.headerPadding),
+            headerWell.bottomAnchor.constraint(equalTo: iconWell.bottomAnchor,
+                                               constant: GroupsPaneLayout.headerPadding),
 
             // The ROWS, uniquely, start at the column's own leading edge: each
-            // row applies `railContentInset` internally to its icon and places
-            // its node in the gutter, so row icons still line up with the header
-            // content above them.
+            // row applies `contentLeadingInset` internally to its icon and
+            // places its node in the gutter, so row icons still line up with
+            // the header content above them. They FILL the section's width
+            // (`buildRows` pins each row to the stack) so a row's trailing
+            // annotation lands at the section's own inset edge instead of
+            // wherever the widest device name happens to end.
             // 8 → 10: the container now extends `verticalPadding` ABOVE the
             // first row, so the visible gap from the "Speakers" label to the
             // container's top edge is this minus that padding. Nudged up so the
             // label doesn't crowd the container's new border.
             membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 10),
             membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
+            membershipStack.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
             // The list section. Spans the column's FULL width, gutter included,
@@ -288,8 +348,13 @@ public final class GroupEditorViewController: NSViewController {
             membershipWell.bottomAnchor.constraint(equalTo: membershipStack.bottomAnchor,
                                                    constant: GroupedSectionView.verticalPadding),
 
-            deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor,
-                                                  constant: Self.railContentInset),
+            // ANCHORING TRAP: anchored to the COLUMN, not the container. It
+            // used to hang off the container's leading edge, which was the
+            // same x only while the column started there too — the moment the
+            // column took its own margin the button drifted 14 pt left of
+            // everything it belongs under.
+            deleteButton.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                                  constant: GroupsPaneLayout.contentLeadingInset),
             // 16 → 20: the grouped-list container extends `verticalPadding`
             // BELOW the last row, so this gap minus that padding is what's
             // actually visible between the container's bottom border and the
@@ -297,9 +362,15 @@ public final class GroupEditorViewController: NSViewController {
             deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 20),
             deleteButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
 
+            // ANCHORING TRAP: the overlay's LEADING edge must coincide with the
+            // rows' leading edge (the column's), not the container's — the
+            // overlay draws the spine at the literal `railGutterCenterX` in its
+            // own space while each row places its node at that x from its own
+            // leading edge, so a mismatch floats every node off the line by
+            // exactly the difference.
             railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
-            railOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            railOverlay.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            railOverlay.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
@@ -318,6 +389,7 @@ public final class GroupEditorViewController: NSViewController {
         allDevices = devices
 
         nameField.stringValue = group.name
+        updateNameFieldWidth()
         refreshIconWell(group: group)
         // Warm Signal §5.3: the ACTIVE Main Out group's icon well carries the
         // thin gold ring (drawing-only; pure model state from
@@ -370,6 +442,12 @@ public final class GroupEditorViewController: NSViewController {
             }
             rowsByID[device.id] = row
             membershipStack.addArrangedSubview(row)
+            // Rows FILL the section (the stack is pinned to both of the
+            // column's edges) instead of sizing to their own intrinsic width —
+            // otherwise the trailing "Unavailable" annotation lands wherever
+            // the widest device name happens to end, and the list reads as a
+            // narrow strip inside a wide box.
+            row.widthAnchor.constraint(equalTo: membershipStack.widthAnchor).isActive = true
         }
         // Pin the sole remaining member: a group needs at least one device, so
         // its last member can't be unchecked here (delete the group instead).
@@ -413,14 +491,83 @@ public final class GroupEditorViewController: NSViewController {
         commitRename()
     }
 
+    /// The group being edited, or `nil` before `show` / after a delete.
+    private var editingGroup: Group? {
+        guard let editingGroupID else { return nil }
+        return groupController.groups.first(where: { $0.id == editingGroupID })
+    }
+
+    /// Commit the field's current text as the group's name — driven by Return
+    /// (the field's action) and by focus loss (`controlTextDidEndEditing`).
+    ///
+    /// EMPTIED: an all-whitespace name is refused, and the field is put BACK to
+    /// the group's real name. It used to be refused silently, leaving a blank
+    /// box on screen while the group still had its old name — the UI lied about
+    /// what was saved.
     private func commitRename() {
-        guard let editingGroupID,
-              var group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
+        guard var group = editingGroup else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != group.name else { return }
+        guard !trimmed.isEmpty else { return restoreNameField() }
+        guard trimmed != group.name else { return restoreNameField() }
         group.name = trimmed
         _ = try? groupController.saveGroup(group)
+        nameField.stringValue = trimmed
+        updateNameFieldWidth()
         onDidEditGroup?()
+    }
+
+    /// Put the field back to the group's persisted name and re-measure it —
+    /// the shared tail of "you emptied it" and "you pressed Escape".
+    private func restoreNameField() {
+        guard let group = editingGroup else { return }
+        if nameField.stringValue != group.name { nameField.stringValue = group.name }
+        updateNameFieldWidth()
+    }
+
+    /// ESCAPE: discard the in-progress edit and hand focus back, exactly like a
+    /// Finder rename. `abortEditing()` is what drops the field editor's pending
+    /// text; the restore then guarantees the visible string matches the model
+    /// even if the field was showing a half-typed name.
+    private func cancelRename() {
+        nameField.abortEditing()
+        restoreNameField()
+        nameField.window?.makeFirstResponder(nil)
+    }
+
+    /// Re-measure the rename field around its current text. An editable
+    /// `NSTextField` reports NO intrinsic width, so "hug the name, then stop at
+    /// the section's edge" has to be measured by hand: this drives the optional
+    /// width constraint, and the required floor / 999-priority cap clamp it.
+    private func updateNameFieldWidth() {
+        guard let nameFieldWidth else { return }
+        let text = nameField.stringValue.isEmpty
+            ? (nameField.placeholderString ?? "")
+            : nameField.stringValue
+        let font = nameField.font ?? Tokens.Font.heading
+        let measured = (text as NSString).size(withAttributes: [.font: font]).width
+        // The insets the cell reserves for the leading margin and the trailing
+        // pencil, plus a hair of slack so the caret at the end of the string
+        // never sits on the truncation edge.
+        nameFieldWidth.constant = (measured
+            + WarmNameFieldCell.textInsetLeading
+            + WarmNameFieldCell.textInsetTrailing
+            + 2).rounded(.up)
+    }
+
+    /// The rename field's skin, for the hover/pencil state below.
+    private var nameFieldCell: WarmNameFieldCell? { nameField.cell as? WarmNameFieldCell }
+
+    /// Hover on the rename field (the tracking area installed in `loadView`;
+    /// the field itself stays stock, so this controller owns the callbacks).
+    /// DRAWING ONLY — a neutral wash plus the pencil's alpha step-up, no
+    /// geometry change (R7).
+    public override func mouseEntered(with event: NSEvent) { setNameFieldHovered(true) }
+    public override func mouseExited(with event: NSEvent) { setNameFieldHovered(false) }
+
+    private func setNameFieldHovered(_ hovered: Bool) {
+        guard let cell = nameFieldCell, cell.isHovered != hovered else { return }
+        cell.isHovered = hovered
+        nameField.needsDisplay = true
     }
 
     private func membershipToggled(deviceID: String, isChecked: Bool) {
@@ -537,8 +684,66 @@ public final class GroupEditorViewController: NSViewController {
     /// Simulate typing a new name and committing it (Return / focus loss).
     public func test_rename(to newName: String) {
         nameField.stringValue = newName
+        updateNameFieldWidth()
         commitRename()
     }
+
+    /// Simulate pressing RETURN in the rename field — drives the field's real
+    /// target/action, the same dispatch AppKit performs, rather than calling
+    /// `commitRename` behind its back.
+    public func test_commitRenameViaReturn(_ newName: String) {
+        nameField.stringValue = newName
+        updateNameFieldWidth()
+        _ = nameField.target?.perform(nameField.action, with: nameField)
+    }
+
+    /// Simulate the rename field LOSING FOCUS with `newName` typed in it —
+    /// drives the real `controlTextDidEndEditing` delegate path.
+    public func test_commitRenameViaFocusLoss(_ newName: String) {
+        nameField.stringValue = newName
+        updateNameFieldWidth()
+        controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification,
+                                              object: nameField))
+    }
+
+    /// Simulate pressing ESCAPE with `typed` in the rename field — drives the
+    /// real `control(_:textView:doCommandBy:)` seam AppKit routes the key
+    /// through, with a throwaway field editor stand-in (the implementation
+    /// never touches it).
+    public func test_cancelRename(after typed: String) {
+        nameField.stringValue = typed
+        updateNameFieldWidth()
+        _ = control(nameField, textView: NSTextView(),
+                    doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+    }
+
+    /// The rename field's laid-out frame in the pane's own coordinates.
+    public var test_titleFieldFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return nameField.convert(nameField.bounds, to: view)
+    }
+
+    /// Drive the rename field's hover state headlessly (a real `mouseEntered`
+    /// can't be synthesized in a headless run) — the same path the tracking
+    /// area's callback takes.
+    public func test_setTitleHovered(_ hovered: Bool) { setNameFieldHovered(hovered) }
+
+    /// Whether the rename field is currently drawing its hover wash.
+    public var test_isTitleHovered: Bool { nameFieldCell?.isHovered ?? false }
+
+    /// Whether the rename field currently paints its trailing pencil (hidden
+    /// while the field is being edited).
+    public var test_titleShowsPencil: Bool {
+        nameFieldCell?.test_showsPencil(in: nameField) ?? false
+    }
+
+    /// Whether the rename field wears the `WarmNameFieldCell` skin while
+    /// staying a real, editable, focusable `NSTextField`.
+    public var test_titleHasWarmSkin: Bool { nameFieldCell != nil }
+
+    /// The rename field itself, so a test can drive real AppKit editing (a
+    /// window + `makeFirstResponder`) instead of a stand-in.
+    public var test_titleField: NSTextField { nameField }
 
     /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {
@@ -560,6 +765,14 @@ public final class GroupEditorViewController: NSViewController {
     /// True when "Delete group…" is currently visible (always true — the
     /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
+
+    /// The delete button's laid-out frame in the pane's own coordinates — it
+    /// must line up with the content above it (anchoring trap: it used to hang
+    /// off the container, not the column).
+    public var test_deleteButtonFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return deleteButton.convert(deleteButton.bounds, to: view)
+    }
 
     /// Simulate confirming the delete (bypasses the confirmation sheet).
     public func test_confirmDelete() {
@@ -597,10 +810,37 @@ public final class GroupEditorViewController: NSViewController {
         return railOverlay.convert(NSPoint(x: centerX, y: 0), from: row).x
     }
 
-    /// The title field's laid-out width — the rail's origin "ring" reports half
-    /// of this as its radius, so a test can assert the hook geometry without
-    /// re-deriving the field's width cap.
-    public var test_titleFieldWidth: CGFloat { nameField.bounds.width }
+    /// The rename field's laid-out width — measured around the name it holds
+    /// (``updateNameFieldWidth()``), clamped between its required floor and its
+    /// section's edge.
+    public var test_titleFieldWidth: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        return nameField.bounds.width
+    }
+
+    /// HEADER PARITY hooks — the three numbers that must match
+    /// `DeviceDetailViewController`'s identically-named hooks, so switching
+    /// sidebar selection never shifts the header (`GroupsHeaderParityTests`).
+
+    /// The icon well's laid-out frame in the pane's own coordinates.
+    public var test_headerIconFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return iconWell.convert(iconWell.bounds, to: view)
+    }
+
+    /// The title's ALIGNMENT rect in the pane's own coordinates — what auto
+    /// layout actually pins, so an editable field and a plain label (whose
+    /// alignment insets differ from their frames) can be compared honestly.
+    public var test_headerTitleAlignmentFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return nameField.alignmentRect(forFrame: nameField.convert(nameField.bounds, to: view))
+    }
+
+    /// The header SECTION's laid-out frame in the pane's own coordinates.
+    public var test_headerSectionFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return headerWell.convert(headerWell.bounds, to: view)
+    }
 
     /// T5: the number of rows currently fed to the checklist's recessed
     /// background (`GroupedSectionView.rows`) — mirrors `candidateDevices`
@@ -620,26 +860,31 @@ public final class GroupEditorViewController: NSViewController {
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
 
 extension GroupEditorViewController: RailHookProviding {
-    /// The group's TITLE is this pane's origin — the analogue of the popover's
-    /// Main Audio ring: the rail curves out of the gutter and lands on the
-    /// group's name, so the members visibly hang off the group they belong to.
-    /// It hooked the ICON well until a design review (2026-07-25) moved it down
-    /// to the title: the name is what the members belong to, and the shorter
-    /// climb keeps the spine from cutting past the whole header.
+    /// The group's ICON WELL is this pane's origin — the analogue of the
+    /// popover's Main Audio ring: the rail curves out of the group tile's left
+    /// edge and drops into the gutter, so the members visibly hang off the
+    /// group they belong to.
     ///
-    /// The protocol is phrased in terms of a ring because the popover's origin
-    /// IS one; only `ringCenterX - ringRadius` (the left edge) and `centerY` are
-    /// ever drawn to, so a rectangular title reports its own half-width and the
-    /// hook lands on the field's leading edge. `gold` still follows the SAME
-    /// active-group truth as the icon well's §5.3 gold ring, so an inactive
-    /// group's hook reads in the quiet `ember` idle tone.
+    /// It briefly hooked the TITLE instead (design review 2026-07-25, when the
+    /// icon sat ABOVE the name and the climb from the list past the whole
+    /// header read badly). The header is now SIDE BY SIDE: icon and name share
+    /// one horizontal band, so hooking the icon hooks the name's line too, and
+    /// the hook goes back to the well — a fixed 64 pt tile whose leading edge
+    /// sits on the content inset, rather than a field whose width changes with
+    /// the name it holds.
+    ///
+    /// The well is a rounded-rect tile rather than a circle, so the "ring"
+    /// reported here is its inscribed circle; only `ringCenterX - ringRadius`
+    /// (the left edge) and `centerY` are ever drawn to. `gold` follows the SAME
+    /// active-group truth as the well's §5.3 gold ring, so an inactive group's
+    /// hook reads in the quiet `ember` idle tone.
     public func railHookAnchor(in view: NSView)
         -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
-        guard isViewLoaded, nameField.superview != nil else { return nil }
-        nameField.layoutSubtreeIfNeeded()
-        let center = nameField.convert(
-            NSPoint(x: nameField.bounds.midX, y: nameField.bounds.midY), to: view)
-        return (center.y, center.x, nameField.bounds.width / 2, iconWell.isActiveGroup)
+        guard isViewLoaded, iconWell.superview != nil else { return nil }
+        iconWell.layoutSubtreeIfNeeded()
+        let center = iconWell.convert(
+            NSPoint(x: iconWell.bounds.midX, y: iconWell.bounds.midY), to: view)
+        return (center.y, center.x, DeviceIconWellView.size / 2, iconWell.isActiveGroup)
     }
 }
 
@@ -657,119 +902,35 @@ private final class RailRepaintingView: NSView {
     }
 }
 
-// MARK: - Membership checklist recessed background (T5)
-
-/// The membership checklist's recessed background: a rounded `Tokens.Color
-/// .well` fill behind the row stack, with a faint `Tokens.Color.hairline`
-/// divider between each pair of ADJACENT rows. Before this the checklist
-/// carried no surface of its own at all — `MembershipRowView` paints nothing
-/// behind itself — so there was zero visual separation either between rows or
-/// against the pane (measured on the real post-fix tones: `panel` vs `canvas`
-/// ~1.06:1 dark / ~1.08:1 light, effectively invisible). Measured floors for
-/// THIS view's own tokens (WCAG relative luminance, both ≥ their required
-/// floor — see `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark /
-/// 1.182:1 light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.309:1
-/// light (floor 1.25:1, the same separator floor `Tokens.Color.hairline`
-/// itself documents against `panel`).
-///
-/// A GROUPED-SECTION container (the macOS System Settings idiom), used TWICE in
-/// this pane: once around the header (icon + title) and once around the
-/// membership list. Two stacked sections with the rail threading out of the
-/// list up into the header mirrors the popover's own composition — bounded
-/// sections, tied together by the spine (design review 2026-07-25).
-///
-/// The geometry, all of it load-bearing:
-///
-/// - **Spans the full column width**, gutter included, so the rail's nodes sit
-///   INSIDE the section rather than floating beside it. Content within is inset
-///   past the gutter (`contentLeadingInset`) so the spine keeps a clear lane.
-/// - **Padded** top/bottom (`verticalPadding`) so content breathes instead of
-///   touching the container's edges.
-/// - **Inset dividers** starting at `contentLeadingInset` — the standard
-///   grouped-list separator treatment, never full-bleed under the corners. A
-///   section holding fewer than two rows draws none, which is what lets this
-///   same view serve as the plain header container.
-/// - **A visible border** plus a radius large enough to read as a shape; the
-///   first draft's 6pt radius rendered visually square.
-///
-/// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern
-/// for a rounded/solid-fill background view in this same file's neighborhood:
-/// every token re-resolves per appearance/Increase-Contrast on each paint, and
-/// `viewDidChangeEffectiveAppearance` just triggers a repaint. Non-interactive
-/// (`hitTest` always `nil`, `MembershipBusView`'s pattern) — it sits BEHIND
-/// `membershipStack` in z-order, so no row/checkbox/rail click target is ever
-/// affected; the small dead area to the right of a narrower row (the well is
-/// wider than a row's intrinsic content) simply swallows a click with no
-/// target, same as clicking blank pane background anywhere else.
-private final class GroupedSectionView: NSView {
-    /// Large enough to read as a rounded shape at this container's size — the
-    /// 6pt first draft rendered visually square.
-    static let cornerRadius: CGFloat = 10
-    /// Breathing room above the first row and below the last, so rows never
-    /// touch the container's edges.
-    static let verticalPadding: CGFloat = 6
-    private static let hairlineThickness: CGFloat = 1
-    private static let borderWidth: CGFloat = 1
-
-    /// Where the row's ICON starts, measured from this view's own leading edge
-    /// — the inset dividers align to it. Set by the controller so it stays
-    /// derived from the shared grid rather than re-typed here.
-    var contentLeadingInset: CGFloat = 0 { didSet { needsDisplay = true } }
-
-    /// The membership rows currently laid out in the stack above this view,
-    /// in top-to-bottom order — read for LIVE frames on every draw, exactly
-    /// like `BusRailOverlayView.deviceRows` (no cached geometry: a rebuild can
-    /// add/drop rows when an unchecked unavailable device disappears).
-    var rows: [NSView] = [] { didSet { needsDisplay = true } }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        // Stroke sits ON the boundary, so inset by half its width to keep the
-        // 1pt line crisp instead of straddling the pixel edge.
-        let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
-        let shape = NSBezierPath(roundedRect: borderRect,
-                                 xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
-        Tokens.Color.well.setFill()
-        shape.fill()
-        Tokens.Color.hairline.setStroke()
-        shape.lineWidth = Self.borderWidth
-        shape.stroke()
-
-        guard rows.count > 1 else { return }
-        Tokens.Color.hairline.setFill()
-        for (a, b) in zip(rows, rows.dropFirst()) {
-            guard let aSuper = a.superview, let bSuper = b.superview else { continue }
-            let aFrame = convert(a.frame, from: aSuper)
-            let bFrame = convert(b.frame, from: bSuper)
-            // Robust to either coordinate flip: two non-overlapping adjacent
-            // rows' gap is bounded by the two INNER edges of the four
-            // (min/max of each frame) — sorting picks them out without this
-            // view needing to know which axis direction is "down".
-            let ys = [aFrame.minY, aFrame.maxY, bFrame.minY, bFrame.maxY].sorted()
-            let midY = (ys[1] + ys[2]) / 2
-            // INSET to the icon's leading edge (grouped-list separator
-            // treatment) — a full-bleed line would run under the container's
-            // rounded corners and read as a slab, not a list.
-            let lineRect = NSRect(x: bounds.minX + contentLeadingInset,
-                                  y: midY - Self.hairlineThickness / 2,
-                                  width: bounds.width - contentLeadingInset,
-                                  height: Self.hairlineThickness)
-            NSBezierPath(rect: lineRect).fill()
-        }
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
-}
 
 // MARK: - NSTextFieldDelegate
 
 extension GroupEditorViewController: NSTextFieldDelegate {
+    /// Select the whole name the moment the field takes focus, Finder-style —
+    /// a rename usually replaces the name rather than appending to it.
+    public func controlTextDidBeginEditing(_ obj: Notification) {
+        nameField.currentEditor()?.selectAll(nil)
+    }
+
+    /// The field grows with the name as it's typed (see
+    /// ``updateNameFieldWidth()``), up to its section's edge.
+    public func controlTextDidChange(_ obj: Notification) {
+        updateNameFieldWidth()
+    }
+
     /// Commit the rename when the field loses focus, not just on Return.
     public func controlTextDidEndEditing(_ obj: Notification) {
         commitRename()
+    }
+
+    /// ESCAPE reverts to the pre-edit name. AppKit routes the key through the
+    /// field editor as `cancelOperation(_:)`; without this it does nothing at
+    /// all here, and a half-typed name sat there until it was committed by
+    /// focus loss.
+    public func control(_ control: NSControl, textView: NSTextView,
+                        doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        cancelRename()
+        return true
     }
 }

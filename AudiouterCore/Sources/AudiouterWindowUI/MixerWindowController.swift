@@ -46,6 +46,33 @@ import AudiouterSharedUI
 @MainActor
 public final class MixerWindowController: NSWindowController {
 
+    /// The window's default CONTENT size — the size a first-ever launch opens
+    /// at. `.fullSizeContentView` means content fills the whole frame, so this
+    /// is also the frame size.
+    ///
+    /// Narrowed 720 → 560 (design review 2026-07-25) once the content panes
+    /// became elastic: at 720 the sections either stretched into a slab or hung
+    /// their intrinsic ~277 pt of content beside a dead strip. The HEIGHT is
+    /// the harder number — the editor pane has no scroll view, so a 7-device
+    /// fleet has to fit inside 505 minus the title bar minus the footer strip
+    /// (`MembershipRailTests.testEditorFitsTheHeightTheWindowActuallyGivesIt`).
+    public nonisolated static let defaultContentSize = NSSize(width: 560, height: 505)
+
+    /// The smallest the user may drag the window. Below this the sidebar and
+    /// the content pane start fighting for the same points.
+    public nonisolated static let minimumContentSize = NSSize(width: 480, height: 420)
+
+    /// The frame-autosave name the shipping app uses.
+    ///
+    /// BUMPED to `-v2` with the 560×505 default (design review 2026-07-25): an
+    /// existing install has a saved frame under the old name and would keep
+    /// opening at its saved 720-wide size forever, so the new default would
+    /// never be seen. A one-time key change makes every install adopt the new
+    /// default exactly once, then start saving under the new name. Tests pass
+    /// their own unique names (AppKit's autosave always writes
+    /// `UserDefaults.standard`, so a shared literal races under `swift test`).
+    public nonisolated static let defaultFrameAutosaveName: NSWindow.FrameAutosaveName = "MixerWindow-v2"
+
     /// The UI-agnostic group model shared with the menu. Source of truth for
     /// groups; the window reads it and writes through it, never around it.
     private let groupController: GroupController
@@ -90,7 +117,7 @@ public final class MixerWindowController: NSWindowController {
     public init(groupController: GroupController,
                appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
-               frameAutosaveName: NSWindow.FrameAutosaveName = "MixerWindow") {
+               frameAutosaveName: NSWindow.FrameAutosaveName = MixerWindowController.defaultFrameAutosaveName) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
@@ -108,6 +135,10 @@ public final class MixerWindowController: NSWindowController {
         // constructor applies source-list material/vibrancy + collapse behavior.
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
         sidebarItem.minimumThickness = 200
+        // Capped so the sidebar can't eat a narrower window's content pane —
+        // it holds one column of short names, and every point past this is
+        // taken from the pane that actually has a form in it.
+        sidebarItem.maximumThickness = 260
         sidebarItem.canCollapse = true
 
         // Content item — wraps the footer-bearing host, which starts on the
@@ -142,7 +173,7 @@ public final class MixerWindowController: NSWindowController {
         if hasSavedFrame {
             window.setFrame(restoredFrame, display: false)
         } else {
-            window.setContentSize(NSSize(width: 720, height: 505))
+            window.setContentSize(Self.defaultContentSize)
             window.center()
         }
         // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
@@ -212,12 +243,13 @@ public final class MixerWindowController: NSWindowController {
     /// going forward; re-applying an already-restored frame is a harmless no-op.
     private static func makeContainer(autosaveName: NSWindow.FrameAutosaveName) -> (window: NSWindow, hasSavedFrame: Bool) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 505),
+            contentRect: NSRect(origin: .zero, size: defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Groups"
+        window.contentMinSize = minimumContentSize
         let hasSavedFrame = window.setFrameUsingName(autosaveName)
         window.setFrameAutosaveName(autosaveName)
         // Summon onto the CURRENT Space (and over a fullscreen app) instead of
@@ -492,6 +524,23 @@ public final class MixerWindowController: NSWindowController {
     /// The persistent footer caption's text (always present, window or panel,
     /// scoped to the content pane — see `ContentPaneHostViewController`).
     public var test_footerText: String { contentHostViewController.test_footerText }
+
+    /// The height the persistent footer strip takes out of the window's
+    /// content, so a test can derive the budget a swapped content pane
+    /// actually gets: `content height − title bar − this`. The editor pane has
+    /// no scroll view, so that budget is a hard ceiling, not a preference.
+    public var test_contentPaneChromeHeight: CGFloat {
+        contentHostViewController.test_chromeHeight
+    }
+
+    /// The window's title-bar height, measured off the REAL window rather than
+    /// assumed: `.fullSizeContentView` means the content view runs under the
+    /// title bar, so the pane's safe area — where the content panes actually
+    /// start — is this much lower than the frame's top.
+    public var test_titleBarHeight: CGFloat {
+        guard let window else { return 0 }
+        return window.frame.height - window.contentLayoutRect.height
+    }
 }
 
 // MARK: - WarmPanelView
@@ -571,6 +620,11 @@ final class ContentPaneHostViewController: NSViewController {
     /// The container the swapped child view fills; sits above the footer.
     private let contentContainer = NSView()
 
+    /// Gap between the swapped content pane's bottom and the footer caption.
+    private static let footerGap: CGFloat = 6
+    /// Gap between the footer caption and the pane's bottom edge.
+    private static let footerBottomInset: CGFloat = 8
+
     /// The currently-hosted child (editor / detail / empty pane), for
     /// structural comparisons. `nil` only before the first `setContent(_:)`.
     private(set) var currentChild: NSViewController?
@@ -613,12 +667,25 @@ final class ContentPaneHostViewController: NSViewController {
             contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentContainer.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -6),
+            contentContainer.bottomAnchor.constraint(equalTo: footerLabel.topAnchor,
+                                                     constant: -Self.footerGap),
             footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             footerLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor,
+                                                constant: -Self.footerBottomInset),
         ])
         view = root
+    }
+
+    /// How much of this pane's height the persistent footer strip takes,
+    /// leaving the rest to the swapped content pane. Derived from the real
+    /// caption's fitting height plus the two gaps its constraints use — the
+    /// height budget a content pane has to fit inside is
+    /// `window height − title bar − THIS`.
+    var test_chromeHeight: CGFloat {
+        loadViewIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        return footerLabel.fittingSize.height + Self.footerGap + Self.footerBottomInset
     }
 
     /// Swap the hosted child, re-parenting it as a real child controller (not

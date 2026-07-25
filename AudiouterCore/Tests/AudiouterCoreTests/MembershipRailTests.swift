@@ -205,25 +205,26 @@ final class MembershipRailTests: IsolatedTestCase {
         XCTAssertEqual(editor.test_railNodes.last, .member)
     }
 
-    func testEditorRailPlanResolvesFromTheGroupTitleOrigin() throws {
+    func testEditorRailPlanResolvesFromTheIconWellOrigin() throws {
         let (editor, _, _) = try makeEditor()
         let plan = try XCTUnwrap(editor.test_railPlan(), "the rail resolves from live frames")
 
         guard case let .ring(centerY, ringCenterX, ringRadius) = plan.origin else {
-            return XCTFail("the origin hooks into the group title, not a header dot")
+            return XCTFail("the origin hooks into the group's icon well, not a header dot")
         }
-        // The hook moved from the icon well DOWN to the title (design review
-        // 2026-07-25): the name is what the members belong to. The protocol is
-        // ring-shaped because the popover's origin is a ring, so a rectangular
-        // title reports its own half-width and only the left edge is drawn to.
-        XCTAssertEqual(ringRadius, editor.test_titleFieldWidth / 2, accuracy: 0.01)
-        // ~2pt inside the content inset: an editable `NSTextField`'s alignment
-        // rect (what the leading constraint pins) is inset from its frame, and
-        // the hook lands on the frame's visual edge.
+        // The hook is back on the ICON WELL. It hooked the TITLE while the
+        // header stacked icon-over-name; now that the header is SIDE BY SIDE
+        // the two share one horizontal band, so hooking the icon hooks the
+        // name's line too — and the well is a fixed 64 pt tile rather than a
+        // field whose width changes with the name it holds. The protocol is
+        // ring-shaped because the popover's origin is a ring, so a rounded-rect
+        // tile reports its inscribed circle and only the left edge is drawn to.
+        XCTAssertEqual(ringRadius, DeviceIconWellView.size / 2, accuracy: 0.01)
         XCTAssertEqual(ringCenterX - ringRadius,
-                       PopoverColumnGrid.firstElementLeading(indented: false), accuracy: 2.5,
-                       "the hook lands on the title's LEFT edge, at the content inset")
-        XCTAssertGreaterThan(centerY, plan.railTopY, "the rail drops below the title's centre")
+                       PopoverColumnGrid.firstElementLeading(indented: false), accuracy: 0.01,
+                       "the hook lands on the well's LEFT edge, exactly at the content inset — " +
+                       "measured in the OVERLAY's space, which is pinned to the column, not the pane")
+        XCTAssertGreaterThan(centerY, plan.railTopY, "the rail drops below the well's centre")
 
         // Four in-span stops (a, office, c, mixer); `echo` is bare, so it
         // contributes no stop. Nothing cuts the rail short — this pane has no
@@ -298,30 +299,76 @@ final class MembershipRailTests: IsolatedTestCase {
                        "a 7-device fleet must not scroll in the create sheet")
     }
 
-    func testEditorStillFitsTheGroupsWindowDefaultHeight() throws {
-        // `MixerWindowController` opens at 720×505 and the editor pane has no
-        // scroll view, so its fitting height is a hard budget. A 7-device fleet
-        // is the demo fleet AND a realistic household ceiling.
-        //
-        // The default grew 460 → 505 when the editor gained its two bordered
-        // grouped sections (design review 2026-07-25): borders and internal
-        // padding cost real height, and the pane had been sitting at ~459 of
-        // the old 460 — one point of slack. The window is user-resizable, so
-        // the honest fix was a default that fits the content rather than
-        // squeezing the design to fit a number.
+    /// The editor pane has NO scroll view, so its fitting height is a hard
+    /// budget — and the budget is NOT the window's height.
+    ///
+    /// This guard used to compare the pane against the whole 505 pt content
+    /// height and passed while the pane was ~22 pt too tall to actually fit:
+    /// the title bar (~32 pt — the window is `.fullSizeContentView`, so the
+    /// pane starts at its SAFE AREA, not its top) and the persistent footer
+    /// strip (~28 pt) both come out of that number first. At a 7-device fleet
+    /// the bottom of the list and the "Delete group…" button fell below the
+    /// window's edge with nothing to scroll them back.
+    ///
+    /// Every term is DERIVED from the real window, not typed in: the default
+    /// content size the controller ships, the title-bar height measured off the
+    /// live window, and the footer strip measured off the real host.
+    func testEditorFitsTheHeightTheWindowActuallyGivesIt() throws {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
+
+        let window = MixerWindowController(groupController: controller,
+                                           frameAutosaveName: uniqueName("MembershipRailTests"))
+        window.update(devices: devices)
+        window.test_select(.group(id: group.id))
+
+        let titleBar = window.test_titleBarHeight
+        let footerStrip = window.test_contentPaneChromeHeight
+        XCTAssertGreaterThan(titleBar, 0, "a titled window must report a real title-bar height")
+        XCTAssertGreaterThan(footerStrip, 0, "the footer strip must cost real height")
+        let available = MixerWindowController.defaultContentSize.height - titleBar - footerStrip
+
         let editor = GroupEditorViewController(groupController: controller)
         editor.loadView()
         editor.show(groupID: group.id, devices: devices)
         editor.view.layoutSubtreeIfNeeded()
 
-        XCTAssertLessThanOrEqual(editor.view.fittingSize.height, 505,
-                                 "the editor must still fit the window's default content height")
+        XCTAssertLessThanOrEqual(
+            editor.view.fittingSize.height, available,
+            "a 7-device editor needs \(editor.view.fittingSize.height)pt but the window's default " +
+            "gives the pane only \(available)pt (\(MixerWindowController.defaultContentSize.height) " +
+            "− \(titleBar) title bar − \(footerStrip) footer). The pane has no scroll view, so this " +
+            "is an overflow, not a preference.")
+    }
+
+    /// The same budget, from the other end: with the window at its shipping
+    /// default and a full fleet selected, the pane it actually hands the editor
+    /// must still hold the editor's laid-out content.
+    func testDefaultWindowSizeIsWideEnoughThatNothingForcesItWider() throws {
+        let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
+        let controller = GroupController(backend: MockBackend(fleet: []),
+                                         store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
+                                               memberVolumes: [:]).group
+        let window = MixerWindowController(groupController: controller,
+                                           frameAutosaveName: uniqueName("MembershipRailTests"))
+        window.update(devices: devices)
+        window.test_select(.group(id: group.id))
+        window.window?.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(window.window?.frame.width, MixerWindowController.defaultContentSize.width,
+                       "no required content constraint may grow the window past its default width")
+        XCTAssertEqual(window.window?.frame.height, MixerWindowController.defaultContentSize.height,
+                       "…nor past its default height")
+        let pane = window.test_editor.view.frame
+        XCTAssertGreaterThan(pane.width, 0)
+        XCTAssertLessThanOrEqual(window.test_editor.view.fittingSize.height, pane.height,
+                                 "the editor's content fits the pane the split view gives it")
     }
 }
 

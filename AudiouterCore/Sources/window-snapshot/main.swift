@@ -532,7 +532,11 @@ func run() -> Int32 {
         guard let window = windowController.window else {
             print("SETUP FAIL: no window"); return 2
         }
-        window.setContentSize(NSSize(width: 720, height: 460))
+        // The SHIPPING default, not a hand-picked size: a golden rendered at a
+        // size the app never opens at can't show whether the content actually
+        // fits (it hid a pane overflowing its own window by ~22pt until the
+        // 2026-07-25 review).
+        window.setContentSize(MixerWindowController.defaultContentSize)
         drain()
 
         // 1. Default state: no groups — the empty "No groups yet" pane (the

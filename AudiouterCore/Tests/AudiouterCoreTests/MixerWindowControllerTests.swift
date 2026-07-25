@@ -162,12 +162,21 @@ final class MixerWindowControllerTests: IsolatedTestCase {
 
         let (window, _, _) = try await makeWindow()
         let frame = try XCTUnwrap(window.window?.frame)
-        XCTAssertEqual(frame.width, 720, accuracy: 0.5)
+        XCTAssertEqual(frame.width, 560, accuracy: 0.5,
+                       "narrowed 720 → 560 once the content panes became elastic (design review " +
+                       "2026-07-25): at 720 the sections either stretched into a slab or hung " +
+                       "their intrinsic ~277pt of content beside a dead strip")
         XCTAssertEqual(frame.height, 505, accuracy: 0.5,
                        "505 = the exact content size — .fullSizeContentView means content fills the " +
                        "whole frame, no separate title-bar addition. Grew from 460 when the group " +
                        "editor gained its two bordered grouped sections (design review 2026-07-25); " +
                        "the pane's fitting height had been within 1pt of the old default")
+        XCTAssertEqual(frame.size, MixerWindowController.defaultContentSize,
+                       "the literals above and the shipping constant must be the same number")
+
+        let minSize = try XCTUnwrap(window.window?.contentMinSize)
+        XCTAssertEqual(minSize, MixerWindowController.minimumContentSize,
+                       "the window refuses to be dragged smaller than its content can survive")
 
         // AppKit's `center()` isn't the screen's exact geometric midpoint (it's
         // nudged for visual balance), so compare against a same-size probe that
@@ -181,6 +190,16 @@ final class MixerWindowControllerTests: IsolatedTestCase {
     }
 
     // MARK: Window chrome (SPEC §9 "Full window")
+
+    /// The shipping autosave name was BUMPED with the 560×505 default. Without
+    /// the bump an existing install keeps opening at whatever it saved under
+    /// the old key — the new default would never be seen on the one machine
+    /// that matters most, the developer's own.
+    func testShippingFrameAutosaveNameWasBumpedForTheNewDefaultSize() {
+        XCTAssertEqual(MixerWindowController.defaultFrameAutosaveName, "MixerWindow-v2",
+                       "a saved frame under the old \"MixerWindow\" key would pin every existing " +
+                       "install to the old 720-wide default forever")
+    }
 
     func testWindowChromeHasFullSizeContentAndNoToolbar() async throws {
         let (window, _, _) = try await makeWindow()

@@ -79,8 +79,11 @@ final class DeviceIconWellView: NSView {
     /// Corner badge — the sole, always-present edit affordance.
     private static let badgeDiameter: CGFloat = 22
     private static let badgeCornerInset: CGFloat = 2
-    private static let badgeRestAlpha: CGFloat = 0.7
-    private static let badgeHoverAlpha: CGFloat = 1.0
+    /// SHARED with the rename field's trailing pencil (`WarmNameFieldCell`) —
+    /// the header carries two edit cues and they must not drift apart, so both
+    /// read the same pair of alphas off the grid.
+    private static let badgeRestAlpha = PopoverColumnGrid.editAffordanceRestAlpha
+    private static let badgeHoverAlpha = PopoverColumnGrid.editAffordanceHoverAlpha
     private static let badgeColor = NSColor(white: 0, alpha: 0.55)
     private static let badgeBorderColor = NSColor(white: 1, alpha: 0.25)
 

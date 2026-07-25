@@ -87,6 +87,28 @@ final class MembershipWellContrastTests: IsolatedTestCase {
                                     "hairline vs panel (light): \(lightRatio):1 below the \(floor):1 separator floor")
     }
 
+    /// FOR THE RECORD (design review 2026-07-25): the inline rename field is
+    /// filled with `raised` and sits beside the icon well, which is filled with
+    /// the same token, inside a header section filled with `well`. That pairing
+    /// is the whole reason the two header controls read as a pair — so the
+    /// separation between the control fill and the section fill gets the same
+    /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
+    /// 1.251:1 light.
+    func testRaisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
+        let floor: CGFloat = 1.15
+
+        let darkRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .darkAqua),
+                                      resolved(Tokens.Color.well, appearanceName: .darkAqua))
+        XCTAssertGreaterThanOrEqual(darkRatio, floor,
+                                    "raised vs well (dark): \(darkRatio):1 below the \(floor):1 floor — " +
+                                    "the rename field/icon well would sink into the section they sit in")
+
+        let lightRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .aqua),
+                                       resolved(Tokens.Color.well, appearanceName: .aqua))
+        XCTAssertGreaterThanOrEqual(lightRatio, floor,
+                                    "raised vs well (light): \(lightRatio):1 below the \(floor):1 floor")
+    }
+
     // MARK: Structural — the editor's checklist actually wears the new surface
 
     /// A group editor showing two members over a four-device candidate list,

@@ -5749,6 +5749,57 @@ final class NativeBackendTests: XCTestCase {
                      "a routed app's relaunch must also refresh the system tap's exclusion pids")
     }
 
+    /// R9 (W1-T7 Gap 2): routing an app BEFORE it plays any sound double-sends it
+    /// the moment it starts — its audio reaching its own device AND the system mix.
+    /// Until the app is audible its pid cannot be translated to a Core Audio process
+    /// object, so the whole-system tap's exclusion list does not actually exclude it,
+    /// and nothing else re-resolves for this case: the app's PID set never changed,
+    /// only the pid's TRANSLATABILITY did, which the membership diff cannot see. The
+    /// fix hangs the re-resolve off the per-app tap reaching `.capturing`.
+    ///
+    /// This is the missing regression guard for that wiring — the fix itself survived
+    /// the 2026-07-24 `main` merge, its test did not. Discriminating because the test
+    /// never calls `handleAppLaunched`, the backend's ONLY other refresh call site, so
+    /// a recorded refresh can only have come from the capture-health transition.
+    func testExclusionRefreshesWhenARoutedAppFinallyBecomesAudible() async {
+        // Fails the first tap attempt with `.processNotYetAudible` (routed while
+        // silent), then succeeds. The retry delay is deliberately long so the
+        // "not yet audible" assertion below has a wide, non-flaky window.
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
+        let resolver = singleProcessResolver(["com.notyet.audible": 4242])
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Not-Yet-Audible Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.notyet.audible", name: "Quiet", toDevice: device.id)])
+
+        // First attempt: the app is routed but silent, so the tap fails and no
+        // exclusion refresh has happened yet — this is exactly the window in which
+        // the app's audio would leak into the system mix if it started now.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+        XCTAssertFalse(capture.refreshedBundleIDs.contains("com.notyet.audible"),
+                       "nothing should have refreshed yet — the app has never been audible")
+
+        // The app starts playing: the retry's tap succeeds, capture health goes
+        // `.capturing`, and THAT is the edge which must re-resolve the exclusion.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+        await pollUntil(timeout: 5) { capture.refreshedBundleIDs.contains("com.notyet.audible") }
+        XCTAssertTrue(capture.refreshedBundleIDs.contains("com.notyet.audible"),
+                      "the instant a routed app's per-app tap reaches .capturing, the whole-system "
+                      + "tap's exclusion must re-resolve — its pid only became translatable now, so "
+                      + "until this refresh the app is double-sent to its device AND the system mix")
+    }
+
 }
 
 // MARK: - collect(after:) convenience

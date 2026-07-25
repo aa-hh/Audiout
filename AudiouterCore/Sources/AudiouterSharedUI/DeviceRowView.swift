@@ -1064,24 +1064,47 @@ public final class DeviceRowView: NSView {
             attr.size().width + PopoverColumnGrid.feedPillHorizontalPadding * 2
         }
 
+        /// The "+N" pill itself, optionally wearing the AP1 tag — used both
+        /// as the trailing pill alongside visible value pills and, when even
+        /// ONE value pill can't fit beside it, as the composite's SOLE pill.
+        func overflowPill(count: Int, prefixTag: Bool) -> NSAttributedString {
+            let result = NSMutableAttributedString()
+            if prefixTag, let tag {
+                result.append(NSAttributedString(string: tag + " ", attributes: [
+                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .foregroundColor: chromeColor,
+                ]))
+            }
+            result.append(NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor]))
+            return result
+        }
+
         let available = PopoverColumnGrid.feedColumnWidth
+        // A lone segment has no overflow GROUP to collapse into — the floor
+        // stays "show the one clipped pill" (spec item 3, "a clipped single
+        // pill beats showing nothing"). But when there's a genuine overflow
+        // group (2+ segments), a value pill plus "+N" can BOTH overflow the
+        // column — left-aligned layout then clips the trailing "+N" down to
+        // an unreadable sliver instead of the (lower-priority) value pill.
+        // In that case drop the value pill too and show a bare "+N" — an
+        // accurate, legible count beats a barely-visible fragment of one.
+        let minVisibleCount = segments.count > 1 ? 0 : 1
 
         var visibleCount = segments.count
         var committed: [NSAttributedString] = []
-        while visibleCount > 0 {
-            var trial: [NSAttributedString] = segments.prefix(visibleCount).enumerated().map { index, segment in
-                attributed(segment, prefixTag: index == 0)
-            }
+        while true {
             let overflowCount = segments.count - visibleCount
+            var trial: [NSAttributedString] = visibleCount > 0
+                ? segments.prefix(visibleCount).enumerated().map { index, segment in
+                    attributed(segment, prefixTag: index == 0)
+                  }
+                : []
             if overflowCount > 0 {
-                trial.append(NSAttributedString(
-                    string: "+\(overflowCount)", attributes: [.font: font, .foregroundColor: chromeColor]))
+                trial.append(overflowPill(count: overflowCount, prefixTag: visibleCount == 0))
             }
             let totalWidth = trial.map(pillWidth).reduce(0, +)
                 + CGFloat(max(0, trial.count - 1)) * PopoverColumnGrid.feedPillGap
-            // Always accept the last candidate (`visibleCount == 1`) even if it
-            // still overflows — a clipped single pill beats showing nothing.
-            if totalWidth <= available || visibleCount == 1 {
+            if totalWidth <= available || visibleCount == minVisibleCount {
                 committed = trial
                 break
             }

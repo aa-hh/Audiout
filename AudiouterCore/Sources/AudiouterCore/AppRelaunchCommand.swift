@@ -6,16 +6,31 @@ import Foundation
 /// AppKit relaunch (`AppRelauncher` in the app target) so it can be unit-tested
 /// without spawning a process or terminating the app.
 ///
-/// ## Why the app has to relaunch at all
-/// The system-audio-capture (Core Audio process-tap) TCC grant is only readable
-/// via `CGPreflightScreenCaptureAccess()`, which returns the value **cached when
-/// the process launched**. A grant the user makes *while the app is running*
-/// stays invisible until the process relaunches — there is no live, silent
-/// status API for this permission bucket (that is the whole reason
-/// ``CoreAudioTonePermissionProbe`` resorts to an audible self-test tone). So
-/// once the user enables the permission in System Settings, the only way for the
-/// running app to pick it up is to relaunch — exactly what macOS's own
-/// "Quit & Reopen" dialog does for the same grant.
+/// ## Why a relaunch was once the only option — and no longer is
+/// **CORRECTED 2026-07-25 (measured on a signed build; this comment previously
+/// claimed the opposite and was wrong on both counts).**
+///
+/// The old claim was that the grant is "only readable via
+/// `CGPreflightScreenCaptureAccess()`, cached when the process launched". Both
+/// halves are false. That call reads the *Screen Recording* list, which an
+/// audio-only app is never listed in — it returned `false` in a process where
+/// capture demonstrably worked. The grant is read from
+/// `kTCCServiceAudioCapture` via the private `TCCAccessPreflight`
+/// (``SystemAudioCaptureTCC``).
+///
+/// What IS true — and is the real constraint — is that `TCCAccessPreflight` is
+/// cached **for the lifetime of the process**, not merely at launch: after the
+/// user granted, the in-process read stayed "undetermined" for 203 s and never
+/// moved, while a freshly spawned helper read "granted" in the same second.
+/// Crucially, a real process tap **captured audio successfully in that stale
+/// process** — macOS had authorised it; the app simply could not find out. So
+/// this was always a DETECTION problem, never an authorisation one, and a
+/// relaunch was never required by the OS.
+///
+/// Detection is now handled live by ``PermissionStateObserver`` (event-driven)
+/// reading through ``TCCProbeRunner``, which spawns a short-lived helper whose
+/// cache is necessarily fresh. This type therefore survives only as a
+/// user-offered escape hatch, not as the mechanism.
 ///
 /// This type builds the shell invocation that performs that relaunch; the
 /// AppKit side spawns it detached and then terminates the app gracefully.

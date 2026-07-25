@@ -138,6 +138,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (read as "Mac not selected").
     public var selectedDevicesQuery: ((String) -> Bool)?
 
+    /// Fired at the START of every routing action — the two chokepoints
+    /// ``setOutputSet(_:)`` and ``updateAppRoutes(_:excludedBundleIDs:)``, which
+    /// between them carry EVERY user action that moves audio (device selection,
+    /// group play, Main Out changes via `GroupController.applyRouting()` /
+    /// `activateGroup(id:)`, and per-app rerouting). `AppDelegate` wires it to
+    /// ``PermissionStateObserver/kick(source:)``, so a user who granted the
+    /// system-audio permission mid-session and then simply picked a speaker gets
+    /// the grant re-checked at the moment they act, with no timer anywhere.
+    ///
+    /// Hooked HERE rather than at the four `GroupController` call sites on
+    /// purpose: the UI sites miss `activateGroup` reached through
+    /// `applyRouting`'s group branch, miss any future caller, and duplicate the
+    /// check four ways.
+    ///
+    /// **MUST NOT BLOCK.** Both chokepoints run on the MAIN THREAD, so anything
+    /// synchronous here — above all a helper-process spawn — lands as latency on
+    /// a device toggle. The wired implementation only ENQUEUES an asynchronous
+    /// resolution, and burst safety for the documented toggle-spam storm (see
+    /// "Per-device op serialization + coalescing" below) comes from
+    /// ``TCCProbeRunner``'s single-flighting rather than any debounce here.
+    /// Assigned once before `start()`, same discipline as `selectedDevicesQuery`.
+    public var onRoutingAction: (() -> Void)?
+
     /// Builds the real delayed-local-sink instance the first time "play
     /// everywhere" activates (T-BACKEND). `makeBackend(_:)` wires the production
     /// closure — constructed at 44.1 kHz / 2ch to match the AirPlay engine's own
@@ -487,6 +510,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// never got permission. Cleared the moment the bundle ID stops being routed
     /// at all (`updateAppRoutes`) or starts `.capturing` again (a successful retry).
     private var deadBundleIDs: Set<String> = []
+
+    /// The subset of ``deadBundleIDs`` whose death was specifically the
+    /// system-audio PERMISSION refusal (`PerAppCaptureError.isPermissionRefusal`)
+    /// rather than a quit, a hiccup, or a not-yet-audible process (T6-rev).
+    ///
+    /// It needs its own set because a permission refusal is the ONE per-app
+    /// failure with no recovery path of its own: the indefinite retry in
+    /// `handlePerAppCaptureHealthChange` is guarded on `.processNotYetAudible`,
+    /// which a refusal does not match, and `updateAppRoutes`'s blanket restart
+    /// only reaches bundles in `captureToStart` — an empty set when the route
+    /// table is unchanged. So a refused bundle stayed dead permanently, and
+    /// ``resumeRefusedAppCaptures()`` is the path that revives it once the grant
+    /// actually lands. Maintained in lockstep with `deadBundleIDs` (same insert
+    /// site, same clear sites) so the two can never drift.
+    private var permissionRefusedBundleIDs: Set<String> = []
 
     /// Routed bundle IDs that have reached `.capturing` at least once. Lets a
     /// LATER `.capturing` transition be recognised as a RE-capture — i.e. the
@@ -1089,6 +1127,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // a later start() begins with no bundle ID considered dead or mid-retry.
             self.lastRoutes.removeAll()
             self.deadBundleIDs.removeAll()
+            self.permissionRefusedBundleIDs.removeAll()
             self.everCapturedBundleIDs.removeAll()
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
@@ -1214,6 +1253,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     public func setOutputSet(_ ids: Set<String>) {
+        // T6-rev: the routing-action permission chokepoint. Deliberately BEFORE
+        // `stateQueue` is taken — it must never run inside a critical section
+        // this method's main-thread `sync` is already blocking on — and
+        // contractually non-blocking (see `onRoutingAction`).
+        onRoutingAction?()
         // Record the intent and update the per-device coalescing target under the
         // state lock, then kick a per-device converge loop for anything whose
         // desired state actually changed. Rapid toggle spam collapses here: N
@@ -1480,6 +1524,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// OUTSIDE `stateQueue`, the same discipline the capture gate keeps for
     /// `captureControlQueue`.
     public func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String> = []) {
+        // T6-rev: the other routing-action permission chokepoint. Same placement
+        // and same non-blocking contract as `setOutputSet`'s — see `onRoutingAction`.
+        onRoutingAction?()
         let plan: UpdateRoutesPlan = stateQueue.sync {
             self.lastRoutes = routes
             // Retained so the metering-only target set can subtract it and so a
@@ -1507,6 +1554,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let stillPresent = Set(routes.map(\.bundleID))
             for bundleID in self.deadBundleIDs where !stillPresent.contains(bundleID) {
                 self.deadBundleIDs.remove(bundleID)
+            }
+            for bundleID in self.permissionRefusedBundleIDs where !stillPresent.contains(bundleID) {
+                self.permissionRefusedBundleIDs.remove(bundleID)
             }
             for bundleID in self.retryCounts.keys where !stillPresent.contains(bundleID) {
                 self.retryCounts.removeValue(forKey: bundleID)
@@ -1692,6 +1742,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .capturing:
             let (recovered, isRecapture): (Bool, Bool) = stateQueue.sync {
                 let wasDead = self.deadBundleIDs.remove(bundleID) != nil
+                self.permissionRefusedBundleIDs.remove(bundleID)
                 self.retryCounts.removeValue(forKey: bundleID)
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
                 // First-ever capture inserts (isRecapture=false); a later capture
@@ -1713,6 +1764,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
                 let justDied = self.deadBundleIDs.insert(bundleID).inserted
+                // T6-rev: remember WHICH deaths were the permission refusal, the
+                // one failure with no self-healing path (the retry below is
+                // `.processNotYetAudible`-only, and an unchanged route table
+                // produces an empty `captureToStart`). `resumeRefusedAppCaptures()`
+                // is what eventually revives these, once the grant is proven.
+                if error.isPermissionRefusal {
+                    self.permissionRefusedBundleIDs.insert(bundleID)
+                } else {
+                    self.permissionRefusedBundleIDs.remove(bundleID)
+                }
                 guard self.routedBundleIDs.contains(bundleID),
                       case .processNotYetAudible = error
                 else {
@@ -2143,6 +2204,64 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         republishMixerTopology()
         // Tell the UI the app is live again so it can remove the offline badge.
         stateQueue.async { self.emit(.routedAppRunning(bundleID: bundleID, isRunning: true)) }
+    }
+
+    /// Restart per-app capture for EVERY currently-routed app, without the route
+    /// table having changed (T6-rev). The recovery path for taps that were
+    /// refused while the system-audio grant was missing, called once the grant
+    /// has actually been proven (`PermissionStateObserver.onBecameGranted`).
+    ///
+    /// ## Why this cannot go through `updateAppRoutes`
+    /// That method starts only `newUnion.subtracting(previousUnion)` — so
+    /// re-pushing an UNCHANGED route table yields an EMPTY start set and does
+    /// precisely nothing for the apps that need reviving. It is the natural
+    /// thing to reach for and it is exactly wrong here; this must call
+    /// ``PerAppCaptureCoordinator/start(bundleID:)`` directly.
+    ///
+    /// ## Why starting EVERY routed bundle is safe
+    /// `start(bundleID:)` is idempotent: it claims only from `.idle`/`.failed`
+    /// and returns immediately for a bundle already resolving/creating/capturing.
+    /// So the apps that are streaming fine are untouched and only the stranded
+    /// ones actually restart — which is why this does not (and must not) filter
+    /// on ``permissionRefusedBundleIDs``: a refusal recorded before the app was
+    /// listed, or a death re-attributed since, would otherwise be skipped forever.
+    ///
+    /// ## Queue ordering
+    /// The `captureControlQueue` enqueue happens INSIDE the `stateQueue`
+    /// critical section, per the ordering contract documented on
+    /// `captureControlQueue`: `stateQueue` orders the decisions, that serial
+    /// queue replays them in the same order, off the (main-thread) hot path.
+    /// Enqueuing after the section returns would let these starts overtake a
+    /// concurrent `updateAppRoutes`'s stops and leave a de-routed app tapped.
+    public func resumeRefusedAppCaptures() {
+        let toStart: Set<String> = stateQueue.sync {
+            // Clear the refusal deaths themselves — the same "no longer dead,
+            // let the topology include it again" step `handleAppLaunched` does
+            // for a relaunched app, and the reason the republish below is a
+            // republish rather than a no-op.
+            for bundleID in self.permissionRefusedBundleIDs {
+                self.deadBundleIDs.remove(bundleID)
+            }
+            let refused = self.permissionRefusedBundleIDs
+            self.permissionRefusedBundleIDs.removeAll()
+            // The per-app tap is destination-agnostic, so the revive set is the
+            // same UNION `updateAppRoutes` keys the tap lifecycle on: apps routed
+            // to a device AND apps pinned to `.currentDevice`.
+            let union = self.routedBundleIDs.union(self.localBundleIDs)
+            Telemetry.log(.capturePA, "resume_refused_app_captures", [
+                "refused": "\(refused.count)",
+                "routed": "\(union.count)",
+            ])
+            guard !union.isEmpty else { return [] }
+            self.captureControlQueue.async {
+                for bundleID in union { self.perAppCapture.start(bundleID: bundleID) }
+            }
+            return union
+        }
+        guard !toStart.isEmpty else { return }
+        // Off `stateQueue` — `republishMixerTopology` re-enters it via
+        // `effectiveMixerRoutes()`. Same call order `handleAppLaunched` uses.
+        republishMixerTopology()
     }
 
     /// One per-app engine binding transition, computed under `stateQueue` and run on
@@ -3640,17 +3759,70 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// start/stop/start/… in exactly the decided order and settle on the last one.
     private func reconcileCaptureGate() {   // on stateQueue
         guard let coordinator = captureCoordinator else { return }
-        // Two B6b overrides force the tap OFF regardless of selection: while
-        // `suspended` (system sleep — nothing to send, and a later didWake re-decides)
-        // and while the wake watchdog has un-gated capture (`wakeCaptureOverride` —
-        // no receiver came back, so un-mute the Mac). Neither touches the selection
-        // intent, so the gate re-engages the moment both clear.
-        let want = !suspended && !wakeCaptureOverride
-            && expectedSelected.contains { known[$0]?.isLocalDevice == false }
+        let want = captureGateWantsCaptureLocked()
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
+        }
+    }
+
+    /// The gate's desired state, purely as a function of current intent. Split
+    /// out of ``reconcileCaptureGate()`` so ``forceCaptureGateReevaluation()``
+    /// can ask the same question WITHOUT committing to a decision. MUST hold
+    /// `stateQueue`.
+    ///
+    /// Two B6b overrides force the tap OFF regardless of selection: while
+    /// `suspended` (system sleep — nothing to send, and a later didWake
+    /// re-decides) and while the wake watchdog has un-gated capture
+    /// (`wakeCaptureOverride` — no receiver came back, so un-mute the Mac).
+    /// Neither touches the selection intent, so the gate re-engages the moment
+    /// both clear.
+    private func captureGateWantsCaptureLocked() -> Bool {   // on stateQueue
+        !suspended && !wakeCaptureOverride
+            && expectedSelected.contains { known[$0]?.isLocalDevice == false }
+    }
+
+    /// Re-drive the whole-system capture gate even though the SELECTION has not
+    /// changed — the recovery path for a `coordinator.start()` that silently
+    /// failed (T6-rev: a system-audio permission refusal).
+    ///
+    /// ## The trap this exists to defeat
+    /// ``reconcileCaptureGate()`` sets `captureRunning = want` BEFORE dispatching
+    /// `coordinator.start()`, and `start()` has no way to report failure (it is
+    /// `Void` and the real coordinator's failure surfaces asynchronously as its
+    /// own `.failed` state). So after a refused tap the backend BELIEVES capture
+    /// is running, and `guard want != captureRunning` makes every subsequent
+    /// reconcile a no-op — the whole-system stream is stranded for the rest of
+    /// the session no matter how many times the user reselects the same device.
+    /// Clearing `captureRunning` first is what defeats that short-circuit.
+    ///
+    /// ## Why this cannot mute the Mac
+    /// The clear happens ONLY when the gate currently wants capture ON. In the
+    /// `want == false` direction the method returns having changed nothing, so
+    /// it can never leave `captureRunning` lying `false` while a live
+    /// `.mutedWhenTapped` tap keeps the speakers silent, and it can never
+    /// enqueue a `stop()` that the selection did not ask for. In the
+    /// `want == true` direction the worst case is a redundant `start()` on an
+    /// already-`.capturing` coordinator, which ``NativeCaptureCoordinator/start()``
+    /// treats as a no-op (it only proceeds from `.idle`/`.failed`) — and re-enters
+    /// cleanly from `.failed`, which is exactly the state a refusal leaves it in.
+    ///
+    /// ## Queue ordering
+    /// The `captureControlQueue` enqueue happens inside `reconcileCaptureGate()`,
+    /// which this calls from INSIDE the `stateQueue` critical section — the
+    /// ordering contract documented on `captureControlQueue` (decisions ordered
+    /// by `stateQueue`, replayed in that same order off the hot path). Enqueuing
+    /// from outside would let this stale `start()` land after a concurrent
+    /// `stop()` and re-mute the Mac forever.
+    public func forceCaptureGateReevaluation() {
+        stateQueue.async {
+            guard self.captureGateWantsCaptureLocked() else { return }
+            Telemetry.log(.captureWS, "capture_gate_forced_reevaluation", [
+                "wasRunning": "\(self.captureRunning)",
+            ])
+            self.captureRunning = false
+            self.reconcileCaptureGate()
         }
     }
 

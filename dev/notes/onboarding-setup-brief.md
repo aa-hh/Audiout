@@ -120,7 +120,15 @@ now fixed in code; a third is a thing to WATCH on the next run.
    *polled* `TCCAccessPreflight` in a loop and HUNG — that read serves a **stale
    in-process cache**, so after the grant it kept returning "undetermined", the
    spinner ran the full `promptAnswerTimeout`, and it reported Denied. The functional
-   tone read has no such cache dependency. An explicit TCC `denied` short-circuits;
+   tone read has no such cache dependency. **CONFIRMED 2026-07-25 by measurement —
+this "stale in-process cache" note was RIGHT, and two other places in the repo
+that claimed otherwise were wrong.** On a signed build the in-process read stayed
+`2`/undetermined for 177 consecutive ticks over 203 s after the user granted,
+while a freshly spawned helper process read `0`/granted in the same second; only
+a NEW process ever sees the change. Consequence, now load-bearing: **any
+in-process poll of that read is dead on arrival** — which is why detection is
+event-driven (`PermissionStateObserver`) and reads through a short-lived helper
+(`TCCProbeRunner`) rather than polling. An explicit TCC `denied` short-circuits;
    an ignored prompt ends in `.denied` at the timeout. **Still wants a signed-build
    live-verify** (drives real Core Audio / the prompt), but the grant should now
    register the moment you click Allow.
@@ -140,9 +148,17 @@ persisted whole-system selection was just `local-mac`, so `reconcileCaptureGate`
 kept it closed.)
 
 **Fix — a cold-prompt guard at every capture-tap site.** New `SystemAudioCaptureTCC`
-exposes a silent, prompt-free `isGranted()` (private `TCCAccessPreflight` on
-`kTCCServiceAudioCapture`, 14.4+; `CGPreflightScreenCaptureAccess` on 14.2–14.3;
-**undetermined counts as not-granted**). Both real tap classes —
+exposes a silent, prompt-free `isGranted()` (**undetermined counts as
+not-granted**, so the gate can never trigger a cold prompt). *Superseded
+2026-07-25:* it now reads BOTH `kTCCServiceAudioCapture` and
+`kTCCServiceScreenCapture` through `TCCAccessPreflight` and combines them
+(any-granted wins; denied only when both agree), and resolves through
+`effectiveStatus()` so a freshly confirmed grant is honoured. The old
+`CGPreflightScreenCaptureAccess` fallback was removed from the decision path:
+it reads the Screen Recording list, which an audio-only app is never in, so it
+could only ever manufacture false denials — it survives solely as a last-resort
+rescue when the private symbol is unresolvable, where a `false` maps to
+undetermined rather than denied. Both real tap classes —
 `NativeCaptureCoordinator` (whole-system) and `PerAppCaptureCoordinator` (per-app
 routing AND the `.unmuted` metering tap, which reuses it) — now `guard
 SystemAudioCaptureTCC.isGranted()` before creating the tap and throw

@@ -124,7 +124,30 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   taps NEVER start/stop the primary routing coordinators' taps.
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply.
+  Saved groups still persist and re-apply. This binds the permission-grant
+  resume below: at LAUNCH a mid-session grant may resume per-app routes only
+  (`resumeRefusedAppCaptures()`); whole-system
+  (`forceCaptureGateReevaluation()`) is wake-only, because sleep preserves
+  `expectedSelected` and is a transient dropout, never a deselection.
+- **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
+  so a grant made after launch is invisible to any in-process read forever —
+  and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
+  refresh that cache. The notification (plus launch/wake/routing/popover-open)
+  is therefore only the TRIGGER; the READER must be the freshly-spawned
+  `tcc-probe` helper (`TCCProbeRunner`). `PermissionStateObserver` pairs them
+  and is EVENT-DRIVEN BY DECISION — no `Timer`, no polling; burst safety comes
+  from `TCCProbeRunner`'s single-flighting. Only `.resolved(.granted)` may ever
+  reach `recordFreshGrant(source:)`; every other answer means "still unknown."
+- **A refused capture strands BOTH paths permanently, each in its own way.**
+  Whole-system: `reconcileCaptureGate()` sets `captureRunning` before dispatching
+  a `start()` that cannot report failure, so every later reconcile
+  short-circuits — `forceCaptureGateReevaluation()` clears it, and ONLY in the
+  wants-capture-ON direction so it can never fabricate a `stop()` and mute the
+  Mac. Per-app: `updateAppRoutes` starts only the route-table DIFF, so an
+  unchanged table revives nothing, and the indefinite retry is
+  `.processNotYetAudible`-only — `resumeRefusedAppCaptures()` calls
+  `start(bundleID:)` directly instead. Both enqueue onto `captureControlQueue`
+  from INSIDE a `stateQueue` critical section, per the ordering contract.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
@@ -201,6 +224,9 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
 | `SetupModel` | Brain of the first-run permission-priming flow (AppKit-free): per-permission `PermissionStatus`, PTP helper `PTPHelperStatus`, runs the injected probes, persists `AppSettings.hasCompletedSetup`, gates auto-present via `shouldPresentOnLaunch(settings:backendKind:)` (native only). UI = `AudiouterOnboardingUI`. |
+| `SystemAudioCaptureTCC` | Silent three-valued system-audio TCC read across both buckets, plus the one-way fresh-verdict latch (`recordFreshGrant(source:)` / `effectiveStatus()`) every capture gate reads through. |
+| `TCCProbeRunner` | Async, single-flighted launcher for the bundled `tcc-probe` helper — the only reader immune to this process's permanently-cached TCC read. |
+| `PermissionStateObserver` | Event-driven (zero-timer) detector for the grant ARRIVING mid-session: Darwin/launch/wake/routing/popover triggers → `TCCProbeRunner` → latch → `onBecameGranted` once. |
 | `AudioCapturePermissionProbing` / `CoreAudioTonePermissionProbe` | Seam + impl that BOTH triggers and verifies the system-audio grant — a denied tap returns `noErr`+zeros, so it plays a muted in-process tone, taps our OWN process, and reads RMS. **Gated on live TCC verify** (`dev/notes/onboarding-setup-brief.md`). |
 | `LocalNetworkPriming` / `LocalNetworkPrimer` | Seam + impl: a brief `NWBrowser` for `_airplay._tcp` that fires the Local Network prompt (no verify API exists — TN3179). |
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |

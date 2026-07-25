@@ -99,6 +99,12 @@ let package = Package(
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
+        // Tiny, short-lived TCC-preflight probe (T14): `TCCProbeRunner` spawns this
+        // fresh, on demand, to get an un-cached `TCCAccessPreflight` read — see
+        // Sources/tcc-probe/main.swift for the full finding and output contract. No
+        // dependency on AudiouterCore by design: it must stay minimal, entitlement-free,
+        // and fast to spawn.
+        .executable(name: "tcc-probe", targets: ["tcc-probe"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
@@ -262,6 +268,14 @@ let package = Package(
         .executableTarget(
             name: "core-audio-diagnostic",
             dependencies: ["AudiouterCore"]
+        ),
+        // Tiny, short-lived TCC-preflight probe (T14) — see Sources/tcc-probe/main.swift
+        // for the output contract `TCCProbeRunner` parses. Run directly with:
+        // swift run tcc-probe   (reports the invoking TERMINAL's own TCC identity when
+        // run this way — a format check only, not the real attribution test, which
+        // needs the packaged .app to spawn it via TCCProbeRunner).
+        .executableTarget(
+            name: "tcc-probe"
         ),
         .testTarget(
             name: "AudiouterCoreTests",

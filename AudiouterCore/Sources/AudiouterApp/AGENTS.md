@@ -51,6 +51,25 @@ package layout, backends, and core types, see
   (system-audio tap), `NSLocalNetworkUsageDescription` + `NSBonjourServices`
   (`_airplay._tcp`/`_raop._tcp` — must match `NativeDiscovery`, or discovery is
   silently blocked even with the usage string).
+- **The mid-session permission grant is detected by EVENTS, never a timer.**
+  `AppDelegate` owns the one `PermissionStateObserver` (retained for the app's
+  lifetime — its `CFNotificationCenter` registration holds an unretained
+  back-pointer) and arms it at launch ONLY when the grant isn't already in
+  place. It is kicked from five places and polled from none: the Darwin
+  notification (inside the observer), launch, `NSWorkspace.didWakeNotification`,
+  every routing action, and a menu-bar/popover open. Routing actions must reach
+  it through `NativeBackend.onRoutingAction` — the two backend chokepoints — not
+  the four `GroupController` call sites, which miss a group activated via
+  `activateGroup(id:)` inside `applyRouting()`. Any hook added here MUST be
+  non-blocking: both chokepoints run on the main thread, so a synchronous helper
+  spawn would put process-spawn latency on every device toggle.
+- **Resume scope on a grant is asymmetric, and deliberately so.** At LAUNCH only
+  per-app routes resume (`resumeRefusedAppCaptures()`); whole-system
+  (`forceCaptureGateReevaluation()`) resumes only once a wake has happened
+  (`permissionResumeIncludesWholeSystem`). Auto-streaming a previously-selected
+  device at launch would contradict the product decision recorded in
+  [../../AGENTS.md](../../AGENTS.md); sleep, by contrast, is a transient dropout
+  that keeps the selection intent.
 - **One shared control-panel shell, behind `AIRPLAY_CONTROL_PANEL=1`.** When
   the flag is set, config surfaces open in the single `controlPanel`
   (`ControlPanelWindowController`, `AudiouterSharedUI`) instead of standalone

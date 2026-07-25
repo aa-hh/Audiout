@@ -53,7 +53,11 @@ slots=${AUDIOUTER_TEST_SLOTS:-2}
 # so a generous timeout would stall every contended run behind a host that is
 # never going to answer. 5s fails fast and falls back to the local queue.
 remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-}
-remote_root=${AUDIOUTER_TEST_REMOTE_ROOT:-'~/audiouter-remote-tests'}
+# Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
+# survives neither quoting on the remote `cd` (it is not expanded inside quotes,
+# so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
+# in $HOME, so a relative path is both simpler and correct.
+remote_root=${AUDIOUTER_TEST_REMOTE_ROOT:-audiouter-remote-tests}
 remote_probe_timeout=${AUDIOUTER_TEST_REMOTE_TIMEOUT:-5}
 remote_tried=0
 
@@ -98,13 +102,26 @@ run_remote() {
     # PATH is set explicitly: a non-interactive ssh shell often lacks
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
+    # Exit 97 is a private sentinel for "the remote ENVIRONMENT is wrong"
+    # (directory missing, no swift) as opposed to "the tests failed". Without
+    # it, a broken remote reports as a test failure — which is exactly the
+    # confusion this whole function is supposed to prevent, and which a missing
+    # directory produced in testing.
     out=$(ssh -o BatchMode=yes "$remote_host" \
-        "export PATH=/opt/homebrew/bin:\$PATH; cd '$rdir/AudiouterCore' && \
+        "export PATH=/opt/homebrew/bin:\$PATH; \
+         cd \"$rdir/AudiouterCore\" || exit 97; \
+         command -v swift >/dev/null 2>&1 || exit 97; \
          swift test $rargs $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     rc=$?
     printf '%s\n' "$out" | grep -v '^REMOTE_EXIT:' >&2
 
     marker=$(printf '%s\n' "$out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2)
+    if [ "$rc" -eq 97 ]; then
+        # The sentinel above: environment wrong, tests never ran. Infrastructure,
+        # not code — fall back locally rather than accusing the caller's changes.
+        echo "  suite: remote environment not usable (missing dir or toolchain) — queueing locally." >&2
+        return 1
+    fi
     if [ "$rc" -eq 255 ] || [ -z "$marker" ]; then
         # 255 is ssh's own error code, and a missing marker means the command
         # never completed — either way the suite did not produce a verdict.

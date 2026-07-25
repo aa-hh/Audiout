@@ -194,8 +194,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     macOS 27 one — nothing here knows macOS 26/27 exists. The package is also
     `swift-tools-version:5.10` with no language-mode override, i.e. Swift 5
     language mode, which does not diverge between 6.3 and 6.4.
-    **UNVERIFIED:** the fallback path is tested, but the remote SUCCESS path has
-    never run — the host was asleep throughout development.
+    **VERIFIED end-to-end 2026-07-25** against the real M3 (Apple M3, 8 cores,
+    24GB, macOS 26.5.2, Swift 6.3.1): builds clean on 6.3.1 with **zero errors**
+    (only cosmetic `ld` warnings about Homebrew dylibs built for macOS 26 vs the
+    macOS 14 deployment target), full suite **1025/1025 green in 45s** (vs
+    ~90-180s locally under contention), the audio gate skips its 7 correctly
+    there, and overflow triggers only once both local slots are held. Sync of
+    the whole tree takes ~1.6s over LAN.
   - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while

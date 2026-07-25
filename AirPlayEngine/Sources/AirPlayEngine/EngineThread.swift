@@ -62,6 +62,44 @@ final class EngineThread: @unchecked Sendable {
         t.name = name
         // A generous stack — the RTSP/pairing state machine is deep.
         t.stackSize = 4 * 1024 * 1024
+        // T4 (H1 mitigation, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md §E):
+        // this thread runs event_base_dispatch, which drives outputs_write →
+        // airplay_write → ALAC encode/encrypt → packet send — the whole
+        // audio-carrying path today (Stage 2 may split send onto its own RT
+        // thread later, but until then this IS the send thread). Left at the
+        // default QOS_CLASS_DEFAULT it can be starved for hundreds of ms
+        // under heavy system load (H1), blowing through the receiver's
+        // buffer. MUST be set before start() — QoS only affects a thread's
+        // initial scheduling if set before it begins running; setting it
+        // after start() has no effect on work already scheduled. No
+        // feature-flag/experiment switch here — Q2 rejected A/B toggles for
+        // this class of change, so it is unconditionally .userInteractive.
+        //
+        // Thread/queue audit performed alongside this change (other threads
+        // that touch audio, left UNCHANGED — this task is EngineThread only):
+        //   - Capture IOProc queues (NativeCaptureCoordinator.swift
+        //     startIOProc, AudiouterCore's PerAppCaptureCoordinator.swift
+        //     startIOProc) — NO CHANGE: Core Audio's HAL invokes the IOProc
+        //     block at real-time priority regardless of the DispatchQueue's
+        //     declared QoS; our setting here doesn't reach it either way.
+        //   - Telemetry's writer queue (AudiouterCore/Telemetry.swift,
+        //     `Writer.queue`, qos: .utility) — NO CHANGE, correct as-is:
+        //     telemetry writes must stay low priority, not compete with
+        //     audio for the CPU.
+        //   - LocalPlaybackEngine.graphQueue / SyncedLocalSink.graphQueue
+        //     (+ .lifecycleQueue) in AudiouterCore — DEFER: control-plane
+        //     only, not on this plan's critical path.
+        //   - DefaultOutputObserver / SystemOutputVolume / NativeDiscovery /
+        //     DACPServer queues in AudiouterCore — DEFER: none carry audio
+        //     samples.
+        //   - ptp-helper (Sources/ptp-helper, separate root daemon process)
+        //     — DEFER, strongest deferred candidate: a distinct process with
+        //     no Core Audio device of its own, so there is no workgroup for
+        //     it to join; its jitter shows up as multi-room sync drift, not
+        //     single-device stutter; and it runs across a privilege boundary
+        //     (root) that makes it a delicate thing to touch without strong
+        //     justification.
+        t.qualityOfService = .userInteractive
         self.thread = t
         t.body = { [weak self] in self?.threadMain() }
     }

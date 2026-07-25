@@ -308,3 +308,111 @@ genuinely cannot avoid touching `sender/`, `evrtsp/`, `pair_ap/`, or
 `libairptp/` (outside the one seed entry above), add a numbered entry here
 following the same format: file, license, rationale, exact hunk, and update
 the "Total vendored diffs to date" count at the top of this file.
+
+---
+
+## Entry 4 — `sender/airplay.c` and `sender/raop.c`: treat `EAGAIN`/`EWOULDBLOCK` on the data-socket send as a dropped packet, not a fatal session error (T6, 2026-07-25)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c`,
+  `AirPlayEngine/Sources/CAirPlayEngine/sender/raop.c`
+- **License**: GPL-2.0-or-later (`AirPlayEngine/Sources/CAirPlayEngine/sender/`)
+- **Landed in**: this worktree, 2026-07-25 (T6, `docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md`
+  §E, per findings F23/F24 in §B.2).
+- **Rationale**: F23 established that making the AirPlay 2 and RAOP data
+  sockets non-blocking costs zero vendored diff — `net_connect` lives in
+  `shims/misc.c` (engine-owned), and only the two `SOCK_DGRAM` callers
+  (`airplay.c:3187`'s "AirPlay data" socket, `raop.c:3497`'s "RAOP data"
+  socket) are affected; the one `SOCK_STREAM` caller (`airplay_events.c:767`,
+  the AirPlay events connection) is untouched and keeps its original blocking
+  behavior. That shim-only change is documented inline in `misc.c`'s
+  `net_connect`, not here — it isn't vendored source. F24 is what forces a
+  real vendored diff: once the data socket can return `EAGAIN`/`EWOULDBLOCK`
+  from `send()`, both senders' `packet_send` unconditionally treated *any*
+  `sent/ret < 0` as fatal and called `deferred_session_failure`, which would
+  tear down an otherwise-healthy session on a purely transient
+  "socket buffer momentarily full" condition — exactly the kind of sender-side
+  hiccup F26 says should never cause an audible dropout on its own. This
+  cannot live in a shim: `packet_send` and its `if (sent < 0) { … }` fatal
+  path are inside the vendored file, and the fix needs to special-case
+  `errno` right where the send return value is checked. The fix is minimal:
+  inside the existing `sent/ret < 0` branch, an `errno == EAGAIN || errno ==
+  EWOULDBLOCK` check now logs and counts the drop and returns `-1` (packet
+  not sent, same signal already used for the pre-existing partial-send case
+  just below) **without** calling `deferred_session_failure`. Every other
+  negative-return cause (real socket errors) falls through to the unchanged
+  `deferred_session_failure` path exactly as before. Each drop counter
+  (`airplay_dropped_packets` in `airplay.c`, `raop_dropped_packets` in
+  `raop.c`) is a function-local `static uint64_t` declared inside the new
+  `if (errno == EAGAIN …)` block specifically so the whole change stays
+  inside the one hunk already touching that `if (sent < 0)` block — no
+  separate top-of-file declaration hunk. They are logged via `DPRINTF`
+  (`E_WARN`) on every drop with a running total; wiring them into T1's
+  Swift-side `WriteSchedulingSnapshot` diagnostic probe is left to whichever
+  later task needs it (out of T6 scope — T6 only needed the drop counted and
+  logged somewhere sane).
+- **Exact hunks** (each marked in-file with a dated
+  `[AirPlayEngine vendored change 2026-07-25]` comment):
+
+  `sender/airplay.c`, inside `packet_send`:
+
+  ```c
+   if (sent < 0)
+     {
+  +      // [AirPlayEngine vendored change 2026-07-25: EAGAIN on non-blocking DGRAM
+  +      // send is a dropped packet, not a fatal session error — see
+  +      // docs/VENDORED-DIFFS.md Entry 4]
+  +      if (errno == EAGAIN || errno == EWOULDBLOCK)
+  +	{
+  +	  static uint64_t airplay_dropped_packets;
+  +
+  +	  airplay_dropped_packets++;
+  +	  DPRINTF(E_WARN, L_AIRPLAY, "Dropped packet for '%s' (send would block): %s (total dropped: %" PRIu64 ")\n",
+  +	    session->devname, strerror(errno), airplay_dropped_packets);
+  +	  return -1;
+  +	}
+  +
+        DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(errno));
+
+        // Can't free it right away, it would make the ->next in the calling
+  ```
+
+  `sender/raop.c`, inside `packet_send`:
+
+  ```c
+   ret = send(rs->server_fd, pkt->data, pkt->data_len, 0);
+   if (ret < 0)
+     {
+  +      // [AirPlayEngine vendored change 2026-07-25: EAGAIN on non-blocking DGRAM
+  +      // send is a dropped packet, not a fatal session error — see
+  +      // docs/VENDORED-DIFFS.md Entry 4]
+  +      if (errno == EAGAIN || errno == EWOULDBLOCK)
+  +	{
+  +	  static uint64_t raop_dropped_packets;
+  +
+  +	  raop_dropped_packets++;
+  +	  DPRINTF(E_WARN, L_RAOP, "Dropped packet for '%s' (send would block): %s (total dropped: %" PRIu64 ")\n",
+  +	    rs->devname, strerror(errno), raop_dropped_packets);
+  +	  return -1;
+  +	}
+  +
+        DPRINTF(E_LOG, L_RAOP, "Send error for '%s': %s\n", rs->devname, strerror(errno));
+
+        // Can't free it right away, it would make the ->next in the calling
+  ```
+
+  Confirmed via `git diff -U3 -- AirPlayEngine/Sources/CAirPlayEngine/sender/`:
+  exactly two `@@` hunks, one per file, nothing else in `sender/` touched.
+- **Sibling shim edit (NOT vendored, listed for context)**: `shims/misc.c`'s
+  `net_connect` now computes `set_nonblock = (type == SOCK_DGRAM)` and passes
+  it to `net_connect_addrinfo` instead of the previous hard-coded `false`, so
+  `SOCK_DGRAM` data sockets are left non-blocking after connect while
+  `SOCK_STREAM` sockets (the events connection) keep the original
+  restore-to-blocking step. Pure `shims/` file, outside the byte-identical
+  vendored set, per F23 — no ledger entry required for it.
+- **Verification**: `swift build` clean (no new warnings from these hunks);
+  `git diff -U3 -- AirPlayEngine/Sources/CAirPlayEngine/sender/` shows exactly
+  two hunks, matching the quotes above verbatim.
+
+**Total vendored files touched: 3** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`);
+`airplay.c` and `raop.c` each now carry more than one distinct diff (Entries
+2/4 and 3a/3b/4 respectively).

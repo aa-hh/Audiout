@@ -152,11 +152,17 @@ run_remote() {
 
     status="$marker"
     if [ "$status" -ne 0 ]; then
-        echo "  suite: FAILED ON REMOTE ($remote_host, Swift/SDK differ from local)." >&2
-        echo "  Confirm locally before treating this as a real failure." >&2
-    else
-        echo "  suite: passed on remote $remote_host." >&2
+        # Return 2 = "ran, but failed". The caller re-runs locally rather than
+        # trusting this verdict. A machine on a different Swift/SDK must never be
+        # what REFUSES a commit: Guard 4 blocks on this result, and a toolchain
+        # difference presenting as "your code is broken" would send an agent
+        # hunting a bug that does not exist. A remote PASS is still accepted —
+        # the asymmetry is deliberate, since the expensive error is a false
+        # refusal, not a false pass on identical code paths.
+        echo "  suite: remote reported FAILURES — re-running locally to confirm." >&2
+        return 2
     fi
+    echo "  suite: passed on remote $remote_host." >&2
     return 0
 }
 
@@ -207,14 +213,21 @@ fi
 # then behaves exactly as if no remote were configured.
 if [ "$remote_pref" = "remote" ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
     remote_tried=1
-    if run_remote "$@"; then
-        if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+    # `|| rrc=$?` rather than a bare call: `set -e` would abort the script on any
+    # non-zero return, and non-zero is the normal "fall back locally" signal.
+    rrc=0
+    run_remote "$@" || rrc=$?
+    if [ "$rrc" -eq 0 ]; then
+        if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
             mkdir -p "$cache_dir"
             : > "$stamp"
         fi
-        exit "$status"
+        exit 0
+    elif [ "$rrc" -eq 1 ]; then
+        # 1 = could not use the remote at all. 2 = it ran and failed, and has
+        # already said it is re-running locally, so do not print a second reason.
+        echo "  suite: falling back to this machine." >&2
     fi
-    echo "  suite: falling back to this machine." >&2
 fi
 
 # --- lock -------------------------------------------------------------------
@@ -258,17 +271,23 @@ else
             # "$@" forwards the caller's own flags (e.g. --filter Foo) into the
             # function; a bare `run_remote` would see the function's empty
             # argument list instead of the script's.
-            if run_remote "$@"; then
+            # `|| rrc=$?` because `set -e` would otherwise abort on the non-zero
+            # "fall back locally" signal.
+            rrc=0
+            run_remote "$@" || rrc=$?
+            if [ "$rrc" -eq 0 ]; then
                 # A remote PASS is a real pass of these exact sources, so record
                 # it — otherwise the very next commit re-runs the whole suite and
                 # the cache silently does nothing for every overflowed run.
-                if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+                if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
                     mkdir -p "$cache_dir"
                     : > "$stamp"
                 fi
                 # Nothing local was started, so there is no slot or trap to unwind.
-                exit "$status"
+                exit 0
             fi
+            # rrc 1 (unusable) and rrc 2 (ran, failed -> confirm locally) both
+            # fall through into the normal local path below.
         fi
         if [ "$announced" -eq 0 ]; then
             echo "  suite: all $slots test slots busy — waiting for one to free." >&2

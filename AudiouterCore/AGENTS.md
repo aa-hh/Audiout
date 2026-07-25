@@ -188,11 +188,20 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     reach some runs and not others. `AUDIOUTER_TEST_REMOTE_HOST` /
     `AUDIOUTER_TEST_PREFER` still override per-invocation.
 
-    `testPrefer=local` (default) uses the remote only as OVERFLOW — when every
-    local slot is busy, instead of queueing. `testPrefer=remote` sends every run
-    there FIRST, keeping this Mac free, with local slots as the fallback. Either
-    way an asleep/offline remote costs one 5s probe and then behaves exactly as
-    if none were configured. `rsync`s the WORKING TREE
+    `testPrefer=local` (default) treats the two machines as ONE POOL: two runs
+    locally, and the third and fourth agent overflow to the remote rather than
+    queueing. `testPrefer=remote` sends every run there first instead. Either way
+    an asleep/offline remote costs one 5s probe and then behaves exactly as if
+    none were configured.
+
+    **A remote PASS is accepted; a remote FAILURE is re-run locally before it
+    can block anything.** Guard 4 refuses commits on this result, and the remote
+    is on a different Swift/SDK — a toolchain difference presenting as "your code
+    is broken" would send an agent hunting a bug that does not exist. The
+    asymmetry is deliberate: the expensive error is a false REFUSAL, not a false
+    pass on code paths that are provably identical (highest gate `macOS 15`,
+    Swift 5 language mode). Cost is one extra run, and only when something
+    actually failed. `rsync`s the WORKING TREE
     (so uncommitted edits go too, which `git push` cannot do) into a per-worktree
     directory under `AUDIOUTER_TEST_REMOTE_ROOT`. Cost is negligible: ~22MB/446
     files on first sync, **~3KB after editing one file**. `.build` is excluded —

@@ -129,8 +129,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   delivering fresh PCM, but the whole-system RTP timeline anchor is left desynced,
   so every Selected-Devices speaker goes permanently silent until the session is
   reset. `NativeCaptureCoordinator` signals *that specific cause* via
-  `onDeviceRateRebuild` (fired only from `recreateTap(cause: .deviceOrRateChange)`,
-  NEVER on the first `start()` and NEVER for a benign `.exclusionChange` rebuild);
+  `onDeviceRateRebuild` (NEVER on the first `start()`, and for an
+  `.exclusionChange` rebuild only when the tap that came back up is measurably on a
+  different device or nominal rate than the one that went down — see the trap
+  below);
   `NativeBackend.resetAirPlaySessionForWholeSystem()` responds by rebinding each
   streaming (`added`) device — claiming the same per-device `converging` slot
   `convergeDevice` uses (so the removeOutput → addOutput can't interleave with a
@@ -146,6 +148,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   kept correct by the debounced process-object-list membership diff (W1-T7 Gap 1) +
   `refreshExcludedProcessSet` (relaunch, W1-T7 Fix 1), which recreate the tap as
   `.exclusionChange` (compare-before-rebuild, no session reset).
+  **TRAP: the rebuild cause is an assumption, not evidence — never make the reset
+  decision from `RebuildCause` alone.** The old tap's `teardown()` takes its
+  default-device listener with it and the new tap arms its own only inside
+  `createAndStart`, so a default-output-device change landing in between is delivered
+  to nobody: an `.exclusionChange` rebuild can come back up on a different device's
+  clock while the receivers hold the old timeline, and a cause-only trigger leaves
+  them silent until some later device/rate event happens to reset them. `recreateTap`
+  therefore also compares the outgoing tap's `SystemAudioTap.tappedDeviceID` and rate
+  against the incoming one's and resets on a real move. A tap that reports `nil`
+  (the protocol default) abstains from the identity half rather than forcing a reset.
 - **The silence fallback (R11) has its OWN always-on delay, decoupled from the
   wake-restore preference.** `armSilenceWatchdog` uses the always-on
   `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be

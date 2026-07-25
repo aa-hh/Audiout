@@ -62,6 +62,16 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             lock.lock(); teardownCount += 1; started = false; lock.unlock()
         }
 
+        /// What this fake reports as the device it's anchored to
+        /// (``SystemAudioTap/tappedDeviceID``). Left nil by default, modelling a tap
+        /// that can't say — the protocol's own default. A test that cares about clock
+        /// re-anchoring sets it, and may change it from inside `onCreateAndStart` to
+        /// model the default output device moving mid-rebuild.
+        private var _deviceID: AudioObjectID?
+        var tappedDeviceID: AudioObjectID? { lock.withLock { _deviceID } }
+        func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
+        func setFormat(_ f: TapFormat) { lock.withLock { format = f } }
+
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
@@ -262,6 +272,98 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
                        "a device/nominal-rate rebuild MUST fire onDeviceRateRebuild exactly once")
         XCTAssertGreaterThanOrEqual(tap.creates, 3, "the device-change rebuild created a fresh tap")
+    }
+
+    /// The completeness gap in the surgical reset trigger: an exclusion-cause rebuild
+    /// that re-anchors the clock ANYWAY must still reset the AirPlay session.
+    ///
+    /// The old tap's `teardown()` takes its default-device listener with it, and the
+    /// new tap only arms one inside `createAndStart`. A default-output-device change
+    /// landing in that window is delivered to nobody: the rebuild silently comes back
+    /// up on a different device's clock while the receivers hold the old timeline, and
+    /// because the rebuild was nominally an `.exclusionChange` (a plain connect, an
+    /// exclusion toggle) nothing reset them. The result is silence that only heals if
+    /// some later device/rate event happens to fire a reset.
+    ///
+    /// Modelled by moving the fake's device id from INSIDE `createAndStart` — exactly
+    /// the un-listened window — during a rebuild triggered by an exclusion change.
+    func testExclusionRebuildThatReAnchorsOntoADifferentDeviceStillResets() {
+        let tap = FakeTap()
+        tap.setTappedDeviceID(AudioObjectID(71))     // built-in, say
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0, "the initial start never resets")
+
+        // The default output device moves while neither tap holds a listener: the
+        // rebuild's own createAndStart is that window.
+        tap.onCreateAndStart = { tap.setTappedDeviceID(AudioObjectID(72)) }   // now the USB DAC
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        waitFor { tap.creates >= 2 }
+        waitFor { lock.withLock { deviceRateRebuilds } == 1 }
+
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
+                       "an exclusion-cause rebuild that came up on a DIFFERENT device must still reset the "
+                       + "whole-system AirPlay session — the receivers are anchored to the old device's clock, "
+                       + "and no cause-based trigger can see this because the device moved while nothing was "
+                       + "listening")
+    }
+
+    /// The other half of the same guarantee, and the regression guard for the fix
+    /// above not undoing what the surgical trigger bought: an exclusion rebuild that
+    /// comes back up on the SAME device at the SAME rate must still stay silent. This
+    /// asserts it with a tap that positively REPORTS its device, so the silence is a
+    /// real like-for-like compare rather than the `nil`-abstains default doing the
+    /// work (which is all `testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes`
+    /// can prove).
+    func testExclusionRebuildOnTheSameDeviceStillDoesNotReset() {
+        let tap = FakeTap()
+        tap.setTappedDeviceID(AudioObjectID(71))
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        waitFor { tap.creates >= 2 }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))   // let a wrong reset arrive
+
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
+                       "a like-for-like exclusion rebuild must NOT reset — that spurious per-connect RTP "
+                       + "re-establish is the \"connects fast, then a long silence\" bug")
+    }
+
+    /// A rate renegotiation that slips through the same un-listened window (the tap
+    /// comes back up at 48 kHz where it was at 44.1) must reset too — the documented
+    /// dropout cause, arriving without a device-change notification to announce it.
+    func testExclusionRebuildThatComesUpAtADifferentRateStillResets() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        tap.onCreateAndStart = {
+            tap.setFormat(TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32,
+                                    isFloat: true, isInterleaved: false))
+        }
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        waitFor { tap.creates >= 2 }
+        waitFor { lock.withLock { deviceRateRebuilds } == 1 }
+
+        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
+                       "a rebuild that came up at a different nominal rate must reset the session, whatever "
+                       + "the rebuild was nominally for")
     }
 
     // MARK: - A dropped (nil) conversion is not forwarded.

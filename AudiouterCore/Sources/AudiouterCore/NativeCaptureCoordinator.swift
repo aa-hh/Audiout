@@ -238,7 +238,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///
     /// Deliberately NOT fired for a rebuild caused by an exclusion-set change
     /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
-    /// ``setSyncedLocalSink(_:renderProcessPID:)``). Those are benign,
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) — UNLESS that rebuild is observed
+    /// to have re-anchored the clock anyway (the device or nominal rate the new tap
+    /// came up on differs from the outgoing tap's), which the cause alone cannot
+    /// report: the default output device can move in the window where neither the old
+    /// nor the new tap holds a listener. Those are otherwise benign,
     /// backend-initiated parts of NORMAL connect/route setup — in particular,
     /// attaching the synced-local sink adds its render pid to the exclusion set,
     /// which recreates the tap on EVERY Mac+AirPlay connect. The output device and
@@ -782,8 +786,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// device's clock out from under the live RTP sessions and desyncs the
     /// receivers; an exclusion-set change
     /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
-    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but leaves the
-    /// device and its clock — and thus the receivers' timeline — untouched.
+    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but is EXPECTED
+    /// to leave the device and its clock — and thus the receivers' timeline —
+    /// untouched. "Expected", not guaranteed: ``recreateTap(cause:)`` verifies it
+    /// against the tap that actually came up and resets anyway if the clock moved, so
+    /// this cause is the default assumption, never the last word.
     enum RebuildCause { case deviceOrRateChange, exclusionChange }
 
     /// Tear the current tap down and recreate it — against the (possibly
@@ -812,8 +819,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // mean the LAST notification can be the one that would otherwise be
         // dropped, leaving the tap rebuilt against a stale device/rate. See
         // dev/notes/stability-audit-2026-07-18.md §C6.
-        let claim: (proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
-            guard case .capturing = _state else {
+        let claim: (
+            proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>,
+            previousRate: Int?, previousDeviceID: AudioObjectID?
+        ) = queue.sync {
+            guard case .capturing(let oldFormat) = _state else {
                 if case .creatingTap = _state {
                     pendingDeviceChange = true
                     // Telemetry (T2): STABILITY(C6) coalescing point — a
@@ -822,13 +832,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // "rebuild_replay" line logged once it's replayed below).
                     Telemetry.log(.captureWS, "rebuild_coalesced", ["reason": "already_rebuilding"])
                 }
-                return (false, nil, [])
+                return (false, nil, [], nil, nil)
             }
             let t = self.tap
             self.tap = nil
             self.converter = nil          // stop forwarding buffers through the dying tap
             self.transition(to: .creatingTap)
-            return (true, t, resolveExcludedProcessObjectIDs())
+            // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
+            // clears it — the baseline the post-commit compare needs to tell a
+            // re-anchor from a like-for-like rebuild.
+            return (true, t, resolveExcludedProcessObjectIDs(), oldFormat.sampleRate, t?.tappedDeviceID)
         }
         // Not capturing (racing a stop()/failure): nothing to do.
         guard claim.proceed else { return }
@@ -876,7 +889,36 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // re-establish (see `onDeviceRateRebuild`). Fired OFF the lock, matching
             // the "no HAL/handler work under `queue`" discipline the rest of this
             // method keeps.
-            if commit.orphan == nil, cause == .deviceOrRateChange {
+            //
+            // ...OR when the rebuild demonstrably re-anchored the clock anyway,
+            // whatever it was nominally for. The cause alone cannot be trusted: the
+            // default output device can move inside the window between the old tap's
+            // `teardown()` (which takes its device listener with it) and the new tap
+            // arming its own. Nobody delivers that notification, so an
+            // `.exclusionChange` rebuild — a plain connect, an exclusion toggle —
+            // silently comes back up on a DIFFERENT device's clock with the receivers
+            // still on the old timeline, and stays silent until some later device/rate
+            // event happens to fire a reset. Comparing what the outgoing tap was
+            // anchored to against what the incoming one landed on closes that window
+            // with a fact instead of an assumption. A tap that doesn't report its
+            // device (`nil`) abstains from the identity half, leaving the rate compare.
+            let rateMoved = claim.previousRate.map { $0 != format.sampleRate } ?? false
+            let deviceMoved: Bool = {
+                guard let before = claim.previousDeviceID, let after = newTap.tappedDeviceID
+                else { return false }
+                return before != after
+            }()
+            if commit.orphan == nil, cause == .deviceOrRateChange || rateMoved || deviceMoved {
+                if cause == .exclusionChange {
+                    // Worth its own line: an exclusion-cause rebuild that turned out to
+                    // re-anchor is exactly the silent-dropout window this compare exists
+                    // to catch, and nothing else in the trail would show it.
+                    Telemetry.log(.captureWS, "rebuild_reanchored", [
+                        "cause": "exclusionChange",
+                        "rateMoved": rateMoved ? "true" : "false",
+                        "deviceMoved": deviceMoved ? "true" : "false",
+                    ])
+                }
                 onDeviceRateRebuild?()
             }
             if commit.replay {
@@ -1175,6 +1217,19 @@ public protocol SystemAudioTap: AnyObject {
     /// Stop and destroy the IOProc, aggregate device, and tap (in that order).
     /// Idempotent and non-throwing so teardown always completes.
     func teardown()
+
+    /// The output device this tap is currently anchored to, or nil when it isn't
+    /// running / can't say. Read by ``NativeCaptureCoordinator`` across a rebuild to
+    /// tell whether the tap actually re-anchored onto a DIFFERENT device's clock —
+    /// which no rebuild *cause* can be trusted to report, because the default output
+    /// device can move inside the window where the old tap is already torn down and
+    /// the new one hasn't armed its listener yet. Defaulted to nil so a fake that
+    /// doesn't model device identity keeps working (the compare simply abstains).
+    var tappedDeviceID: AudioObjectID? { get }
+}
+
+public extension SystemAudioTap {
+    var tappedDeviceID: AudioObjectID? { nil }
 }
 
 /// The PCM destination — the engine's `write(pcm:pts:)`. Injected so tests spy on
@@ -1448,6 +1503,13 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+
+    /// The device this tap is anchored to (``SystemAudioTap/tappedDeviceID``), or nil
+    /// before `createAndStart` resolved one / after `teardown()` cleared it.
+    var tappedDeviceID: AudioObjectID? {
+        let id = tappedOutputDeviceID
+        return id == kAudioObjectUnknown ? nil : id
+    }
     private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`

@@ -133,8 +133,13 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     echo "" >&2
     echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
-    echo "  (swift test --parallel --num-workers 4) before commit. ~70s warm; --no-verify to skip." >&2
-    if ! ( cd "$repo_root/AudiouterCore" && swift test --parallel --num-workers 4 >&2 ); then
+    echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
+    # Via the shared runner, NOT a bare `swift test`: the runner takes a
+    # machine-wide lock so concurrent agents queue instead of thrashing 8 cores
+    # with N full suites at once, and skips the run outright when these exact
+    # sources already passed. It hashes the WORKING TREE, which is what this
+    # guard has always actually tested (it never stashed unstaged changes).
+    if ! "$repo_root/scripts/run-tests.sh"; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2

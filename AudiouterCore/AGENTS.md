@@ -139,14 +139,32 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
   change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full pre-commit run is `swift test --parallel --num-workers 4`**
-  (capped to 4 concurrent test processes to keep CPU/fan load reasonable on
-  an 8-core machine; ~70s warm vs ~124s for a bare serial `swift test`, only
-  marginally slower than an uncapped `--parallel`). It parallelizes at the
-  test-CLASS level: each suite runs in its own process, so tests must not
-  race on cross-process shared state.
+- **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
+  wraps `swift test --parallel` and adds the two things a bare run cannot do
+  on a machine with several worktrees in flight:
+  - **A machine-wide lock** (`/tmp/audiouter-suite.lock`, shared across every
+    worktree and clone). `--num-workers 4` caps one PROCESS; it cannot see the
+    three other agents each running their own capped suite. Four concurrent
+    Guard 4 runs put 16 xctest processes plus four independent compiles on 8
+    cores — a measured 15-minute load average of 73. Runs now queue, and
+    because a test run saturates the CPU anyway, serialising costs nothing in
+    total throughput while keeping the machine usable. Holding the lock means
+    running alone, so the runner uses **6** workers, not 4 — each run is
+    faster than before.
+  - **A content-addressed pass cache**: if these exact sources already passed,
+    the run is skipped. Agents routinely run the suite by hand and then
+    commit, firing Guard 4 on byte-identical sources seconds later.
+
+  Escape hatches: `AUDIOUTER_TEST_NO_LOCK=1` (machine known idle),
+  `AUDIOUTER_TEST_NO_CACHE=1` (force a real run), `AUDIOUTER_TEST_WORKERS=N`.
+  If the lock stays busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
+  the runner proceeds **unlocked** rather than failing — it exists to protect
+  the CPU, not to gate correctness, and must never block a commit for a reason
+  the committer cannot see. `swift test` parallelizes at the test-CLASS level:
+  each suite runs in its own process, so tests must not race on cross-process
+  shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
-  Guard 4 runs the full `swift test --parallel --num-workers 4` whenever a commit's staged
+  Guard 4 runs the full suite via `scripts/run-tests.sh` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
   fails. So a too-narrow filter in the loop can never ship a regression — it
   only costs one extra fix cycle at commit. Everything that reaches `main` was

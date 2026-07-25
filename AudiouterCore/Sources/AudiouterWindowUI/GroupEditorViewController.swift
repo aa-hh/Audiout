@@ -86,6 +86,9 @@ public final class GroupEditorViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = NSStackView()
+    /// The checklist's recessed background + inter-row hairlines (T5) — see
+    /// ``MembershipWellView`` below. Sits BEHIND `membershipStack` in z-order.
+    private let membershipWell = MembershipWellView()
     private let deleteButton = NSButton()
 
     /// Width cap for the editable title field (design feedback 2026-07-18:
@@ -166,12 +169,20 @@ public final class GroupEditorViewController: NSViewController {
         // with no cached geometry — the popover's `RailHostView` pattern.
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
+        container.membershipWell = membershipWell
         // The form column: capped to `contentMaxWidth`, leading-aligned,
         // pinned below the safe area. Everything hangs off this column's
         // edges rather than the container's, so the cap applies uniformly.
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
+        // Added FIRST so it sits behind every row (T5: a recessed background +
+        // hairline dividers behind the checklist, which otherwise carries no
+        // surface at all — measured ~1.06:1 dark / ~1.08:1 light against
+        // `panel`, an invisible boundary). Non-interactive (`hitTest` always
+        // nil), so it never intercepts a row's click.
+        membershipWell.translatesAutoresizingMaskIntoConstraints = false
+        column.addSubview(membershipWell)
         for v in [iconWell, nameField, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
@@ -221,6 +232,18 @@ public final class GroupEditorViewController: NSViewController {
             membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
+
+            // T5's recessed well: pinned EXACTLY to the stack's own top/bottom
+            // (adds ZERO extra height — T6 left only ~13pt of slack against the
+            // Groups window's 720x460 default, none to spend on padding) but
+            // spans the FULL column width (leading/trailing), including the
+            // rail's gutter on the left, so the recessed card reads as one
+            // list container even though the rows it holds are only as wide
+            // as their own content.
+            membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            membershipWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            membershipWell.topAnchor.constraint(equalTo: membershipStack.topAnchor),
+            membershipWell.bottomAnchor.constraint(equalTo: membershipStack.bottomAnchor),
 
             deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor,
                                                   constant: Self.railContentInset),
@@ -308,6 +331,10 @@ public final class GroupEditorViewController: NSViewController {
             rowsByID[onlyMemberID]?.setCheckboxEnabled(
                 false, tooltip: "A group needs at least one device. Use \u{201C}Delete group\u{2026}\u{201D} to remove it.")
         }
+        // T5: re-point the well at the CURRENT rows so its hairlines land
+        // between whatever's actually in the stack now (a rebuild can add or
+        // drop rows — an unchecked unavailable device disappears).
+        membershipWell.rows = candidateDevices.compactMap { rowsByID[$0.id] }
         updateRail()
     }
 
@@ -522,6 +549,20 @@ public final class GroupEditorViewController: NSViewController {
         view.layoutSubtreeIfNeeded()
         return railOverlay.convert(NSPoint(x: centerX, y: 0), from: row).x
     }
+
+    /// T5: the number of rows currently fed to the checklist's recessed
+    /// background (`MembershipWellView.rows`) — mirrors `candidateDevices`
+    /// when the well is correctly kept in sync with the row rebuild.
+    public var test_membershipWellRowCount: Int { membershipWell.rows.count }
+
+    /// T5: whether the well sits BEHIND the row stack in the column's
+    /// z-order (so it can never intercept a row's click).
+    public var test_membershipWellIsBehindStack: Bool {
+        guard let column = membershipWell.superview,
+              let wellIndex = column.subviews.firstIndex(of: membershipWell),
+              let stackIndex = column.subviews.firstIndex(of: membershipStack) else { return false }
+        return wellIndex < stackIndex
+    }
 }
 
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
@@ -545,15 +586,89 @@ extension GroupEditorViewController: RailHookProviding {
     }
 }
 
-/// The editor pane's container: re-invalidates the rail overlay on every layout
-/// pass so the spine tracks the current row frames with no cached geometry
-/// (the popover's `RailHostView` pattern). The overlay draws from settled
-/// frames, so `cacheDisplay` snapshots stay deterministic.
+/// The editor pane's container: re-invalidates the rail overlay AND the
+/// membership well (T5) on every layout pass so both track the current row
+/// frames with no cached geometry (the popover's `RailHostView` pattern). Both
+/// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
 private final class RailRepaintingView: NSView {
     weak var railOverlay: BusRailOverlayView?
+    weak var membershipWell: MembershipWellView?
     override func layout() {
         super.layout()
         railOverlay?.needsDisplay = true
+        membershipWell?.needsDisplay = true
+    }
+}
+
+// MARK: - Membership checklist recessed background (T5)
+
+/// The membership checklist's recessed background: a rounded `Tokens.Color
+/// .well` fill behind the row stack, with a faint `Tokens.Color.hairline`
+/// divider between each pair of ADJACENT rows. Before this the checklist
+/// carried no surface of its own at all — `MembershipRowView` paints nothing
+/// behind itself — so there was zero visual separation either between rows or
+/// against the pane (measured on the real post-fix tones: `panel` vs `canvas`
+/// ~1.06:1 dark / ~1.08:1 light, effectively invisible). Measured floors for
+/// THIS view's own tokens (WCAG relative luminance, both ≥ their required
+/// floor — see `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark /
+/// 1.182:1 light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.309:1
+/// light (floor 1.25:1, the same separator floor `Tokens.Color.hairline`
+/// itself documents against `panel`).
+///
+/// Pinned EXACTLY to `membershipStack`'s own top/bottom (zero extra height —
+/// T6's commit left only ~13pt of slack in the editor's fitting height
+/// against the Groups window's 720×460 default, none to spend on padding) but
+/// spans the FULL column width, including the rail's gutter on the left, so
+/// the recessed card reads as one list container even though the rows inside
+/// it are only as wide as their own content (`MembershipRowView` has no width
+/// tie to the stack).
+///
+/// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern
+/// for a rounded/solid-fill background view in this same file's neighborhood:
+/// every token re-resolves per appearance/Increase-Contrast on each paint, and
+/// `viewDidChangeEffectiveAppearance` just triggers a repaint. Non-interactive
+/// (`hitTest` always `nil`, `MembershipBusView`'s pattern) — it sits BEHIND
+/// `membershipStack` in z-order, so no row/checkbox/rail click target is ever
+/// affected; the small dead area to the right of a narrower row (the well is
+/// wider than a row's intrinsic content) simply swallows a click with no
+/// target, same as clicking blank pane background anywhere else.
+private final class MembershipWellView: NSView {
+    private static let cornerRadius: CGFloat = 6
+    private static let hairlineThickness: CGFloat = 1
+
+    /// The membership rows currently laid out in the stack above this view,
+    /// in top-to-bottom order — read for LIVE frames on every draw, exactly
+    /// like `BusRailOverlayView.deviceRows` (no cached geometry: a rebuild can
+    /// add/drop rows when an unchecked unavailable device disappears).
+    var rows: [NSView] = [] { didSet { needsDisplay = true } }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Tokens.Color.well.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: Self.cornerRadius, yRadius: Self.cornerRadius).fill()
+
+        guard rows.count > 1 else { return }
+        Tokens.Color.hairline.setFill()
+        for (a, b) in zip(rows, rows.dropFirst()) {
+            guard let aSuper = a.superview, let bSuper = b.superview else { continue }
+            let aFrame = convert(a.frame, from: aSuper)
+            let bFrame = convert(b.frame, from: bSuper)
+            // Robust to either coordinate flip: two non-overlapping adjacent
+            // rows' gap is bounded by the two INNER edges of the four
+            // (min/max of each frame) — sorting picks them out without this
+            // view needing to know which axis direction is "down".
+            let ys = [aFrame.minY, aFrame.maxY, bFrame.minY, bFrame.maxY].sorted()
+            let midY = (ys[1] + ys[2]) / 2
+            let lineRect = NSRect(x: bounds.minX, y: midY - Self.hairlineThickness / 2,
+                                  width: bounds.width, height: Self.hairlineThickness)
+            NSBezierPath(rect: lineRect).fill()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

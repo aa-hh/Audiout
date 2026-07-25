@@ -39,6 +39,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `fake-speakers.sh` | Launches shairport-sync fake receivers (single-instance caveat above). |
 | `stop-fake-speakers.sh` | Kills every process tracked by a pidfile in `.run/`. |
 | `audiocap/` | Standalone Core Audio process-tap capture CLI; independent tool. |
+| `bt-multi-spike/` | Throwaway Bluetooth multi-device feasibility spike: interactive CLI for testing concurrent AVAudioEngine pinning. |
 | `README.md` | Setup/rationale for the mock, fake-speaker, and `native` backends. |
 | `notes/p2b-nativebackend-runbook.md` | How to run `native`: build/test, TCC grant, verification. |
 | `notes/onboarding-setup-brief.md` | First-run permission-priming flow: design + gated live-verify recipe for the audio self-test tone. |

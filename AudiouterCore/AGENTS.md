@@ -162,12 +162,25 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     | serial | 124s | **69.7s** | **6.0s** |
 
     Serial does the same work for **~1/5 the CPU and ~1/8 the system time**.
-    `--parallel` forks one process per test CLASS and this suite has **57**, so
-    each spawn re-execs and re-links a large AppKit/CoreAudio/AirPlayEngine
-    binary to run a handful of tests. Real test work is ~70 CPU-seconds;
-    parallel spends ~290 MORE on fork/exec + dyld. That is also why lowering
-    `--num-workers` barely helps — it staggers the 57 spawns rather than
-    removing them (6→2 workers was 2.2x SLOWER for the same load).
+    **CORRECTED 2026-07-25** — `--parallel` forks one process per test
+    **METHOD**, not per class (an earlier version of this doc said "class";
+    verified wrong by watching live `ps` output: different methods of the
+    SAME class run as distinct concurrent processes, and total spawns for a
+    filtered single-class run equals that class's method count, not 1). This
+    suite has **1025 methods across 58 classes**, so each spawn re-execs and
+    re-links a large AppKit/CoreAudio/AirPlayEngine binary to run ONE test.
+    Real test work is ~70 CPU-seconds; parallel spends ~290 MORE on fork/exec
+    + dyld — **~0.28-0.33 CPU-seconds per spawn**, the right order of
+    magnitude for launching a large linked binary (dividing that overhead by
+    the class count instead gives ~5 CPU-seconds per spawn, which is not
+    physically plausible — more than the entire serial suite's total CPU).
+    **Consequence: consolidating test classes cannot reduce spawn count** —
+    1025 methods spawn ~1025 processes regardless of how many classes they
+    are grouped into. See `docs/notes/test-parallel-spawn-measurement.md`
+    (worktree `claude/test-class-consolidation`) for the full measurement.
+    This is also why lowering `--num-workers` barely helps — it staggers the
+    ~1025 spawns rather than removing them (6→2 workers was 2.2x SLOWER for
+    the same load).
     On an idle machine parallel is still ~1.8x faster in wall time (~70s vs
     ~124s warm), so `auto` picks parallel when nothing else is testing and
     serial when something is — including a bare `swift test` started outside
@@ -248,8 +261,9 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   If all slots stay busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
   the runner proceeds **uncapped** rather than failing — it exists to protect
   the CPU, not to gate correctness, and must never block a commit for a reason
-  the committer cannot see. `swift test` parallelizes at the test-CLASS level:
-  each suite runs in its own process, so tests must not race on cross-process
+  the committer cannot see. `swift test` parallelizes at the test-**METHOD**
+  level (corrected — see the measured spawn-count finding above): each test
+  method runs in its own process, so tests must not race on cross-process
   shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
   Guard 4 runs the full suite via `scripts/run-tests.sh` whenever a commit's staged

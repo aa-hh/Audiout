@@ -60,6 +60,12 @@ final class LocalPlaybackEngineTests: XCTestCase {
     /// every test starts from the same known-good state; failures here would
     /// mean the environment has no usable audio output at all, not a T10 bug.
     private func makeStartedEngine() throws -> LocalPlaybackEngine {
+        // The single choke point for every real-hardware test in this file, so
+        // the gate lives in one place and a newly added test inherits it rather
+        // than silently reintroducing ~54 CPU-seconds of coreaudiod load into
+        // routine runs. See `AudioHardwareTestGate` for the measurements and
+        // for how to run these deliberately.
+        try AudioHardwareTestGate.skipUnlessEnabled()
         let engine = LocalPlaybackEngine()
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         return engine

@@ -171,6 +171,26 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
+  `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
+  `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,
+  not CPU** — measured, these tests cost 0.9 `coreaudiod` CPU-seconds, and the
+  whole suite costs ~10 across an 87s run (~11% of ONE core, ~1.4% of an 8-core
+  machine). Core Audio is NOT a meaningful part of suite cost; test execution
+  is. (Earlier "coreaudiod at 38-45%" figures were instantaneous `ps` %CPU
+  samples — they overstate sustained load badly; don't cite them.) What the gate
+  buys: these seven tests depend on real hardware and a machine-wide daemon, so
+  they are timing-sensitive to whatever else the Mac is doing — the documented
+  cause of three unrelated tests flaking under `--parallel` on a busy machine.
+  `AudioHardwareTestGate.skipUnlessEnabled()` is called from that file's
+  `makeStartedEngine()` — the one choke point all seven hardware tests share, so
+  a newly added test inherits the gate rather than silently reintroducing the
+  load. The 7 skip by default (visibly, with a reason); the 3 that only exercise
+  the pure static `isFollowableTransport` still run. Run the real ones
+  deliberately when working on local playback:
+  `AIRPLAY_AUDIO_HARDWARE_TESTS=1 swift test --filter LocalPlaybackEngineTests`.
+  They are NOT faked — `LocalPlaybackControlling` is the protocol fakes already
+  implement, so spying here would delete the only coverage of the real engine.
 - **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
   each suite its own process, two suites that both write `UserDefaults.standard`
   or the same `FileManager.default.temporaryDirectory` path race and flake.

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import ApplicationServices
 import AudiouterCore
 
 /// Turns a transport command a user pressed ON A SPEAKER (surfaced by
@@ -36,6 +35,17 @@ final class MediaKeyController {
     /// speaker presses can't stack system dialogs.
     private var didRequestAccessibility = false
 
+    /// The Accessibility read/prompt seam. The same ``RemoteControlPriming`` the
+    /// onboarding flow uses — injected (not a direct `AXIsProcessTrusted()` call)
+    /// so `AIRPLAY_PERMISSIONS=granted|denied` reaches this path too: a simulated
+    /// seam never springs a real system dialog during an automated run. Defaults
+    /// to the production primer, so the ordinary launch is unchanged.
+    private let remoteControl: RemoteControlPriming
+
+    init(remoteControl: RemoteControlPriming = RemoteControlPrimerFactory.makeDefault()) {
+        self.remoteControl = remoteControl
+    }
+
     /// Handle one transport command from a speaker: fire the media key, and if we
     /// aren't trusted yet, ask for Accessibility (once).
     func handle(_ command: RemoteTransportCommand) {
@@ -43,8 +53,8 @@ final class MediaKeyController {
 
         // Posting reaches other apps only when we're trusted; if we aren't, the
         // press just now did nothing — surface the one-time prompt so the NEXT
-        // press works. `AXIsProcessTrusted()` never prompts (safe to poll here).
-        if !AXIsProcessTrusted() {
+        // press works. `isTrusted()` (AXIsProcessTrusted) never prompts.
+        if !remoteControl.isTrusted() {
             requestAccessibilityOnce()
         }
     }
@@ -95,8 +105,9 @@ final class MediaKeyController {
         guard !didRequestAccessibility else { return }
         didRequestAccessibility = true
 
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        // `prime()` is the `AXIsProcessTrustedWithOptions([prompt:true])` call —
+        // through the seam so a simulated primer stays silent.
+        remoteControl.prime()
 
         let message = "[Audiouter] Speaker transport keys need Accessibility access — prompted. "
             + "Grant it in System Settings › Privacy & Security › Accessibility, then "

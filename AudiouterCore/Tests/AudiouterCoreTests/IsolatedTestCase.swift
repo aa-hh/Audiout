@@ -3,9 +3,12 @@ import XCTest
 /// Base class that gives every test its own isolated, auto-cleaned scratch
 /// state so the suite stays green under `swift test --parallel`.
 ///
-/// WHY THIS EXISTS: `swift test --parallel` runs each test **class** in its own
-/// process, concurrently. Processes don't share memory, so in-process `static`
-/// counters are safe — but they DO share anything that lives outside the
+/// WHY THIS EXISTS: `swift test --parallel` runs each test **method** in its
+/// own process, concurrently (corrected 2026-07-25 — verified by watching live
+/// `ps` output: distinct methods of the SAME class run as distinct concurrent
+/// processes; see `docs/notes/test-parallel-spawn-measurement.md`). Processes
+/// don't share memory, so in-process `static` counters are safe — but they DO
+/// share anything that lives outside the
 /// process: `UserDefaults.standard` (one on-disk plist for the whole app
 /// domain) and a fixed filesystem path (a bare
 /// `FileManager.default.temporaryDirectory` + a shared filename). Two suites

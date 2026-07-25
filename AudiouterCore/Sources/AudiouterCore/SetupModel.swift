@@ -310,6 +310,20 @@ public final class SetupModel {
         }
     }
 
+    /// Convenience over the four-seam init that takes a ``PermissionProviders``
+    /// bundle — how the app builds it once from ``PermissionMode`` and threads
+    /// the same set (real or simulated) into every construction site.
+    public convenience init(providers: PermissionProviders,
+                            settings: AppSettings = AppSettings(),
+                            localNetworkGated: Bool = true) {
+        self.init(audioProbe: providers.audioProbe,
+                  localNetwork: providers.localNetwork,
+                  remoteControl: providers.remoteControl,
+                  ptpHelper: providers.ptpHelper,
+                  settings: settings,
+                  localNetworkGated: localNetworkGated)
+    }
+
     /// Trigger + verify the audio-capture permission. On first run this surfaces
     /// the system prompt; either way it lands on a real `.granted` / `.denied` /
     /// `.unsupported`. Idempotent while a probe is in flight (a second call is a

@@ -40,6 +40,26 @@ package layout, backends, and core types, see
   presents (ignores backend + the completed flag, to iterate on the flow itself),
   unset = the default gate. Sibling of `AIRPLAY_BACKEND`; forward it the same way
   (`launchctl setenv`, or run the bundle binary directly with the var set).
+- **`AIRPLAY_PERMISSIONS` simulates the OS permission seams (testing knob).**
+  `PermissionMode.resolved` reads it: `granted` / `denied` inject *simulated*
+  audio/Local-Network/Accessibility/PTP seams so the whole permission flow runs
+  without touching real macOS TCC; unset (or `system`) uses the real production
+  probes. `AppDelegate` resolves it ONCE into `permissionProviders` and threads
+  the same bundle into both `SetupModel` sites, `registerPTPHelperIfNeeded()`,
+  and `MediaKeyController` — so nothing reads a real grant behind the
+  simulation's back. WHY: macOS keys every TCC grant to the binary's code
+  signature, so an ad-hoc rebuild orphans yesterday's grant and re-onboarding
+  churns every build; this knob makes permission LOGIC iterable regardless.
+  LIMIT: `granted` makes the flow *believe* capture is on — it does NOT make the
+  Core Audio tap deliver real samples; end-to-end audio still needs a genuine
+  grant on a stably-signed (Developer ID) build. Sibling of `AIRPLAY_BACKEND`;
+  forward it the same way.
+- **Permission-dependent live builds need a stable signature.**
+  `scripts/make-app.sh` signs with Developer ID when the keychain has one, else
+  ad-hoc. Ad-hoc grants re-pin to the binary and are lost on the next rebuild,
+  so for repeatable on-device permission testing sign with Developer ID; set
+  `CODESIGN_REQUIRE_IDENTITY=1` to turn a missing cert into a hard error instead
+  of a silent throwaway ad-hoc build.
 - **`AppDelegate` alone enforces "excluded ⇒ un-routable."** Neither
   `ExcludedAppsController` nor `AppRoutingController` prunes the other —
   `pruneRoutesForExcludedApps()` must run on launch and on every

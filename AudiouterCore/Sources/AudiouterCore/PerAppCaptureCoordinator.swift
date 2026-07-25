@@ -830,6 +830,12 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try createTapAndReadFormat(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
             try createAggregate(bundleID: bundleID)
             try startIOProc()
+            // Correct the converter's input rate to the aggregate's REAL rate
+            // BEFORE `format` is returned (the converter is built from it) and
+            // before the rate listener is installed (its compare-before-rebuild
+            // guard also reads `format.sampleRate`). Mirrors the whole-system
+            // tap's identical fix exactly — see `reconcileFormatWithAggregate`.
+            reconcileFormatWithAggregate()
             installDefaultDeviceListener()
             installSampleRateListener(bundleID: bundleID)
         } catch {
@@ -1021,6 +1027,35 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         }
     }
 
+    // MARK: Aggregate-rate reconciliation (converter input-rate correctness)
+    //
+    // Per-app port of `CoreAudioSystemTap.reconcileFormatWithAggregate` — same
+    // root cause, same fix, same shared `TapFormat`/`readNominalSampleRate`/
+    // `reconciledFormat` (see that type's doc comment for the full mechanism).
+    // In short: `createTapAndReadFormat` reads `kAudioTapPropertyFormat` off the
+    // BARE process tap, before it joins the aggregate. With sub-tap drift
+    // compensation on (`createAggregate`), the aggregate resamples the tap's
+    // audio onto ITS OWN clock — so a tap that read back 44100 pre-aggregate can
+    // actually deliver 48000-rate buffers once aggregated. Building the
+    // `AVAudioConverter` from the stale pre-aggregate rate reinterprets every
+    // 48000 buffer as 44100: a sustained ~8.8% (48000/44100) pitch-up. This also
+    // makes the rate listener's compare-before-rebuild guard correct — that
+    // guard compares the notified rate against `format.sampleRate`, so an
+    // unreconciled `format` would never match and every notification would
+    // rebuild the tap.
+    private func reconcileFormatWithAggregate() {
+        guard aggregateID != kAudioObjectUnknown else { return }
+        let aggregateRate = CoreAudioSystemTap.readNominalSampleRate(aggregateID)
+        let reconciled = CoreAudioSystemTap.reconciledFormat(declared: format, aggregateRate: aggregateRate)
+        guard reconciled != format else { return }
+        Telemetry.log(.capturePA, "rate_reconciled", [
+            "declaredRate": "\(format.sampleRate)",
+            "aggregateRate": "\(reconciled.sampleRate)",
+        ])
+        self.asbd.mSampleRate = Double(reconciled.sampleRate)
+        self.format = reconciled
+    }
+
     // MARK: Default-device-change listener
 
     private func installDefaultDeviceListener() {
@@ -1110,14 +1145,34 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
+            // COMPARE-BEFORE-REBUILD LOOP-BREAKER (reuses
+            // `CoreAudioSystemTap.shouldRebuildForNominalRate`, pure/tested):
+            // Core Audio posts this listener for a set-to-same-value too, not
+            // just a genuine change. Without this guard EVERY such spurious
+            // re-announcement tore this per-app tap down and rebuilt it —
+            // observed live as a per-app capture restarting every few seconds
+            // with no real rate change. `format.sampleRate` is safe to compare
+            // against here specifically because `reconcileFormatWithAggregate`
+            // already corrected it to the aggregate's real rate at start —
+            // comparing against the unreconciled pre-aggregate rate would make
+            // this guard never match and rebuild on every notification.
+            guard CoreAudioSystemTap.shouldRebuildForNominalRate(
+                notifiedRate: newRate, currentEffectiveRate: self.format.sampleRate) else {
+                Telemetry.log(.capturePA, "rate_notification_skipped", [
+                    "bundleID": bundleID,
+                    "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
+                    "rate": String(self.format.sampleRate),
+                ])
+                return
+            }
             // The Telemetry call below is the real HAL detection point, so it
             // carries the richest fields (device name, and a fresh HAL read of
             // the NEW rate rather than waiting for the rebuilt tap's ASBD).
             // Never exercised by the hermetic suite (no live Core Audio) — see
             // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
             // which is.
-            guard let self else { return }
-            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
             Telemetry.log(.capturePA, "rate_rebuild", [
                 "bundleID": bundleID,
                 "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),

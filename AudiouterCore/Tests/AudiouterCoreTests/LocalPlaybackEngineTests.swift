@@ -73,6 +73,15 @@ final class LocalPlaybackEngineTests: XCTestCase {
     /// the audio device — the metering path under test reads RMS off the
     /// captured buffer and is identical whether output is real or offline.
     private func makeStartedEngine() throws -> LocalPlaybackEngine {
+        // Offline rendering rather than `AudioHardwareTestGate.skipUnlessEnabled()`
+        // (main's approach for this helper): both exist to keep the ~54 CPU-seconds
+        // of coreaudiod load out of routine runs, but offline rendering achieves
+        // that WITHOUT skipping — the test still executes on every run instead of
+        // silently not running unless someone sets AIRPLAY_AUDIO_HARDWARE_TESTS.
+        // Safe because, as the doc comment above states, the metering path under
+        // test reads RMS off the captured buffer and is identical whether output
+        // is real or offline. The gate is still used elsewhere in this file for
+        // tests that genuinely need real hardware.
         let engine = LocalPlaybackEngine(offlineRenderingForTests: true)
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         return engine

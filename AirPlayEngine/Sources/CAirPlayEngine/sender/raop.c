@@ -2047,6 +2047,13 @@ session_free(struct raop_session *rs)
   if (rs->server_fd >= 0)
     close(rs->server_fd);
 
+  /* A session torn down mid-handshake (external stop/deinit racing an
+   * in-flight pair-verify/pair-setup exchange) bypasses the handshake state
+   * machine's own pair_verify_free()/pair_setup_free() calls -- free them
+   * here too. Both are NULL-safe, matching every other call site. */
+  pair_verify_free(rs->pair_verify_ctx);
+  pair_setup_free(rs->pair_setup_ctx);
+
   free(rs->realm);
   free(rs->nonce);
   free(rs->session);
@@ -3998,6 +4005,7 @@ raop_pair_request_send(int step, struct raop_session *rs, void (*cb)(struct evrt
   if (!req)
     {
       DPRINTF(E_LOG, L_RAOP, "Could not create RTSP request for verification step %d\n", step);
+      free(body);
       return -1;
     }
 
@@ -4037,6 +4045,7 @@ raop_cb_pair_verify_step2(struct evrtsp_request *req, void *arg)
   int ret;
 
   pair_verify_free(rs->pair_verify_ctx);
+  rs->pair_verify_ctx = NULL; /* null-out after free: session_free() frees it again (NULL-safe, not double-free-safe) */
 
   ret = raop_pair_response_process(5, req, rs);
   if (ret < 0)

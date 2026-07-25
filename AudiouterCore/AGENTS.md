@@ -52,6 +52,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **The whole-system tap's `.failed` now self-heals via a bounded retry (T16,
+  E10).** `CaptureControlling` gained `onStateChange`; `NativeBackend` wires it in
+  `start()` and drives a capped-exponential backoff retry
+  (`handleCaptureCoordinatorStateChange` → `scheduleCaptureRetry`, mirroring the
+  per-app `.processNotYetAudible` retry). Two differences from the per-app path:
+  the retry only arms when `NativeCaptureError.isRetryable` (everything but
+  `.osUnsupported`), and — because there is ONE `.mutedWhenTapped` whole-system
+  tap — it **re-checks `captureRunning` at FIRE time** before calling `start()`,
+  so a deselect during the backoff can't restart the tap and mute the Mac with
+  the audio going nowhere (the bug `reconcileCaptureGate` exists to prevent).
 - **Resolving a bundle ID for per-app capture or whole-system exclusion MUST
   resolve to the FULL set of Core Audio processes, not a single pid.** Multi-process
   browsers emit audio from child/helper processes whose pids differ from the main
@@ -372,4 +382,6 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
+| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) shared by `CoreAudioProcessTap`'s and `CoreAudioSystemTap`'s default-device/nominal-rate listener blocks: fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
+| `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |

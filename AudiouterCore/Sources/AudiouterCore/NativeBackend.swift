@@ -307,6 +307,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // So capture runs ONLY while at least one real AP2 output is selected. The
     // gate keys on INTENT (`expectedSelected`), not availability — see
     // `reconcileCaptureGate`.
+    //
+    // T16/E10: the gate's own `want`/`captureRunning` intent is ALSO what the
+    // whole-system tap's `.failed` retry gates on — see
+    // `handleCaptureCoordinatorStateChange`/`scheduleCaptureRetry`. Before that
+    // fix, a transient `.failed` (TCC lost mid-session, a HAL hiccup building
+    // the aggregate device) had NO recovery path at all: `captureCoordinator.
+    // onStateChange` wasn't wired to anything, so the tap just stayed dead
+    // until the user happened to toggle a Selected Device.
 
     /// Whether the capture coordinator is currently *desired* running. The gate's
     /// last decision, NOT a read of the coordinator's own state machine (which
@@ -456,6 +464,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// stream_id-0 output set), which this never touches.
     private var streamBindings: [String: UInt32] = [:]
 
+    /// The destination sets `handleDestinationSetsChanged` last ran with, cached so
+    /// device DISCOVERY can re-drive the binding for a target that wasn't known yet
+    /// when the routes were applied (see the re-drive in `addOrUpdate`). Cached
+    /// rather than re-read from `routeMixer.destinationSets` because that accessor
+    /// takes the MIXER's queue, and this is read while already holding `stateQueue`
+    /// — the cache keeps the discovery path single-queue. Written only inside
+    /// `handleDestinationSetsChanged`'s own `stateQueue` critical section.
+    private var lastDestinationSets: [AppRouteMixer.DestinationSet] = []
+
+    /// Mixed-buffer counter driving the rate-limited write-backlog sampling (see
+    /// `sampleWriteBacklogIfDue`). Confined to the mixer's `onMixedBuffer` queue.
+    private var backlogSampleCounter = 0
+    /// Last `droppedWrites` total reported to Telemetry, so the sampler emits only
+    /// on change instead of once per sample. Same queue confinement as above.
+    private var lastReportedDroppedWrites: UInt64 = 0
+
     /// deviceID → the sorted app display names last published via `.routedApps`, so
     /// the event fires only when a device's live app mapping actually changes.
     private var routedAppNames: [String: [String]] = [:]
@@ -576,6 +600,89 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     private var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
 
+    /// How many whole-system-tap `.failed` retries have already fired in a row
+    /// (T16, E10) — kept ONLY to grow the capped-exponential backoff delay, not
+    /// as a give-up ceiling: unlike the per-app `retryCounts` (keyed per bundle
+    /// ID, one entry per routed app), there is exactly ONE whole-system tap, so
+    /// this is a single counter. Reset to 0 on recovery (`.capturing`) and on a
+    /// deliberate deselect (`reconcileCaptureGate`'s stop branch clears the
+    /// pending timer; `stop()` resets the counter alongside it). Confined to
+    /// `stateQueue`.
+    private var captureRetryCount = 0
+
+    /// The whole-system tap's in-flight bounded retry (T16, E10), so a second
+    /// `.failed` while one is already scheduled REPLACES rather than stacks it —
+    /// the single-flighting requirement — and a recovery (`.capturing`) or a
+    /// deliberate deselect can cancel it before it fires. Best-effort (a work
+    /// item already running when cancelled still completes, same D4 tolerance as
+    /// `pendingRetries`). Confined to `stateQueue`.
+    private var pendingCaptureRetry: DispatchWorkItem?
+
+    /// Base delay before the FIRST whole-system-tap `.failed` retry (T16, E10),
+    /// and the seed of its capped-exponential backoff (doubled per attempt,
+    /// capped at `captureRetryMaxBackoff`) — mirrors
+    /// `processNotYetAudibleRetryDelay`'s shape exactly, but kept as its own
+    /// knob since the whole-system tap and the per-app taps are unrelated
+    /// subsystems with independently tunable recovery timing. `var`-free `let`,
+    /// injectable only through the designated initializer so tests can shrink
+    /// it; production never needs to.
+    private let captureRetryDelay: TimeInterval
+
+    /// Ceiling for the whole-system-tap retry backoff (T16, E10) — mirrors
+    /// `processNotYetAudibleMaxBackoff`: the delay doubles each attempt but
+    /// never exceeds this, so a tap that stays `.failed` (e.g. the TCC grant
+    /// hasn't been (re-)completed yet) is re-probed forever on a bounded
+    /// interval rather than being permanently given up on — matching this
+    /// file's existing indefinite-retry philosophy for a condition the user,
+    /// not a fixed retry count, ultimately resolves.
+    private let captureRetryMaxBackoff: TimeInterval
+
+    /// Test-only (`@testable`): whether a `.processNotYetAudible` retry
+    /// `DispatchWorkItem` is currently sitting in `pendingRetries` for
+    /// `bundleID` — lets a test prove the map doesn't leak a stale reference
+    /// past a non-retryable failure.
+    func test_hasPendingRetry(bundleID: String) -> Bool {
+        stateQueue.sync { pendingRetries[bundleID] != nil }
+    }
+
+    /// Test-only (`@testable`): whether a rebind-recovery retry
+    /// `DispatchWorkItem` is currently sitting in `pendingRebindRecoveries`
+    /// for `deviceID` — lets a test prove the map doesn't leak a stale
+    /// reference past a superseding topology-driven `.rebind`.
+    func test_hasPendingRebindRecovery(deviceID: String) -> Bool {
+        stateQueue.sync { pendingRebindRecoveries[deviceID] != nil }
+    }
+
+    /// Test-only (`@testable`): whether a whole-system-tap `.failed` retry
+    /// `DispatchWorkItem` (T16, E10) is currently sitting in
+    /// `pendingCaptureRetry` — lets a test prove a `.failed` schedules exactly
+    /// one in-flight retry (single-flighting) and that it's cancelled on
+    /// recovery (`.capturing`) or a deliberate deselect.
+    func test_hasPendingCaptureRetry() -> Bool {
+        stateQueue.sync { pendingCaptureRetry != nil }
+    }
+
+    /// Test-only (`@testable`): the whole-system-tap retry attempt counter
+    /// (T16, E10) — lets a test prove the backoff actually grows across
+    /// consecutive failures (rather than resetting or stacking) and resets to 0
+    /// on recovery.
+    func test_captureRetryCount() -> Int {
+        stateQueue.sync { captureRetryCount }
+    }
+
+    /// Test-only (`@testable`): whether `bundleID` is currently recorded in
+    /// `everCapturedBundleIDs`. Asserted DIRECTLY (rather than via an
+    /// engine-bind side effect) because `resetAirPlaySessionForRoutedApp` —
+    /// the consumer of a stale entry here — is a guaranteed no-op via its own
+    /// `routeMixer.streamID(for:)` guard when triggered from
+    /// `handleAppLaunched`'s synchronous relaunch path (the topology republish
+    /// that would bind a stream hasn't run yet), so a test built on engine
+    /// binds alone cannot distinguish a fixed `handleAppTerminated` from a
+    /// broken one for that path.
+    func test_hasEverCaptured(bundleID: String) -> Bool {
+        stateQueue.sync { everCapturedBundleIDs.contains(bundleID) }
+    }
+
     /// Bounded attempt ceiling for the AirPlay-session rebind recovery (T4).
     /// UNLIKE the indefinite `.processNotYetAudible` retry: a rebind that keeps
     /// failing means the receiver is genuinely gone, and infinite
@@ -684,6 +791,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `processNotYetAudibleMaxBackoff` (T8) tune the capped-exponential retry
     /// for a `.processNotYetAudible` capture failure; tests shrink the delay so
     /// the retry doesn't cost real wall-clock seconds.
+    /// `captureRetryDelay`/`captureRetryMaxBackoff` (T16, E10) tune the equivalent
+    /// backoff for the WHOLE-SYSTEM tap's `.failed` retry — a separate knob since
+    /// it's an unrelated subsystem; tests shrink it the same way.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
@@ -696,7 +806,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         processNotYetAudibleRetryDelay: TimeInterval = 2.0,
         processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
         maxRebindRecoveryAttempts: Int = 3,
-        rebindRecoveryRetryDelay: TimeInterval = 0.5
+        rebindRecoveryRetryDelay: TimeInterval = 0.5,
+        captureRetryDelay: TimeInterval = 2.0,
+        captureRetryMaxBackoff: TimeInterval = 10.0
     ) {
         self.engine = engineControl
         self.discovery = discoverySource
@@ -715,6 +827,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
         self.maxRebindRecoveryAttempts = maxRebindRecoveryAttempts
         self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
+        self.captureRetryDelay = captureRetryDelay
+        self.captureRetryMaxBackoff = captureRetryMaxBackoff
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
         // here, never mutated after, so no `stateQueue` synchronization is needed
@@ -766,6 +880,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self?.engine.write(
                 pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
+            // silently DROP audio once a stream's un-drained backlog hits its cap
+            // — audible as "dropped milliseconds" that the routing telemetry above
+            // can never explain (no rebuild, no reset, nothing logged). Sample the
+            // guard's counters here, but RATE-LIMITED and only emitting on CHANGE:
+            // this closure runs per mixed buffer (mixer queue, RT-adjacent), and
+            // `Telemetry` must never be called at buffer cadence. One cheap
+            // counter increment per buffer; a snapshot read + possible log only
+            // once every `backlogSampleInterval` buffers.
+            self?.sampleWriteBacklogIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -977,6 +1101,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    wire early: it only fires while the tap is running.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
 
+            // WIRE the whole-system tap's state machine (T16, E10) so a
+            // `.failed` (TCC lost, the aggregate device torn out from under it,
+            // a bad ASBD read) drives a capped-exponential-backoff retry instead
+            // of staying dead until the user happens to toggle a Selected
+            // Device (the only other path that re-invokes `reconcileCaptureGate`).
+            // Harmless to wire this early like `onLevel` — it only fires once
+            // `reconcileCaptureGate` has actually started the tap.
+            self.captureCoordinator?.onStateChange = { [weak self] state in
+                self?.handleCaptureCoordinatorStateChange(state)
+            }
             // Whole-system capture health (T2). A nominal-sample-rate renegotiation
             // (opening the Mac's built-in speakers in a Mac+AirPlay synced-local
             // selection flips the tapped device 44.1↔48 kHz) rebuilds the tap, after
@@ -1015,6 +1149,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        captureCoordinator?.onStateChange = nil
         // T2: stop observing the whole-system tap's device/rate rebuilds so the
         // ordered `captureControlQueue` stop below (which tears the tap down) can't
         // fire a spurious session reset during teardown.
@@ -1132,6 +1267,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.retryCounts.removeAll()
             for work in self.pendingRetries.values { work.cancel() }
             self.pendingRetries.removeAll()
+            // T16/E10: the whole-system tap's own retry resets alongside the
+            // per-app one — a later start() re-decides `reconcileCaptureGate`
+            // from a clean slate, with no stale attempt count or dangling timer
+            // left over from a failure right before teardown.
+            self.pendingCaptureRetry?.cancel()
+            self.pendingCaptureRetry = nil
+            self.captureRetryCount = 0
             // T4: drop any in-flight AirPlay-session rebind recovery — the engine
             // sessions are torn down by `engine.stop()` above and `bindTail` is
             // cancelled, so a fresh start() re-binds from scratch.
@@ -1564,7 +1706,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for bundleID in self.pendingRetries.keys where !stillPresent.contains(bundleID) {
                 self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             }
-            for bundleID in self.everCapturedBundleIDs where !stillPresent.contains(bundleID) {
+            // Bookkeeping-hygiene fix: unlike dead/retry tracking above,
+            // `everCapturedBundleIDs` must ALSO forget a bundle that merely
+            // drops OUT OF ROUTING while staying `stillPresent` in the table —
+            // e.g. a `.device` -> `.noRedirect` -> `.device` toggle (same route
+            // row, capture genuinely stops via `captureToStop` below and later
+            // restarts fresh). Otherwise the later restart's `.capturing` misreads
+            // as a RE-capture (see `everCapturedBundleIDs`'s doc comment) and fires
+            // an unneeded `resetAirPlaySessionForRoutedApp`. `newRouted`/`newLocal`
+            // are both subsets of `stillPresent`, so "not in either" is a strict
+            // superset of the old `!stillPresent` condition — every bundle the old
+            // check cleared is still cleared here, plus the toggle case.
+            for bundleID in self.everCapturedBundleIDs
+            where !newRouted.contains(bundleID) && !newLocal.contains(bundleID) {
                 self.everCapturedBundleIDs.remove(bundleID)
             }
 
@@ -1725,8 +1879,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// recovers). Runs off `stateQueue` (callback context from
     /// `PerAppCaptureCoordinator.onStateChange`); hops on only for the mutation.
     ///
-    /// `.capturing` clears `deadBundleIDs`/`retryCounts`/`pendingRetries` for the
-    /// bundle ID and, if it had been dead, re-includes it in the mixer topology.
+    /// `.capturing` FIRST checks `bundleID` is still actually wanted (present in
+    /// `routedBundleIDs` OR `localBundleIDs`) before accepting it — see the
+    /// `isOrphan` branch below for why an orphaned capture can land here at all
+    /// (a `.processNotYetAudible` retry racing a de-route) and why it must be
+    /// stopped rather than accepted. Once accepted, it clears
+    /// `deadBundleIDs`/`retryCounts`/`pendingRetries` for the bundle ID and, if it
+    /// had been dead, re-includes it in the mixer topology.
     /// `.failed` marks it dead (excluding it from `.routedApps` / the engine stream
     /// binding so a silent app is never claimed as streaming) and, ONLY for
     /// `.processNotYetAudible`, schedules an INDEFINITE capped-exponential-backoff
@@ -1740,7 +1899,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ) {
         switch state {
         case .capturing:
-            let (recovered, isRecapture): (Bool, Bool) = stateQueue.sync {
+            let (recovered, isRecapture, isOrphan): (Bool, Bool, Bool) = stateQueue.sync {
+                // A capture can land here for a bundle ID nobody wants any more: a
+                // `.processNotYetAudible` retry (`scheduleProcessNotYetAudibleRetry`)
+                // scheduled BEFORE a de-route can fire AFTER it and SUCCEED — the app
+                // started playing audio in the meantime, so `perAppCapture.start`
+                // does NOT fail fast the way the retry's doc comment used to
+                // (incorrectly) assume. That builds a brand-new coordinator slot
+                // that nothing in `updateAppRoutes`'s route-table diff will ever
+                // see again. Refuse it here rather than accept it.
+                guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else {
+                    return (false, false, true)
+                }
                 let wasDead = self.deadBundleIDs.remove(bundleID) != nil
                 self.permissionRefusedBundleIDs.remove(bundleID)
                 self.retryCounts.removeValue(forKey: bundleID)
@@ -1748,7 +1918,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // First-ever capture inserts (isRecapture=false); a later capture
                 // (tap rebuilt) is already present (isRecapture=true).
                 let isRecapture = !self.everCapturedBundleIDs.insert(bundleID).inserted
-                return (wasDead, isRecapture)
+                return (wasDead, isRecapture, false)
+            }
+            if isOrphan {
+                // Nothing wants this tap any more — stop it rather than leave a
+                // live (muted, per `TapMuteBehavior.mutedWhenTapped`) Core Audio
+                // tap + private aggregate device + IOProc running in coreaudiod
+                // forever for a bundle ID that is neither routed nor local.
+                //
+                // MUST be dispatched, never called inline: the `onStateChange`
+                // callback that reached us fires SYNCHRONOUSLY from inside
+                // `PerAppCaptureCoordinator`'s own private serial `queue`
+                // (`transition(_:bundleID:to:)`, itself invoked from a
+                // `queue.sync { … }` in `beginStart`/`handleDeviceChange`).
+                // `PerAppCaptureCoordinator.stop(bundleID:)` ALSO does
+                // `queue.sync { … }` on that SAME queue — calling it inline here
+                // would recursively `sync` onto a serial queue we are already
+                // executing on and deadlock the coordinator (and every per-app
+                // capture app-wide) the very first time this race occurs.
+                // `captureControlQueue` is the existing convention for
+                // Core-Audio-touching work triggered by a route/state change (see
+                // the comment above `updateAppRoutes`'s own hand-off to this same
+                // queue, a few hundred lines up).
+                captureControlQueue.async { [weak self] in
+                    self?.perAppCapture.stop(bundleID: bundleID)
+                }
+                return
             }
             if recovered {
                 // Was excluded from the topology while dead; re-adding it rebinds
@@ -1777,6 +1972,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard self.routedBundleIDs.contains(bundleID),
                       case .processNotYetAudible = error
                 else {
+                    // Bookkeeping-hygiene fix: no retry is being scheduled from
+                    // here (either the bundle isn't routed any more, or this is a
+                    // NON-retryable failure while it still is) — a `pendingRetries`
+                    // entry left over from the retry attempt that just landed here
+                    // (or any earlier one) is now stale and must not linger as a
+                    // dangling `DispatchWorkItem` reference.
+                    self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
                     return (justDied, false, 0)
                 }
                 // Indefinite retry: as long as the route is still desired (guard
@@ -2122,10 +2324,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `retryDelay × 2^(attempt-1)`, capped at `processNotYetAudibleMaxBackoff`
     /// (e.g. 2 → 4 → 8 → 10 → 10 … forever). Single-flighted: replaces any retry
     /// already pending for this bundle ID (so N `.failed` events never stack N
-    /// timers). Best-effort (D4): if the route is gone by the time the timer fires,
-    /// `perAppCapture.start` fails fast (`.appNotRunning` or similar) and the
-    /// failure handler above declines to reschedule (route no longer in
-    /// `routedBundleIDs`).
+    /// timers).
+    ///
+    /// CORRECTED: this was previously documented as best-effort-safe on the
+    /// assumption that "if the route is gone by the time the timer fires,
+    /// `perAppCapture.start` fails fast (`.appNotRunning` or similar)". That is
+    /// FALSE whenever the app has started playing audio by the time this fires —
+    /// `start` then SUCCEEDS (lands `.capturing`) even though the route is long
+    /// gone, because this closure captures only `bundleID`, never re-checks
+    /// `routedBundleIDs`/`localBundleIDs`, and `PerAppCaptureCoordinator.start`
+    /// happily builds a brand-new slot from `.idle`. The guard against that
+    /// resurrected/orphaned capture lives at the OTHER end instead, where the
+    /// outcome is actually known: the `.capturing` case in
+    /// `handlePerAppCaptureHealthChange` checks route/local membership before
+    /// accepting a capture, and stops (rather than accepts) an orphaned one. This
+    /// timer is deliberately left unguarded on the route table.
     private func scheduleProcessNotYetAudibleRetry(bundleID: String, attempt: Int) {
         let delay = min(
             processNotYetAudibleRetryDelay * pow(2.0, Double(attempt - 1)),
@@ -2141,28 +2354,152 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             deadline: .now() + delay, execute: work)
     }
 
+    /// React to the WHOLE-SYSTEM tap's state transition (T16, E10). Before this,
+    /// `captureCoordinator.onStateChange` was never wired at all — a `.failed`
+    /// tap (TCC lost mid-session, the aggregate device torn out from under it, a
+    /// bad ASBD read) stayed dead forever unless the user happened to toggle a
+    /// Selected Device afterward (the only other path that re-invokes
+    /// `reconcileCaptureGate`, and only because toggling changes `want`). Runs
+    /// off `stateQueue` (callback context from
+    /// `NativeCaptureCoordinator.onStateChange`, wired in `start()`); hops on
+    /// only for the mutation, mirroring `handlePerAppCaptureHealthChange`.
+    ///
+    /// `.capturing` cancels any pending retry and resets the attempt counter —
+    /// recovered. `.failed` schedules an indefinite capped-exponential-backoff
+    /// retry (mirrors T8's `.processNotYetAudible` retry exactly) ONLY when BOTH:
+    ///   - the error is retryable (`NativeCaptureError.isRetryable` — excludes
+    ///     `.osUnsupported`, which no retry can ever fix), and
+    ///   - capture is still actually desired (`captureRunning`, the gate's own
+    ///     "should the tap be running" intent).
+    /// The second guard has no per-app equivalent to reach for: a per-app
+    /// capture's stray `.capturing` for a route nobody wants any more is caught
+    /// CHEAPLY at that landing site (stopped as an orphan). But there is only
+    /// ONE whole-system tap, and it is `.mutedWhenTapped` — blindly restarting
+    /// it while `captureRunning` is false (nothing selected, or the user just
+    /// deselected everything) would silence the Mac's speakers with the audio
+    /// going nowhere, exactly the bug `reconcileCaptureGate`'s own doc comment
+    /// describes. So the desired-ness check has to happen before EVER calling
+    /// `start()` again, not after.
+    private func handleCaptureCoordinatorStateChange(_ state: NativeCaptureCoordinator.State) {
+        switch state {
+        case .capturing:
+            stateQueue.sync {
+                self.pendingCaptureRetry?.cancel()
+                self.pendingCaptureRetry = nil
+                self.captureRetryCount = 0
+            }
+
+        case .failed(let error):
+            let (shouldRetry, attempt): (Bool, Int) = stateQueue.sync {
+                guard self.captureRunning, error.isRetryable else {
+                    // Bookkeeping-hygiene fix (mirrors `handlePerAppCaptureHealthChange`):
+                    // no retry is being scheduled from here — either capture
+                    // isn't desired any more or this is a non-retryable failure
+                    // — so a `pendingCaptureRetry` left over from an earlier
+                    // attempt is now stale and must not linger as a dangling
+                    // `DispatchWorkItem` reference.
+                    self.pendingCaptureRetry?.cancel()
+                    self.pendingCaptureRetry = nil
+                    return (false, 0)
+                }
+                let attempt = self.captureRetryCount + 1
+                self.captureRetryCount = attempt
+                return (true, attempt)
+            }
+            if shouldRetry {
+                scheduleCaptureRetry(attempt: attempt)
+            }
+
+        case .idle, .creatingTap, .stopping:
+            break
+        }
+    }
+
+    /// Schedule the next whole-system-tap retry with capped-exponential backoff
+    /// (T16, E10) — mirrors `scheduleProcessNotYetAudibleRetry`'s exact shape
+    /// (`retryDelay × 2^(attempt-1)`, capped at `captureRetryMaxBackoff`, e.g.
+    /// 2 → 4 → 8 → 10 → 10 … forever) and its single-flighting (replaces any
+    /// retry already pending so N `.failed` events in a row never stack N
+    /// timers, and a `stop()`/deselect can cancel it via `pendingCaptureRetry`).
+    ///
+    /// UNLIKE that retry — which is deliberately left unguarded on the route
+    /// table because a resurrected/orphaned per-app capture is caught cheaply
+    /// at its OWN `.capturing` landing site — this one RE-CHECKS
+    /// `captureRunning` at FIRE time, right before calling `coordinator.start()`.
+    /// There is only one whole-system tap, and it is `.mutedWhenTapped`: if
+    /// capture was deselected during the backoff wait, blindly starting it here
+    /// would mute the Mac's speakers with nowhere for the captured audio to go
+    /// — the exact bug `reconcileCaptureGate` exists to prevent, and worse than
+    /// an orphaned per-app tap (which only affects one app's exclusion
+    /// bookkeeping, not the user's actual listening experience).
+    /// `reconcileCaptureGate`'s own `coordinator.stop()` branch already cancels
+    /// this timer proactively on a deselect, so this re-check is a defensive
+    /// backstop against the (intentionally tolerated, D4-style) race where the
+    /// timer is already past that check when the cancel lands.
+    private func scheduleCaptureRetry(attempt: Int) {
+        let delay = min(
+            captureRetryDelay * pow(2.0, Double(attempt - 1)),
+            captureRetryMaxBackoff)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let stillWanted: Bool = self.stateQueue.sync { self.captureRunning }
+            guard stillWanted, let coordinator = self.captureCoordinator else { return }
+            self.captureControlQueue.async { coordinator.start() }
+        }
+        stateQueue.sync {
+            self.pendingCaptureRetry?.cancel()
+            self.pendingCaptureRetry = work
+        }
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + delay, execute: work)
+    }
+
     /// Forward an app-quit notification from the AppKit boundary (T8, edge case 1:
-    /// a routed app's process quits mid-stream). `AppDelegate` observes
+    /// a routed app's process quits mid-stream; Bug 2: a `.currentDevice`-routed
+    /// app's process quits mid-stream). `AppDelegate` observes
     /// `NSWorkspace.didTerminateApplicationNotification` and calls this with the
     /// terminated app's bundle ID — Core can't observe AppKit notifications itself,
     /// mirroring the `processResolver` injection.
     ///
-    /// A no-op unless `bundleID` currently has an active `.device(id:)` route: the
-    /// PERSISTED route survives the quit (the silent-fallback-to-`.noRedirect`
-    /// behavior is reserved for a lost DEVICE, not a quit app — the user may
-    /// relaunch the app and expect its route to still apply). Its per-app capture
-    /// is stopped, it's marked dead so the mixer topology drops it immediately, and
-    /// any pending `.processNotYetAudible` retry is cancelled (retrying a tap for a
-    /// pid that no longer exists is pointless).
+    /// A no-op unless `bundleID` currently has an active `.device(id:)` route OR is
+    /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, which meant a
+    /// "play on this Mac" app's per-app Core Audio tap was NEVER stopped on quit:
+    /// `AppRoutingController.resetDeviceRoute` deliberately never touches
+    /// `.currentDevice` — see its doc comment — so no route-table change ever
+    /// re-drove `updateAppRoutes` for it either, leaving the tap registered against
+    /// a dead pid in coreaudiod forever). Either way the PERSISTED route survives
+    /// the quit (the silent-fallback-to-`.noRedirect` behavior is reserved for a
+    /// lost DEVICE, not a quit app — the user may relaunch the app and expect its
+    /// route/pick to still apply). The per-app capture is stopped, it's marked dead
+    /// so the mixer topology drops it immediately (a no-op for a `.currentDevice`
+    /// bundle — it was never in the mixer topology to begin with), and any pending
+    /// `.processNotYetAudible` retry is cancelled (retrying a tap for a pid that no
+    /// longer exists is pointless).
     public func handleAppTerminated(bundleID: String) {
-        let wasRouted: Bool = stateQueue.sync {
+        let wasCaptured: Bool = stateQueue.sync {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.retryCounts.removeValue(forKey: bundleID)
-            return self.routedBundleIDs.contains(bundleID)
+            return self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID)
         }
-        guard wasRouted else { return }
+        guard wasCaptured else { return }
         perAppCapture.stop(bundleID: bundleID)
-        let justDied: Bool = stateQueue.sync { self.deadBundleIDs.insert(bundleID).inserted }
+        let justDied: Bool = stateQueue.sync {
+            // Bookkeeping-hygiene fix: the capture just stopped for real (a
+            // quit, not a tap rebuild) — forget the "ever captured" bit so a
+            // later relaunch's fresh `.capturing` (`handleAppLaunched`) is
+            // recognised as a first capture, not a stale recapture. (In
+            // practice `resetAirPlaySessionForRoutedApp` is ALSO a guaranteed
+            // no-op for this exact call path today — `handleAppLaunched` calls
+            // `perAppCapture.start` synchronously-to-completion BEFORE its own
+            // `republishMixerTopology()` runs, so `routeMixer.streamID(for:)`
+            // is still nil when `.capturing` lands — but this keeps the
+            // invariant this field documents true regardless of that other
+            // function's current implementation, and keeps it in sync with
+            // `deadBundleIDs`/`retryCounts`/`pendingRetries`, all cleared at
+            // this same capture-stop point.)
+            self.everCapturedBundleIDs.remove(bundleID)
+            return self.deadBundleIDs.insert(bundleID).inserted
+        }
         if justDied { republishMixerTopology() }
         // Notify the UI that this routed app is no longer running so it can
         // show an offline indicator on the row (T4). The route itself persists
@@ -2171,30 +2508,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// React to an app-launch notification forwarded from the AppKit boundary
-    /// (T4, bug fix: relaunching a routed app did not restart its capture).
-    /// `AppDelegate` observes `NSWorkspace.didLaunchApplicationNotification` and
-    /// calls this; Core can't observe AppKit notifications itself, mirroring the
+    /// (T4, bug fix: relaunching a routed app did not restart its capture; Bug 2:
+    /// same fix extended to a relaunched `.currentDevice`-routed app). `AppDelegate`
+    /// observes `NSWorkspace.didLaunchApplicationNotification` and calls this; Core
+    /// can't observe AppKit notifications itself, mirroring the
     /// `handleAppTerminated` / `processResolver` injection pattern.
     ///
-    /// Only acts when `bundleID` currently has an active `.device(id:)` route —
-    /// a non-routed app launch is silently ignored. On a match it:
+    /// Only acts when `bundleID` currently has an active `.device(id:)` route OR is
+    /// routed `.currentDevice` (Bug 2 fix — was `.device`-only, so a "play on this
+    /// Mac" app's capture never restarted after `handleAppTerminated` stopped it) —
+    /// a non-routed, non-local app launch is silently ignored. On a match it:
     ///  - Clears any dead/retry tracking left over from a prior quit
     ///  - Restarts the per-app Core Audio capture tap (the previous one was
     ///    torn down by `handleAppTerminated` when the process exited)
     ///  - Republishes the mixer topology so `.routedApps` and the engine stream
-    ///    binding reflect the restarted app
+    ///    binding reflect the restarted app (a no-op for a `.currentDevice`
+    ///    bundle — see `resetAirPlaySessionForRoutedApp`'s doc comment; the
+    ///    relaunched local player itself comes back through
+    ///    `handleLocalCaptureStateChange`'s `.capturing` case once the capture
+    ///    below reaches it, not through this republish)
     ///  - Emits `.routedAppRunning(bundleID:isRunning:true)` so the UI can
     ///    clear any offline indicator it had shown for this app
     public func handleAppLaunched(bundleID: String) {
-        let hasRoute: Bool = stateQueue.sync {
-            guard self.routedBundleIDs.contains(bundleID) else { return false }
+        let hasCapture: Bool = stateQueue.sync {
+            guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else { return false }
             // Clear any dead/retry state from a prior quit (edge case 1 cleanup).
             self.deadBundleIDs.remove(bundleID)
             self.retryCounts.removeValue(forKey: bundleID)
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             return true
         }
-        guard hasRoute else { return }
+        guard hasCapture else { return }
         // Restart the per-app capture tap for the relaunched process. This is
         // the same call `updateAppRoutes` issues for newly-routed apps; calling
         // it here means a relaunch self-heals without any route-table change.
@@ -2303,8 +2647,46 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return Int(peak)
     }
 
+    /// How many mixed buffers between write-backlog samples. At ~44.1 kHz with
+    /// typical buffer sizes this is a handful of seconds — frequent enough to
+    /// catch a backlog trend, rare enough that neither the snapshot read (which
+    /// takes the guard's own lock) nor a Telemetry write ever lands at buffer
+    /// cadence on this RT-adjacent queue.
+    private static let backlogSampleInterval = 500
+
+    /// Sample the engine's write-backpressure guard every `backlogSampleInterval`
+    /// buffers and emit a Telemetry line ONLY when the cumulative dropped-write
+    /// count actually moves. Counters are confined to the mixer's callback queue
+    /// (this is the sole caller, and `onMixedBuffer` is serialized on that queue),
+    /// so no additional lock is needed.
+    ///
+    /// `dropped > 0` is the definitive signal that audio is being discarded by
+    /// backpressure rather than interrupted by a rebuild/reset — the distinction
+    /// the routing telemetry cannot make. `maxInFlightSeconds` climbing toward the
+    /// cap across samples means the engine thread is draining slower than capture
+    /// produces (clock drift / a stalled receiver), which is the underlying
+    /// condition the drop is merely the symptom of.
+    private func sampleWriteBacklogIfDue() {
+        backlogSampleCounter &+= 1
+        guard backlogSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeBacklogSnapshot()
+        guard snap.droppedWrites != lastReportedDroppedWrites else { return }
+        let delta = snap.droppedWrites &- lastReportedDroppedWrites
+        lastReportedDroppedWrites = snap.droppedWrites
+        Telemetry.log(.airplay, "write_backlog_drop", [
+            "droppedTotal": String(snap.droppedWrites),
+            "droppedDelta": String(delta),
+            "maxInFlightSeconds": String(format: "%.3f", snap.maxInFlightSeconds),
+            "streamsTracked": String(snap.streamsTracked),
+        ])
+    }
+
     private func handleDestinationSetsChanged(_ sets: [AppRouteMixer.DestinationSet]) {
         stateQueue.sync {
+            // Remember the topology so a LATER device discovery can re-drive this
+            // binding pass for a target that wasn't discovered yet (see
+            // `addOrUpdate`'s per-app re-drive).
+            self.lastDestinationSets = sets
             // --- .routedApps diff (UI signal; independent of device discovery) ---
             var newAppNames: [String: [String]] = [:]
             for set in sets {
@@ -2344,7 +2726,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (deviceID, stream) in newBindings {
                 let outputID = self.outputIDs[deviceID]!
                 if let old = self.streamBindings[deviceID] {
-                    if old != stream { ops.append(.rebind(outputID, stream)) }
+                    if old != stream {
+                        ops.append(.rebind(outputID, stream))
+                        // Bookkeeping-hygiene fix: this topology-driven rebind
+                        // supersedes any pending (explicit-reset) rebind-recovery
+                        // retry for the SAME device, exactly like the `.unbind`
+                        // loop below already does for a device leaving routing
+                        // entirely — otherwise a stale backed-off recovery attempt
+                        // can fire later against a device that has already moved
+                        // on to a different stream.
+                        self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                        self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                    }
                 } else {
                     ops.append(.bind(outputID, stream))
                 }
@@ -3142,6 +3535,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
+
+        // PER-APP redirect recovery (counterpart to the whole-system re-kick
+        // above). A redirect TARGET is deliberately NOT in `desiredOn` — T7 keeps
+        // app-route targets out of the whole-system output set — so the recovery
+        // above can never cover it. Meanwhile `handleDestinationSetsChanged` binds
+        // "only for discovered devices": a route restored at LAUNCH is applied
+        // ~tens of ms in, long before Bonjour finds the target, so the device was
+        // silently dropped from the binding pass with nothing to re-drive it. The
+        // app then captured audio that went nowhere — a redirect that stayed
+        // SILENT until the user re-picked the destination by hand.
+        //
+        // So: once a targeted device becomes streamable and engine-registered, if
+        // it still has no per-app stream binding, re-run the binding pass with the
+        // cached topology. Idempotent for devices already bound (same stream ⇒ no
+        // op); the newly-discovered one now passes the `outputIDs != nil` filter
+        // and gets its `.bind`.
+        if streamableNow,
+           self.outputIDs[id] != nil,
+           self.streamBindings[id] == nil,
+           self.lastDestinationSets.contains(where: { $0.deviceIDs.contains(id) }) {
+            let sets = self.lastDestinationSets
+            AudioDiag.log("per-app redirect target \(id) discovered after its route was applied — re-driving stream binding")
+            Telemetry.log(.airplay, "app_route_rebind_on_discovery", ["device": id])
+            // MUST hop OFF `stateQueue`: we are already inside it here, and
+            // `handleDestinationSetsChanged` takes it with `.sync`.
+            DispatchQueue.global().async { [weak self] in
+                self?.handleDestinationSetsChanged(sets)
+            }
+        }
     }
 
     /// A device dropped off the network. It stays in the model as unavailable (so a
@@ -3762,6 +4184,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let want = captureGateWantsCaptureLocked()
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
+        if !want {
+            // T16/E10 hygiene: capture is no longer desired — cancel any
+            // pending whole-system-tap retry rather than let it fire later.
+            // `scheduleCaptureRetry`'s own fire-time `captureRunning` re-check
+            // would also catch this (calling `coordinator.start()` on a tap
+            // nobody wants would re-mute the Mac's speakers for nothing — the
+            // exact bug this gate exists to prevent), but there's no reason to
+            // let a stale timer linger past the moment its outcome is decided.
+            pendingCaptureRetry?.cancel()
+            pendingCaptureRetry = nil
+        }
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
         }
@@ -4121,9 +4554,22 @@ protocol EngineControlling: Sendable {
     /// `NativeBackendTests` spy) compiles unchanged and keeps its prior
     /// all-healthy behavior.
     var ptpClockAvailable: Bool { get async }
+
+    /// Diagnostic snapshot of the engine's write-path backpressure guard (T14):
+    /// cumulative writes DROPPED because a stream's un-drained backlog hit the
+    /// cap, plus the current worst-case backlog. Read-only and side-effect-free —
+    /// it reports what the guard already did, it never gates a write. Surfaced so
+    /// a live run can tell "audio is being discarded by backpressure" apart from
+    /// "audio is being interrupted by a rebuild/reset", which the routing
+    /// telemetry already covers.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot
 }
 
 extension EngineControlling {
+    /// Default: an all-zero (healthy) snapshot, so every existing test double
+    /// compiles unchanged. ``EngineAdapter`` overrides this with the real read.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot { WriteBacklogSnapshot() }
+
     /// Default: legacy single-stream behavior (`streamId` 0), so a conformer
     /// that predates T2 doesn't need updating. ``EngineAdapter`` overrides this
     /// with the real forwarding call.
@@ -4151,6 +4597,9 @@ struct EngineAdapter: EngineControlling {
 
     func start() async throws { try await engine.start() }
     func stop() async { await engine.stop() }
+    /// Real read of the write-path backpressure guard (T14 diagnostic).
+    /// `nonisolated` on the engine, so no hop/await is needed here.
+    func writeBacklogSnapshot() -> WriteBacklogSnapshot { engine.writeBacklogSnapshot() }
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
         try await engine.updateDiscovery(descriptor)
@@ -4218,6 +4667,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Fired once per captured buffer with its level in 0.0…1.0, from the tap's
     /// delivery thread. See ``NativeCaptureCoordinator/onLevel``.
     var onLevel: (@Sendable (_ rms: Float) -> Void)? { get set }
+    /// Fired once per state transition (T16, E10 — the whole-system-tap
+    /// `.failed` retry) so `NativeBackend` can react to `.failed`/`.capturing`
+    /// the same way it already reacts to `PerAppCaptureCoordinator.onStateChange`.
+    /// See ``NativeCaptureCoordinator/onStateChange``.
+    var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? { get set }
 
     /// Fired when the whole-system tap was rebuilt specifically because the tapped
     /// output device changed or renegotiated its nominal sample rate (T2), so

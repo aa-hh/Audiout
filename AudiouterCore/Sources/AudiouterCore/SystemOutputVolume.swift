@@ -537,7 +537,10 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
         guard let block = deviceBlock else { return }
         for registration in deviceRegistrations {
             var address = registration.address
-            AudioObjectRemovePropertyListenerBlock(registration.objectID, &address, queue, block)
+            let status = AudioObjectRemovePropertyListenerBlock(registration.objectID, &address, queue, block)
+            if status != noErr {
+                AudioDiag.log("SystemOutputVolume.removeDeviceListenersLocked AudioObjectRemovePropertyListenerBlock failed for object \(registration.objectID): \(status)")
+            }
         }
         deviceRegistrations = []
         deviceBlock = nil
@@ -563,7 +566,10 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     private func removeDefaultDeviceListenerLocked() {
         guard let block = defaultDeviceBlock, let registration = defaultDeviceRegistration else { return }
         var address = registration.address
-        AudioObjectRemovePropertyListenerBlock(registration.objectID, &address, queue, block)
+        let status = AudioObjectRemovePropertyListenerBlock(registration.objectID, &address, queue, block)
+        if status != noErr {
+            AudioDiag.log("SystemOutputVolume.removeDefaultDeviceListenerLocked AudioObjectRemovePropertyListenerBlock failed: \(status)")
+        }
         defaultDeviceBlock = nil
         defaultDeviceRegistration = nil
     }

@@ -60,6 +60,28 @@ public final class GroupController {
     private(set) public var groups: [Group]
     private(set) public var activeGroupID: String?
 
+    /// Keyed by device id. Cleared WHOLESALE on group-activation transitions
+    /// (`syncActiveGroupToSelection()`, `activateGroup(id:)`,
+    /// `deactivateGroup()` — search `memberState.removeAll()`), never pruned
+    /// per-device. Growth is bounded (one entry per distinct real device id
+    /// this controller has ever muted, not unbounded), but a device that's
+    /// muted once and then permanently leaves the fleet keeps its entry
+    /// forever until the next wholesale clear.
+    ///
+    /// NOT fixed here (audit finding, scoped low-effort/deferred): this class
+    /// has no per-device-removal signal to prune against. `devices` (above)
+    /// always reads `backend.devices` LIVE and on demand — `GroupController`
+    /// never caches a device list or subscribes to `BackendEvent` itself, so
+    /// there's no hook that fires when a device drops out. The nearest
+    /// candidate, `BackendEvent.deviceRemoved`, is also the WRONG signal for
+    /// this even if wired up: its own doc comment says a device "stays in the
+    /// model as unavailable; this signals availability, not deletion" — i.e.
+    /// it fires for an ordinary offline blip, not a permanent departure, so
+    /// pruning on it would drop a reconnecting device's mute state. No sibling
+    /// dictionary in this class prunes per-device either (`dragRatios` below
+    /// is cleared wholesale at drag-end, not per-device). Wiring a real
+    /// permanent-removal signal is a bigger, separate change; left as a
+    /// documented gap rather than building that machinery here.
     private var memberState: [String: MemberState] = [:]
 
     // MARK: Main Out / Selected Devices (SPEC.md §9 2026-07-14b — SoundSource model)

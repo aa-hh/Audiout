@@ -209,8 +209,8 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
         // OPEN for the whole wait so the prompt stays up and, once the user
         // allows, our tone starts flowing through it.
         let tap = SelfProcessTap(processObject: processObject)
-        guard tap.start() else { return .denied }
         defer { tap.teardown() }
+        guard tap.start() else { return .denied }
 
         let deadline = Date().addingTimeInterval(promptAnswerTimeout)
         while Date() < deadline {
@@ -393,6 +393,8 @@ private final class SelfProcessTap: @unchecked Sendable {
         self.processObject = processObject
     }
 
+    deinit { teardown() }
+
     func peak() -> Float { peakLock.withLock { _peak } }
 
     /// Create the muted self-tap + aggregate + IOProc and start it. Returns false
@@ -470,16 +472,20 @@ private final class SelfProcessTap: @unchecked Sendable {
     /// Stop + destroy the IOProc, aggregate, and tap (order matters). Idempotent.
     func teardown() {
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)") }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)") }
             aggregateID = kAudioObjectUnknown
         }
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)") }
             tapID = kAudioObjectUnknown
         }
     }

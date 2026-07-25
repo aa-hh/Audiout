@@ -260,6 +260,7 @@ srp_user_new(enum hash_alg alg, SRP_NGType ng_type, const char *username,
   if (!usr)
     return NULL;
 
+  free_ng(usr->ng);
   bnum_free(usr->a);
   bnum_free(usr->A);
   bnum_free(usr->S);

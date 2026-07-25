@@ -73,6 +73,7 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 | `EngineThread` | Owns the one `event_base` + OS thread. |
 | `AirPlayTypes.swift` | Swift-facing types, incl. `DeviceDescriptor`, `OutputState`. |
 | `CompletionRegistry` | Bridges C callback-id dispatcher to `async`/`await`. |
+| `WriteBacklogGuard` | Per-stream, time-based backpressure cap on `write(streams:pts:)` (`nonisolated`, `NSLock`-guarded — the write path never hops the actor executor). Admits/drops audio-seconds against a fixed cap (`maxInFlightAudioSeconds`); the reservation releases when the enqueued write body actually drains on the engine thread, never merely on `enqueue`'s `true` return — self-heals, never a one-shot trip. The one genuinely unbounded-growth path in this layer if the engine thread ever stalls; everything else here is confirmed bounded/symmetric. |
 | `Sources/CAirPlayEngine/` | Vendored+shimmed C cluster. |
 | `Sources/engine-probe/` | Gated one-device live-session CLI. |
 | `Sources/ptp-helper/` (`ptp-helper` target) | Privileged root PTP daemon: binds 319/320, finds nothing. |

@@ -446,10 +446,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (and, before the cold-prompt guard, re-prompt) on a later launch.
         // `resetDeviceRoute` reverts a `.device` redirect back to `.noRedirect` and
         // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing the
-        // per-app tap down through the SAME un-route path a manual change takes
-        // (so it supersedes the old `handleAppTerminated` "keep route, show
-        // offline" behavior). Core can't observe AppKit notifications itself, so
-        // this is the one place that forwards the quit across the boundary. Never
+        // per-app tap down through the SAME un-route path a manual change takes —
+        // but ONLY for a `.device` route: it deliberately leaves a `.currentDevice`
+        // ("play on this Mac") route untouched (see its own doc comment), so on its
+        // own it can't tear down THAT tap on quit — it would otherwise leak
+        // (registered in coreaudiod against a dead pid) forever. Forwarding to
+        // `backend.handleAppTerminated` below covers both cases directly (capture
+        // lifecycle, orthogonal to `resetDeviceRoute`'s route persistence) —
+        // called FIRST so its routed/local membership check sees the pre-reset
+        // state rather than racing `resetDeviceRoute`'s own cascade having already
+        // changed it. Core can't observe AppKit notifications itself, so this is
+        // the one place that forwards the quit across the boundary. Never
         // explicitly removed: this observer's lifetime is the app's own
         // (AppDelegate is never deallocated before termination).
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -462,6 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     as? NSRunningApplication,
                 let bundleID = app.bundleIdentifier
             else { return }
+            (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
             self?.appRouting.resetDeviceRoute(bundleID: bundleID)
         }
 
@@ -808,11 +816,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///     Ignored when re-fronting an already-open window.
     @MainActor
     private func presentSetup(reason: OnboardingReason = .firstRun, model providedModel: SetupModel? = nil) {
+        // Re-entry guard (matches the three other call sites' `onboardingWindowController
+        // == nil` pattern above). Both this branch and the memory-leak branch hit
+        // this independently, which is how confident we are it's real: without the
+        // guard, a second call while a first onboarding window is still open
+        // (reachable via Settings ▸ General's "Run Setup Again…" — the window is
+        // normal-level, so Settings stays clickable) silently overwrites
+        // `onboardingWindowController`. Releasing the old controller fires its
+        // `windowWillClose` → `onFinished`, which nils the reference to the NEW
+        // controller just stored, leaving it unretained so it deallocates and
+        // vanishes — and orphaning the first window's two live 1.5 s polling
+        // Timers (`OnboardingViewController`), never stopped. Observed live as
+        // "the setup window just closes while I'm still granting permissions."
+        // Re-front the existing window instead, so a repeat click visibly does
+        // something rather than silently no-op'ing.
         if let existing = onboardingWindowController {
             existing.present()
             return
         }
 
+        // Generation stamp: `onFinished` below only clears
+        // `onboardingWindowController` when the closing controller is still the
+        // CURRENT one, so a late teardown can never clobber a newer window even
+        // if a future caller reintroduces re-entrancy past the guard above.
         onboardingPresentationGeneration += 1
         let presentationGeneration = onboardingPresentationGeneration
 
@@ -1351,6 +1377,12 @@ final class QuittingIndicatorPanel: NSPanel {
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
+        // A programmatic NSPanel defaults `isReleasedWhenClosed` to true (AppKit
+        // releases it on close) — combined with the strong `quittingIndicator`
+        // property that ALSO releases it (cleared to nil after close), that's a
+        // double-release. This class has no window controller to own that
+        // instead, so ARC via the property is the one owner.
+        isReleasedWhenClosed = false
         isFloatingPanel = true
         level = .floating
         isOpaque = false

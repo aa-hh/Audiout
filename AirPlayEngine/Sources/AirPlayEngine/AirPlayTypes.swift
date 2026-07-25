@@ -244,3 +244,38 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
         self.lastGapSeconds = lastGapSeconds
     }
 }
+
+/// A diagnostic snapshot of the write-path backpressure guard (memory-leak
+/// audit 2026-07-23 — the one unbounded-growth site found in this layer).
+///
+/// `write(streams:pts:)` heap-copies each PCM buffer and enqueues a closure onto
+/// the single engine thread. With no cap, a thread that stops draining (see
+/// `EngineThread.stop()`'s documented "vendored callback wedged in a blocking
+/// call" mode) lets producers pile PCM-carrying closures onto libevent's pending
+/// list without bound — hundreds of KB/s per active stream for as long as the
+/// stall lasts. The guard bounds the *un-drained* audio queued per stream to a
+/// fixed audio-time cap and drops further writes past it. Diagnostic-only, like
+/// ``WriteCadenceSnapshot``: this snapshot reports what the guard did; it never
+/// itself gates a write.
+public struct WriteBacklogSnapshot: Sendable, Equatable {
+    /// Cumulative `write(streams:pts:)` calls dropped (across all streams)
+    /// because a stream's un-drained backlog was already at the cap. Zero in
+    /// healthy operation. Monotonically non-decreasing except across a `reset()`.
+    public var droppedWrites: UInt64
+    /// The largest per-stream un-drained backlog right now (seconds of audio).
+    /// Sits near zero when the engine thread is draining normally; approaches the
+    /// cap only while a stream is stalled.
+    public var maxInFlightSeconds: Double
+    /// How many streams currently carry a non-zero un-drained backlog.
+    public var streamsTracked: Int
+
+    public init(
+        droppedWrites: UInt64 = 0,
+        maxInFlightSeconds: Double = 0,
+        streamsTracked: Int = 0
+    ) {
+        self.droppedWrites = droppedWrites
+        self.maxInFlightSeconds = maxInFlightSeconds
+        self.streamsTracked = streamsTracked
+    }
+}

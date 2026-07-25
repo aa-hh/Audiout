@@ -32,6 +32,9 @@ final class MixerWindowControllerTests: IsolatedTestCase {
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
         let window = MixerWindowController(groupController: controller,
                                            frameAutosaveName: mixerWindowAutosaveName)
+        // Headless test seam: simulate the window being visible so update(devices:)
+        // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
+        window.test_isWindowVisibleOverride = true
         window.update(devices: backend.devices)
         return (window, controller, backend)
     }
@@ -77,6 +80,9 @@ final class MixerWindowControllerTests: IsolatedTestCase {
                                                    loadPersisted: false)
         let window = MixerWindowController(groupController: controller, deviceIconController: iconController,
                                            frameAutosaveName: mixerWindowAutosaveName)
+        // Headless test seam: simulate the window being visible so update(devices:)
+        // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
+        window.test_isWindowVisibleOverride = true
         window.update(devices: backend.devices)
         return (window, controller, backend, iconController)
     }

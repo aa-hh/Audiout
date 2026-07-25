@@ -1167,6 +1167,46 @@ public actor AirPlayEngine {
         schedulingProbe.snapshot()
     }
 
+    // MARK: - Audio I/O workgroup (T7, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md)
+
+    /// Join the engine thread to the I/O workgroup published by `deviceID`, which
+    /// MUST be the capture AGGREGATE device's `AudioObjectID` — never the default
+    /// output device's. Measured during planning: the two publish DISTINCT
+    /// workgroups that do NOT nest, so joining the output device's and then the
+    /// aggregate's returns `EALREADY` and the thread ends up in the wrong one.
+    ///
+    /// The engine thread is the target because, until Stage 2 splits a dedicated
+    /// real-time send thread out, IT is the thread doing the audio work: it runs
+    /// `event_base_dispatch`, and the whole `outputs_write` → `airplay_write` →
+    /// encode → encrypt → send path executes inside the closures enqueued onto it
+    /// by `write(streams:pts:)`. The capture IOProc's own delivery thread is NOT a
+    /// candidate: it is a HAL-owned/dispatch-serviced context we neither own nor
+    /// can pin an identity to, and the HAL already runs it inside the device's
+    /// workgroup — which is precisely the workgroup we are asking to be scheduled
+    /// alongside.
+    ///
+    /// `nonisolated` and fire-and-forget (same rationale as `write`): the caller is
+    /// the capture coordinator on its own state queue, and the actual join is
+    /// marshaled onto the engine thread, which is the only thread allowed to
+    /// perform it. Returns `false` only when there is no engine thread to schedule
+    /// onto (pre-`start()` / post-`stop()`), in which case there is no membership
+    /// to manage. A join that fails at the Core Audio level is reported by
+    /// `EngineThread` and is deliberately non-fatal — see its `EINVAL` handling.
+    @discardableResult
+    public nonisolated func joinIOWorkgroup(deviceID: UInt32) -> Bool {
+        engineThreadHolder.current?.updateWorkgroup(deviceID: deviceID) ?? false
+    }
+
+    /// Drop the engine thread's I/O workgroup membership, if any. Called before the
+    /// aggregate that published the workgroup is destroyed (tap teardown/recreate),
+    /// so the next `joinIOWorkgroup` starts from a clean slate — see
+    /// `EngineThread.updateWorkgroup` for why leave-then-join is mandatory rather
+    /// than merely tidy.
+    @discardableResult
+    public nonisolated func leaveIOWorkgroup() -> Bool {
+        engineThreadHolder.current?.updateWorkgroup(deviceID: nil) ?? false
+    }
+
     /// Test/diagnostic seam: reset the cadence counters (e.g. after a known
     /// gap such as a deliberate pause) without recreating the engine.
     func resetWriteCadence() {

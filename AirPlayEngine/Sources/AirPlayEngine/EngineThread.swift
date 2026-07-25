@@ -55,6 +55,109 @@ final class EngineThread: @unchecked Sendable {
     private static let evTimeout: Int16 = 0x01
     private static let evPersist: Int16 = 0x10
 
+    // MARK: Audio I/O workgroup membership (T7)
+
+    /// This thread's CURRENT `os_workgroup` membership token, or `nil` when it is
+    /// not joined to one. `OpaquePointer` bridges the shim's opaque
+    /// `engine_workgroup_token *`.
+    ///
+    /// THREAD IDENTITY IS THE WHOLE POINT. `os_workgroup_join`/`leave` act ONLY on
+    /// the calling thread, so both this property's mutations and the C calls that
+    /// produce/consume it happen exclusively on THIS thread — every public entry
+    /// point below funnels through `enqueue`, and `threadMain`'s own exit path
+    /// reads it inline. Nothing else may touch it, which is also why it needs no
+    /// lock (single-thread confinement, the same discipline the rest of the C
+    /// cluster keeps).
+    private var workgroupToken: OpaquePointer?
+
+    /// The `AudioObjectID` whose workgroup `workgroupToken` came from — the
+    /// AGGREGATE device the capture tap built, never the default output device
+    /// (measured: the two are distinct and do NOT nest, so joining the wrong one
+    /// and then the right one returns `EALREADY`). Diagnostic/logging only;
+    /// confined to this thread exactly like `workgroupToken`.
+    private var workgroupDeviceID: UInt32?
+
+    /// Point this thread's workgroup membership at `deviceID`'s I/O workgroup, or
+    /// at nothing when `deviceID` is `nil`.
+    ///
+    /// Callable from ANY thread: the work is marshaled onto the engine thread,
+    /// because that is the thread the join/leave must happen on. Returns `false`
+    /// when it could not be scheduled at all (no base — pre-`start()`/post-`stop()`),
+    /// in which case there is no membership to worry about anyway.
+    ///
+    /// LEAVE-THEN-JOIN, ALWAYS, AND IN ONE CLOSURE. The two halves are deliberately
+    /// not separate scheduled units: a single closure makes the ordering structural
+    /// rather than a property of two racing enqueues. And the order is forced —
+    /// `os_workgroup_join` on a thread that is already in a non-nesting workgroup
+    /// returns `EALREADY` and joins nothing, so a join-then-leave shape would both
+    /// fail to join the new workgroup AND then drop the old membership, leaving the
+    /// thread in no workgroup at all. (Apple documents no nesting guarantee between
+    /// two unrelated device workgroups; the plan's measurement confirms `EALREADY`
+    /// for this exact pair.) Sequential `updateWorkgroup` calls likewise stay
+    /// ordered because `enqueue` preserves FIFO order on the engine thread.
+    ///
+    /// `tracked: false` is REQUIRED here, not an optimization: a tracked closure
+    /// left over at teardown is run by `stop()`'s sweep — which executes on the
+    /// STOPPING thread, not the engine thread — and a join/leave issued from the
+    /// wrong thread is exactly the undefined behavior this file is guarding
+    /// against. Dropping a late membership change instead is correct: `threadMain`
+    /// unconditionally leaves on its way out.
+    @discardableResult
+    func updateWorkgroup(deviceID: UInt32?) -> Bool {
+        enqueue({ [weak self] in
+            self?.applyWorkgroupOnEngineThread(deviceID: deviceID)
+        }, tracked: false)
+    }
+
+    /// The engine-thread half of `updateWorkgroup`. MUST run on the engine thread.
+    private func applyWorkgroupOnEngineThread(deviceID: UInt32?) {
+        // Leave first — unconditionally, even when re-joining the same id. See
+        // `updateWorkgroup` for why this order is not negotiable.
+        leaveWorkgroupOnEngineThread()
+
+        guard let deviceID else { return }
+
+        var token: OpaquePointer?
+        let rc = engine_workgroup_join(deviceID, &token)
+        switch rc {
+        case 0:
+            workgroupToken = token
+            workgroupDeviceID = deviceID
+            log.notice("engine thread joined audio I/O workgroup of device \(deviceID, privacy: .public)")
+        case EINVAL:
+            // NOT an error worth escalating. EINVAL means the target is gone or
+            // never published a workgroup: the aggregate was torn down between the
+            // capture coordinator scheduling this and the engine thread running it
+            // (a tap mid-teardown when a device-change notification fires is a
+            // NORMAL race), or this aggregate simply exposes no
+            // kAudioDevicePropertyIOThreadOSWorkgroup at all (plan risk #6 — only a
+            // synthetic aggregate was ever measured; a tap-bearing one publishing
+            // nothing degrades us to QoS-only, which is a report-it, not a
+            // work-around-it, outcome). Skip: no crash, no retry loop. The next
+            // real lifecycle edge (a tap recreate) will try again on its own.
+            log.info("audio I/O workgroup join skipped for device \(deviceID, privacy: .public): EINVAL (device cancelled/torn down, or it publishes no workgroup) — continuing without workgroup membership")
+        case EALREADY:
+            // Should be unreachable: the leave above always runs first. If it does
+            // fire, the thread is in some OTHER workgroup joined outside this API,
+            // which is a real bug — say so loudly rather than paper over it.
+            log.fault("audio I/O workgroup join returned EALREADY for device \(deviceID, privacy: .public) — the engine thread is already in a workgroup this one does not nest with, joined outside EngineThread.updateWorkgroup")
+        default:
+            log.error("audio I/O workgroup join failed for device \(deviceID, privacy: .public): errno \(rc, privacy: .public)")
+        }
+    }
+
+    /// Drop this thread's workgroup membership, if any. MUST run on the engine
+    /// thread — `os_workgroup_leave` acts only on the calling thread. Idempotent
+    /// (the shim treats a `nil` token as a no-op, and we clear ours either way).
+    private func leaveWorkgroupOnEngineThread() {
+        guard let token = workgroupToken else { return }
+        let previous = workgroupDeviceID
+        workgroupToken = nil
+        workgroupDeviceID = nil
+        engine_workgroup_leave(token)
+        log.notice("engine thread left audio I/O workgroup of device \(previous ?? 0, privacy: .public)")
+    }
+
     init(name: String = "com.airplayengine.engine") {
         // Use a Thread subclass so the run body can call back into `self`
         // without a capture-before-init of a stored `thread` property.
@@ -124,6 +227,16 @@ final class EngineThread: @unchecked Sendable {
 
     private func threadMain() {
         thread_setname("com.airplayengine.engine")
+
+        // T7 EDGE 2 — a thread joined to an os_workgroup MUST NOT simply exit.
+        // Apple's contract is that the join is unwound, on the same thread, before
+        // that thread's function returns; not doing so is UNDEFINED BEHAVIOR, not a
+        // logged error. `defer` (rather than a call before the last `return`) so it
+        // covers EVERY exit path this function has — including the early
+        // evthread/event_base_new failure return above, which today cannot hold a
+        // membership (nothing can join before `start()` publishes the base) but must
+        // not become a hole if this function grows another early return later.
+        defer { leaveWorkgroupOnEngineThread() }
 
         guard EngineThread.evthreadEnabled, let b = event_base_new() else {
             base = nil
@@ -292,6 +405,25 @@ final class EngineThread: @unchecked Sendable {
                     + "blocking call. Leaking the thread + event_base rather than hang the engine actor."
                 FileHandle.standardError.write(Data((msg + "\n").utf8))
                 log.fault("\(msg, privacy: .public)")
+                // T7 EDGE 4 — ACCEPTED, BOUNDED LEAK: the workgroup membership
+                // leaks along with the thread here, and there is NO fix available.
+                // `os_workgroup_leave` acts ONLY on the calling thread; there is no
+                // "leave on behalf of thread X" in the API. So a wedged engine
+                // thread — one stuck in a blocking vendored call, which is the
+                // entire reason this deadline exists — cannot be made to leave from
+                // out here, and calling `leaveWorkgroupOnEngineThread()` on THIS
+                // thread would be worse than the leak: it would be a leave issued
+                // from a thread that never joined, i.e. the undefined behavior the
+                // whole join/leave discipline exists to avoid, on top of a data race
+                // on `workgroupToken` with the thread still running.
+                //
+                // This is deliberately NOT swallowed and NOT filed as a bug to fix:
+                // it is the correct behavior given the API's constraint. The cost is
+                // bounded exactly like the leaked thread + event_base it rides
+                // along with — one membership per wedged stop(), on a path that
+                // already logs `fault`, versus hanging the engine actor forever.
+                // If the wedged thread ever DOES unwind, `threadMain`'s `defer`
+                // (edge 2) still leaves correctly on its way out.
                 // Resume any stranded continuations before returning (a hung
                 // continuation freezes the app — strictly worse than a leak).
                 sweepPending()

@@ -103,6 +103,22 @@ final class DeviceIconWellView: NSView {
         didSet { if isActiveGroup != oldValue { needsDisplay = true } }
     }
 
+    /// True when the membership rail's origin hook lands on this well — i.e.
+    /// the GROUP EDITOR's well, never the device detail pane's. The rail then
+    /// visibly terminates INTO a ring of its own tone rather than butting
+    /// against a neutral hairline edge (design review 2026-07-25: *"have a gold
+    /// border applied around the icon element to make it feel like the rail is
+    /// going into something"*).
+    ///
+    /// It follows the SAME active-group truth the rail does — `gold` when the
+    /// group is the live Main Out target, the quiet `ember` when it's idle — so
+    /// the spine and the ring it lands on are always the same colour, and the
+    /// active/idle distinction the §5.3 gold ring carries is preserved rather
+    /// than flattened into "always gold". Drawing-only.
+    var isRailOrigin: Bool = false {
+        didSet { if isRailOrigin != oldValue { needsDisplay = true } }
+    }
+
     /// Hover/keyboard-focus state — drives the neutral wash (§4.8) drawn in
     /// `draw(_:)`; the badge alpha step-up animates separately.
     private var isHighlighted: Bool = false
@@ -171,7 +187,11 @@ final class DeviceIconWellView: NSView {
     /// Transparency need no special casing here (nothing animates, nothing
     /// is translucent over foreign content).
     override func draw(_ dirtyRect: NSRect) {
-        let strokeWidth = isActiveGroup ? Self.activeRingWidth : Self.hairlineWidth
+        // A rail origin wears the ring at its full width even when idle — the
+        // spine has to land on something, and a 1pt hairline reads as an edge
+        // the rail stops AT rather than one it plugs INTO.
+        let wearsRing = isActiveGroup || isRailOrigin
+        let strokeWidth = wearsRing ? Self.activeRingWidth : Self.hairlineWidth
         // Inset by half the stroke so the edge draws fully inside bounds.
         let rect = bounds.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2)
         let path = NSBezierPath(roundedRect: rect,
@@ -188,7 +208,18 @@ final class DeviceIconWellView: NSView {
             path.fill()
         }
 
-        let edge = isActiveGroup ? Tokens.Color.gold : Tokens.Color.hairline
+        // Gold when the group is the live target; the quiet `ember` when it's
+        // an idle rail origin — the exact tone the rail itself draws in, so the
+        // spine and the ring it lands on never disagree. Everything else keeps
+        // the neutral resting hairline.
+        let edge: NSColor
+        if isActiveGroup {
+            edge = Tokens.Color.gold
+        } else if isRailOrigin {
+            edge = Tokens.Color.ember
+        } else {
+            edge = Tokens.Color.hairline
+        }
         edge.setStroke()
         path.lineWidth = strokeWidth
         path.stroke()

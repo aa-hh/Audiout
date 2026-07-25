@@ -141,6 +141,11 @@ public final class GroupEditorViewController: NSViewController {
 
     public override func loadView() {
         iconWell.translatesAutoresizingMaskIntoConstraints = false
+        // This pane's well is where the membership rail's origin hook lands, so
+        // it wears the ring (gold when active, ember when idle) that the spine
+        // terminates into. The device detail pane's well is NOT a rail origin
+        // and keeps its neutral resting edge.
+        iconWell.isRailOrigin = true
         iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.setAccessibilityLabel("Edit group icon")
@@ -360,7 +365,16 @@ public final class GroupEditorViewController: NSViewController {
             // actually visible between the container's bottom border and the
             // button. 16 left it reading cramped against the border.
             deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 20),
-            deleteButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+            // `<=`, NOT `==`: pinning the button to the PANE's bottom made the
+            // whole chain above it stretch to reach — the column grew, the row
+            // stack (pinned to the column's bottom) grew with it, and the
+            // section's bottom padding silently absorbed every spare point of
+            // pane height. It measured 49.5pt below the last divider against
+            // 36.5pt above the first (design review 2026-07-25). Now the
+            // content keeps its natural height and the slack falls BELOW the
+            // button, where nothing is drawn.
+            deleteButton.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor,
+                                                 constant: -16),
 
             // ANCHORING TRAP: the overlay's LEADING edge must coincide with the
             // rows' leading edge (the column's), not the container's — the

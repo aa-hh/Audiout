@@ -72,7 +72,17 @@ public final class WarmNameFieldCell: NSTextFieldCell {
     // override (which would inset a second time on top of this one).
 
     public override func drawingRect(forBounds rect: NSRect) -> NSRect {
-        super.drawingRect(forBounds: Self.textRect(in: rect))
+        let band = super.drawingRect(forBounds: Self.textRect(in: rect))
+        // VERTICALLY CENTRE the text in the box. `NSTextFieldCell` lays a
+        // single line out at the TOP of whatever rect it's handed, so the name
+        // sat ~4pt high in its own 28pt field — visibly off against the icon
+        // well beside it (design review 2026-07-25). Insetting symmetrically
+        // is flip-agnostic, so this holds whichever way the host view's
+        // coordinate system runs.
+        guard let font else { return band }
+        let line = NSLayoutManager().defaultLineHeight(for: font)
+        guard band.height > line else { return band }
+        return band.insetBy(dx: 0, dy: ((band.height - line) / 2).rounded(.down))
     }
 
     /// The horizontal band the text lives in, inside the drawn box.

@@ -167,9 +167,15 @@ public final class DeviceDetailViewController: NSViewController {
 
         // Sections go in FIRST so they sit behind the content they back
         // (non-interactive either way — `GroupedSectionView.hitTest` is nil).
+        // The HEADER keeps the full spine-gutter inset so its icon + name stay
+        // pinned to the group editor's; the metadata sections below use the
+        // rail-free inset, because no rail runs past them and reserving the
+        // lane left them looking hollow (design review 2026-07-25).
+        headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
+        stateWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         for well in [headerWell, stateWell, groupsWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
-            well.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
             column.addSubview(well)
         }
         for v in [iconWell, nameLabel, stateStack, groupsStack, hintLabel] { column.addSubview(v) }
@@ -220,8 +226,9 @@ public final class DeviceDetailViewController: NSViewController {
 
             stateStack.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
                                             constant: 14 + GroupedSectionView.verticalPadding),
-            stateStack.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                constant: GroupsPaneLayout.contentLeadingInset),
+            stateStack.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
             stateStack.trailingAnchor.constraint(
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
 
@@ -234,8 +241,9 @@ public final class DeviceDetailViewController: NSViewController {
 
             groupsStack.topAnchor.constraint(equalTo: stateWell.bottomAnchor,
                                              constant: 14 + GroupedSectionView.verticalPadding),
-            groupsStack.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                 constant: GroupsPaneLayout.contentLeadingInset),
+            groupsStack.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
             groupsStack.trailingAnchor.constraint(
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
 
@@ -484,6 +492,18 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_headerSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return headerWell.convert(headerWell.bounds, to: view)
+    }
+
+    /// Leading inset of the metadata rows, measured from their section's own
+    /// edge. This pane draws NO rail, so its rows use the tighter
+    /// `railFreeContentLeadingInset` rather than reserving the spine's lane —
+    /// its HEADER still uses the full inset so the icon + name stay pinned to
+    /// the group editor's (design review 2026-07-25).
+    public var test_metadataRowInset: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        let row = stateStack.convert(stateStack.bounds, to: view)
+        let section = stateWell.convert(stateWell.bounds, to: view)
+        return row.minX - section.minX
     }
 
     /// The number of `GroupedSectionView` sections this pane draws (header +

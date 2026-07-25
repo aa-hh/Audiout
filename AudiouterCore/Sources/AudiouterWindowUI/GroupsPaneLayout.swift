@@ -46,11 +46,22 @@ enum GroupsPaneLayout {
 
     /// Where content STARTS inside the column: the group editor's left spine
     /// gutter (Warm Signal v4 §Call-1), which the membership rail owns
-    /// exclusively. The device detail pane draws no rail, so the reserved lane
-    /// simply reads as a wider left margin there — parity is worth more than
-    /// reclaiming it. Derived from the popover's own grid so the two surfaces
+    /// exclusively. Derived from the popover's own grid so the two surfaces
     /// can't drift.
+    ///
+    /// **The HEADER of both panes uses this**, rail or no rail, because the
+    /// icon + name are what visibly jump when the sidebar selection switches
+    /// between a group and a device — keeping them locked is worth carrying an
+    /// unused lane in the device pane's header (design review 2026-07-25).
     static let contentLeadingInset: CGFloat = PopoverColumnGrid.firstElementLeading(indented: false)
+
+    /// Where content starts inside a section that has NO rail running past it —
+    /// the device pane's metadata rows. Reserving the full spine gutter there
+    /// left those sections looking hollow on their leading edge, since nothing
+    /// occupies the lane (design review 2026-07-25: *"it looks empty in devices
+    /// because there's no rail"*). Only rows below the header take this; the
+    /// header keeps ``contentLeadingInset`` so it stays pinned to the editor's.
+    static let railFreeContentLeadingInset: CGFloat = PopoverColumnGrid.leadingInset
     /// Where content STOPS inside a section, measured from the section's
     /// trailing edge.
     static let contentTrailingInset: CGFloat = PopoverColumnGrid.trailingInset

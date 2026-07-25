@@ -131,6 +131,31 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
                        "alignment is worth more than reclaiming it")
     }
 
+    /// The HEADER is pinned across both panes (above), but everything BELOW it
+    /// in the rail-less detail pane is not: reserving the spine's lane there
+    /// left those sections looking hollow on their leading edge, with nothing
+    /// occupying the gap (design review 2026-07-25). The two insets must stay
+    /// genuinely different, or one of the two halves of that decision has been
+    /// quietly undone.
+    func testDetailMetadataRowsUseTheRailFreeInsetNotTheHeaderOne() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.device(id: "d0"))
+        settle(window)
+
+        let rowInset = window.test_detail.test_metadataRowInset
+        let headerInset = window.test_detail.test_headerIconFrame.minX
+            - window.test_detail.test_headerSectionFrame.minX
+
+        XCTAssertEqual(rowInset, GroupsPaneLayout.railFreeContentLeadingInset, accuracy: 0.01,
+                       "no rail runs past the metadata rows, so they don't reserve its lane")
+        XCTAssertLessThan(rowInset, headerInset,
+                          "the rows must sit tighter than the header, which stays pinned to the " +
+                          "editor's for cross-pane alignment")
+        XCTAssertGreaterThan(headerInset - rowInset, 1,
+                             "a difference this small means the rail-free inset has drifted back " +
+                             "toward the header's and the hollow leading edge is returning")
+    }
+
     // MARK: The elastic column
 
     func testSectionsStretchWithThePaneInsteadOfHuggingTheirContent() throws {

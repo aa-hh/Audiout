@@ -34,6 +34,11 @@ core="$repo_root/AudiouterCore"
 
 workers=${AUDIOUTER_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUTER_TEST_LOCK_TIMEOUT:-1800}
+# How many suite runs may proceed at once, machine-wide. Default 2: a single run
+# only reaches ~2.6 of 8 cores (it is wait-bound, not CPU-bound), so two overlap
+# comfortably while still leaving headroom for the developer's own machine.
+# Raise for a beefier box, set to 1 for strict one-at-a-time.
+slots=${AUDIOUTER_TEST_SLOTS:-2}
 
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
 # and every clone on this machine, so they cannot live under $repo_root (each
@@ -78,16 +83,37 @@ fi
 # shlock(1) is the macOS base-system answer to flock(1), which is NOT installed
 # here. It writes our PID atomically and, critically, reclaims the lock if the
 # recorded PID is gone — so an agent killed mid-run cannot wedge the machine.
+#
+# NOT a hard mutex — a COUNTING semaphore of `slots` permits, implemented as
+# `slots` independent shlock files where a run takes the first one it can get.
+#
+# Why not one exclusive lock (the obvious first design, and what this was):
+# that assumed a test run saturates the CPU, so overlapping two would gain
+# nothing. MEASUREMENT SAYS OTHERWISE — a warm `--parallel --num-workers 6` run
+# uses 411s user + 66s sys over 181s wall, i.e. only ~2.6 of 8 cores. The suite
+# is WAIT-bound (timers, expectations), not CPU-bound. Two or three concurrent
+# runs genuinely do overlap, so serialising to exactly one would idle most of
+# the machine AND make four agents queue behind each other for no reason.
+# The cap exists to stop unbounded pile-up, not to enforce single-file.
 acquired=0
+slot_file=""
 if [ "${AUDIOUTER_TEST_NO_LOCK:-0}" = "1" ]; then
-    echo "  suite: AUDIOUTER_TEST_NO_LOCK=1 — not serialising." >&2
+    echo "  suite: AUDIOUTER_TEST_NO_LOCK=1 — not limiting concurrency." >&2
 else
     waited=0
     announced=0
-    while ! /usr/bin/shlock -f "$lock_file" -p $$; do
+    while :; do
+        n=1
+        while [ "$n" -le "$slots" ]; do
+            if /usr/bin/shlock -f "${lock_file}.$n" -p $$; then
+                slot_file="${lock_file}.$n"
+                break
+            fi
+            n=$((n + 1))
+        done
+        [ -n "$slot_file" ] && break
         if [ "$announced" -eq 0 ]; then
-            holder=$(cat "$lock_file" 2>/dev/null || echo '?')
-            echo "  suite: another test run (pid $holder) is using the machine — waiting." >&2
+            echo "  suite: all $slots test slots busy — waiting for one to free." >&2
             announced=1
         fi
         if [ "$waited" -ge "$lock_timeout" ]; then
@@ -98,27 +124,27 @@ else
             # committer cannot see or fix. Falling through runs unlocked, i.e.
             # exactly the pre-runner behaviour, so the worst case is the old
             # contention rather than a wedged agent.
-            echo "  suite: lock busy for ${lock_timeout}s — proceeding UNLOCKED." >&2
-            echo "  (expect contention; check pid in $lock_file if this repeats)" >&2
+            echo "  suite: all slots busy for ${lock_timeout}s — proceeding UNCAPPED." >&2
+            echo "  (expect contention; check ${lock_file}.N pids if this repeats)" >&2
             timed_out=1
             break
         fi
         sleep 5
         waited=$((waited + 5))
     done
-    # Only claim ownership if the loop ENDED because shlock succeeded. On the
-    # timeout path we never took the lock, and installing the release trap
-    # anyway would delete the holder's lock out from under them — freeing it for
-    # a third process and defeating the whole mechanism.
-    if [ "${timed_out:-0}" -eq 0 ]; then
+    # Only install the release trap if we actually HOLD a slot. On the timeout
+    # path `slot_file` is empty; removing someone else's slot file would hand a
+    # permit to a third process and break the cap.
+    if [ "${timed_out:-0}" -eq 0 ] && [ -n "$slot_file" ]; then
         acquired=1
         # Release on ANY exit path, including the failure exit below and a
-        # signal — a lock outliving its holder blocks every other worktree.
-        trap 'rm -f "$lock_file"' EXIT HUP INT TERM
+        # signal — a held slot outliving its holder permanently shrinks the cap.
+        trap 'rm -f "$slot_file"' EXIT HUP INT TERM
     fi
 fi
 
-[ "$acquired" -eq 1 ] && echo "  suite: lock held — running with $workers workers." >&2
+[ "$acquired" -eq 1 ] && \
+    echo "  suite: slot $(basename "$slot_file") of $slots — running with $workers workers." >&2
 
 # --- run --------------------------------------------------------------------
 # `set -e` is off for this one command so a failure reaches the cache logic

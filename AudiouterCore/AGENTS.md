@@ -142,15 +142,25 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
   wraps `swift test --parallel` and adds the two things a bare run cannot do
   on a machine with several worktrees in flight:
-  - **A machine-wide lock** (`/tmp/audiouter-suite.lock`, shared across every
-    worktree and clone). `--num-workers 4` caps one PROCESS; it cannot see the
-    three other agents each running their own capped suite. Four concurrent
-    Guard 4 runs put 16 xctest processes plus four independent compiles on 8
-    cores — a measured 15-minute load average of 73. Runs now queue, and
-    because a test run saturates the CPU anyway, serialising costs nothing in
-    total throughput while keeping the machine usable. Holding the lock means
-    running alone, so the runner uses **6** workers, not 4 — each run is
-    faster than before.
+  - **A machine-wide concurrency CAP** (`AUDIOUTER_TEST_SLOTS`, default **2**) —
+    a counting semaphore over `/tmp/audiouter-suite.lock.N`, shared across every
+    worktree and clone. `--num-workers 4` caps one PROCESS; it cannot see the
+    other agents each running their own capped suite. Four concurrent Guard 4
+    runs put 16 xctest processes plus four independent compiles on 8 cores —
+    measured 15-minute load averages of 29-73. The cap is 2, NOT 1: measured, a
+    warm run uses only ~2.6 of 8 cores (411s user + 66s sys over 181s wall), so
+    the suite is WAIT-bound, not CPU-bound, and two runs genuinely overlap.
+    Serialising to one would idle most of the machine and needlessly queue
+    agents behind each other.
+  - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
+    agent that types `swift test` or `swift build` directly bypasses it
+    entirely, and that is the dominant real-world source of load: while
+    measuring this, two other worktrees were independently running a full serial
+    suite and a `-c release` product build, driving load average to 29 and
+    making an unrelated 4s filtered run take 117s. Prefer `scripts/run-tests.sh`
+    for any full run. This is convention, not enforcement (the PreToolUse nudge
+    hook that tried to enforce it was deliberately removed and must not be
+    rebuilt).
   - **A content-addressed pass cache**: if these exact sources already passed,
     the run is skipped. Agents routinely run the suite by hand and then
     commit, firing Guard 4 on byte-identical sources seconds later.

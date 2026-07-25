@@ -40,6 +40,88 @@ lock_timeout=${AUDIOUTER_TEST_LOCK_TIMEOUT:-1800}
 # Raise for a beefier box, set to 1 for strict one-at-a-time.
 slots=${AUDIOUTER_TEST_SLOTS:-2}
 
+# --- remote overflow --------------------------------------------------------
+# Optional second Mac used ONLY as overflow: when every local slot is busy, hand
+# the run there instead of sitting in a queue. Unset by default — this does
+# nothing until you point it at a host.
+#
+#   AUDIOUTER_TEST_REMOTE_HOST=user@192.168.4.41
+#   AUDIOUTER_TEST_REMOTE_ROOT=~/audiouter-remote-tests   (per-worktree dirs live here)
+#
+# The probe timeout is short ON PURPOSE. The known failure mode of this
+# particular machine is sleeping: it answers ping (sleep proxy) but refuses TCP,
+# so a generous timeout would stall every contended run behind a host that is
+# never going to answer. 5s fails fast and falls back to the local queue.
+remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-}
+remote_root=${AUDIOUTER_TEST_REMOTE_ROOT:-'~/audiouter-remote-tests'}
+remote_probe_timeout=${AUDIOUTER_TEST_REMOTE_TIMEOUT:-5}
+remote_tried=0
+
+# Returns 0 only if the suite ACTUALLY RAN remotely (with $status set to its
+# result). Returns 1 for every "couldn't use the remote" case, so the caller
+# falls back to the local queue.
+#
+# The distinction matters more than it looks: a remote that cannot be reached,
+# cannot sync, or cannot build must NEVER surface as "your tests failed". The
+# toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26),
+# and an agent that reads an infrastructure failure as a code failure will chase
+# a bug that does not exist.
+run_remote() {
+    echo "  suite: local slots busy — trying remote $remote_host ..." >&2
+    if ! ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
+             -o StrictHostKeyChecking=accept-new \
+             "$remote_host" true >/dev/null 2>&1; then
+        echo "  suite: remote unreachable (asleep or offline) — queueing locally instead." >&2
+        return 1
+    fi
+
+    rdir="$remote_root/$(basename "$repo_root")"
+    # Source only: .build is per-machine (absolute paths baked in) and .git is
+    # not needed to compile. Tracked sources are ~20MB/445 files, so after the
+    # first sync this ships only the handful of files an agent actually edited.
+    if ! rsync -az --delete --timeout=30 \
+            --exclude '.build/' --exclude '.git/' --exclude '.claude/' \
+            "$repo_root/" "$remote_host:$rdir/" >/dev/null 2>&1; then
+        echo "  suite: rsync to remote failed — queueing locally instead." >&2
+        return 1
+    fi
+
+    # Mode for the REMOTE run is decided independently of the local machine:
+    # the whole reason we are here is that this Mac is busy and that one is not,
+    # so the remote gets the fast parallel path (~1.8x quicker on an idle host).
+    # An explicitly forced AUDIOUTER_TEST_MODE is still honoured.
+    case "${AUDIOUTER_TEST_MODE:-auto}" in
+        serial) rargs="" ;;
+        *)      rargs="--parallel --num-workers $workers" ;;
+    esac
+
+    # PATH is set explicitly: a non-interactive ssh shell often lacks
+    # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
+    # the keg-only C dependencies.
+    out=$(ssh -o BatchMode=yes "$remote_host" \
+        "export PATH=/opt/homebrew/bin:\$PATH; cd '$rdir/AudiouterCore' && \
+         swift test $rargs $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
+    rc=$?
+    printf '%s\n' "$out" | grep -v '^REMOTE_EXIT:' >&2
+
+    marker=$(printf '%s\n' "$out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2)
+    if [ "$rc" -eq 255 ] || [ -z "$marker" ]; then
+        # 255 is ssh's own error code, and a missing marker means the command
+        # never completed — either way the suite did not produce a verdict.
+        echo "  suite: remote run did not complete (connection dropped) — queueing locally." >&2
+        return 1
+    fi
+
+    status="$marker"
+    if [ "$status" -ne 0 ]; then
+        echo "  suite: FAILED ON REMOTE ($remote_host, Swift/SDK differ from local)." >&2
+        echo "  Confirm locally before treating this as a real failure." >&2
+    else
+        echo "  suite: passed on remote $remote_host." >&2
+    fi
+    return 0
+}
+
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
 # and every clone on this machine, so they cannot live under $repo_root (each
 # worktree has its own) or under .git (ditto).
@@ -112,6 +194,26 @@ else
             n=$((n + 1))
         done
         [ -n "$slot_file" ] && break
+        # OVERFLOW: rather than idle in a queue, hand this run to the remote Mac
+        # if one is configured and awake. Tried ONCE, on first contention only —
+        # re-probing a sleeping host every 5s would add latency to every wait.
+        if [ "$announced" -eq 0 ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
+            remote_tried=1
+            # "$@" forwards the caller's own flags (e.g. --filter Foo) into the
+            # function; a bare `run_remote` would see the function's empty
+            # argument list instead of the script's.
+            if run_remote "$@"; then
+                # A remote PASS is a real pass of these exact sources, so record
+                # it — otherwise the very next commit re-runs the whole suite and
+                # the cache silently does nothing for every overflowed run.
+                if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+                    mkdir -p "$cache_dir"
+                    : > "$stamp"
+                fi
+                # Nothing local was started, so there is no slot or trap to unwind.
+                exit "$status"
+            fi
+        fi
         if [ "$announced" -eq 0 ]; then
             echo "  suite: all $slots test slots busy — waiting for one to free." >&2
             announced=1

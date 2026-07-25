@@ -172,6 +172,30 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ~124s warm), so `auto` picks parallel when nothing else is testing and
     serial when something is — including a bare `swift test` started outside
     this script, which it detects via `pgrep`.
+  - **Remote overflow (opt-in, off by default).** Set
+    `AUDIOUTER_TEST_REMOTE_HOST=user@host` and, when every local slot is busy,
+    the run is handed to that Mac instead of queueing. `rsync`s the WORKING TREE
+    (so uncommitted edits go too, which `git push` cannot do) into a per-worktree
+    directory under `AUDIOUTER_TEST_REMOTE_ROOT`. Cost is negligible: ~22MB/446
+    files on first sync, **~3KB after editing one file**. `.build` is excluded —
+    it bakes in absolute paths and is per-machine.
+    Probe timeout is a deliberate 5s: the known failure mode is the host being
+    ASLEEP, where it answers ping via a sleep proxy but refuses TCP, so a
+    generous timeout would stall every contended run behind a host that will
+    never answer. Any "cannot reach / cannot sync / connection dropped" outcome
+    falls back to the local queue and is NEVER reported as a test failure —
+    toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26)
+    and an agent reading infrastructure trouble as a code failure will chase a
+    bug that does not exist. A genuine remote FAILURE is reported, but flagged
+    to confirm locally first.
+    **Version parity is a smaller risk than it sounds:** the highest OS gate in
+    this repo is `#available(macOS 15, *)` and the deployment target is
+    `.macOS(.v14)`, so a macOS 26 host takes byte-identical code paths to a
+    macOS 27 one — nothing here knows macOS 26/27 exists. The package is also
+    `swift-tools-version:5.10` with no language-mode override, i.e. Swift 5
+    language mode, which does not diverge between 6.3 and 6.4.
+    **UNVERIFIED:** the fallback path is tested, but the remote SUCCESS path has
+    never run — the host was asleep throughout development.
   - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while

@@ -116,15 +116,27 @@ to a backend directly.
   creation (`GroupCreationSheetController`) is a separate, parallel flow.
 - **`MembershipRowView` is a shared checklist row.** Used by both the
   creation sheet and the group editor to present devices as a checkbox list
-  (memberships, not routing). The popover's `DeviceRowView` remains the
-  routing-and-volume row; never conflate them.
+  (memberships, not routing). When shown in the group editor's membership
+  checklist (`Surface.warmPane`), the checkbox becomes an invisible cell +
+  gold `MembershipBusView` node, tied together by a `BusRailOverlayView`
+  rail hooked out of the group's icon well; in the "New Group" creation
+  sheet (`Surface.systemSheet`), it stays a plain stock checkbox row. The
+  popover's `DeviceRowView` remains the routing-and-volume row; never
+  conflate them. Gold on the warm pane measures too low contrast (≈2.3-2.5:1)
+  against the system sheet's white background, so this split confines the
+  gold to where the background can support it.
+- **Membership checklist well and dividers.** The group editor's membership
+  checklist (`MembershipWellView`, private) adds a recessed
+  `Tokens.Color.well` background + `Tokens.Color.hairline` dividers between
+  rows — both tokens already existed and unused until now.
 - **No toolbar, no volume UI.** The window mounts no `NSToolbar` at all —
   the master slider left with the mixer pane (live-test feedback 2026-07-18).
   Anything that changes what you HEAR belongs in the popover.
 - **Auto-select, never a no-op pane.** With no sidebar selection the window
   selects the first saved group's editor; with zero groups it shows
   `GroupsEmptyStateViewController` ("No groups yet" + a New Group button that
-  runs the same creation sheet).
+  runs the same creation sheet). The empty-state subtitle is "Music first —
+  rooms can come later."
 - **Header parity between groups and devices.** `GroupEditorViewController`
   and `DeviceDetailViewController` share the identical large-icon header —
   the same `DeviceIconWellView` (size, edit badge, click-to-pick) — the only
@@ -132,6 +144,9 @@ to a backend directly.
   (commits like a Finder rename) while a device's title is a static label.
   An editable `NSTextField` has no intrinsic width: the title uses a FIXED
   width constraint, not a `<=` cap (a cap alone collapses it to zero).
+  **Known gap:** the group editor's header now sits ~22.5pt right of the
+  device detail header (rail-driven indentation), a visual inconsistency
+  flagged as a follow-up.
 - **No synthesized clicks in headless runs.** Every controller exposes
   `test_*` methods mirroring a real UI action; add one for any new
   user-facing action or it becomes untestable outside a live window.
@@ -193,6 +208,16 @@ to a backend directly.
   window's sidebar/editor/creation-sheet icon wells all resolve it through
   the same `DeviceIcon.resolve(_:default:)` path as device overrides, so a
   group icon and a device icon never fall back differently.
+- **Text colors are frozen; contrast lifts from surfaces, not hue.** The
+  entire Groups window uses Apple's stock semantic text colors
+  (`.secondaryLabel`, `.tertiaryLabel`) everywhere — no warm-tinted text
+  anywhere. Contrast improvements in the Warm Signal redesign come ONLY from
+  new surface layers (the well, hairlines, sidebar tint) — never from text
+  color changes — a locked tradeoff accepted by Alec. Light-mode secondary/
+  tertiary text stays below common readability floors (≈3:1 ceiling), but
+  changing it to warm text risked breaking cohesion with other AppKit panes
+  and other apps. This is not an oversight; don't "fix" it back to warm text
+  without re-confirming the decision.
 
 ## Map
 

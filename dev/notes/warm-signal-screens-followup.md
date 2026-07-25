@@ -13,14 +13,12 @@ the screen review so it isn't lost. These surfaces are file-disjoint from the po
 - (Separately still outstanding from earlier: the feature-intro reference page + contextual
   first-use hints — a distinct follow-up, not this batch.)
 
-## Groups window
-- **Raise content contrast significantly** — the warm-content-on-warm-pane is genuinely too low
-  to read (independent of the headless snapshot's dim inactive-window tone). Increase separation
-  between text, rows, and the pane.
-- **Liquid Glass sidebar on macOS 26+** (the system liquid-glass sidebar material) with a graceful
-  **solid warm fallback** on older systems.
-- (Also still owed from earlier: member rows should adopt the v4 rail/node language — a
-  groups-consistency pass. Can fold in here or stay separate.)
+## Groups window — DONE
+See: `fd77c79` (window-snapshot tool bug fix), `ffe966c` (sidebar Liquid Glass + warm tint),
+`9b97984` (MembershipRowView.Surface split + BusRailOverlayView rail), `1aaf9ac` (MembershipWellView
+well/hairlines). Docs in `AudiouterWindowUI/AGENTS.md` and `AudiouterSharedUI/AGENTS.md`.
+Rules locked: text colors frozen (contrast via surfaces only); row height 28pt (no slack for
+matching popover's 42pt); known header-position gap (rail indentation) flagged as follow-up.
 
 ## Settings
 - **Add tabs** to kill the long vertical scroll: **General / Appearance / Audio** (the existing

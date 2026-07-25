@@ -594,9 +594,9 @@ public enum Tokens {
         /// window background, About panel). Alias of
         /// `NSVisualEffectView.Material.windowBackground`.
         public static var windowBackground: NSVisualEffectView.Material { .windowBackground }
-        /// The source-list sidebar material, applied implicitly by
-        /// `NSTabViewItem.sidebar(withViewController:)` in
-        /// `SidebarViewController`/`MixerWindowController`. Alias of
+        /// The source-list sidebar material, applied via
+        /// `NSSplitViewItem(sidebarWithViewController:)` in
+        /// `MixerWindowController`. Alias of
         /// `NSVisualEffectView.Material.sidebar`.
         public static var sidebar: NSVisualEffectView.Material { .sidebar }
     }

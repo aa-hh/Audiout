@@ -172,9 +172,27 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ~124s warm), so `auto` picks parallel when nothing else is testing and
     serial when something is — including a bare `swift test` started outside
     this script, which it detects via `pgrep`.
-  - **Remote overflow (opt-in, off by default).** Set
-    `AUDIOUTER_TEST_REMOTE_HOST=user@host` and, when every local slot is busy,
-    the run is handed to that Mac instead of queueing. `rsync`s the WORKING TREE
+  - **Remote Mac (opt-in, off by default).** Configure with `git config`, NOT an
+    env var or a committed file:
+
+    ```
+    git config --local audiouter.remoteHost 'user@192.168.4.41'
+    git config --local audiouter.testPrefer remote   # or: local (default)
+    ```
+
+    This lands in `.git/config`, which is **not tracked** — so a personal
+    username and LAN address never enter the repo — and which every worktree
+    shares, so one command covers all of them. It is also read by git itself
+    rather than by a shell, which matters: hooks run NON-interactively and a
+    non-interactive zsh does not source `~/.zshrc`, so an `export` there would
+    reach some runs and not others. `AUDIOUTER_TEST_REMOTE_HOST` /
+    `AUDIOUTER_TEST_PREFER` still override per-invocation.
+
+    `testPrefer=local` (default) uses the remote only as OVERFLOW — when every
+    local slot is busy, instead of queueing. `testPrefer=remote` sends every run
+    there FIRST, keeping this Mac free, with local slots as the fallback. Either
+    way an asleep/offline remote costs one 5s probe and then behaves exactly as
+    if none were configured. `rsync`s the WORKING TREE
     (so uncommitted edits go too, which `git push` cannot do) into a per-worktree
     directory under `AUDIOUTER_TEST_REMOTE_ROOT`. Cost is negligible: ~22MB/446
     files on first sync, **~3KB after editing one file**. `.build` is excluded —

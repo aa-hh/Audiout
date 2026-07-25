@@ -52,7 +52,24 @@ slots=${AUDIOUTER_TEST_SLOTS:-2}
 # particular machine is sleeping: it answers ping (sleep proxy) but refuses TCP,
 # so a generous timeout would stall every contended run behind a host that is
 # never going to answer. 5s fails fast and falls back to the local queue.
-remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-}
+# Host resolution: env var first, then `git config`. The git-config path is the
+# one to actually use, for two reasons:
+#   - It is NOT committed. It lives in ~/.gitconfig (--global) or .git/config
+#     (--local), so a personal username and LAN address never enter the repo.
+#   - It does not depend on the shell. A git hook runs non-interactively, and a
+#     non-interactive zsh does NOT source ~/.zshrc — so an export there would
+#     reach some runs and not others depending on how the caller's shell was
+#     started. `git config` is read by git itself, identically every time.
+#
+#   git config --global audiouter.remoteHost 'user@192.168.4.41'
+remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-$(git config --get audiouter.remoteHost 2>/dev/null || true)}
+
+# Where the remote is used: "overflow" (default — local first, remote only when
+# every local slot is busy) or "prefer" (try remote FIRST, fall back to local).
+# "prefer" keeps this Mac free, which is the actual goal when several agents are
+# working; "overflow" keeps the shipping toolchain as the primary gate.
+#   git config --global audiouter.testPrefer remote
+remote_pref=${AUDIOUTER_TEST_PREFER:-$(git config --get audiouter.testPrefer 2>/dev/null || echo local)}
 # Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
 # survives neither quoting on the remote `cd` (it is not expanded inside quotes,
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
@@ -71,7 +88,11 @@ remote_tried=0
 # and an agent that reads an infrastructure failure as a code failure will chase
 # a bug that does not exist.
 run_remote() {
-    echo "  suite: local slots busy — trying remote $remote_host ..." >&2
+    if [ "$remote_pref" = "remote" ]; then
+        echo "  suite: sending to remote $remote_host (preferred) ..." >&2
+    else
+        echo "  suite: local slots busy — trying remote $remote_host ..." >&2
+    fi
     if ! ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
              -o StrictHostKeyChecking=accept-new \
              "$remote_host" true >/dev/null 2>&1; then
@@ -176,6 +197,24 @@ if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then
     echo "  suite: sources unchanged since a passing run — skipping." >&2
     echo "  (AUDIOUTER_TEST_NO_CACHE=1 to force)" >&2
     exit 0
+fi
+
+# --- prefer-remote ----------------------------------------------------------
+# With `audiouter.testPrefer = remote`, go to the other Mac FIRST rather than
+# only on contention. This is the setting that actually keeps THIS machine free
+# — the stated goal — instead of merely rescheduling load on it. Local slots
+# remain the fallback, so an asleep or offline remote costs one 5s probe and
+# then behaves exactly as if no remote were configured.
+if [ "$remote_pref" = "remote" ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
+    remote_tried=1
+    if run_remote "$@"; then
+        if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+            mkdir -p "$cache_dir"
+            : > "$stamp"
+        fi
+        exit "$status"
+    fi
+    echo "  suite: falling back to this machine." >&2
 fi
 
 # --- lock -------------------------------------------------------------------

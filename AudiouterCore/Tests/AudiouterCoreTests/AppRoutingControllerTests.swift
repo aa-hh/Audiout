@@ -74,9 +74,9 @@ final class AppRoutingControllerTests: XCTestCase {
         XCTAssertEqual(controller.routedAppCount, 0)
     }
 
-    // MARK: handleDeviceUnavailable
+    // MARK: handleDeviceDisappeared
 
-    func testHandleDeviceUnavailableResetsMatchingRoutesAndPersists() throws {
+    func testHandleDeviceDisappearedResetsMatchingRoutesAndPersists() throws {
         let dir = tempDirectory()
         let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
@@ -85,7 +85,7 @@ final class AppRoutingControllerTests: XCTestCase {
         controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
         controller.setDestination(.device(id: "office"), for: "com.spotify.client")
 
-        controller.handleDeviceUnavailable(id: "homepod-1")
+        controller.handleDeviceDisappeared(id: "homepod-1")
 
         XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .noRedirect,
                        "fallback targets No Redirect, not Current Device — losing a device isn't a deliberate choice")
@@ -97,7 +97,7 @@ final class AppRoutingControllerTests: XCTestCase {
                        "the fallback must be persisted")
     }
 
-    func testHandleDeviceUnavailableWithNoMatchIsNoOpAndDoesNotPersist() throws {
+    func testHandleDeviceDisappearedWithNoMatchIsNoOpAndDoesNotPersist() throws {
         let dir = tempDirectory()
         let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
@@ -105,7 +105,7 @@ final class AppRoutingControllerTests: XCTestCase {
         let fileURL = fileURL(in: dir)
         let before = try Data(contentsOf: fileURL)
 
-        controller.handleDeviceUnavailable(id: "some-other-device")
+        controller.handleDeviceDisappeared(id: "some-other-device")
 
         let after = try Data(contentsOf: fileURL)
         XCTAssertEqual(before, after, "a no-op fallback must not rewrite the store")

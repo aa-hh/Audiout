@@ -481,14 +481,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //     detection is `NSWorkspace.didTerminateApplicationNotification`, which
     //     Core can't call itself. `handleAppTerminated(bundleID:)` is the AppKit
     //     boundary's forwarding target (mirrors the `processResolver` injection).
-    //  2. The DEVICE a route targets disappears. Already flows end-to-end through
-    //     the existing generic pipeline — `AppRoutingController.handleDeviceUnavailable`
+    //  2. The DEVICE a route targets disappears ENTIRELY. Flows end-to-end through
+    //     the existing generic pipeline — `AppRoutingController.handleDeviceDisappeared`
     //     (fired from `PopoverController.update(devices:)`, PLAN decision 7) resets
     //     the persisted route to `.noRedirect` and fires `onRoutesDidChange`,
     //     which reaches `updateAppRoutes` below exactly like any other route edit.
     //     No new state needed here — `NativeBackendTests.
     //     testDeviceUnavailableTearsDownBackendCaptureViaAppRoutingController`
     //     proves the two layers stay in sync (T10).
+    //     Its NARROWER sibling — the target is still discovered but reports
+    //     `isAvailable == false` — deliberately does NOT reset the route (R5).
+    //     `effectiveAppRoutesLocked` demotes it for the duration instead, so the
+    //     app rejoins the whole-system mix while the intent survives, and
+    //     `rerunAppRoutesForReachabilityChange` re-engages it on recovery.
     //  3. A per-app tap FAILS (`.processNotYetAudible` most commonly — routed
     //     before the app started playing audio). `deadBundleIDs` below excludes a
     //     failed bundle ID from the mixer topology so `.routedApps` never claims a
@@ -1468,6 +1473,73 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Per-app routing (T6 — ADDITIVE to the Selected Devices path above)
 
+    /// Whether a `.device(id:)` route pointed at `id` can actually carry audio
+    /// RIGHT NOW: the device is in our discovered snapshot, reports itself
+    /// reachable, and has an engine output handle to stream through. On
+    /// `stateQueue`.
+    ///
+    /// This is the whole basis of the effective route table below (R5). A route
+    /// aimed at an unreachable receiver is intent, not a live redirect: honouring
+    /// it would pull the app out of the whole-system tap and hand its audio to a
+    /// stream that goes nowhere, i.e. silence the app. An UNKNOWN id counts as
+    /// unreachable, which is also what makes launch safe — persisted routes are
+    /// pushed in before discovery has found anything, and each one engages as its
+    /// device shows up.
+    private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
+        known[id]?.isAvailable == true && outputIDs[id] != nil
+    }
+
+    /// `routes` with every `.device` route whose target is unreachable right now
+    /// demoted to `.noRedirect` — the EFFECTIVE table, which is what all of the
+    /// per-app machinery keys off (R5). On `stateQueue`.
+    ///
+    /// Demoting to `.noRedirect` (rather than dropping the route) is what makes the
+    /// app rejoin the system mix: `.noRedirect` is exclusion-equivalent to having no
+    /// route at all, so the bundle ID leaves `routedBundleIDs`, its per-app tap
+    /// stops, and the whole-system tap stops excluding it — it plays through
+    /// whatever the user's current top-level selection outputs to. Deliberately NOT
+    /// `.currentDevice`, which would open a private local stream and pin the app to
+    /// the Mac instead of following the system.
+    ///
+    /// The USER's table (`lastRoutes`, and the persisted store above it) is never
+    /// rewritten by this — that is the difference between R5 and the old
+    /// reset-on-unavailable behavior, and it is what lets
+    /// `rerunAppRoutesForReachabilityChange` restore the redirect with no
+    /// route-table edit and no user action.
+    private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> [AppRoute] {   // on stateQueue
+        routes.map { route in
+            guard case .device(let id) = route.destination,
+                  !isRouteTargetReachableLocked(id) else { return route }
+            var demoted = route
+            demoted.destination = .noRedirect
+            return demoted
+        }
+    }
+
+    /// Re-push the CURRENT (unedited) route table so `effectiveAppRoutesLocked`
+    /// re-resolves it — the recovery half of R5. A redirect target becoming
+    /// reachable again must restart that app's per-app tap and put it back in the
+    /// whole-system tap's exclusion set with no route-table mutation and no user
+    /// action; a target becoming unreachable must do the reverse.
+    ///
+    /// Safe to call WITH `stateQueue` held (every caller does) because the work is
+    /// only ENQUEUED here: `updateAppRoutes` takes `stateQueue` synchronously itself,
+    /// so running it inline would deadlock. `captureControlQueue` is the same serial
+    /// queue the capture gate uses, which keeps this ordered against the tap
+    /// start/stops it causes. Reading the table at EXECUTION time (not capture time)
+    /// means a genuine route edit landing in between wins instead of being clobbered
+    /// by a stale snapshot.
+    private func rerunAppRoutesForReachabilityChange() {
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let (routes, excluded) = self.stateQueue.sync {
+                (self.lastRoutes, self.lastExcludedBundleIDs)
+            }
+            guard !routes.isEmpty else { return }
+            self.updateAppRoutes(routes, excludedBundleIDs: excluded)
+        }
+    }
+
     /// Feed the current per-app routing table in. The single external entry point
     /// for per-app redirect (T7 calls this whenever `AppRoutingController.appRoutes`
     /// changes, passing the Settings excluded-apps denylist as `excludedBundleIDs`).
@@ -1490,6 +1562,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///  4. Syncs the whole-system tap's exclusion set (T4) so individually-routed
     ///     (`.device`) AND `.currentDevice` apps don't double up into the system mix.
     ///
+    /// Every one of those four steps reads the EFFECTIVE table
+    /// (``effectiveAppRoutesLocked(_:)``), not the raw one it was handed: a `.device`
+    /// route whose target is unreachable right now is treated exactly as
+    /// `.noRedirect` for the duration (R5), so the app keeps playing in the system
+    /// mix instead of being excluded in favour of a stream that goes nowhere. Only
+    /// `lastRoutes` (the user's intent, replayed by
+    /// ``rerunAppRoutesForReachabilityChange()``) and the display-name map keep the
+    /// raw table. Re-calling this with an unchanged table is therefore MEANINGFUL,
+    /// not a no-op — it is how a reachability change is applied.
+    ///
     /// Concurrency: the routed-bundle-ID diff and the display-name refresh happen
     /// under `stateQueue` (serialized against concurrent calls). Everything that can
     /// BLOCK — `perAppCapture.start`/`stop` (Core Audio tap create/teardown), the
@@ -1504,12 +1586,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.lastExcludedBundleIDs = excludedBundleIDs
             self.routeDisplayNames = Dictionary(
                 routes.map { ($0.bundleID, $0.displayName) }, uniquingKeysWith: { _, new in new })
-            let newRouted = Set(routes.compactMap { route -> String? in
+            // R5: everything below keys off the EFFECTIVE table — a `.device` route
+            // whose target is unreachable right now reads as `.noRedirect`, so the
+            // app stays in the whole-system mix rather than being excluded in favour
+            // of a stream that can't reach anything.
+            let effective = self.effectiveAppRoutesLocked(routes)
+            let newRouted = Set(effective.compactMap { route -> String? in
                 if case .device = route.destination { return route.bundleID }
                 return nil
             })
             // Bug T2: apps deliberately pinned to the local Mac ("Current Device").
-            let newLocal = Set(routes.compactMap { route -> String? in
+            let newLocal = Set(effective.compactMap { route -> String? in
                 route.destination == .currentDevice ? route.bundleID : nil
             })
             let previousRouted = self.routedBundleIDs
@@ -1539,7 +1626,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // capturing — a `deadBundleIDs` entry (quit mid-stream, or a per-app tap
             // that's `.failed`) is excluded here so `.routedApps` / the engine stream
             // binding never claim a silent app is streaming.
-            let mixerRoutes = routes.filter { !self.deadBundleIDs.contains($0.bundleID) }
+            let mixerRoutes = effective.filter { !self.deadBundleIDs.contains($0.bundleID) }
 
             // The per-app tap is destination-agnostic — one tap serves whichever
             // destination the app currently routes to — so its start/stop keys on
@@ -1548,16 +1635,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // its tap running (only the downstream consumer changes).
             let previousUnion = previousRouted.union(previousLocal)
             let newUnion = newRouted.union(newLocal)
+            // R5: a bundle ID leaving the capture union must ALSO lose any pending
+            // `.processNotYetAudible` retry. The T8 cleanup above keys on the RAW
+            // table, which a demoted route is still in — so without this, a timer
+            // armed while the route was live would fire later and re-`start` the
+            // per-app tap for an app that is now supposed to be in the system mix.
+            // That tap is `.mutedWhenTapped`: it would silence the app's normal
+            // output while feeding a stream nothing is bound to. Re-engaging the
+            // route restarts the tap through `captureToStart`, so nothing is lost.
+            for bundleID in previousUnion.subtracting(newUnion) {
+                self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
+                self.retryCounts.removeValue(forKey: bundleID)
+            }
             // T3: re-reconcile the metering-only taps against the new route/excluded
             // table (routed/local/excluded were all just updated above). Empty when
             // metering is inactive. NEVER touches the primary `perAppCapture` taps.
             let meteringDiff = self.meteringTapDiffLocked()
             return UpdateRoutesPlan(
+                effectiveRoutes: effective,
                 mixerRoutes: mixerRoutes,
                 captureToStart: newUnion.subtracting(previousUnion),
                 captureToStop: previousUnion.subtracting(newUnion),
                 localRemoved: previousLocal.subtracting(newLocal),
-                localRoutes: routes.filter { $0.destination == .currentDevice },
+                localRoutes: effective.filter { $0.destination == .currentDevice },
                 localExcluded: newLocal,
                 meteringToStart: meteringDiff.start,
                 meteringToStop: meteringDiff.stop)
@@ -1618,8 +1718,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `.currentDevice` apps (Bug T2 — they play via `localPlaybackEngine`, not
             // the AirPlay mix), and user-excluded apps (T4). No-op when no real capture
             // coordinator is wired (tests/UI-smoke).
+            //
+            // R5: the EFFECTIVE table, so an app whose target is unreachable is NOT
+            // excluded — that omission is exactly what puts it back in the system mix.
             self.captureCoordinator?.updateRouting(
-                appRoutes: routes, excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
+                appRoutes: plan.effectiveRoutes,
+                excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
         }
     }
 
@@ -1627,6 +1731,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// executes without it — a named struct so the (now six-field) hand-off stays
     /// readable.
     private struct UpdateRoutesPlan {
+        /// The route table as it is being ACTED on: the caller's table with every
+        /// `.device` route whose target is currently unreachable demoted to
+        /// `.noRedirect` (R5). This — not the raw table — is what the whole-system
+        /// tap's exclusion set is computed from.
+        let effectiveRoutes: [AppRoute]
         let mixerRoutes: [AppRoute]
         let captureToStart: Set<String>
         let captureToStop: Set<String>
@@ -2105,14 +2214,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// `lastRoutes` filtered to exclude any bundle ID currently in `deadBundleIDs`
-    /// (T8). Acquires `stateQueue` itself — call only from OUTSIDE any existing
-    /// `stateQueue.sync` block (e.g. not from `updateAppRoutes`'s own critical
-    /// section, which computes the equivalent filter inline to avoid a
-    /// same-queue deadlock).
+    /// `lastRoutes` resolved for the mixer: unreachable-target `.device` routes
+    /// demoted (R5, ``effectiveAppRoutesLocked(_:)``), then any bundle ID currently
+    /// in `deadBundleIDs` dropped (T8). Acquires `stateQueue` itself — call only
+    /// from OUTSIDE any existing `stateQueue.sync` block (e.g. not from
+    /// `updateAppRoutes`'s own critical section, which computes the equivalent
+    /// inline to avoid a same-queue deadlock).
     private func effectiveMixerRoutes() -> [AppRoute] {
         stateQueue.sync {
-            self.lastRoutes.filter { !self.deadBundleIDs.contains($0.bundleID) }
+            self.effectiveAppRoutesLocked(self.lastRoutes)
+                .filter { !self.deadBundleIDs.contains($0.bundleID) }
         }
     }
 
@@ -3280,6 +3391,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// On `stateQueue`.
     private func addOrUpdate(_ discovered: DiscoveredDevice) {
         let id = discovered.id                        // colon-hex TXT id, verbatim
+        // R5: sampled BEFORE anything below can change it, so the tail of this
+        // method can tell a real reachability EDGE from a repeated `.updated`.
+        let wasRouteTargetReachable = isRouteTargetReachableLocked(id)
         self.outputIDs[id] = discovered.outputID
         // "Streamable right now" = currently reachable (AP1 or AP2 — both drive
         // through the shared engine). A sticky-AP2 device that went offline
@@ -3336,6 +3450,48 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
+
+        // R5: per-app redirects are the OTHER thing a reachability edge has to
+        // recover. The converge re-kick above only chases `desiredOn` (Selected
+        // Devices / Main Out); a redirect target is deliberately never in that set
+        // (`AudiouterCore/AGENTS.md`), so it needs its own replay — which is also
+        // what disengages a route whose target just went offline.
+        rerunAppRoutesIfTargeted(id, wasReachable: wasRouteTargetReachable)
+    }
+
+    /// Replay the per-app route table iff `id`'s reachability actually FLIPPED and
+    /// some route points at it (R5). Both guards matter: discovery re-resolves the
+    /// same device repeatedly, and a replay per `.updated` event would churn the
+    /// per-app taps and the whole-system tap's exclusion set for nothing. On
+    /// `stateQueue` (the replay itself hops off it).
+    private func rerunAppRoutesIfTargeted(_ id: String, wasReachable: Bool) {   // on stateQueue
+        let isReachable = isRouteTargetReachableLocked(id)
+        guard isReachable != wasReachable,
+              lastRoutes.contains(where: { $0.destination == .device(id: id) })
+        else { return }
+        AudioDiag.log(
+            "app routes: redirect target \(id) became \(isReachable ? "REACHABLE" : "UNREACHABLE")"
+            + " — re-resolving effective routes (route table unchanged)")
+        rerunAppRoutesForReachabilityChange()
+    }
+
+    /// Commit a changed `Device` snapshot for `id`, emit it, and replay the per-app
+    /// route table if this write flipped whether `id` can carry a redirect (R5).
+    /// On `stateQueue`.
+    ///
+    /// Every site that can change `Device.isAvailable` for a DISCOVERED device must
+    /// go through here (or sample + replay by hand, as `addOrUpdate` does across its
+    /// two branches). Availability does not only move on discovery events: a live
+    /// session dying (`applyEngineState`'s `.failed`/`.passwordRequired`) or a
+    /// converge add failing (`applyLocal`) drop it too. Miss one of those and the
+    /// effective route table goes stale in the direction that HURTS — the app stays
+    /// excluded from the whole-system tap while its per-app stream has nowhere to
+    /// go, i.e. silence with no user-visible cause.
+    private func commitKnownDevice(_ id: String, _ device: Device) {   // on stateQueue
+        let wasReachable = isRouteTargetReachableLocked(id)
+        known[id] = device
+        emit(.deviceUpdated(device))
+        rerunAppRoutesIfTargeted(id, wasReachable: wasReachable)
     }
 
     /// A device dropped off the network. It stays in the model as unavailable (so a
@@ -3355,8 +3511,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `.failed → .off` on the poll's removal branch).
         if device.connectionState != .off { device.connectionState = .off; changed = true }
         if changed {
-            known[id] = device
-            emit(.deviceUpdated(device))
+            // R5: a vanished device is unreachable, so any route aimed at it stops
+            // being an effective redirect and that app rejoins the system mix. The
+            // popover ALSO resets such a route (`handleDeviceDisappeared`), but the
+            // backend must never depend on a UI layer for its own audibility.
+            commitKnownDevice(id, device)
         }
     }
 
@@ -3470,8 +3629,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 return nil // non-terminal progress; nothing to render yet
             }
             guard device != before else { return nil }   // de-dupe the completion echo
-            self.known[id] = device
-            self.emit(.deviceUpdated(device))
+            // R5: `.failed`/`.passwordRequired` above just made this device
+            // unreachable, and `.connected`/`.streaming` just made it reachable —
+            // both are per-app redirect edges the discovery path never sees, so this
+            // commit (not a bare `known[id] =`) is what replays the route table.
+            self.commitKnownDevice(id, device)
             // This out-of-band transition set `connectionState` DIRECTLY on the device
             // (bypassing `setConnectionState`), so drive the silence-watchdog reconcile
             // here too — a `→ .connected` re-engages the gate, a `→ .failed`/`.off`
@@ -3802,8 +3964,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let before = device
         change(&device)
         guard device != before else { return }
-        known[id] = device
-        emit(.deviceUpdated(device))
+        // `commitKnownDevice`, not a bare write: `change` may flip `isAvailable`
+        // (converge add success/failure, `markUnavailable`), which is a per-app
+        // redirect edge the effective route table has to be replayed for (R5).
+        commitKnownDevice(id, device)
     }
 
     private func markUnavailable(_ id: String) {   // on stateQueue
@@ -4133,7 +4297,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.latestAppLevel[bundleID] = rms
             // The device this app feeds tracks the loudest source routed to it, so
             // re-emit its combined `.level` now that this source level changed.
-            for route in self.lastRoutes where route.bundleID == bundleID {
+            // `routedBundleIDs` is the EFFECTIVE routed set (R5): an app whose target
+            // is currently unreachable feeds the system mix, not that device, so it
+            // must not animate the offline device's meter.
+            for route in self.lastRoutes
+            where route.bundleID == bundleID && self.routedBundleIDs.contains(bundleID) {
                 if case .device(let deviceID) = route.destination {
                     self.emitCombinedLevel(forDevice: deviceID)
                 }
@@ -4152,7 +4320,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard let device = known[id] else { return }
         let systemContribution: Float = (isMeterable(device) && !device.isMuted) ? latestSystemRMS : 0
         var sourceContribution: Float = 0
-        for route in lastRoutes where !deadBundleIDs.contains(route.bundleID) {
+        // `routedBundleIDs` is the EFFECTIVE routed set (R5) — a route whose target
+        // is unreachable right now contributes to the system mix, not to this
+        // device, so it must not keep this device's bar alive while it is offline.
+        for route in lastRoutes
+        where routedBundleIDs.contains(route.bundleID) && !deadBundleIDs.contains(route.bundleID) {
             if case .device(let deviceID) = route.destination, deviceID == id,
                let level = latestAppLevel[route.bundleID] {
                 sourceContribution = max(sourceContribution, level)

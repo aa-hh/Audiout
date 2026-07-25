@@ -95,7 +95,7 @@ public final class AppRoutingController {
     /// the user re-picks it deliberately. No-op for a `.noRedirect`/`.currentDevice`
     /// route (only an involuntary device redirect is reset — a "play on this Mac"
     /// pick is left alone) or a bundle with no route, so it's safe to call on
-    /// every app termination. Mirrors ``handleDeviceUnavailable(id:)``'s
+    /// every app termination. Mirrors ``handleDeviceDisappeared(id:)``'s
     /// involuntary reset-to-`.noRedirect`, and reuses the same un-route path a
     /// manual change takes (persist → `onRoutesDidChange`).
     public func resetDeviceRoute(bundleID: String) {
@@ -128,14 +128,24 @@ public final class AppRoutingController {
         }
     }
 
-    /// PLAN decision 7 (silent fallback): any route targeting the now-gone
-    /// device `id` resets to `.noRedirect`, NOT `.currentDevice`. A device
-    /// disappearing out from under a route isn't a deliberate choice to
-    /// switch to "play on this Mac" — `.currentDevice` is now a genuine user
-    /// pick (menu decision), and an involuntary reset shouldn't masquerade as
-    /// one. `.noRedirect` is the neutral/unset state this route effectively
-    /// reverts to. Persists only if something actually changed.
-    public func handleDeviceUnavailable(id: String) {
+    /// PLAN decision 7 (silent fallback), narrowed by R5: any route targeting the
+    /// device `id` — which has DISAPPEARED from the discovered fleet entirely —
+    /// resets to `.noRedirect`, NOT `.currentDevice`. A device disappearing out
+    /// from under a route isn't a deliberate choice to switch to "play on this
+    /// Mac" — `.currentDevice` is now a genuine user pick (menu decision), and an
+    /// involuntary reset shouldn't masquerade as one. `.noRedirect` is the
+    /// neutral/unset state this route effectively reverts to. Persists only if
+    /// something actually changed.
+    ///
+    /// GONE means gone from the snapshot, NOT merely `isAvailable == false`
+    /// (R5). A still-discovered receiver that reports itself unreachable (a
+    /// sticky-AP2 speaker powered off, a Wi-Fi blip) KEEPS its route: the user's
+    /// intent survives, the backend un-excludes the app so it rejoins the
+    /// whole-system mix meanwhile (`NativeBackend`'s effective route table), and
+    /// the redirect re-engages by itself when the device is reachable again. Only
+    /// the caller that observes an outright disappearance may call this — see
+    /// `PopoverController.update(devices:)`.
+    public func handleDeviceDisappeared(id: String) {
         var changed = false
         for i in appRoutes.indices {
             if case .device(let deviceID) = appRoutes[i].destination, deviceID == id {

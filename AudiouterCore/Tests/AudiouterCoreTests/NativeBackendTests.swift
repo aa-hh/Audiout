@@ -2854,6 +2854,31 @@ final class NativeBackendTests: XCTestCase {
         }
         var refreshedBundleIDs: [String] { lock.withLock { _refreshedBundleIDs } }
 
+        /// R5: records the route table + denylist handed to `updateRouting`, in
+        /// order, so a test can assert exactly WHICH bundle IDs the whole-system tap
+        /// was told to exclude. The real coordinator turns `.device`-routed bundle
+        /// IDs plus the denylist into excluded process object ids (covered by
+        /// `NativeCaptureCoordinatorTests`); at THIS seam the question is only what
+        /// `NativeBackend` decided to send, which is what the effective route table
+        /// changes.
+        private var _routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] = []
+        func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
+            lock.withLock { _routingUpdates.append((appRoutes, excludedBundleIDs)) }
+        }
+        var routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] {
+            lock.withLock { _routingUpdates }
+        }
+        /// The bundle IDs the LAST `updateRouting` call would have the whole-system
+        /// tap exclude: every `.device`-routed bundle ID unioned with the denylist —
+        /// i.e. `NativeCaptureCoordinator`'s own union rule, mirrored here.
+        var lastExcludedBundleIDs: Set<String>? {
+            guard let last = routingUpdates.last else { return nil }
+            let routedAway = last.appRoutes
+                .filter(\.destination.isDeviceRoute)
+                .map(\.bundleID)
+            return last.excludedBundleIDs.union(routedAway)
+        }
+
         /// Fire a device/nominal-rate rebuild exactly as the real coordinator does
         /// from `recreateTap(cause: .deviceOrRateChange)` (T2), so a test can
         /// simulate the rate-renegotiation rebuild and observe `NativeBackend`'s
@@ -4273,8 +4298,8 @@ final class NativeBackendTests: XCTestCase {
     /// `testDeviceUnavailableTearsDownBackendCaptureViaAppRoutingController` —
     /// that does not actually exist anywhere in the suite (only
     /// `AppRoutingController`-only-level coverage exists:
-    /// `testHandleDeviceUnavailableResetsMatchingRoutesAndPersists`). This is
-    /// that missing test: `AppRoutingController.handleDeviceUnavailable` must
+    /// `testHandleDeviceDisappearedResetsMatchingRoutesAndPersists`). This is
+    /// that missing test: `AppRoutingController.handleDeviceDisappeared` must
     /// reach all the way through `onRoutesDidChange` into a REAL
     /// `NativeBackend.updateAppRoutes` and tear down the per-app stream binding
     /// — not just reset the persisted route in isolation.
@@ -4295,10 +4320,10 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
 
         // The device the route targets disappears. In production this is
-        // `PopoverController.update(devices:)` calling `handleDeviceUnavailable`
+        // `PopoverController.update(devices:)` calling `handleDeviceDisappeared`
         // (PLAN decision 7); here we call it directly, exactly as that boundary
         // does, to prove the layers beneath it stay in sync.
-        controller.handleDeviceUnavailable(id: device.id)
+        controller.handleDeviceDisappeared(id: device.id)
 
         await pollUntil { engine.removedIDs.contains(device.outputID) }
         XCTAssertTrue(engine.removedIDs.contains(device.outputID),
@@ -4306,6 +4331,116 @@ final class NativeBackendTests: XCTestCase {
                       "driven through the REAL AppRoutingController -> NativeBackend chain, not a direct call")
         XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.foo.player" }?.destination, .noRedirect,
                        "the persisted route must fall back to .noRedirect")
+    }
+
+    // MARK: R5 — a route whose target is temporarily unreachable
+
+    /// R5, the audibility half: a `.device` route whose target is discovered but
+    /// NOT reachable (`isAvailable == false`) must be treated as if the app weren't
+    /// routed at all — otherwise the app is excluded from the whole-system tap
+    /// (because the route table says it has its own stream) while that stream has
+    /// nowhere to go, and the app is simply silent with no visible cause. Keeping
+    /// the route is only safe BECAUSE of this: the app rejoins the system mix and
+    /// keeps playing wherever the Mac's current selection points.
+    ///
+    /// Then, with NO route-table edit at all, the device comes back and the redirect
+    /// must re-engage by itself: tap restarted, bundle ID excluded again, engine
+    /// stream re-bound.
+    func testUnreachableRouteTargetRejoinsSystemMixThenReEngagesOnRecovery() async throws {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo.player", "com.bar.player"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+
+        let target = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Flaky Speaker")
+        let bystander = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Steady Speaker")
+        await startAndDiscover(backend, engine, discovery, target)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == bystander.id } else { return false } }
+        } after: { discovery.fire(.appeared(bystander)) }
+
+        // Both apps routed, each to its own device. The route table is set ONCE here
+        // and never touched again for the rest of the test — every later transition
+        // has to come from reachability alone.
+        let routes = [
+            route("com.foo.player", name: "Foo", toDevice: target.id),
+            route("com.bar.player", name: "Bar", toDevice: bystander.id),
+        ]
+        backend.updateAppRoutes(routes)
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player", "com.bar.player"],
+                       "both reachable-target routes are live, so both apps are excluded from the "
+                       + "whole-system tap (they stream to their own devices)")
+        await pollUntil { perApp.state(for: "com.foo.player") != .idle }
+        XCTAssertNotEqual(perApp.state(for: "com.foo.player"), .idle, "its per-app tap is running")
+
+        // The target goes quiet but stays discovered — a sticky-AP2 receiver powering
+        // off. NOTHING calls updateAppRoutes; discovery is the only input.
+        let offline = DiscoveredDevice(
+            id: target.id, descriptor: target.descriptor, outputID: target.outputID,
+            isAirPlay2Supported: true, isAvailable: false)
+        discovery.fire(.updated(offline))
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == false }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.bar.player"],
+                       "R5: the unreachable-target app must LEAVE the exclusion set — that omission is "
+                       + "exactly what puts it back in the whole-system mix and keeps it audible")
+        await pollUntil { perApp.state(for: "com.foo.player") == .idle }
+        XCTAssertEqual(perApp.state(for: "com.foo.player"), .idle,
+                       "its per-app tap is stopped — there is nothing for it to feed")
+        XCTAssertNotEqual(perApp.state(for: "com.bar.player"), .idle,
+                          "the app routed to a still-reachable device is untouched")
+
+        // Recovery, with no route-table edit: the device re-resolves as reachable.
+        let addsBefore = engine.streamAddCalls.filter { $0.0 == target.outputID }.count
+        discovery.fire(.updated(target))
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player", "com.bar.player"],
+                       "R5 recovery: the redirect re-engages by itself, so the app is excluded again")
+        await pollUntil { perApp.state(for: "com.foo.player") != .idle }
+        XCTAssertNotEqual(perApp.state(for: "com.foo.player"), .idle, "its per-app tap restarted")
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == target.outputID }.count > addsBefore }
+        XCTAssertGreaterThan(engine.streamAddCalls.filter { $0.0 == target.outputID }.count, addsBefore,
+                             "the device is re-bound to its per-app stream, with no route-table mutation")
+    }
+
+    /// R5, the launch case that falls out of the same rule: persisted routes are
+    /// pushed into the backend before discovery has resolved anything, so their
+    /// targets are UNKNOWN — which counts as unreachable. The app must not be
+    /// excluded from the system mix during that window (it would be silent), and the
+    /// redirect must engage the moment its device appears.
+    func testRouteTargetNotYetDiscoveredDoesNotExcludeUntilItAppears() async throws {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo.player"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Late Speaker")
+        backend.start()
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { capture.lastExcludedBundleIDs != nil }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, [],
+                       "a route whose target hasn't been discovered yet must not exclude its app — "
+                       + "there is no stream for it to be excluded in favour of")
+        XCTAssertEqual(perApp.state(for: "com.foo.player"), .idle, "and no per-app tap yet")
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player"],
+                       "the redirect engages on discovery alone, with no route-table edit")
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                      "and the device is bound to its per-app stream")
     }
 
     // MARK: Local playback (Bug T2 — .currentDevice as an independent local stream)

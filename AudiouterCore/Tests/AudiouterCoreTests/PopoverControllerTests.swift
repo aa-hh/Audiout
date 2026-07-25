@@ -1337,9 +1337,60 @@ final class PopoverControllerTests: XCTestCase {
                        "the repainted row reflects the fallback")
     }
 
-    /// A device merely going UNAVAILABLE (still present, `isAvailable == false`)
-    /// also triggers the silent fallback — it is no longer a valid redirect target.
-    func testDeviceUnavailableResetsMatchingRoute() async throws {
+    /// R5: a device merely going UNAVAILABLE (still present in the snapshot,
+    /// `isAvailable == false`) must NOT reset the route. This used to assert the
+    /// opposite — a receiver going quiet for a moment silently and permanently
+    /// discarded the user's redirect. The route is now KEPT, and because the target
+    /// is no longer in `availableAirPlayDestinations` the row's popup has to be
+    /// given an entry for it anyway, or `selectedDestinationID` matches nothing and
+    /// `AppRowView.apply`'s `?? true` fallback renders the row as an unset "No
+    /// Redirect" — a lie about a route that is perfectly intact.
+    func testDeviceUnavailableKeepsRouteAndOffersItAsAnOfflineDestination() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        // A second app routed to a DIFFERENT, still-reachable device: nothing about
+        // the office outage may touch it.
+        seedRoute(appRouting, bundleID: "com.example.safari", displayName: "Safari",
+                  destination: .device(id: "homepod-bed"))
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                           runningAppsProvider: routedApps)
+
+        var devices = backend.devices
+        let officeIndex = try XCTUnwrap(devices.firstIndex(where: { $0.id == "office" }))
+        devices[officeIndex].isAvailable = false
+        popover.update(devices: devices)
+
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .device(id: "office"),
+                       "an unavailable-but-still-discovered target KEEPS the route (R5) — the user's "
+                       + "intent survives a receiver going quiet")
+        XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"), "office",
+                       "the row still selects the kept target, not the No Redirect sentinel")
+        XCTAssertEqual(popover.test_appRowSliderDimmed(for: "com.example.music"), false,
+                       "the row must not render as an unset No Redirect row (dimmed slider)")
+
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertTrue(titles.contains("Office"),
+                      "the kept-but-offline target is injected into its own row's menu")
+        let officeItem = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.music")?
+                .test_destinationPopUpMenuItem(forDestinationID: "office"))
+        XCTAssertEqual(officeItem.toolTip, PopoverController.offlineDestinationSubtitle,
+                       "the injected entry says what is actually happening to the audio meanwhile")
+
+        // The other app is untouched: same route, and it is NOT handed an entry for
+        // a device it doesn't target (the injection is per-row, not global).
+        XCTAssertEqual(appRouting.appRoutes.last?.destination, .device(id: "homepod-bed"),
+                       "an app routed elsewhere is untouched by another device's outage")
+        let safariTitles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.safari"))
+        XCTAssertFalse(safariTitles.contains("Office"),
+                       "the offline entry is injected only into the row that actually targets it")
+    }
+
+    /// R5 recovery, UI half: the target coming back needs no route-table edit at
+    /// all — the route was never reset, so the row simply stops carrying the offline
+    /// subtitle and the device is a normal available entry again.
+    func testDeviceAvailableAgainLeavesKeptRouteAndDropsOfflineSubtitle() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
@@ -1347,13 +1398,20 @@ final class PopoverControllerTests: XCTestCase {
                                                            runningAppsProvider: routedApps)
 
         var devices = backend.devices
-        if let i = devices.firstIndex(where: { $0.id == "office" }) {
-            devices[i].isAvailable = false
-        }
+        let officeIndex = try XCTUnwrap(devices.firstIndex(where: { $0.id == "office" }))
+        devices[officeIndex].isAvailable = false
+        popover.update(devices: devices)
+        devices[officeIndex].isAvailable = true
         popover.update(devices: devices)
 
-        XCTAssertEqual(appRouting.appRoutes.first?.destination, .noRedirect,
-                       "an unavailable target falls back to No Redirect, not Current Device")
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .device(id: "office"),
+                       "the route was never reset, so there is nothing to restore")
+        XCTAssertEqual(popover.test_appRowSelectedDestinationID(for: "com.example.music"), "office")
+        let officeItem = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.music")?
+                .test_destinationPopUpMenuItem(forDestinationID: "office"))
+        XCTAssertNil(officeItem.toolTip,
+                     "back to a plain available entry — no lingering \"Offline\" copy")
     }
 
     /// A device update that doesn't touch any routed target leaves routes alone

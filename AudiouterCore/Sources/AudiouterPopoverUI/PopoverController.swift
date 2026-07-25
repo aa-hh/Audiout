@@ -308,12 +308,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private var applicationsPlaceholderShown = false
 
     /// The previous device snapshot's ids-that-were-valid-AirPlay-targets, so
-    /// `update(devices:)` can detect a routed device disappearing or going
-    /// unavailable and drive `appRouting.handleDeviceUnavailable(id:)` (PLAN
-    /// decision 7 — silent fallback). "Valid target" == present AND available AND
-    /// non-local, exactly the set `availableAirPlayDestinations` offers as a
-    /// redirect target. `nil` until the first snapshot arrives (so the very first
-    /// `update` never mistakes "not seen yet" for "went away").
+    /// `update(devices:)` can detect a routed device dropping out of the offerable
+    /// set. "Valid target" == present AND available AND non-local, exactly the set
+    /// `availableAirPlayDestinations` offers as a redirect target. `nil` until the
+    /// first snapshot arrives (so the very first `update` never mistakes "not seen
+    /// yet" for "went away").
+    ///
+    /// Leaving this set is NOT on its own grounds to reset a route (R5): only a
+    /// device that also left `devicesByID` entirely is gone for good and drives
+    /// `appRouting.handleDeviceDisappeared(id:)`. A device that merely went
+    /// `isAvailable == false` keeps its route — see `update(devices:)`.
     private var lastValidDestinationIDs: Set<String>?
 
     /// The sentinel destination id the Applications card's "Current Device" entry
@@ -396,19 +400,34 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         groupController?.syncActiveGroupToSelection()
 
         // Device-lifecycle → per-app routes (T-8, PLAN decision 7 — silent
-        // fallback). A device that was a valid AirPlay redirect target last
-        // snapshot but isn't now (dropped entirely via `deviceRemoved`, or present
-        // but `isAvailable == false`) resets any route pointed at it to Current
-        // Device. `handleDeviceUnavailable` no-ops when no route targeted the id, so
-        // this only mutates when a routed target actually went away.
+        // fallback), NARROWED by R5 to the one case that genuinely loses the
+        // target. A device that was a valid AirPlay redirect target last snapshot
+        // but isn't now falls into two very different situations, and only the
+        // second may touch the route table:
+        //
+        //  1. Still in the snapshot, but `isAvailable == false` (a sticky-AP2
+        //     receiver powered off, a Wi-Fi blip, a receiver gone quiet). The
+        //     user's intent is intact and the device is expected back, so the route
+        //     is KEPT. `NativeBackend`'s effective route table stops excluding the
+        //     app for the duration (it rejoins the whole-system mix, so it stays
+        //     audible) and re-engages the redirect by itself on recovery — no
+        //     route-table edit is involved in either direction. The row still shows
+        //     the target thanks to `appDestinations`' offline entry.
+        //  2. Gone from the snapshot entirely (`deviceRemoved`). There is nothing
+        //     left to come back to, so this — and only this — resets the route.
+        //
+        // `handleDeviceDisappeared` no-ops when no route targeted the id, so this
+        // only mutates when a routed target actually went away for good.
         let nowValid = Set(availableAirPlayDestinations(devices: devices).map(\.id))
         var routesChanged = false
+        var validTargetsChanged = false
         if let previous = lastValidDestinationIDs {
             let routedBefore = appRouting.appRoutes
-            for goneID in previous.subtracting(nowValid) {
-                appRouting.handleDeviceUnavailable(id: goneID)
+            for goneID in previous.subtracting(nowValid) where devicesByID[goneID] == nil {
+                appRouting.handleDeviceDisappeared(id: goneID)
             }
             routesChanged = appRouting.appRoutes != routedBefore
+            validTargetsChanged = previous != nowValid
         }
         lastValidDestinationIDs = nowValid
 
@@ -420,10 +439,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // A device being added or removed also restructures the device rows —
         // `refreshDeviceRows()` only repaints EXISTING rows, so a device set
         // change (not just a route change) must force the same full rebuild path.
+        //
+        // `validTargetsChanged` is the R5 addition: an availability flip that no
+        // longer resets any route still changes what every app row's destination
+        // menu must offer (an entry drops out, or a kept route's target needs its
+        // "Offline" entry injected). Before R5 that flip always came with a route
+        // reset, so `routesChanged` covered it; now it has to be its own trigger or
+        // the menus go stale until the next reopen.
         // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if isEffectivelyShown {
-            if routesChanged || deviceSetChanged {
+            if routesChanged || deviceSetChanged || validTargetsChanged {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
             } else {
@@ -1129,7 +1155,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The destination popup leads with the standalone "No Redirect" entry (the
     /// new default/neutral state), then mirrors `refreshMainOutRow`'s split — a
     /// "Current Device" entry (local, now an explicit pick) then the available
-    /// (present + reachable) non-local AirPlay devices. The selected id is
+    /// (present + reachable) non-local AirPlay devices, plus this route's own
+    /// target if it is currently unreachable (R5). The selected id is
     /// derived from `route.destination`, and the slider dims while local
     /// (decision 3, driven inside `AppRowView` by the selected entry's `isLocal`
     /// — true for both "No Redirect" and "Current Device").
@@ -1142,19 +1169,32 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             icon: appIcon(for: route.bundleID),
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
-            destinations: appDestinations(devices: devices),
+            destinations: appDestinations(devices: devices, keeping: route.destination),
             isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
     }
 
-    /// The destination entries for the Applications popup, in display order:
-    /// the standalone "No Redirect" entry (the default/neutral state) first,
-    /// then the "Current Device" entry (decision 8, now an explicit pick),
-    /// then every AVAILABLE non-local device (`availableAirPlayDestinations`).
+    /// The destination entries for ONE row's popup, in display order: the
+    /// standalone "No Redirect" entry (the default/neutral state) first, then the
+    /// "Current Device" entry (decision 8, now an explicit pick), then every
+    /// AVAILABLE non-local device (`availableAirPlayDestinations`).
     /// Plain values only — `AppRowView` is isolated from Core's `AppRoute` (T-6).
-    private func appDestinations(devices: [Device]) -> [AppRowView.Destination] {
+    ///
+    /// `keeping` is this row's CURRENT destination, and it earns an entry even when
+    /// it isn't offerable any more (R5). A route whose target went
+    /// `isAvailable == false` is now kept rather than reset, and without this the
+    /// row's `selectedDestinationID` would match nothing in the menu — which
+    /// `AppRowView.apply` reads as "No Redirect" (its `?? true` fallback), rendering
+    /// a dimmed slider and an unset-looking row for a route that is perfectly
+    /// intact. The injected entry names the device and says what is actually
+    /// happening to its audio meanwhile. Same inclusion rule
+    /// `GroupEditorViewController` uses for its membership list ("available OR
+    /// already a member"): what the user chose stays visible even when it has gone
+    /// quiet.
+    private func appDestinations(devices: [Device],
+                                keeping current: AppRouteDestination) -> [AppRowView.Destination] {
         var entries: [AppRowView.Destination] = [
             .init(id: Self.noRedirectDestinationID,
                   title: "No Redirect",
@@ -1168,17 +1208,35 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   symbolName: Device.Kind.localMac.symbolName,
                   subtitle: "Plays locally with its own volume"),
         ]
-        for device in availableAirPlayDestinations(devices: devices) {
+        let available = availableAirPlayDestinations(devices: devices)
+        for device in available {
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
                                  symbolName: device.kind.symbolName))
+        }
+        if case .device(let id) = current,
+           !available.contains(where: { $0.id == id }),
+           let device = devices.first(where: { $0.id == id && !$0.isLocalDevice }) {
+            entries.append(.init(id: device.id, title: device.name, isLocal: false,
+                                 symbolName: device.kind.symbolName,
+                                 subtitle: Self.offlineDestinationSubtitle))
         }
         return entries
     }
 
+    /// The secondary line on a kept-but-unreachable redirect target's menu entry
+    /// (R5). It has to state the AUDIBLE consequence, not just the device's state:
+    /// while the target is unreachable the app is no longer excluded from the
+    /// whole-system capture tap, so it plays wherever the Mac's current top-level
+    /// selection points — and the redirect resumes on its own once the device is
+    /// back, with nothing for the user to re-pick.
+    static let offlineDestinationSubtitle = "Offline — playing with system audio"
+
     /// The available AirPlay redirect targets: present, reachable (`isAvailable`),
     /// non-local devices, in the same stable order as the Selected Devices card.
-    /// PLAN decision 7 pairs with this — a routed device that drops out of this set
-    /// falls back to Current Device (see `update(devices:)`).
+    /// This is what a row may newly be POINTED at; it is not the same question as
+    /// what a row may keep SHOWING — a route whose target drops out of this set is
+    /// kept and gets an injected offline entry (`appDestinations(devices:keeping:)`),
+    /// and only an outright disappearance resets it (R5, `update(devices:)`).
     ///
     /// AirPlay-1-only (RAOP) devices are excluded (T4b, a deliberate product
     /// call, not a bug): a per-app rebind (`removeOutput`+`addOutput` on a

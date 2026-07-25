@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 ahh and contributors.
 
+import Foundation
+import Testing
+// LEGACY: only for `skipUnlessEnabled` below. Remove with it.
 import XCTest
 
 /// Opt-in gate for tests that drive REAL Core Audio against the Mac's actual
@@ -36,6 +39,50 @@ import XCTest
 /// DELIBERATELY while working on a feature, and must never be baked into
 /// automated/routine build verification.
 ///
+/// HOW IT IS APPLIED (swift-testing). Under XCTest this gate was a
+/// `skipUnlessEnabled()` call placed in the ONE helper every hardware test goes
+/// through (`makeStartedEngine()`), so a newly added hardware test inherited
+/// the gate instead of quietly reintroducing the hardware load. swift-testing
+/// evaluates skip conditions as **traits, before the test body runs**, so a
+/// call inside a helper can no longer do this. The equivalent single choke
+/// point is a **suite-level trait**: put every real-hardware test inside one
+/// nested suite that carries `.enabled(if:)`, and a test added to that suite is
+/// gated automatically, with nothing to remember per test.
+///
+/// ```swift
+/// @Suite struct LocalPlaybackEngineTests {
+///
+///     // Pure/static tests that need no hardware stay out here and always run.
+///     @Test func isFollowableTransportRejectsAirPlay() { ... }
+///
+///     /// Everything that drives a real `AVAudioEngine` against the Mac's
+///     /// actual output lives in here. The trait is the whole gate — do not
+///     /// add per-test `.enabled(if:)`, and do not move a hardware test out of
+///     /// this suite.
+///     @Suite(AudioHardwareTestGate.trait)
+///     struct RealHardware {
+///         @Test func startedEngineProducesOutput() throws {
+///             let engine = try makeStartedEngine()   // no gate call in the body
+///             ...
+///         }
+///     }
+/// }
+/// ```
+///
+/// Notes for whoever converts those files:
+///  - `.enabled(if:)` on a suite applies to every test in it, including tests
+///    in suites nested further inside. A per-`@Test` trait does not inherit,
+///    which is why the suite-level form is the required shape here.
+///  - The gate's skip *reason* still surfaces per test in the output
+///    (`Test x() skipped: "Real Core Audio hardware test…"`), so the lost
+///    coverage stays legible exactly as it did under `XCTSkipUnless`.
+///  - `makeStartedEngine()` (and any other shared helper) moves into the nested
+///    suite alongside the tests that use it, and its `try
+///    AudioHardwareTestGate.skipUnlessEnabled()` line is deleted — the trait
+///    has already made that decision by the time the body runs.
+///  - The trait condition is evaluated at discovery time, so it must not depend
+///    on per-test state. Reading the environment (all this does) is fine.
+///
 /// Run them:
 /// ```
 /// AIRPLAY_AUDIO_HARDWARE_TESTS=1 swift test --filter LocalPlaybackEngineTests
@@ -57,22 +104,31 @@ enum AudioHardwareTestGate {
         ProcessInfo.processInfo.environment[environmentVariableName] == "1"
     }
 
-    /// Skip the calling test unless real-hardware audio tests are opted in.
+    /// The reason shown against each skipped test.
+    static let skipReason =
+        "Real Core Audio hardware test. Set \(environmentVariableName)=1 to run "
+        + "(drives actual output hardware; excluded from routine verification "
+        + "because its timing depends on the machine, not because it is slow)."
+
+    /// The gate, as a swift-testing suite trait. Apply it to the ONE nested
+    /// suite that holds every real-hardware test — see the file comment above
+    /// for the exact shape. This is the whole gate; there is nothing left to
+    /// call from a test body.
+    static var trait: ConditionTrait {
+        .enabled(if: isEnabled, Comment(rawValue: skipReason))
+    }
+
+    /// LEGACY (XCTest only) — skip the calling test unless real-hardware audio
+    /// tests are opted in.
     ///
-    /// Call from the single helper that builds a real engine rather than from
-    /// each test, so a new test added to a gated suite inherits the gate instead
-    /// of quietly reintroducing the hardware load.
+    /// Kept only until `LocalPlaybackEngineTests` is converted to swift-testing;
+    /// its replacement is `trait` above. Delete this function, and this file's
+    /// `import XCTest`, once `git grep skipUnlessEnabled` finds nothing but this
+    /// declaration.
     static func skipUnlessEnabled(
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
-        try XCTSkipUnless(
-            isEnabled,
-            "Real Core Audio hardware test. Set \(environmentVariableName)=1 to run "
-                + "(drives actual output hardware; excluded from routine verification "
-                + "because its timing depends on the machine, not because it is slow).",
-            file: file,
-            line: line
-        )
+        try XCTSkipUnless(isEnabled, skipReason, file: file, line: line)
     }
 }

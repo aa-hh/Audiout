@@ -297,6 +297,12 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
     let size = view.fittingSize
     let frame = NSRect(origin: .zero, size: size)
 
+    // `view` may already be hosted in a real window (state 2's create sheet
+    // is a genuine `presentAsSheet`, not a mock) — remember that superview
+    // now, before `backdrop.addSubview(view)` below reparents `view` away
+    // from it, so it can go back afterward.
+    let originalSuperview = view.superview
+
     let host = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
     host.appearance = appearance
 
@@ -340,6 +346,17 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: backdrop, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
     host.orderOut(nil)
+    // Give `view` back to its original superview (if any) BEFORE detaching
+    // it from `host` below. For a real presented sheet, leaving `view`
+    // orphaned here would make `view.window` read `nil` for the rest of this
+    // process — `GroupCreationSheetController.finish`'s `view.window != nil`
+    // guard exists so headless tests can drive `commit()`/`cancel()` with no
+    // hosting window at all, but it means a later `test_cancel()` on a sheet
+    // that WAS really presented would silently skip `dismiss(self)`, leaving
+    // the sheet attached to (and dimming) its presenting window through every
+    // subsequent capture. Restoring `view` here keeps `view.window` truthful,
+    // so that guard takes the real-sheet branch and actually ends it.
+    originalSuperview?.addSubview(view)
     host.contentView = NSView()   // detach so the view isn't torn down under us
 }
 

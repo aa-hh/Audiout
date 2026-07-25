@@ -128,6 +128,100 @@ final class AppRoutingControllerTests: XCTestCase {
                        "the reset must persist so a relaunch never auto-resumes streaming to the speaker")
     }
 
+    // MARK: clearedDeviceRouteMemory — "Resume → <device>" support
+
+    /// `resetDeviceRoute` (the app-quit-triggered clear) records the cleared
+    /// target in-memory so a relaunch can offer a one-click "Resume" back to
+    /// it, without reversing the quit-clears-the-route decision itself.
+    func testResetDeviceRouteRecordsClearedDeviceRouteMemory() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+
+        XCTAssertEqual(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"), "living-room",
+                       "the cleared target must be remembered so a relaunch can offer to resume it")
+    }
+
+    /// A `resetDeviceRoute` call that no-ops (already `.noRedirect`/`.currentDevice`,
+    /// or no route at all) must not fabricate a memory entry — there was nothing
+    /// to resume.
+    func testResetDeviceRouteNoOpDoesNotRecordClearedDeviceRouteMemory() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")     // stays .noRedirect
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+
+        controller.resetDeviceRoute(bundleID: "com.apple.Music")
+        controller.resetDeviceRoute(bundleID: "com.apple.Safari")
+        controller.resetDeviceRoute(bundleID: "com.unknown.app")
+
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "com.apple.Music"))
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "com.apple.Safari"))
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "com.unknown.app"))
+    }
+
+    /// Any `setDestination` call for a bundle ID with a remembered cleared
+    /// target consumes (clears) that memory — whether the pick IS the resume
+    /// target, a different device entirely, or even the exact same destination
+    /// the route already has (a true no-op mutation still consumes it: once the
+    /// user has touched this row, the remembered target is moot either way).
+    func testSetDestinationClearsClearedDeviceRouteMemoryOnAnyPick() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+        XCTAssertEqual(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"), "living-room")
+
+        // Picking the SAME device the memory names (the "Resume" pick in
+        // production) still consumes the memory — it's now been acted on.
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"),
+                    "picking the resume target consumes the memory")
+
+        // Re-arm, then pick a DIFFERENT destination entirely.
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+        XCTAssertEqual(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"), "living-room")
+
+        controller.setDestination(.device(id: "kitchen"), for: "org.mozilla.firefox")
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"),
+                    "picking a different destination also consumes the now-stale memory")
+    }
+
+    /// `removeRoute` drops any remembered cleared target too — a removed route
+    /// has nothing left to resume.
+    func testRemoveRouteClearsClearedDeviceRouteMemory() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+        XCTAssertEqual(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"), "living-room")
+
+        controller.removeRoute(bundleID: "org.mozilla.firefox")
+
+        XCTAssertNil(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"))
+    }
+
+    /// The memory is in-memory ONLY — a reloaded controller (simulating
+    /// Audiouter itself relaunching) must never see a remembered target, since
+    /// nothing persisted it and no `AppRouteStore` schema field carries it.
+    func testClearedDeviceRouteMemoryIsNotPersistedAcrossReload() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
+        controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
+        XCTAssertEqual(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox"), "living-room")
+
+        let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
+        XCTAssertNil(reloaded.clearedDeviceRouteTarget(for: "org.mozilla.firefox"),
+                    "the memory must not survive a reload — it is forgotten for free on quit")
+        // And the persisted route itself is exactly what resetDeviceRoute left it as.
+        XCTAssertEqual(reloaded.appRoutes.first?.destination, .noRedirect)
+    }
+
     func testResetDeviceRouteLeavesNonDeviceRoutesAndMissingBundlesUntouched() throws {
         let dir = tempDirectory()
         let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)

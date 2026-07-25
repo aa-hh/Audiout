@@ -134,13 +134,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// mutated after wiring, so no synchronization on the reference is needed.
     public var localPlaybackEngine: LocalPlaybackControlling?
 
-    /// Supplies whether `id` is currently a member of "Selected Devices" — the
-    /// signal T-BACKEND needs to detect "Mac + ≥1 AirPlay" ("play everywhere"),
-    /// since `GroupController.applyRouting` always filters the local device out
-    /// of the `ids` this backend's `setOutputSet` receives (the local Mac is
-    /// never a real engine output). `GroupController` already exposes exactly
-    /// this via its public `isSpeakerSelected(_:)`; `AppDelegate` wires it in
-    /// once both are constructed. Assigned once, before any selection change —
+    /// Supplies whether `id` is currently a member of what Main Out points at —
+    /// the Selected Devices set OR the active group's members — the signal
+    /// T-BACKEND needs to detect "Mac + ≥1 AirPlay" ("play everywhere"), since
+    /// `GroupController` always filters the local device out of the `ids` this
+    /// backend's `setOutputSet` receives (the local Mac is never a real engine
+    /// output). `GroupController` exposes exactly this via its public
+    /// `isMainOutMember(_:)` — NOT `isSpeakerSelected(_:)`, which is blind to
+    /// group membership; `AppDelegate` wires it in once both are constructed.
+    /// Assigned once, before any selection change —
     /// same discipline as `captureCoordinator`/`localPlaybackEngine` — so no
     /// synchronization is needed on the reference itself. `nil` in tests / the
     /// UI-only smoke path, in which case "play everywhere" never activates
@@ -2455,21 +2457,59 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Execute one per-app binding op against the engine. Best-effort (D4): a failed
-    /// engine op is swallowed — the binding is idempotently re-established on the next
-    /// topology change. The engine's `addOutput(_:streamId:)` binds the device's
-    /// session to the given master stream (T2).
+    /// op is NOT silently retried here — the binding is idempotently re-established on
+    /// the next topology change — but a bind/rebind failure is no longer swallowed
+    /// blind: `handleBindFailure` walks the `.routedApps` claim back to empty so the
+    /// UI stops asserting a stream that never actually established (dot-truthfulness
+    /// fix; deliberately does NOT touch `Device.connectionState` — out of scope here).
+    /// The engine's `addOutput(_:streamId:)` binds the device's session to the given
+    /// master stream (T2).
     private func performBindOp(_ op: StreamBindOp) async {
         switch op {
         case .bind(let outputID, let stream):
             AudioDiag.log("engine BIND output=\(outputID) stream=\(stream)")
-            try? await engine.addOutput(outputID, streamId: stream)
+            do {
+                try await engine.addOutput(outputID, streamId: stream)
+            } catch {
+                handleBindFailure(outputID: outputID, stream: stream, op: "bind", error: error)
+            }
         case .rebind(let outputID, let stream):
             AudioDiag.log("engine REBIND output=\(outputID) stream=\(stream)")
+            // The removeOutput throw is tolerated (the device may not currently be
+            // added — a no-op teardown is fine); only the addOutput result determines
+            // whether the rebind actually re-established the session.
             try? await engine.removeOutput(outputID)
-            try? await engine.addOutput(outputID, streamId: stream)
+            do {
+                try await engine.addOutput(outputID, streamId: stream)
+            } catch {
+                handleBindFailure(outputID: outputID, stream: stream, op: "rebind", error: error)
+            }
         case .unbind(let outputID):
             AudioDiag.log("engine UNBIND output=\(outputID) (AirPlay session torn down)")
             try? await engine.removeOutput(outputID)
+        }
+    }
+
+    /// A per-app bind/rebind that never actually established an AirPlay session must
+    /// not leave the device claiming it streams one — `handleDestinationSetsChanged`
+    /// already emitted `.routedApps` with the intended app names purely from mixer
+    /// TOPOLOGY, ahead of (and independent of) whether the engine op below it would
+    /// succeed. Mirrors exactly the "device just lost its stream" clear that function
+    /// emits (`.routedApps(deviceID:, appNames: [])`, then drops the device from
+    /// `routedAppNames` so a later successful topology change is free to re-publish it
+    /// from scratch) — so a genuinely failed session falls back to the same
+    /// truthful, intent-only rendering instead of the teal dot + sublabel lying about
+    /// audio that never flowed. Runs on `stateQueue` to serialize against the same
+    /// `.routedApps` bookkeeping `handleDestinationSetsChanged` mutates.
+    private func handleBindFailure(outputID: OutputID, stream: UInt32, op: String, error: Error) {
+        stateQueue.sync {
+            guard let deviceID = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
+            Telemetry.log(.airplay, "bind_failed", [
+                "device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)",
+            ])
+            guard self.routedAppNames[deviceID] != nil else { return }
+            self.routedAppNames.removeValue(forKey: deviceID)
+            self.emit(.routedApps(deviceID: deviceID, appNames: []))
         }
     }
 

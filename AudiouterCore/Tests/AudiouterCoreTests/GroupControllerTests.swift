@@ -492,6 +492,138 @@ final class GroupControllerTests: XCTestCase {
         XCTAssertEqual(volume("office", in: backend), 12)
     }
 
+    // MARK: Activation — the local Mac is never an engine output
+    //
+    // A saved group may MIX the Mac with AirPlay speakers (the pre-engine
+    // local-mix block is gone — `canSelectLocalSpeaker` is unconditionally true).
+    // `activateGroup` must therefore apply the SAME local-device filter
+    // `applyRouting()`'s Selected-Devices branch does: the Mac is the Mac's own
+    // output, not an engine output, and `NativeBackend.setOutputSet` documents
+    // that `GroupController` never hands it through. The Mac still plays — via
+    // the synced local sink, armed off `isMainOutMember(_:)` (below).
+
+    /// Mixed group {Mac, AirPlay}: only the AirPlay side reaches the backend.
+    func testActivateGroupMixingMacWithAirPlayExcludesMacFromOutputSet() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), ["sonos-move"],
+                       "the local Mac must never enter the backend output set")
+        XCTAssertFalse(backend.devices.first { $0.id == "local-mac" }?.isSelected ?? false,
+                       "the Mac has no engine session — it plays via the synced local sink")
+    }
+
+    /// Mac-ONLY group: the backend output set is EMPTY (passthrough), exactly as
+    /// a Selected-Devices set of {local} reaches the backend. Handing the Mac
+    /// through instead made this look like "≥1 real output" downstream — which is
+    /// what would arm the synced local sink with nothing behind it.
+    func testActivateGroupOfTheMacAloneReachesBackendAsEmptyOutputSet() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Just the Mac",
+                                       memberIDs: ["local-mac"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), [],
+                       "a Mac-only group is passthrough — an EMPTY backend output set")
+    }
+
+    /// The Mac's "volume" is the Mac's SYSTEM output level, so replaying a
+    /// group's remembered value would silently move it on every activation (and a
+    /// remembered 0 would mute the Mac outright). Its AirPlay siblings still get
+    /// their remembered levels.
+    func testActivateGroupDoesNotPushRememberedVolumeToTheMac() async throws {
+        let (controller, backend) = try await makeController()
+        let macVolumeBefore = volume("local-mac", in: backend)
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"],
+                                       memberVolumes: ["local-mac": 0, "sonos-move": 77]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(volume("sonos-move", in: backend), 77, "AirPlay members still get their levels")
+        XCTAssertEqual(volume("local-mac", in: backend), macVolumeBefore,
+                       "activating a group must not write the Mac's system output volume")
+    }
+
+    // MARK: Main Out membership — the synced-local-sink arming query
+    //
+    // `isMainOutMember(_:)` is what `NativeBackend.selectedDevicesQuery` is wired
+    // to (AppDelegate). It has to exist because the Mac never travels in
+    // `setOutputSet`'s ids, and it must follow the MAIN OUT TARGET, not the
+    // Selected Devices set, or the group path gets it wrong in both directions.
+
+    /// A group containing the Mac reports the Mac as a Main Out member — so the
+    /// synced local sink arms and the Mac stays audible alongside the speaker.
+    func testIsMainOutMemberSeesTheMacInsideTheActiveGroup() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+
+        XCTAssertTrue(controller.isMainOutMember("local-mac"),
+                      "a group containing the Mac must arm the synced local sink")
+        XCTAssertTrue(controller.isMainOutMember("sonos-move"))
+        XCTAssertFalse(controller.isMainOutMember("office"), "a non-member is not a Main Out member")
+    }
+
+    /// The mirror failure: an AirPlay-ONLY group must NOT report the Mac, even
+    /// though the Mac is still sitting in the (now untargeted) Selected Devices
+    /// set — otherwise the sink arms and the Mac plays when the user routed the
+    /// audio away from it.
+    func testIsMainOutMemberIgnoresSelectedDevicesWhileAGroupIsTheTarget() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        try controller.saveGroup(Group(id: "g1", name: "Patio",
+                                       memberIDs: ["sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"),
+                      "the Mac is still in the untargeted Selected Devices set")
+        XCTAssertFalse(controller.isMainOutMember("local-mac"),
+                       "an AirPlay-only group must not arm the synced local sink")
+    }
+
+    /// The rewire's safety proof (NOT a regression test — this invariant holds
+    /// before and after the fix): under the ordinary `.selectedDevices` target,
+    /// `isMainOutMember(_:)` is EXACTLY `isSpeakerSelected(_:)` for every id in
+    /// every selection state, because `mainOutMemberIDs` is
+    /// `Array(selectedDeviceIDs)` in that branch. So repointing
+    /// `NativeBackend.selectedDevicesQuery` from one to the other changes
+    /// behaviour on the GROUP path only.
+    func testIsMainOutMemberEqualsIsSpeakerSelectedUnderSelectedDevicesTarget() async throws {
+        let (controller, backend) = try await makeController()
+        let ids = backend.devices.map(\.id) + ["never-discovered"]
+
+        func assertAgrees(_ label: String) {
+            for id in ids {
+                XCTAssertEqual(controller.isMainOutMember(id), controller.isSpeakerSelected(id),
+                               "\(label): the two reads disagree on \(id)")
+            }
+        }
+
+        controller.setMainOut(.selectedDevices)
+        assertAgrees("empty selection")
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        assertAgrees("{local-mac}")
+        _ = controller.setDeviceSelected("sonos-move", true)      // auto-swap → {sonos-move}
+        assertAgrees("AirPlay-only after auto-swap")
+        _ = controller.setDeviceSelected("local-mac", true)       // → mixed
+        assertAgrees("mixed {sonos-move, local-mac}")
+        _ = controller.setDeviceSelected("office", true)
+        assertAgrees("mixed + a second AirPlay device")
+        _ = controller.setDeviceSelected("sonos-move", false)
+        assertAgrees("after a removal")
+    }
+
     func testDeactivateGroupClearsActiveIDWithoutChangingOutputSet() async throws {
         let (controller, backend) = try await makeController()
         let group = Group(id: "g1", name: "Downstairs", memberIDs: ["sonos-move"], memberVolumes: [:])

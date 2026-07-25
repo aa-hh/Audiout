@@ -1430,6 +1430,140 @@ final class PopoverControllerTests: XCTestCase {
                        "dropping an unrelated device leaves the route untouched")
     }
 
+    // MARK: "Resume → <device>" destination entry
+    //
+    // When an app quits, `AppRoutingController.resetDeviceRoute` clears its
+    // `.device(id:)` route back to `.noRedirect` (deliberate, 2026-07-22 product
+    // decision — unchanged) but now also remembers the cleared target in-memory
+    // (`clearedDeviceRouteMemory`). These tests pin the popover-side offer built
+    // on top of that memory: a one-click "Resume → <device>" entry when the
+    // remembered target is currently available, wired through the exact same
+    // `setDestination(.device(id:), for:)` path an ordinary pick takes.
+
+    /// The core offer: a route reset by `resetDeviceRoute` (simulating the
+    /// routed app quitting) gets a "Resume → <device name>" entry prepended to
+    /// its destination popup, carrying the documented subtitle, as long as the
+    /// remembered target device is still present + reachable.
+    func testResumeEntryOfferedWhenClearedTargetIsAvailable() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        appRouting.resetDeviceRoute(bundleID: "com.example.music") // simulates the app quitting
+
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .noRedirect,
+                       "the quit-clear itself is unaffected — still reverts to No Redirect")
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertTrue(titles.contains("Resume → Office"),
+                      "an available remembered target is offered as a one-click resume")
+
+        let resumeID = PopoverController.resumeDestinationID(forDeviceID: "office")
+        let resumeItem = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.music")?
+                .test_destinationPopUpMenuItem(forDestinationID: resumeID))
+        XCTAssertEqual(resumeItem.toolTip, "Return to where this app was playing")
+    }
+
+    /// No memory, no offer — an app that just has an ordinary `.noRedirect`
+    /// route (never quit-reset) must not see a stray "Resume" entry.
+    func testNoResumeEntryWithoutClearedDeviceRouteMemory() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music") // plain .noRedirect
+
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertFalse(titles.contains(where: { $0.hasPrefix("Resume") }),
+                       "no cleared-route memory ⇒ no resume offer")
+    }
+
+    /// The remembered target going unreachable (still discovered, but
+    /// `isAvailable == false`) must hide the resume offer too — same
+    /// "available" set (`availableAirPlayDestinations`) the plain device list
+    /// and R5's kept-route injection both key off.
+    func testResumeEntryHiddenWhenClearedTargetIsUnavailable() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                           runningAppsProvider: routedApps)
+        var devices = backend.devices
+        let officeIndex = try XCTUnwrap(devices.firstIndex(where: { $0.id == "office" }))
+        devices[officeIndex].isAvailable = false
+        popover.update(devices: devices)
+
+        let titles = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertFalse(titles.contains(where: { $0.hasPrefix("Resume") }),
+                       "an unreachable remembered target must not be offered as a resume pick")
+    }
+
+    /// Picking the "Resume" entry reaches the SAME `setDestination` call the
+    /// destination popup always uses (no new code path) and consumes the
+    /// memory it was built from.
+    func testPickingResumeEntrySetsDestinationAndConsumesMemory() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+
+        row.test_selectDestination(PopoverController.resumeDestinationID(forDeviceID: "office"))
+
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .device(id: "office"),
+                       "picking Resume redirects the app back to the remembered device")
+        XCTAssertNil(appRouting.clearedDeviceRouteTarget(for: "com.example.music"),
+                    "the memory is consumed once acted on")
+        // The resume entry is gone on the next render — the route is active again.
+        let titlesAfter = try XCTUnwrap(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        XCTAssertFalse(titlesAfter.contains(where: { $0.hasPrefix("Resume") }))
+    }
+
+    /// Picking a DIFFERENT destination (not the resume offer) while a resume
+    /// memory exists also clears it — it's stale/moot either way once the user
+    /// has made a fresh, deliberate pick.
+    func testPickingADifferentDestinationAlsoClearsResumeMemory() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+
+        row.test_selectDestination("homepod-bed") // an ordinary device pick, not the resume offer
+
+        XCTAssertEqual(appRouting.appRoutes.first?.destination, .device(id: "homepod-bed"))
+        XCTAssertNil(appRouting.clearedDeviceRouteTarget(for: "com.example.music"),
+                    "a fresh pick moots the remembered target even though it wasn't the one chosen")
+    }
+
+    /// Removing the app row entirely also drops any resume memory (wired via
+    /// `AppRoutingController.removeRoute`, exercised here end-to-end through the
+    /// popover's own removal path).
+    func testRemovingAppRowClearsResumeMemory() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+        XCTAssertEqual(appRouting.clearedDeviceRouteTarget(for: "com.example.music"), "office")
+
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        let row = try XCTUnwrap(popover.test_appRow(for: "com.example.music"))
+        row.test_remove()
+
+        XCTAssertNil(appRouting.clearedDeviceRouteTarget(for: "com.example.music"))
+    }
+
     /// The Applications card's collapse default (C5, updated from the old
     /// "redirected app" rule): expanded on open iff ANY app route exists — even a
     /// route still on the neutral "No Redirect" default counts (the user added it

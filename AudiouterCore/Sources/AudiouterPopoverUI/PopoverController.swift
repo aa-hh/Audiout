@@ -333,6 +333,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `Device.id` or with `currentDeviceDestinationID`.
     static let noRedirectDestinationID = "\u{0000}no-redirect"
 
+    /// The sentinel PREFIX a "Resume → <device>" destination entry's id carries
+    /// (see `appDestinations(devices:keeping:bundleID:)`) — offered when
+    /// `AppRoutingController.clearedDeviceRouteTarget(for:)` names a device the
+    /// app-quit reset cleared and that device is currently available again. The
+    /// underlying device id is appended after the prefix so `destination(forID:)`
+    /// can recover it; prefixed (rather than reusing the plain device id) so this
+    /// entry never collides with that same device's own plain entry lower in the
+    /// same popup.
+    static let resumeDestinationIDPrefix = "\u{0000}resume:"
+
+    /// Builds the destination-popup id for a "Resume → <device>" entry
+    /// targeting `deviceID`. Inverse of the prefix-stripping in
+    /// `destination(forID:)`.
+    static func resumeDestinationID(forDeviceID deviceID: String) -> String {
+        resumeDestinationIDPrefix + deviceID
+    }
+
     /// The SF Symbol shown for a routed app that isn't currently running (its icon
     /// can't be resolved) — routes persist across app quits (T-8, PLAN §C). A
     /// documented AppKit-usable symbol.
@@ -1169,15 +1186,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             icon: appIcon(for: route.bundleID),
             volume: route.volume,
             selectedDestinationID: destinationID(for: route.destination),
-            destinations: appDestinations(devices: devices, keeping: route.destination),
+            destinations: appDestinations(devices: devices, keeping: route.destination,
+                                         bundleID: route.bundleID),
             isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
     }
 
-    /// The destination entries for ONE row's popup, in display order: the
-    /// standalone "No Redirect" entry (the default/neutral state) first, then the
+    /// The destination entries for ONE row's popup, in display order: a
+    /// "Resume → <device>" entry when one is offerable (see below), then the
+    /// standalone "No Redirect" entry (the default/neutral state), then the
     /// "Current Device" entry (decision 8, now an explicit pick), then every
     /// AVAILABLE non-local device (`availableAirPlayDestinations`).
     /// Plain values only — `AppRowView` is isolated from Core's `AppRoute` (T-6).
@@ -1193,9 +1212,34 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `GroupEditorViewController` uses for its membership list ("available OR
     /// already a member"): what the user chose stays visible even when it has gone
     /// quiet.
-    private func appDestinations(devices: [Device],
-                                keeping current: AppRouteDestination) -> [AppRowView.Destination] {
-        var entries: [AppRowView.Destination] = [
+    ///
+    /// `bundleID` is this row's app identity, used ONLY to look up
+    /// `AppRoutingController.clearedDeviceRouteTarget(for:)` — the device an
+    /// app-quit `resetDeviceRoute` most recently cleared this app FROM, if any
+    /// and if not yet consumed. When that remembered target is also in
+    /// `available` (present + reachable now), a "Resume → <device name>" entry
+    /// is prepended ahead of every other entry — the one-click way back to
+    /// where this app was playing before it quit, without reversing the
+    /// 2026-07-22 decision that the redirect itself doesn't survive the quit.
+    /// Its id carries `resumeDestinationIDPrefix` rather than the plain device
+    /// id so it never collides with that same device's own plain entry further
+    /// down this same list; `destination(forID:)` strips the prefix back off,
+    /// so picking "Resume" reaches `setDestination(.device(id:), for:)` through
+    /// the exact same call site an ordinary device pick does.
+    private func appDestinations(devices: [Device], keeping current: AppRouteDestination,
+                                bundleID: String) -> [AppRowView.Destination] {
+        let available = availableAirPlayDestinations(devices: devices)
+        var entries: [AppRowView.Destination] = []
+        if let resumeTargetID = appRouting.clearedDeviceRouteTarget(for: bundleID),
+           let resumeDevice = available.first(where: { $0.id == resumeTargetID }) {
+            entries.append(.init(id: Self.resumeDestinationID(forDeviceID: resumeDevice.id),
+                                 title: "Resume → \(resumeDevice.name)",
+                                 isLocal: false,
+                                 symbolName: resumeDevice.kind.symbolName,
+                                 isStandalone: true,
+                                 subtitle: "Return to where this app was playing"))
+        }
+        entries.append(contentsOf: [
             .init(id: Self.noRedirectDestinationID,
                   title: "No Redirect",
                   isLocal: true,
@@ -1207,8 +1251,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   isLocal: true,
                   symbolName: Device.Kind.localMac.symbolName,
                   subtitle: "Plays locally with its own volume"),
-        ]
-        let available = availableAirPlayDestinations(devices: devices)
+        ])
         for device in available {
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
                                  symbolName: device.kind.symbolName))
@@ -1235,7 +1278,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// non-local devices, in the same stable order as the Selected Devices card.
     /// This is what a row may newly be POINTED at; it is not the same question as
     /// what a row may keep SHOWING — a route whose target drops out of this set is
-    /// kept and gets an injected offline entry (`appDestinations(devices:keeping:)`),
+    /// kept and gets an injected offline entry (`appDestinations(devices:keeping:bundleID:)`),
     /// and only an outright disappearance resets it (R5, `update(devices:)`).
     ///
     /// AirPlay-1-only (RAOP) devices are excluded (T4b, a deliberate product
@@ -1268,11 +1311,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Inverse of `destinationID(for:)`: either sentinel maps back to its own
-    /// local case, any other id to `.device(id:)`.
+    /// Inverse of `destinationID(for:)`: either local sentinel maps back to its
+    /// own case; a "Resume → <device>" id has its prefix stripped back down to
+    /// the plain device id it named all along; any other id is already a plain
+    /// device id, mapping straight to `.device(id:)`. Picking the "Resume" entry
+    /// therefore reaches the exact same `.device(id:)` case — and the exact
+    /// same `setDestination` call site — an ordinary device pick does.
     private func destination(forID id: String) -> AppRouteDestination {
         if id == Self.noRedirectDestinationID { return .noRedirect }
         if id == Self.currentDeviceDestinationID { return .currentDevice }
+        if id.hasPrefix(Self.resumeDestinationIDPrefix) {
+            return .device(id: String(id.dropFirst(Self.resumeDestinationIDPrefix.count)))
+        }
         return .device(id: id)
     }
 

@@ -73,11 +73,15 @@ public final class AppRowView: NSView {
         /// AirPlay device entry.
         public let isLocal: Bool
         public let symbolName: String?
-        /// True ONLY for the single "No Redirect" entry — rendered first, with
-        /// no section header, above the "Current Device"/"AirPlay Devices"
-        /// sections (the new default/neutral choice, visually distinct from
-        /// both named sections). Every other entry (including "Current
-        /// Device") leaves this `false`.
+        /// True for the standalone "No Redirect" entry, and also for a
+        /// per-row "Resume → <device>" entry a host may prepend (e.g.
+        /// `PopoverController` offering a one-click way back to a device an
+        /// app-quit reset cleared) — anything rendered first, with no section
+        /// header, above the "Current Device"/"AirPlay Devices" sections (the
+        /// default/neutral choice and any "get back to this" shortcut, both
+        /// visually distinct from the named sections). Every other entry
+        /// (including "Current Device" and a plain device entry) leaves this
+        /// `false`.
         public let isStandalone: Bool
         /// Optional secondary line of copy shown under `title` in the
         /// destination menu (e.g. clarifying what "No Redirect" or "Current
@@ -290,8 +294,10 @@ public final class AppRowView: NSView {
     /// same checkmark, just a caller-supplied action selector so each host can
     /// route the pick back through `destinationChanged(_:)`.
     ///
-    /// Structure: the standalone "No Redirect" entry FIRST, with no header
-    /// (the new default/neutral choice, visually distinct from every named
+    /// Structure: every standalone entry (in `destinations`' own order — the
+    /// host may prepend a "Resume → <device>" entry ahead of the fixed "No
+    /// Redirect" entry) FIRST, with no header (the default/neutral choice and
+    /// any "get back to this" shortcut, visually distinct from every named
     /// section), then a separator, then the same two sections as before
     /// (LOCKED DECISION 4 — no Groups): "Current Device", then "AirPlay
     /// Devices".
@@ -335,7 +341,11 @@ public final class AppRowView: NSView {
         // either named group.
         let standaloneEntries = destinations.filter(\.isStandalone)
         let localEntries = destinations.filter { $0.isLocal && !$0.isStandalone }
-        let deviceEntries = destinations.filter { !$0.isLocal }
+        // `!isStandalone` mirrors `localEntries`'s own exclusion above — without
+        // it, a standalone entry that also names a device (e.g. a "Resume →
+        // <device>" entry, `isLocal: false`) would render TWICE: once at the
+        // top with the other standalone entries, once again down here.
+        let deviceEntries = destinations.filter { !$0.isLocal && !$0.isStandalone }
 
         addEntries(standaloneEntries)
         if !standaloneEntries.isEmpty, !localEntries.isEmpty || !deviceEntries.isEmpty {

@@ -277,17 +277,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
-        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
-        // "Selected Devices" (not just which AirPlay devices are) to detect
-        // "play everywhere" — `GroupController.applyRouting` always filters the
-        // local device out of what it hands `backend.setOutputSet`, so that call
-        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
-        // existing public read that does; wire it in once, here, right after
-        // both are constructed. `backend as? NativeBackend` is nil for
-        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
-        // `LatencyConfigurable` optional-capability pattern used below.
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
+        // what Main Out points at (not just which AirPlay devices are) to detect
+        // "play everywhere" — neither `GroupController.applyRouting` nor
+        // `activateGroup` ever hands the local device to `backend.setOutputSet`,
+        // so that call alone can't carry this. `isMainOutMember(_:)` is the read
+        // that answers it for BOTH Main Out targets; wire it in once, here, right
+        // after both are constructed. Deliberately NOT `isSpeakerSelected(_:)`,
+        // which sees only the Selected Devices set: under a group target that
+        // both fails to arm the sink for a group containing the Mac and arms it
+        // for an AirPlay-only group whose Mac is merely still sitting in the
+        // untargeted Selected Devices set. For `.selectedDevices` the two are the
+        // same read, so this is a group-path-only change.
+        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // matching the `MeteringControlling`/`LatencyConfigurable`
+        // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
-            self?.groupController?.isSpeakerSelected(id) ?? false
+            self?.groupController?.isMainOutMember(id) ?? false
         }
 
         // Construct the production AppRoutingController explicitly (T-11), using

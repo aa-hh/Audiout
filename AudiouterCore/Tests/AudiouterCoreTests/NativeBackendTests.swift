@@ -3531,6 +3531,139 @@ final class NativeBackendTests: XCTestCase {
                        "a redirect target must not be marked isSelected by the per-app path")
     }
 
+    /// D4-best-effort's engine failure was previously swallowed with `try?` in
+    /// `performBindOp`, so a per-app bind that genuinely fails at the engine left
+    /// the UI's `.routedApps` claim (published purely from mixer TOPOLOGY by
+    /// `handleDestinationSetsChanged`, ahead of and independent from whether the
+    /// engine call underneath succeeds) standing — the teal dot + "streaming Foo"
+    /// sublabel kept claiming a session that was never actually established.
+    /// `handleBindFailure` now walks that claim back to empty on a failed bind,
+    /// mirroring exactly the clear `handleDestinationSetsChanged` emits when a
+    /// device legitimately loses its stream.
+    func testFailedBindEmitsRoutedAppsClearInsteadOfFalselyClaimingStream() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Force the per-app engine bind to throw for this device.
+        engine.addFailures = [device.outputID.rawValue]
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
+        }
+
+        XCTAssertTrue(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
+            return false
+        }, "topology-driven .routedApps still fires first, purely from mixer intent")
+        XCTAssertTrue(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "a bind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming a stream")
+
+        // Confirm the engine bind attempt actually happened (and, by construction
+        // of this test's `addFailures`, failed).
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+    }
+
+    /// Same fallback for the REBIND path: a membership change that reassigns a
+    /// device to a new per-app stream (here, one of two sibling apps sharing a
+    /// device's stream terminates — see
+    /// `testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream` for the
+    /// happy-path version of this exact setup) can also fail at the engine. The
+    /// device must fall back to an empty `.routedApps` claim rather than keep
+    /// asserting the surviving app's stream.
+    func testFailedRebindEmitsRoutedAppsClearInsteadOfFalselyClaimingStream() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Rebind Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar", "Foo"] }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([
+                self.route("com.foo", name: "Foo", toDevice: device.id),
+                self.route("com.bar", name: "Bar", toDevice: device.id),
+            ])
+        }
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Now force the rebind's re-add (Foo's termination reassigns the device
+        // to Bar-only's fresh stream) to fail at the engine.
+        engine.addFailures = [device.outputID.rawValue]
+
+        let afterTermination = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: { backend.handleAppTerminated(bundleID: "com.foo") }
+
+        XCTAssertTrue(afterTermination.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar"] }
+            return false
+        }, "topology still updates to the surviving app first, purely from mixer intent")
+        XCTAssertTrue(afterTermination.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "a rebind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming Bar's stream")
+
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= 2 }
+    }
+
+    /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
+    /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`), same pattern as
+    /// `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+    func testFailedBindLogsTelemetry() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Telemetry Bind-Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func bindFailedLines() -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "bind_failed"
+                    && $0["device"] as? String == device.id
+            }
+        }
+        // `Telemetry.log` is non-blocking (its own writer queue), so poll for the
+        // line to land rather than reading the box immediately after the
+        // `.routedApps` event that's emitted from the same `stateQueue.sync` block
+        // — same pattern as
+        // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+        await pollUntil(timeout: 5) { !bindFailedLines().isEmpty }
+        XCTAssertFalse(bindFailedLines().isEmpty,
+                       "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
+        XCTAssertEqual(bindFailedLines().first?["op"] as? String, "bind",
+                       "the logged op must identify this as a bind (not rebind) failure")
+    }
+
     // MARK: T10 cross-component gap coverage
     //
     // The T6/T7 tests above prove routing TOPOLOGY (which streamId a device is

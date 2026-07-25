@@ -152,6 +152,26 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     the suite is WAIT-bound, not CPU-bound, and two runs genuinely overlap.
     Serialising to one would idle most of the machine and needlessly queue
     agents behind each other.
+  - **Adaptive serial/parallel (`AUDIOUTER_TEST_MODE=auto|parallel|serial`).**
+    Measured on the same machine for the identical 1025 tests:
+
+    | mode | wall | user CPU | sys CPU |
+    |---|---|---|---|
+    | `--parallel 6` | 127s | **358s** | **51.7s** |
+    | `--parallel 2` | 278s | 316s | 46.6s |
+    | serial | 124s | **69.7s** | **6.0s** |
+
+    Serial does the same work for **~1/5 the CPU and ~1/8 the system time**.
+    `--parallel` forks one process per test CLASS and this suite has **57**, so
+    each spawn re-execs and re-links a large AppKit/CoreAudio/AirPlayEngine
+    binary to run a handful of tests. Real test work is ~70 CPU-seconds;
+    parallel spends ~290 MORE on fork/exec + dyld. That is also why lowering
+    `--num-workers` barely helps — it staggers the 57 spawns rather than
+    removing them (6→2 workers was 2.2x SLOWER for the same load).
+    On an idle machine parallel is still ~1.8x faster in wall time (~70s vs
+    ~124s warm), so `auto` picks parallel when nothing else is testing and
+    serial when something is — including a bare `swift test` started outside
+    this script, which it detects via `pgrep`.
   - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while
@@ -165,10 +185,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     the run is skipped. Agents routinely run the suite by hand and then
     commit, firing Guard 4 on byte-identical sources seconds later.
 
-  Escape hatches: `AUDIOUTER_TEST_NO_LOCK=1` (machine known idle),
+  Escape hatches: `AUDIOUTER_TEST_MODE=parallel` (force the fast path when you
+  are watching the terminal), `AUDIOUTER_TEST_SLOTS=N` (concurrency cap,
+  default 2), `AUDIOUTER_TEST_NO_LOCK=1` (skip the cap entirely),
   `AUDIOUTER_TEST_NO_CACHE=1` (force a real run), `AUDIOUTER_TEST_WORKERS=N`.
-  If the lock stays busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
-  the runner proceeds **unlocked** rather than failing — it exists to protect
+  If all slots stay busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
+  the runner proceeds **uncapped** rather than failing — it exists to protect
   the CPU, not to gate correctness, and must never block a commit for a reason
   the committer cannot see. `swift test` parallelizes at the test-CLASS level:
   each suite runs in its own process, so tests must not race on cross-process

@@ -143,14 +143,79 @@ else
     fi
 fi
 
-[ "$acquired" -eq 1 ] && \
-    echo "  suite: slot $(basename "$slot_file") of $slots — running with $workers workers." >&2
+# --- serial vs parallel -----------------------------------------------------
+# MEASURED (1025 tests, same machine, same work):
+#
+#   --parallel 6   wall 127s   user 358s   sys 51.7s
+#   --parallel 2   wall 278s   user 316s   sys 46.6s
+#   serial         wall 124s   user  69.7s sys  6.0s
+#
+# Serial does the identical work for ~1/5 the CPU and ~1/8 the system time.
+# `swift test --parallel` parallelises at the test-CLASS level — one fresh OS
+# process per class, and this suite has 57 — so each spawn re-execs and re-links
+# a large AppKit/CoreAudio/AirPlayEngine binary just to run a handful of tests.
+# Real test work is only ~70 CPU-seconds; parallel burns ~290 MORE on fork/exec
+# and dyld. That overhead is also why lowering --num-workers barely helps: it
+# does not remove the 57 spawns, it just staggers them.
+#
+# On an IDLE machine parallel is still ~1.8x faster in wall time (~70s vs ~124s
+# warm), which is what a human watching the terminal wants. With several agents
+# testing at once nobody is watching a clock, and 5x the CPU is precisely what
+# makes the machine unusable. So: pick by conditions rather than fixing one.
+#
+# AUDIOUTER_TEST_MODE=auto (default) | parallel | serial
+mode=${AUDIOUTER_TEST_MODE:-auto}
+
+# Is anything else already testing? Two sources, because the second is the one
+# that actually bites: other runner slots, AND bare `swift test` invocations
+# that never went through this script at all (an agent typing it by hand is the
+# dominant real-world case — observed driving load average past 40).
+machine_busy=0
+n=1
+while [ "$n" -le "$slots" ]; do
+    f="${lock_file}.$n"
+    if [ "$f" != "$slot_file" ] && [ -f "$f" ]; then
+        # Liveness-check the PID: a stale file left by a killed run must not
+        # permanently force everyone onto the slow path.
+        p=$(cat "$f" 2>/dev/null || echo '')
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then machine_busy=1; fi
+    fi
+    n=$((n + 1))
+done
+if pgrep -f 'swift-test|xctest' >/dev/null 2>&1; then machine_busy=1; fi
+
+case "$mode" in
+    serial)   test_args="" ;;
+    parallel) test_args="--parallel --num-workers $workers" ;;
+    *)        if [ "$machine_busy" -eq 1 ]; then test_args=""
+              else test_args="--parallel --num-workers $workers"; fi ;;
+esac
+
+if [ "$acquired" -eq 1 ]; then
+    # State the REASON accurately: an explicitly forced mode was not a decision
+    # this script made, and printing "machine idle" next to a mode the caller
+    # pinned would be a lie the next reader has to debug.
+    if [ "$mode" = "auto" ]; then
+        why=$([ "$machine_busy" -eq 1 ] && echo "machine busy" || echo "machine idle")
+    else
+        why="AUDIOUTER_TEST_MODE=$mode"
+    fi
+    if [ -z "$test_args" ]; then
+        echo "  suite: slot $(basename "$slot_file") of $slots — SERIAL ($why; ~1/5 the CPU of parallel)." >&2
+    else
+        echo "  suite: slot $(basename "$slot_file") of $slots — parallel, $workers workers ($why)." >&2
+    fi
+fi
 
 # --- run --------------------------------------------------------------------
 # `set -e` is off for this one command so a failure reaches the cache logic
 # (which must NOT write a stamp) and the trap, rather than exiting immediately.
 set +e
-( cd "$core" && swift test --parallel --num-workers "$workers" "$@" ) >&2
+# $test_args is deliberately UNQUOTED: it must word-split into flags (or expand
+# to nothing at all in serial mode). "$@" stays quoted so caller arguments with
+# spaces survive.
+# shellcheck disable=SC2086
+( cd "$core" && swift test $test_args "$@" ) >&2
 status=$?
 set -e
 

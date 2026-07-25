@@ -101,12 +101,21 @@ run_remote() {
     fi
 
     rdir="$remote_root/$(basename "$repo_root")"
+    # rsync parses "host:path" ITSELF, before any shell (local or remote) gets
+    # involved — normal shell quoting around the whole argument does not protect
+    # spaces inside the path portion. The primary checkout's own directory is
+    # "AirPlay Controller" (a space in its basename), so $rdir for a run from
+    # there needs its spaces escaped for rsync's remote-path parser specifically,
+    # not just quoted for this local shell. Confirmed broken without this: rsync
+    # errors "server receiver mode requires two argument" and the whole overflow
+    # path silently fell back to local for every run from the main checkout.
+    rdir_escaped=$(printf '%s' "$rdir" | sed 's/ /\\ /g')
     # Source only: .build is per-machine (absolute paths baked in) and .git is
     # not needed to compile. Tracked sources are ~20MB/445 files, so after the
     # first sync this ships only the handful of files an agent actually edited.
     if ! rsync -az --delete --timeout=30 \
             --exclude '.build/' --exclude '.git/' --exclude '.claude/' \
-            "$repo_root/" "$remote_host:$rdir/" >/dev/null 2>&1; then
+            "$repo_root/" "$remote_host:$rdir_escaped/" >/dev/null 2>&1; then
         echo "  suite: rsync to remote failed — queueing locally instead." >&2
         return 1
     fi

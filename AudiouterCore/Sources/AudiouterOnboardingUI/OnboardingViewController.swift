@@ -106,7 +106,8 @@ public final class OnboardingViewController: NSViewController {
                 detail: "macOS calls this screen recording. Your audio flows "
                     + "straight to your speakers — nothing is stored or sent. "
                     + "Allowing plays a brief tone to confirm it's working.",
-                allowButtonTitle: "Allow…"),
+                allowButtonTitle: "Allow…",
+                iconColor: Tokens.Color.permissionSystemAudio),
             onAllow: { [weak self] in self?.allowAudio() },
             onOpenSettings: { [weak self] in self?.onOpenSettings(.screenAndSystemAudioRecording) })
 
@@ -119,7 +120,8 @@ public final class OnboardingViewController: NSViewController {
                 // from wrapping to an orphan "Fi."
                 detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
                     + "in your list.",
-                allowButtonTitle: "Allow…"),
+                allowButtonTitle: "Allow…",
+                iconColor: Tokens.Color.permissionLocalNetwork),
             onAllow: { [weak self] in
                 Task { @MainActor in
                     await self?.model.primeLocalNetwork()
@@ -143,7 +145,8 @@ public final class OnboardingViewController: NSViewController {
                 // permission so the System Settings pane is recognisable.
                 detail: "Press play or pause on a speaker and your Mac follows. "
                     + "macOS calls this Accessibility.",
-                allowButtonTitle: "Allow…"),
+                allowButtonTitle: "Allow…",
+                iconColor: Tokens.Color.permissionRemoteControl),
             onAllow: { [weak self] in self?.model.primeRemoteControl() },
             // Re-fire the macOS Accessibility PROMPT rather than deep-linking to the
             // pane: the prompt's own "Open System Settings" button is the one path

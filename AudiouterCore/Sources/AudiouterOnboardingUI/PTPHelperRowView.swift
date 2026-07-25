@@ -45,7 +45,8 @@ final class PTPHelperRowView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         iconTile = IconTileView(symbolName: "clock.arrow.2.circlepath",
-                                accessibility: "Speaker Sync")
+                                accessibility: "Speaker Sync",
+                                color: Tokens.Color.permissionSpeakerSync)
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
         titleLabel.font = Tokens.Font.bodyEmphasized

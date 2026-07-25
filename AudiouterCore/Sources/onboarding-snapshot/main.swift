@@ -111,13 +111,14 @@ func snapshot(appearanceName: NSAppearance.Name,
               audio: PermissionStatus,
               network: PermissionStatus,
               remoteControl: PermissionStatus,
+              ptpHelper: PTPHelperStatus = .enabled,
               outDir: URL) {
     let controller = makeViewController()
     let appearance = NSAppearance(named: appearanceName)
     let rootView = controller.test_rootView
     rootView.appearance = appearance
     controller.test_applyStatuses(audio: audio, isProbingAudio: false, network: network,
-                                  remoteControl: remoteControl)
+                                  remoteControl: remoteControl, ptpHelper: ptpHelper)
     rootView.layoutSubtreeIfNeeded()
     let size = rootView.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -158,7 +159,7 @@ func run() -> Int32 {
 
     for (name, tag) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
         snapshot(appearanceName: name, label: "\(tag)-initial",
-                 audio: .unknown, network: .unknown, remoteControl: .unknown, outDir: outDir)
+                 audio: .unknown, network: .unknown, remoteControl: .unknown, ptpHelper: .requiresApproval, outDir: outDir)
         snapshot(appearanceName: name, label: "\(tag)-resolved",
                  audio: .granted, network: .requested, remoteControl: .requested, outDir: outDir)
         snapshot(appearanceName: name, label: "\(tag)-denied",

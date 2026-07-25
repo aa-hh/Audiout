@@ -84,10 +84,19 @@ Fill in after all four phases complete. Each row represents one measurement pass
 
 | Phase | Load | Audio Quality | Wake Latency p50 (µs) | Wake Latency p95 (µs) | Wake Latency p99 (µs) | Wake Latency max (µs) | Inter-Arrival Gap p50 (ms) | Inter-Arrival Gap p99 (ms) | In-Cycle Work p99 (µs) | H1 Send Starvation? | H2 Capture Underrun? | H3 Sync Drift? |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Idle (before fixes) | None (idle) | [clear/crackle/stutter] | — | — | — | — | — | — | — | — | — | — |
-| Loaded (before fixes) | 16 spinners | [clear/crackle/stutter] | | | | | | | | [Y/N/maybe] | [Y/N/maybe] | [Y/N/maybe] |
-| Idle (after fixes) | None (idle) | [clear/crackle/stutter] | — | — | — | — | — | — | — | — | — | — |
-| Loaded (after fixes) | 16 spinners | [clear/crackle/stutter] | | | | | | | | [Y/N/maybe] | [Y/N/maybe] | [Y/N/maybe] |
+| Idle (before fixes) | None (idle) | not measured — Stage 1 was already committed before this run; see note below | — | — | — | — | — | — | — | — | — | — |
+| Loaded (before fixes) | 16 spinners | not measured | | | | | | | | — | — | — |
+| Idle (after fixes) | None (idle, load avg ~5.5) | **clear** | 50 | 270 | 580 | 1280 | 11.61 | 11.83 | 720 | N | N | N |
+| Loaded (after fixes) | 16 spinners (load avg peaked **35.7**, roughly 2x the load-16 originally observed stuttering under) | **clear** | 30 | 270 | 640 | 1020 | 11.61 | 11.67 | 600 | N | N | N |
+
+**2026-07-26, Alec live, quiet machine:** ran on a fresh `APP_NAME=AudiouterSchedProbe` build of this worktree
+(commit b849320, Stage 1 complete), connected to a real receiver, `scripts/load-gen.sh 16 30`. Numbers above are
+from the last 5-second probe sample of each 30-second window (`log stream --predicate 'subsystem ==
+"com.airplayengine" AND category == "write-scheduling"'`). No "before fixes" comparison was run — Stage 1 was
+already committed to this worktree before this session, so getting a true before/after would need a separate
+build off the pre-Stage-1 commit (84270da). Treat the "before" rows as the qualitative baseline instead:
+Alec's original 2026-07-25 observation (load avg 16, 2.1% CPU, stuttering, zero telemetry errors) is what
+prompted this plan.
 
 ### Interpreting the Results
 
@@ -115,6 +124,17 @@ Fill in after all four phases complete. Each row represents one measurement pass
 **Does H1 dominate (send starvation)?**
 - **Yes:** Stage 2 (real-time send thread) proceeds as planned. Dispatch tasks T11–T14 after this measurement.
 - **No:** H2 likely fixed the problem. Document which hypothesis won, and defer Stage 2 pending further investigation.
+
+**2026-07-26 DECISION: No. Stage 2 is deferred.** Under a loaded condition harder than the one that originally
+produced audible stutter (load avg 35.7 vs. the original 16), audio stayed clear and none of the three metric
+families moved meaningfully from their idle values — wake latency p99 stayed under 1ms, inter-arrival gap stayed
+locked to the 11.6ms IOProc cadence with no dropped-cycle spikes, in-cycle work stayed flat. Neither H1 nor H2
+nor H3 shows any sign of the problem recurring. This matches the plan's own risk #1 / finding F26: a quarter
+second of receiver buffering should absorb sender jitter of tens of ms, so once QoS + workgroup + the F12
+lock fix removed the actual sources of that jitter, there was nothing left for a dedicated real-time send
+thread to fix. **Stage 2 (T11–T17) is not being dispatched.** If stutter resurfaces under a different load
+shape (not CPU-spinner load — e.g. memory pressure, disk I/O contention) revisit this decision with a fresh T10
+run under that condition.
 
 ---
 

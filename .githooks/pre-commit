@@ -139,17 +139,27 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # with N full suites at once, and skips the run outright when these exact
     # sources already passed. It hashes the WORKING TREE, which is what this
     # guard has always actually tested (it never stashed unstaged changes).
-    # Fallback matters: core.hooksPath is an ABSOLUTE path to the primary
-    # checkout's .githooks, so EVERY worktree runs THIS file the moment it
-    # lands on main — while $repo_root/scripts/run-tests.sh resolves to each
-    # worktree's OWN root, where a branch predating the script has no such
-    # file. Without this fallback, landing the runner would break `git commit`
-    # in every worktree still on an older branch. Degrade to the previous
-    # inline command instead.
+    # Finding the runner, in priority order. This matters more than it looks:
+    # core.hooksPath is an ABSOLUTE path to the primary checkout's .githooks, so
+    # EVERY worktree executes THIS file — but $repo_root/scripts/run-tests.sh
+    # resolves to each worktree's OWN root, and a branch cut before this work has
+    # no such file there. Preferring only $repo_root would mean the runner
+    # silently did nothing for every in-flight worktree (11 of 12 when this
+    # landed) until each merged main, which is exactly the case where the
+    # machine-wide cap is needed most.
+    #
+    # So: this worktree's copy first (a branch may legitimately be iterating on
+    # the runner itself and must test its own version), else the copy that sits
+    # beside this hook in the primary checkout — the same checkout git already
+    # points every worktree at. The runner derives its own repo_root from the
+    # invoking cwd, so main's copy operates correctly on the calling worktree.
+    hook_root=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
     if [ -x "$repo_root/scripts/run-tests.sh" ]; then
         run_suite="$repo_root/scripts/run-tests.sh"
+    elif [ -n "$hook_root" ] && [ -x "$hook_root/scripts/run-tests.sh" ]; then
+        run_suite="$hook_root/scripts/run-tests.sh"
     else
-        echo "  (no scripts/run-tests.sh on this branch — running unserialised)" >&2
+        echo "  (no scripts/run-tests.sh found — running unserialised)" >&2
         run_suite=""
     fi
     if ! { if [ -n "$run_suite" ]; then "$run_suite"; \

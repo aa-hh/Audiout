@@ -567,6 +567,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     private var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
 
+    /// The devices whose `converging` slot is held by a WHOLE-SYSTEM rebind
+    /// recovery rather than by a `convergeDevice` loop. `converging` is one
+    /// serialization domain shared by both (Finding 1), but only the recovery's
+    /// hold is ours to drop out-of-band: `handleSystemWillSleep` abandons in-flight
+    /// recoveries, and it must release exactly the slots those recoveries claimed —
+    /// removing a slot a live `convergeDevice` loop owns would let a second kick
+    /// interleave engine ops for the same device. Per-app-scope recoveries never
+    /// claim a slot, so they never appear here.
+    private var rebindConverging: Set<String> = []
+
     /// Bounded attempt ceiling for the AirPlay-session rebind recovery (T4).
     /// UNLIKE the indefinite `.processNotYetAudible` retry: a rebind that keeps
     /// failing means the receiver is genuinely gone, and infinite
@@ -1141,6 +1151,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.rebindRecoveryGen.removeAll()
             for work in self.pendingRebindRecoveries.values { work.cancel() }
             self.pendingRebindRecoveries.removeAll()
+            self.rebindConverging.removeAll()
             self.bufferReAdding.removeAll()
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
@@ -1841,6 +1852,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     continue
                 }
                 self.converging.insert(deviceID)
+                self.rebindConverging.insert(deviceID)
                 let gen = (self.rebindRecoveryGen[deviceID] ?? 0) + 1
                 self.rebindRecoveryGen[deviceID] = gen
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
@@ -1955,7 +1967,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         "trigger": "recapture", "outcome": "superseded", "reason": reason,
                     ])
                     if case .wholeSystem = scope {
-                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                        return self.releaseRebindConverging(id: deviceID)
                     }
                     return nil
                 }
@@ -1969,7 +1981,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     self.emit(.streamHealth(id: deviceID, recovering: false))
                     if case .wholeSystem = scope {
-                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                        return self.releaseRebindConverging(id: deviceID)
                     }
                     return nil
                 }
@@ -1985,7 +1997,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.rebindRecoveryGen.removeValue(forKey: deviceID)
                     self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                     if case .wholeSystem = scope {
-                        return self.releaseConvergingAndRequeueIfNeeded(id: deviceID)
+                        return self.releaseRebindConverging(id: deviceID)
                     }
                     return nil
                 }
@@ -2006,26 +2018,56 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     + "in \(delay)s: device=\(deviceID) \(label)")
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
-                    self.stateQueue.sync {
-                        // Re-check under the lock: still the same generation, still
-                        // owns this session, device still discovered.
-                        guard self.rebindRecoveryGen[deviceID] == gen,
-                              self.stillOwnsRebind(deviceID: deviceID, scope: scope),
-                              let out = self.outputIDs[deviceID] else {
+                    let requeue: OutputID? = self.stateQueue.sync {
+                        // Superseded while waiting out the delay: a newer chain now
+                        // owns this device's bookkeeping AND — for whole-system scope —
+                        // its `converging` slot, so touch neither. Releasing or
+                        // clearing here would pull the newer recovery's state out from
+                        // under it.
+                        guard self.rebindRecoveryGen[deviceID] == gen else {
                             // T4: the backed-off retry for `attempt + 1` never got
-                            // to run — state moved on while it was waiting out the
-                            // delay. Without this line the trail goes silent after
+                            // to run. Without this line the trail goes silent after
                             // `retry_scheduled` with no explanation.
+                            Telemetry.log(.airplay, "rebind", [
+                                "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt + 1)",
+                                "trigger": "recapture", "outcome": "superseded",
+                                "reason": "gen_superseded_before_retry_fired",
+                            ])
+                            return nil
+                        }
+                        // Still the reigning chain, but the device no longer owns this
+                        // session (or went away): a TERMINAL exit. The scheduling
+                        // attempt deliberately kept the whole-system `converging` slot
+                        // held ("still in progress") and nothing else will ever release
+                        // it, so release it here like every other terminal exit does.
+                        // Skipping this leaked the slot and permanently wedged the
+                        // device (see `releaseRebindConverging`); the commonest way in
+                        // is a sleep landing during the backoff, which clears `added`
+                        // and so fails the ownership re-check below.
+                        guard self.stillOwnsRebind(deviceID: deviceID, scope: scope),
+                              let out = self.outputIDs[deviceID] else {
                             Telemetry.log(.airplay, "rebind", [
                                 "device": deviceID, "gen": "\(gen)", "attempt": "\(attempt + 1)",
                                 "trigger": "recapture", "outcome": "superseded",
                                 "reason": "state_changed_before_retry_fired",
                             ])
-                            return
+                            self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                            self.pendingRebindRecoveries.removeValue(forKey: deviceID)
+                            self.emit(.streamHealth(id: deviceID, recovering: false))
+                            if case .wholeSystem = scope {
+                                return self.releaseRebindConverging(id: deviceID)
+                            }
+                            return nil
                         }
                         self.enqueueRebindRecovery(
                             deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1)
+                        return nil
+                    }
+                    if let requeue {
+                        Task { [weak self] in
+                            await self?.convergeDevice(id: deviceID, outputID: requeue)
+                        }
                     }
                 }
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
@@ -2342,8 +2384,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// hold `converging` as the single serialization domain for a device's
     /// engine ops, so both release through the same requeue check. Must run on
     /// `stateQueue`.
+    /// Terminal exit for a WHOLE-SYSTEM rebind recovery: forget that the recovery
+    /// held `id`'s `converging` slot, then release it through the shared requeue
+    /// check. Every terminal exit of the chain goes through here so
+    /// `rebindConverging` can never outlive the hold it records — including the
+    /// backed-off retry that finds the world moved on before it fired, which used
+    /// to `return` without releasing anything and stranded the device: with the
+    /// slot leaked, `handleSystemDidWake`'s `!converging.contains(id)` kick and
+    /// every later `setOutputSet` skipped it forever, so a selected speaker stayed
+    /// silent with no self-recovery until the app was restarted.
+    private func releaseRebindConverging(id: String) -> OutputID? {
+        self.rebindConverging.remove(id)
+        return self.releaseConvergingAndRequeueIfNeeded(id: id)
+    }
+
     private func releaseConvergingAndRequeueIfNeeded(id: String) -> OutputID? {
         self.converging.remove(id)
+        // Never requeue into a suspension. `convergeDevice` has no `suspended` guard
+        // of its own, so a slot released mid-sleep would otherwise kick a loop that
+        // issues addOutput at engine sessions sleep has already torn down. The slot
+        // stays FREE instead, which is exactly what `handleSystemDidWake` needs: it
+        // re-kicks every still-desired device that isn't already `converging`.
+        guard !self.suspended else { return nil }
         guard !self.failedGate.contains(id),
               let want = self.desiredOn[id],
               let out = self.outputIDs[id],
@@ -2858,6 +2920,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
             // the `clearSilenceOverride()` above.
             self.clearSystemAirPlayGuard()
+            // Abandon any in-flight AirPlay-session rebind recovery, exactly as
+            // `stop()` does: the engine sessions are about to die, so completing a
+            // rebind — or waking one out of a backoff delay — on the far side of the
+            // sleep is meaningless. Clearing the generation supersedes a chain
+            // currently awaiting its engine op (it bows out on its own gen check) and
+            // cancelling the timers drops the backed-off attempts.
+            //
+            // Because a cancelled timer never runs, the whole-system `converging` slot
+            // those chains were holding has to be released HERE. Leaving it held is
+            // what stranded a selected speaker silent after wake with no
+            // self-recovery: `handleSystemDidWake` only re-kicks devices that are not
+            // already `converging`, so the device was never re-added. Release only the
+            // slots `rebindConverging` records — a slot a live `convergeDevice` loop
+            // owns is not ours to drop. No requeue here; the wake path issues the
+            // re-add for every still-desired device.
+            self.rebindRecoveryGen.removeAll()
+            for work in self.pendingRebindRecoveries.values { work.cancel() }
+            self.pendingRebindRecoveries.removeAll()
+            for deviceID in self.rebindConverging {
+                self.converging.remove(deviceID)
+                self.emit(.streamHealth(id: deviceID, recovering: false))
+            }
+            self.rebindConverging.removeAll()
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }

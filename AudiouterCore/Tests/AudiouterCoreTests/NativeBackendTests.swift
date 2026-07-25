@@ -3186,6 +3186,108 @@ final class NativeBackendTests: XCTestCase {
                       "the LAST engine op must be the add that leaves the device genuinely streaming")
     }
 
+    /// Post-merge adversarial finding: a system SLEEP landing while a whole-system
+    /// rebind recovery was waiting out its backoff delay stranded a still-selected
+    /// speaker silent for the rest of the app's life.
+    ///
+    /// The attempt that schedules a backed-off retry deliberately KEEPS the device's
+    /// `converging` slot ("still in progress"). Sleep clears `added`, so when the
+    /// retry finally fired, its ownership re-check failed and it simply returned —
+    /// releasing nothing. Every path that re-adds a device is gated on
+    /// `!converging.contains(id)`, so from that moment `handleSystemDidWake`'s
+    /// re-kick skipped the device, as did every later `setOutputSet`: it never got
+    /// an engine session again, and no watchdog re-issues one.
+    ///
+    /// `handleSystemWillSleep` now abandons in-flight recovery the way `stop()` does
+    /// (cancel the timers, clear the generations) and releases exactly the slots
+    /// those recoveries held, so wake re-converges the device normally.
+    func testSleepDuringRebindRecoveryBackoffStillReconvergesOnWake() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        // A long backoff so the sleep below lands squarely INSIDE the delay window,
+        // with the retry still pending and the `converging` slot still held.
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        // The receiver refuses the rebind, so recovery attempt 1 fails and schedules
+        // a backed-off retry — the state the sleep has to clean up after.
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
+        }
+        let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        backend.handleSystemWillSleep()
+        engine.addFailures = []          // the receiver is reachable again after wake
+        backend.handleSystemDidWake()
+
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt
+        }
+        XCTAssertGreaterThan(engine.addedIDs.filter { $0 == device.outputID }.count, addsAfterFailedAttempt,
+                             "wake must re-add a still-selected device even though a rebind recovery was "
+                             + "mid-backoff when the Mac slept — a `converging` slot left held by that "
+                             + "recovery makes the wake re-kick (and every later select) skip the device "
+                             + "forever, which is silence with no self-recovery")
+        await pollUntil(timeout: 2) {
+            backend.devices.first { $0.id == device.id }?.isSelected == true
+        }
+        XCTAssertTrue(backend.devices.first { $0.id == device.id }!.isSelected,
+                      "the device must end up genuinely streaming again after wake")
+    }
+
+    /// The UI half of the same finding: sleep must also retract the "recovering"
+    /// badge for a rebind it just abandoned. The chain that would have emitted
+    /// `recovering: false` on success is cancelled by the sleep, so without an
+    /// explicit clear the popover strands a recovery spinner on a device that is
+    /// not recovering and — post-wake — is converging by an entirely different
+    /// path. Same discipline as the `clearSilenceOverride()`/`clearSystemAirPlayGuard()`
+    /// clears already in `handleSystemWillSleep`.
+    func testSleepClearsTheRecoveringBadgeForAnAbandonedRebind() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()   // emits recovering:true, then fails attempt 1
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
+        }
+
+        // Subscribe AFTER the recovery is established but BEFORE the sleep, so the
+        // only `recovering: false` this can observe is the one sleep itself emits.
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .streamHealth(let id, let recovering) = $0 {
+                    return id == device.id && !recovering
+                }
+                return false
+            }
+        } after: { backend.handleSystemWillSleep() }
+
+        XCTAssertTrue(
+            events.contains {
+                if case .streamHealth(let id, let recovering) = $0 { return id == device.id && !recovering }
+                return false
+            },
+            "sleep must clear the recovering badge for the rebind it abandons — the chain that "
+            + "would have cleared it on success is cancelled, so nothing else ever will")
+    }
+
     // MARK: Per-app routing (T6)
 
     /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`

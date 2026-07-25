@@ -51,24 +51,33 @@ package layout, backends, and core types, see
   (system-audio tap), `NSLocalNetworkUsageDescription` + `NSBonjourServices`
   (`_airplay._tcp`/`_raop._tcp` — must match `NativeDiscovery`, or discovery is
   silently blocked even with the usage string).
-- **One shared control-panel shell, behind `AIRPLAY_CONTROL_PANEL=1`.** When
-  the flag is set, config surfaces open in the single `controlPanel`
-  (`ControlPanelWindowController`, `AudiouterSharedUI`) instead of standalone
-  windows: `presentInControlPanel(content:title:surface:)` creates the shell
-  and wires its land-home `onClose` (→ `showPopoverHome`) EXACTLY once, then
-  swaps content (`setContent`) on later opens — never a second panel.
-  `openGroupsPanel` builds/reuses the `MixerWindowController` with plain WINDOW
-  chrome and hands the shell its `contentController`; `openSettings` builds/
-  reuses `SettingsWindowController` the same way and hands the shell its
-  `settingsContentViewController` (`AudiouterSettingsUI`). `activePanelSurface`
-  records what's showing — opening the other surface REPLACES the current
-  content in the same shell via `setContent`, never a second panel. A
-  status-item click during a live session (`controlPanelSessionActive`)
-  TOGGLES `controlPanel`: it CLOSES a showing panel (a real close, so it lands
-  home on the popover, like ✕/Esc) and RESTORES one tucked away on an
-  app-switch — it never merely re-fronts an already-open panel. The flag
-  defaults off, so the shipping window paths (`openMixer`, `openSettings`'s
-  `showWindow()`) are untouched.
+- **One shared control-panel shell, behind `AIRPLAY_CONTROL_PANEL=1` —
+  Groups only.** Settings LEFT the shared shell (owner-locked, screens
+  follow-up): it is now always its own standalone titled window
+  (`SettingsWindowController`, `AudiouterSettingsUI`, tabbed
+  General/Appearance/Audio) regardless of the flag, so a tall Settings tab can
+  never dictate the Groups panel's geometry. The flag's mechanism is
+  otherwise unchanged, just narrower in scope: when set, `openMixer` routes
+  through `openGroupsPanel`, which builds/reuses the `MixerWindowController`
+  with plain WINDOW chrome and hands its `contentController` to the single
+  `controlPanel` (`ControlPanelWindowController`, `AudiouterSharedUI`) via
+  `presentInControlPanel(content:title:defaultSize:)`. That method creates the
+  shell and wires its land-home `onClose` (→ `showPopoverHome`) EXACTLY once,
+  then swaps content (`setContent`) on later opens — never a second panel.
+  Each surface passes its own documented size explicitly as `defaultSize`
+  (Groups: 720×460, matching `MixerWindowController`'s own window sizing)
+  rather than relying on `setContent`'s default. A status-item click during a
+  live session (`controlPanelSessionActive`) TOGGLES `controlPanel`: it CLOSES
+  a showing panel (a real close, so it lands home on the popover, like ✕/Esc)
+  and RESTORES one tucked away on an app-switch — it never merely re-fronts an
+  already-open panel. The flag defaults off, so the shipping window path
+  (`openMixer`'s `showWindow()`) is untouched; `openSettings` is unconditional
+  now, flag or not.
+- **File ▸ Close (⌘W)**, wired in `installMainMenu`. AppKit does not
+  synthesize ⌘W for a `.closable` window unless a main menu carries a File ▸
+  Close item, so this is explicit: action `performClose:`, target `nil`, so it
+  dispatches down the responder chain to whichever window is key (Settings or
+  the Groups panel/mixer window) rather than being hardwired to one.
 
 ## Map
 

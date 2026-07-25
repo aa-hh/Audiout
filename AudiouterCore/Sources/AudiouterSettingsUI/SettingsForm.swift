@@ -6,8 +6,10 @@ import AudiouterSharedUI
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
 /// rows with the control right-aligned, standard insets, and a fitting height
-/// the tab controller resizes the window to. Deliberately minimal — panes stay
-/// small, so this is a few helpers, not a framework.
+/// that `SettingsWindowController` measures and applies to the window itself
+/// (AppKit's tab controller does NOT do that for you — see the sizing-trap note
+/// there). Deliberately minimal — panes stay small, so this is a few helpers,
+/// not a framework.
 enum SettingsForm {
 
     /// Fixed content width for every pane (settings windows don't reflow).
@@ -87,46 +89,6 @@ enum SettingsForm {
 
             control.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             control.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-        ])
-        return container
-    }
-
-    /// A bold, secondary-colored category label ("General", "Appearance", …) at
-    /// `contentWidth`, indented to align with the row content beneath it. Used by
-    /// the single-screen `SettingsWindowController` to delineate each merged
-    /// section — there's no tab bar to carry that label anymore.
-    static func sectionHeaderLabel(_ text: String) -> NSView {
-        let title = label(text)
-        title.font = Tokens.Font.bodyEmphasized
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(title)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: contentWidth),
-            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            title.topAnchor.constraint(equalTo: container.topAnchor),
-            title.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        return container
-    }
-
-    /// A full-width hairline divider between merged sections, inset to match the
-    /// row content's horizontal margins.
-    static func divider() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(line)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: contentWidth),
-            line.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            line.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            line.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            container.heightAnchor.constraint(equalToConstant: 1),
         ])
         return container
     }

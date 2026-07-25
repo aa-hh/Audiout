@@ -133,6 +133,12 @@ final class AudioSettingsLatencyTests: XCTestCase {
             runningAppsProvider: { [] },
             latency: model)
         XCTAssertTrue(controller.test_audio.test_hasLatencySection)
+        // `test_contentFittingSize` measures the SELECTED tab (trap 3: the tab
+        // controller's own `fittingSize` lies for anything but the first tab),
+        // and the Audio tab isn't selected by default (the window always opens
+        // on General) — select it first or this asserts General's height, not
+        // the Audio pane's.
+        controller.test_selectTab(at: 2)
         XCTAssertGreaterThan(controller.test_contentFittingSize.height, 100)
     }
 

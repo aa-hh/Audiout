@@ -201,11 +201,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `onClose` "lands home" by re-presenting the popover.
     private var controlPanel: ControlPanelWindowController?
 
-    /// Which surface the shared shell is currently hosting (control-panel
-    /// rollout). Groups today; Settings folds onto the same shell next.
-    private enum ControlPanelSurface { case groups, settings }
-    private var activePanelSurface: ControlPanelSurface = .groups
-
     /// Set once `applicationShouldTerminate` has begun tearing down (C1). A second
     /// Quit while the first is still waiting on `stopAndWait` must not re-enter
     /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
@@ -615,6 +610,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// no menu bar, but a main menu still supplies working key equivalents while
     /// the app is active — this is what makes ⌘Q (and ⌘,) work, which the app
     /// otherwise lacked entirely.
+    ///
+    /// Also installs a File menu with a single Close item (⌘W): AppKit only
+    /// synthesizes ⌘W automatically for a `.closable` window when a main menu
+    /// with a File ▸ Close item exists at all — with no main menu (the prior
+    /// state) or a main menu missing this item, ⌘W does nothing. `target: nil`
+    /// sends `performClose:` down the responder chain, so it reaches whichever
+    /// window is key (Settings or the Groups panel/mixer window) rather than
+    /// being hardwired to one.
     @MainActor
     private func installMainMenu() {
         let mainMenu = NSMenu()
@@ -627,6 +630,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = appMenu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         appItem.submenu = appMenu
+
+        let fileItem = NSMenuItem()
+        mainMenu.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File")
+        let close = fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        close.target = nil
+        fileItem.submenu = fileMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -675,22 +686,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.update(devices: Array(devicesByID.values))
         presentInControlPanel(content: controller.contentController,
                               title: "Groups",
-                              surface: .groups)
+                              defaultSize: NSSize(width: 720, height: 460))
         log("Open Groups (control panel)")
     }
 
     /// Host `content` in the ONE shared control-panel shell (control-panel
-    /// rollout). Create the shell and wire its land-home `onClose` exactly once;
-    /// otherwise swap its content in place (opening a different surface replaces
-    /// the current one in the same shell). Hands off from the popover (close it
-    /// first), records the active surface, marks the session live, and shows the
-    /// shell anchored just under the menu-bar item. When the shell later closes
-    /// for real, `onClose` re-presents the popover so you always land back
-    /// "home" and are never stranded in a dockless void.
+    /// rollout — Groups only; Settings now owns a standalone window). Create
+    /// the shell and wire its land-home `onClose` exactly once; otherwise swap
+    /// its content in place. Hands off from the popover (close it first),
+    /// marks the session live, and shows the shell anchored just under the
+    /// menu-bar item. When the shell later closes for real, `onClose`
+    /// re-presents the popover so you always land back "home" and are never
+    /// stranded in a dockless void. `defaultSize` is Groups' own documented
+    /// size (`MixerWindowController`'s 720×460) passed explicitly rather than
+    /// relied on as `setContent`'s default.
     @MainActor
     private func presentInControlPanel(content: NSViewController,
                                        title: String,
-                                       surface: ControlPanelSurface) {
+                                       defaultSize: NSSize) {
         let shell: ControlPanelWindowController
         if let existing = controlPanel {
             shell = existing
@@ -703,9 +716,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             controlPanel = shell
         }
-        shell.setContent(content)
+        shell.setContent(content, defaultSize: defaultSize)
         shell.setTitle(title)
-        activePanelSurface = surface
         controlPanelSessionActive = true
         popoverController.popover.performClose(nil)   // hand off from the popover
         shell.show(anchorRect: statusAnchorRect())
@@ -755,13 +767,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // guarded no-op.
             controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }
             settingsWindowController = controller
-        }
-        if useControlPanel {
-            presentInControlPanel(content: controller.settingsContentViewController,
-                                  title: "Settings",
-                                  surface: .settings)
-            log("Open Settings (control panel)")
-            return
         }
         controller.showWindow()
         log("Open Settings (window shown)")

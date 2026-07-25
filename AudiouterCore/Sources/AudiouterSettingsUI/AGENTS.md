@@ -12,53 +12,93 @@ package layout and where the settings model types (`AppSettings`,
 
 ## Rules
 
-- **One screen, not tabs** (design revision 2026-07-17 — ahh: "this feels
-  like it should maybe just be one screen at the moment"). With three
-  single-control sections, a tab bar was pure navigation overhead — General /
-  Appearance / Audio render as bold-labeled sections stacked in one
-  scrolling-free column (`SettingsRootViewController`), divided by hairlines,
-  in a single fixed-size window. Each section keeps its own `NSViewController`
-  so re-splitting into tabs later only touches `SettingsRootViewController`,
-  not the sections themselves.
-- **The sizing-bug history this replaced:** the previous `NSTabViewController`
-  build called `NSWindow(contentViewController: tabController)` *before* any
-  tabs were added, so the window's initial size was AppKit's fallback for an
-  empty, content-less tab controller — much larger than any real pane.
-  `setFrameAutosaveName` then persisted that oversized frame, and nothing ever
-  forced a correct resize afterward. **Do not remove or weaken the fix**:
-  `showWindow()` explicitly re-measures the assembled content
-  (`rootVC.view.layoutSubtreeIfNeeded()` then `window?.setContentSize(rootVC.view.fittingSize)`)
-  immediately before every show, so no stale saved frame (or AppKit fallback)
-  can ever stick. This mirrors the popover's own explicit
-  `panelContentDidChangeHeight` re-measure before every show — same shape,
-  same reason.
-- `SettingsRootViewController`'s content view is an explicit opaque,
-  appearance-adaptive `NSVisualEffectView` (`.windowBackground`,
-  `.behindWindow`), not left to the ambient window fill — confirmed necessary
-  by rendering in dark mode via `settings-snapshot`: without it, child
-  controls draw with dark-adapted (light) text/colors over whatever happens to
-  sit behind the window, which is illegible.
-- Test/snapshot hooks: `test_general` / `test_appearance` / `test_audio`
-  reach each section's view controller directly; `test_sectionTitles` is a
-  structural sanity check that all three sections mounted (the single-screen
-  replacement for the old `test_tabLabels`); `test_contentFittingSize` lets a
-  test assert sizing is deterministic and non-degenerate without a live
-  window; `test_rootView` exposes the laid-out content view for offscreen
-  snapshot rendering. The `settings-snapshot` executable target renders this
-  content view to a PNG for visual/dark-mode verification without opening a
+- **Three tabs, not one screen** (screens follow-up, LOCKED by ahh 2026-07-22:
+  "add tabs to kill the long vertical scroll: General / Appearance / Audio;
+  each tab short + scannable"). This supersedes the 2026-07-17 one-screen
+  revision — the stacked column had grown past 750pt into exactly the scroll
+  the spec calls out. `SettingsRootViewController` is now an
+  `NSTabViewController` with one `NSTabViewItem` per pane; the panes
+  themselves were not restructured. It is an **ordinary titled standalone
+  window** (traffic lights, movable, position remembered via
+  `setFrameUsingName`/`setFrameAutosaveName`), it **always opens on General**
+  (no persisted last tab), and it stays **non-resizable**
+  (`[.titled, .closable, .miniaturizable]`) — the preferences convention, and
+  it keeps per-tab sizing unambiguous.
+- **Chrome stays stock:** `tabStyle = .toolbar` + `NSWindow.toolbarStyle =
+  .preference` (the System-Settings/Safari/Xcode idiom, matching Warm Signal
+  §5.2's "no warm canvas, no gold on the chrome"). Each tab item needs an SF
+  Symbol `image` or it renders as a blank toolbar slot. The tab bar lives in
+  the title-bar area, so it costs zero height inside the content rect — the
+  window's content size IS the selected pane's fitting size, nothing to
+  subtract.
+- **The sizing trap — four probe-confirmed AppKit facts. Do not weaken any of
+  them.** An earlier tabbed build shipped a mostly-empty giant window on every
+  tab, every launch; the one-screen rewrite dodged that bug rather than fixing
+  it, so re-adding tabs re-entered the same minefield with two additional
+  traps the original note never knew about:
+  1. `NSWindow(contentViewController:)` on an **empty** tab controller yields
+     AppKit's 500×500 fallback, and that fallback **never self-corrects** —
+     not when tabs are added later, not when a tab is selected. (Original bug:
+     `addTab` ran after `super.init`, then `setFrameAutosaveName` persisted the
+     bogus frame forever.) All three tabs are therefore added inside
+     `SettingsRootViewController.init`, before the window is constructed.
+  2. `NSTabViewController` **does not resize its window when the selected tab
+     changes** — probed, three panes of 200/480/700pt all left the window at
+     460×200. The resize is ours: `tabView(_:didSelect:)`.
+  3. The tab controller's **own `view.fittingSize` lies** — probed, it reads
+     (0, 0) for every tab except the first. This is why `fittedContentSize`
+     measures the **selected child**, never `self.view`; measuring itself
+     would collapse the window on any other tab.
+  4. `setContentSize` preserves the window's **top** edge, so the title bar
+     stays anchored and the window grows downward per tab — the native
+     preferences feel, and why the remembered position survives a tab switch.
+
+  **Only the HEIGHT is ever measured.** The width is pinned to
+  `SettingsForm.contentWidth`, and the height is taken from the pane's own
+  `preferredContentSize` (every pane publishes one) rather than its live
+  `view.fittingSize`. Measuring the live view feeds back on itself: when a tab
+  is shown, the tab view stretches the pane to ITS bounds, the pane's wrapping
+  labels re-read `preferredMaxLayoutWidth` from that wider frame and stop
+  wrapping, and `fittingSize` then reports the stretched width as if it were
+  required — probed, the Audio pane reads 460×221 fresh and 561×205 once shown
+  (wider AND shorter). Feeding that back would ratchet the window sideways and
+  clip it vertically.
+
+  There are exactly **three re-measure trigger points**, and all three are
+  needed: `showWindow()` (a show can't inherit a stale frame), the tab-switch
+  delegate `tabView(_:didSelect:)` (trap 2), and — for a pane that grows at
+  runtime with no tab switch (`AudioSettingsViewController.rebuildList()` when
+  the excluded-apps list changes) — **KVO on each pane's
+  `preferredContentSize`**. That last one is deliberately NOT AppKit's
+  documented `preferredContentSizeDidChange(for:)`: probed, AppKit never calls
+  it for a tab item's view controller (republishing a selected pane at 600pt
+  left the window at 452pt), while KVO on the same property fires reliably.
+  The override is kept as a harmless second path only.
+- `SettingsRootViewController` puts an explicit opaque, appearance-adaptive
+  `NSVisualEffectView` (`.windowBackground`, `.behindWindow`) behind the panes
+  rather than relying on the ambient window fill — confirmed necessary by
+  rendering in dark mode via `settings-snapshot`: without it, child controls
+  draw with dark-adapted (light) text/colors over whatever happens to sit
+  behind the window, which is illegible. It's autoresized, not constrained, so
+  it contributes nothing to the fitting-size measurements above. Stock
+  material, not a `Tokens` one — Settings chrome stays system.
+- Test/snapshot hooks: `test_general` / `test_appearance` / `test_audio` reach
+  each pane's view controller directly; `test_tabLabels` and
+  `test_selectedTabIndex` read live `NSTabView` state; `test_contentFittingSize`
+  is the SELECTED tab's fitted size, so a test can assert sizing is
+  deterministic, non-degenerate, and genuinely per-tab without a live window;
+  `test_tabRootView(at:)` exposes one pane's laid-out view for offscreen
+  snapshot rendering (per-tab, because with tabs there's no single "the
+  content" view) — call it on a FRESH controller, before any show or tab
+  selection, or the pane snapshots at the stretched width described above —
+  and `test_rootView` exposes the tab controller's own root.
+  **`test_selectTab(at:)` drives real `NSTabView` selection, not a direct
+  delegate call** — that distinction is load-bearing: a hook that called a
+  delegate directly once let genuinely broken UI stay green across 78 tests
+  (`MainOutRowView.selectionChanged`), and this hook exists precisely to prove
+  the tab-switch resize path runs. The `settings-snapshot` executable target
+  renders a pane to a PNG for visual/dark-mode verification without opening a
   real window — run it after any layout change here.
-- **`settingsContentViewController` is now also hostable in the shared
-  control-panel shell** (`AudiouterSharedUI.ControlPanelWindowController`,
-  behind `AIRPLAY_CONTROL_PANEL=1`): it exposes the same `rootVC` this window
-  uses as its `contentViewController`, so the shell can mount the identical
-  assembled content without this type constructing a second copy of the
-  sections. Named `settingsContentViewController`, not `contentViewController`
-  — `NSWindowController` already declares a mutable, optional
-  `contentViewController` property, and a same-named override with a
-  non-optional return type fails to compile (covariance mismatch). This
-  accessor is additive only — it does not change `showWindow()`'s explicit
-  re-measure behavior or the existing standalone window path, which remains
-  the shipping default.
 
 - **Settings chrome stays system** (Warm Signal spec §5.2): no warm canvas and
   no gold anywhere in these panes. The ONLY warm/gold pixels are inside the
@@ -79,8 +119,8 @@ package layout and where the settings model types (`AppSettings`,
 
 | Type | What it is |
 |---|---|
-| `SettingsWindowController` | Owns the window, forwards `onThemeChanged`/`onExcludedAppsChanged`, exposes `settingsContentViewController` + `test_*` hooks. |
-| `SettingsRootViewController` | Assembles the three sections into one scrolling-free column; `preferredContentSize` follows `fittingSize`. |
+| `SettingsWindowController` | Owns the standalone titled window + its frame autosave, forwards `onThemeChanged`/`onExcludedAppsChanged`, applies the per-tab content size, exposes the `test_*` hooks. |
+| `SettingsRootViewController` | `NSTabViewController` (toolbar style) holding the three panes; measures `fittedContentSize` off the selected child and publishes it via `onFittedContentSizeChange`. |
 | `GeneralSettingsViewController` | Launch-at-login. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
 | `AudioSettingsViewController` | Excluded-apps list + Advanced › Audio buffer (when `LatencyConfigurable`). |

@@ -156,12 +156,12 @@ public final class AudioSettingsViewController: NSViewController {
         let heading = SettingsForm.label("Excluded applications")
         heading.font = Tokens.Font.body
 
-        let subtitle = SettingsForm.label(
+        // `hintLabel`, not a hand-rolled `label` + wrap properties: it also
+        // resolves `preferredMaxLayoutWidth`, without which this sentence's
+        // unwrapped width drags the whole pane (and the live window) wider
+        // than the fixed content column — see hintLabel's doc comment.
+        let subtitle = SettingsForm.hintLabel(
             "Audio from these apps always plays on your Mac — never sent to speakers.")
-        subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.secondaryLabel
-        subtitle.lineBreakMode = .byWordWrapping
-        subtitle.maximumNumberOfLines = 0
 
         listStack.orientation = .vertical
         listStack.alignment = .leading
@@ -437,6 +437,11 @@ public final class AudioSettingsViewController: NSViewController {
             note.textColor = Tokens.Color.warning
             note.lineBreakMode = .byWordWrapping
             note.maximumNumberOfLines = 0
+            // Not `hintLabel` (wrong color: this one's `.warning`, not
+            // `.secondaryLabel`) but it needs the SAME `preferredMaxLayoutWidth`
+            // fix — see hintLabel's doc comment for why an unset one drags the
+            // whole pane wider than the fixed content column.
+            note.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
             views.append(note)
             // The CTA never mounts in env mode; keep the (orphan) button's
             // state honest for the test hooks all the same.

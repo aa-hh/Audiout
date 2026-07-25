@@ -28,12 +28,32 @@ enum SettingsForm {
     /// owning pane RE-WRITES whenever its control's value changes, so the
     /// consequence of the current value is always spelled out beneath it.
     /// Styling only — the update-on-change contract is the caller's.
+    ///
+    /// **`preferredMaxLayoutWidth` is set here, not left to a later layout
+    /// pass.** A multi-line `NSTextField` with it unset has no width to wrap
+    /// against, so its intrinsic content size reports its natural, UNWRAPPED
+    /// single-line width — for a sentence-length hint, wider than a whole
+    /// pane. That width is a compression-resistance *preference*, not a
+    /// requirement, but it is enough to drag the fixed-`contentWidth` column
+    /// (and, once embedded in the real tab window, the window itself) wider
+    /// than the 460pt design — confirmed live: the Audio tab's window grew to
+    /// 561pt, matching this exact label's unwrapped width, and calling
+    /// `setContentSize` back down did not hold, because the label's own
+    /// unresolved intrinsic size was what wanted 561 in the first place.
+    /// `row(title:subtitle:control:)`'s labels dodge this because
+    /// `RowContainerView.layout()` resolves their wrap width on every real
+    /// layout pass; a full-bleed hint has no such container, so the value is
+    /// pinned here instead — `contentWidth` minus the standard 20pt insets on
+    /// each side (`SettingsForm.paneView(rows:)`, and `AudioSettingsViewController
+    /// .loadView()`'s equivalent hand-rolled insets), the usable width every
+    /// full-bleed line in a pane actually gets.
     static func hintLabel(_ string: String = "") -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.caption
         field.textColor = Tokens.Color.secondaryLabel
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
+        field.preferredMaxLayoutWidth = contentWidth - 40
         return field
     }
 

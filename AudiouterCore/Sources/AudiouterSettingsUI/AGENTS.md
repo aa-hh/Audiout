@@ -31,11 +31,10 @@ package layout and where the settings model types (`AppSettings`,
   the title-bar area, so it costs zero height inside the content rect — the
   window's content size IS the selected pane's fitting size, nothing to
   subtract.
-- **The sizing trap — four probe-confirmed AppKit facts. Do not weaken any of
+- **The sizing trap — probe-confirmed AppKit facts. Do not weaken any of
   them.** An earlier tabbed build shipped a mostly-empty giant window on every
   tab, every launch; the one-screen rewrite dodged that bug rather than fixing
-  it, so re-adding tabs re-entered the same minefield with two additional
-  traps the original note never knew about:
+  it, so re-adding tabs re-entered the same minefield:
   1. `NSWindow(contentViewController:)` on an **empty** tab controller yields
      AppKit's 500×500 fallback, and that fallback **never self-corrects** —
      not when tabs are added later, not when a tab is selected. (Original bug:
@@ -43,15 +42,26 @@ package layout and where the settings model types (`AppSettings`,
      bogus frame forever.) All three tabs are therefore added inside
      `SettingsRootViewController.init`, before the window is constructed.
   2. `NSTabViewController` **does not resize its window when the selected tab
-     changes** — probed, three panes of 200/480/700pt all left the window at
-     460×200. The resize is ours: `tabView(_:didSelect:)`.
-  3. The tab controller's **own `view.fittingSize` lies** — probed, it reads
-     (0, 0) for every tab except the first. This is why `fittedContentSize`
-     measures the **selected child**, never `self.view`; measuring itself
-     would collapse the window on any other tab.
-  4. `setContentSize` preserves the window's **top** edge, so the title bar
+     changes** — probed offscreen and re-probed on a genuinely on-screen
+     window. The resize is ours: `tabView(_:didSelect:)`.
+  3. `setContentSize` preserves the window's **top** edge, so the title bar
      stays anchored and the window grows downward per tab — the native
      preferences feel, and why the remembered position survives a tab switch.
+  4. **Every view in this window's hierarchy must set
+     `translatesAutoresizingMaskIntoConstraints = false`.** An autoresized
+     subview of an engine-managed superview is not neutral: AppKit synthesises
+     mask constraints from the margins it holds *at synthesis time*, and here
+     that caught trap 1's transient 500×500 and froze it into a **required**
+     `contentHeight == subviewHeight + 308`. No conflict is ever logged, the
+     window just refuses to go under 308pt, and the surplus lands as dead
+     space inside the pane. Recognise it by the signature: the **shorter** the
+     pane, the **bigger** the bloat (every pane snaps to `500 −` its own
+     height). This is why `viewDidLoad`'s background is pinned with four
+     zero-constant edge constraints — a zero constant cannot capture a
+     transient.
+
+  A fifth "fact" was retired: the tab controller's own `view.fittingSize` does
+  **not** inherently lie — it was reading trap 4's frozen floor.
 
   **Only the HEIGHT is ever measured.** The width is pinned to
   `SettingsForm.contentWidth`, and the height is taken from the pane's own
@@ -79,9 +89,9 @@ package layout and where the settings model types (`AppSettings`,
   rather than relying on the ambient window fill — confirmed necessary by
   rendering in dark mode via `settings-snapshot`: without it, child controls
   draw with dark-adapted (light) text/colors over whatever happens to sit
-  behind the window, which is illegible. It's autoresized, not constrained, so
-  it contributes nothing to the fitting-size measurements above. Stock
-  material, not a `Tokens` one — Settings chrome stays system.
+  behind the window, which is illegible. It is pinned with four zero-constant
+  edge constraints and **must not** go back to an autoresizing mask (trap 4).
+  Stock material, not a `Tokens` one — Settings chrome stays system.
 - Test/snapshot hooks: `test_general` / `test_appearance` / `test_audio` reach
   each pane's view controller directly; `test_tabLabels` and
   `test_selectedTabIndex` read live `NSTabView` state; `test_contentFittingSize`

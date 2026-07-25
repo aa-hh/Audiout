@@ -146,7 +146,7 @@ final class SettingsWindowControllerTests: IsolatedTestCase {
                        "the tab-switch resize (tabView(_:didSelect:)) may not be running")
         // The width contract: panes never reflow sideways.
         XCTAssertEqual(widths.count, 1, "the window's width must stay pinned across every tab: \(widths)")
-        // Trap 4: the window grows DOWNWARD — the top edge (frame.maxY) is the
+        // Trap 3: the window grows DOWNWARD — the top edge (frame.maxY) is the
         // anchor, never the bottom.
         XCTAssertEqual(topEdges.count, 1, "the window's top edge must stay anchored across a tab switch: \(topEdges)")
 
@@ -159,6 +159,46 @@ final class SettingsWindowControllerTests: IsolatedTestCase {
         // would be exactly the brittle-to-content-changes trap this test is
         // supposed to avoid, so only the shape (three distinct heights, one
         // pinned width, one constant top edge) is asserted above.
+    }
+
+    /// Trap 4's regression guard: **nothing in the window's content hierarchy
+    /// may carry a translated autoresizing mask.** One such view (the pane
+    /// background) froze `NSWindow(contentViewController:)`'s transient 500×500
+    /// into required constraints, so the window could never go below
+    /// `500 −` the pane's own height — General shipped with a 116pt dead gap
+    /// under "Launch at login", Appearance with 37pt, and no constraint
+    /// conflict was ever logged.
+    ///
+    /// A headless run can't display the window, and the frozen constraints only
+    /// bind on a genuine layout pass — but they poison the ROOT view's fitting
+    /// size immediately, and that IS readable headlessly. So the assertion is
+    /// the invariant the poisoning breaks: for every tab, the tab controller's
+    /// own root view must want exactly what that tab's pane wants, no more (it
+    /// read 460×308 on General and 40×308 on Appearance while poisoned).
+    /// Deliberately relative, not absolute — a pane's real height is free to
+    /// change.
+    func testRootViewWantsExactlyTheSelectedPaneSizeOnEveryTab() throws {
+        let controller = SettingsWindowController(
+            settings: makeSettings(), loginItem: FakeLoginItem(enabled: false),
+            excludedApps: makeExcluded(), runningAppsProvider: { [] })
+
+        for index in 0..<3 {
+            controller.test_selectTab(at: index)
+            let pane = try XCTUnwrap([controller.test_general as NSViewController,
+                                      controller.test_appearance,
+                                      controller.test_audio][index].view)
+            pane.layoutSubtreeIfNeeded()
+            let paneWants = pane.fittingSize
+            let rootWants = controller.test_rootView.fittingSize
+            XCTAssertEqual(rootWants.height, paneWants.height, accuracy: 0.5,
+                           "tab \(index): the root view wants \(rootWants.height)pt but its pane only " +
+                           "needs \(paneWants.height)pt — the surplus renders as dead space. A view in " +
+                           "the hierarchy is translating its autoresizing mask and has frozen a " +
+                           "transient window size into required constraints.")
+            XCTAssertEqual(rootWants.width, SettingsForm.contentWidth, accuracy: 0.5,
+                           "tab \(index): the root view's wanted width must stay pinned to the pane " +
+                           "column, got \(rootWants.width)")
+        }
     }
 
     /// Re-measure trigger 3: `AudioSettingsViewController.rebuildList()`

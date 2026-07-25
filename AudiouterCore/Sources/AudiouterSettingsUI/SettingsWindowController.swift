@@ -24,11 +24,10 @@ import AudiouterCore
 /// title-bar area, so it costs ZERO height inside `contentRect` — the content
 /// size below is exactly the selected pane's own fitting size.
 ///
-/// **THE SIZING TRAP — four probe-confirmed AppKit facts, all still live.** An
-/// earlier tabbed build shipped a mostly-empty giant window on every tab, every
-/// launch; the single-screen rewrite dodged that bug rather than fixing it, so
-/// re-adding tabs re-enters exactly the same minefield. Do not weaken any of
-/// these:
+/// **THE SIZING TRAP — probe-confirmed AppKit facts.** An earlier tabbed build
+/// shipped a mostly-empty giant window on every tab, every launch; the
+/// single-screen rewrite dodged that bug rather than fixing it, so re-adding
+/// tabs re-enters exactly the same minefield. Do not weaken any of these:
 ///
 /// 1. **Never build the window from an EMPTY tab controller.**
 ///    `NSWindow(contentViewController:)` on a tab controller with no tabs yet
@@ -40,15 +39,50 @@ import AudiouterCore
 ///    before `NSWindow(contentViewController:)` below ever runs.
 /// 2. **`NSTabViewController` does NOT resize its window when the selected tab
 ///    changes.** Probed: three tabs of genuinely different heights all left the
-///    window at 460×200. The resize is ours to drive — see
+///    window at 460×200. Re-probed on a genuinely on-screen window: forcing the
+///    window 460pt tall while Appearance (271pt) is selected leaves it at 460 —
+///    nothing native ever shrinks it back. The resize is ours to drive — see
 ///    ``SettingsRootViewController/tabView(_:didSelect:)``.
-/// 3. **The tab controller's own `view.fittingSize` lies.** Probed: it reads
-///    (0, 0) for every tab except the first. Measure the **selected child's**
-///    `view.fittingSize` instead (``SettingsRootViewController/fittedContentSize``);
-///    that reports 200 / 480 / 700pt for General / Appearance / Audio.
-/// 4. **`setContentSize` preserves the window's TOP edge**, so the title bar
+/// 3. **`setContentSize` preserves the window's TOP edge**, so the title bar
 ///    stays anchored and the window grows downward per tab — the correct native
 ///    preferences feel, and the reason position memory survives a tab switch.
+///    Re-probed on screen: top-left stays put across all three tabs.
+/// 4. **A subview that still translates its autoresizing mask FREEZES the
+///    window's transient construction size into REQUIRED constraints.** This is
+///    the one that shipped a visible bug (a 116pt dead gap under "Launch at
+///    login"), and it is the nastiest, because the poisoned constraints look
+///    inert: `constraintsAffectingLayout(for: .vertical)` on the content view
+///    showed only `NSAutoresizingMaskLayoutConstraint`s, and no conflict is ever
+///    logged. The background in ``SettingsRootViewController/viewDidLoad()`` was
+///    built `NSVisualEffectView(frame: view.bounds)` + `autoresizingMask`, on
+///    the reasoning that an autoresized view "contributes nothing to the fitting
+///    size". It does: the moment its superview is engine-managed, AppKit
+///    synthesises mask constraints that pin its edges with the margins it
+///    happened to have **at synthesis time** — and synthesis caught the
+///    500×500 of trap 1, which `NSWindow(contentViewController:)` passes through
+///    transiently even when the tab controller is correctly non-empty — with
+///    the background sized 460×192 (General's own height) inside it. The frozen
+///    pair read `V:|-(308)-[background]` + `background.minY == 0`, i.e.
+///    `contentHeight == backgroundHeight + 308` (and `contentWidth ==
+///    backgroundWidth + 40`) — required, and unsatisfiable below 308pt, so
+///    every genuine layout pass snapped the window back to `500 − pane height`
+///    no matter how often `setContentSize` was re-applied.
+///    (Signature worth recognising: the *shorter* the pane, the *bigger* the
+///    bloat. General 192 → 308; a two-row variant 136 → 364; Appearance 271 →
+///    308; Audio 502 was tall enough to clear the floor, which is why only
+///    General and Appearance ever looked wrong.) The background is therefore
+///    pinned with four explicit zero-constant edge constraints — no constants,
+///    so nothing transient can ever be baked in. **Any view added to this
+///    window's hierarchy must set `translatesAutoresizingMaskIntoConstraints =
+///    false`.**
+///
+///    A previously documented fifth fact — "the tab controller's own
+///    `view.fittingSize` reads (0, 0) off any tab but the first" — was a
+///    *symptom* of this same poisoning, not an `NSTabViewController` property:
+///    with the mask constraints gone it reads truthfully (460×192 / 271 / 502)
+///    both offscreen and on screen. ``SettingsRootViewController/fittedContentSize``
+///    still measures the selected child rather than `self.view`, for the
+///    independent reason given there.
 ///
 /// Position memory uses `MixerWindowController`'s empirically-verified order:
 /// `setFrameUsingName` to restore *and* reliably report, `setFrameAutosaveName`
@@ -193,7 +227,7 @@ public final class SettingsWindowController: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// Resize the window to `size`, keeping its top-left corner put (trap 4), so
+    /// Resize the window to `size`, keeping its top-left corner put (trap 3), so
     /// the title bar stays anchored and the window grows downward. A degenerate
     /// measurement is ignored rather than applied — collapsing the window to
     /// nothing is strictly worse than leaving it where it was.
@@ -224,10 +258,10 @@ public final class SettingsWindowController: NSWindowController {
     public func test_selectTab(at index: Int) { rootVC.selectTab(at: index) }
 
     /// The size `showWindow()`/a tab switch applies — the SELECTED tab's fitted
-    /// size (trap 3: the tab controller's own `fittingSize` reads (0, 0) off any
-    /// tab but the first, so this measures the selected child). Lets a test
-    /// assert sizing is deterministic, non-degenerate, and genuinely per-tab
-    /// without a live window.
+    /// size (``SettingsRootViewController/fittedContentSize`` measures the
+    /// selected child, not the tab controller itself). Lets a test assert sizing
+    /// is deterministic, non-degenerate, and genuinely per-tab without a live
+    /// window.
     public var test_contentFittingSize: NSSize { rootVC.fittedContentSize }
 
     /// One tab's laid-out pane view, for offscreen snapshot rendering (mirrors
@@ -255,7 +289,7 @@ public final class SettingsWindowController: NSWindowController {
 /// Owns the window-sizing contract described on `SettingsWindowController` —
 /// every re-measure funnels through ``fittedContentSize`` and is published via
 /// ``onFittedContentSizeChange``, because `NSTabViewController` itself never
-/// resizes its window (trap 2) and mis-reports its own fitting size (trap 3).
+/// resizes its window when the selected tab changes (trap 2).
 @MainActor
 final class SettingsRootViewController: NSTabViewController {
 
@@ -319,23 +353,47 @@ final class SettingsRootViewController: NSTabViewController {
         // dark-adapted (light) text/colors over whatever happens to sit behind,
         // which is illegible. Stock `NSVisualEffectView` material, not a
         // `Tokens` one — Settings chrome stays system (Warm Signal §5.2).
-        let background = NSVisualEffectView(frame: view.bounds)
+        //
+        // TRAP 4 LIVES HERE — the four edge constraints below are load-bearing,
+        // do not "simplify" them back to an autoresizing mask. This view used to
+        // be built `NSVisualEffectView(frame: view.bounds)` + `autoresizingMask`
+        // on the reasoning that an autoresized view stays out of the constraint
+        // system. It does not: its superview is engine-managed, so AppKit
+        // synthesised mask constraints froze the margins this view happened to
+        // have at synthesis time — which was `NSWindow(contentViewController:)`'s
+        // transient 500×500 — into a REQUIRED `contentHeight == myHeight + 308`.
+        // Nothing logged a conflict; the window simply refused to be shorter
+        // than 308pt for the rest of its life, and the surplus showed up as a
+        // dead gap inside the General pane. Zero-constant edge pins can't
+        // capture a transient, so they're immune. (They also make this view
+        // genuinely cover the pane: under the mask it had settled at 420×0
+        // inside a 460×308 content view, drawing nothing at all.)
+        let background = NSVisualEffectView()
         background.material = .windowBackground
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
-        background.autoresizingMask = [.width, .height]
-        // Autoresized, not constrained, so it contributes nothing to the
-        // fitting-size measurements the window sizing depends on.
+        background.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(background, positioned: .below, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            background.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            background.topAnchor.constraint(equalTo: view.topAnchor),
+            background.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
     }
 
     /// The size the window's content should be for the CURRENTLY SELECTED tab:
     /// `SettingsForm.contentWidth` wide, as tall as that pane needs at that
     /// width.
     ///
-    /// Measures the selected child's view, never `self.view` — trap 3: the tab
-    /// controller's own `fittingSize` reads (0, 0) for every tab except the
-    /// first, which would silently collapse the window on any other tab.
+    /// Measures the selected CHILD, never `self.view`. `self.view.fittingSize`
+    /// was long documented as simply lying; it doesn't — it lied only while
+    /// trap 4's frozen mask constraints were poisoning the root view (it then
+    /// read the frozen floor, e.g. 40×308 on Appearance). The child measurement
+    /// is kept anyway because it is the only one that is **identical offscreen
+    /// and on screen**: `settings-snapshot` and the test suite never run a
+    /// display cycle, so nothing there ever resolves a root-view measurement the
+    /// way a real window does.
     ///
     /// **The width is pinned, not measured**, and the height comes from the
     /// pane's own `preferredContentSize` (every pane publishes
@@ -345,16 +403,19 @@ final class SettingsRootViewController: NSTabViewController {
     /// * Width is a fixed design contract (`SettingsForm.contentWidth`, "panes
     ///   don't reflow"). A window that changed width when you clicked a tab
     ///   would read as a bug.
-    /// * Measuring either dimension off the LIVE view feeds back on itself.
-    ///   When a tab is shown the tab view stretches the incoming pane to ITS
-    ///   current bounds; the panes' wrapping labels then take their
-    ///   `preferredMaxLayoutWidth` from that wider frame and stop wrapping, so
-    ///   `view.fittingSize` reports the stretched width as if it were required
-    ///   (probed: the Audio pane reads 460×221 fresh, then 561×205 once shown —
-    ///   wider AND shorter). Feeding that into `setContentSize` would ratchet
-    ///   the window sideways and clip the pane vertically.
+    /// * Measuring off the LIVE view can feed back on itself: when a tab is
+    ///   shown the tab view stretches the incoming pane to ITS current bounds,
+    ///   and any wrapping label that takes `preferredMaxLayoutWidth` from that
+    ///   wider frame stops wrapping, so `view.fittingSize` reports the stretched
+    ///   width as if it were required (probed: the Audio pane read 460×221
+    ///   fresh, then 561×205 once shown — wider AND shorter).
     ///   `preferredContentSize` is captured at the fixed width instead, so it
-    ///   is stable and identical headless and live.
+    ///   is stable.
+    ///
+    /// This is a floor, not a ceiling, and deliberately so: a pane whose own
+    /// required constraints need more than it published still gets it, because
+    /// the pane view fills the tab view with zero margins (Audio publishes 486
+    /// and genuinely needs 502 on screen; the window lands on 502, with no gap).
     ///
     /// The `fittingSize` fallback only covers a pane that never published a
     /// preferred size — better a rough measurement than a collapsed window.

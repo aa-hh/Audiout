@@ -79,9 +79,25 @@ else
   CODESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application:[^"]*"' | head -1 | tr -d '"' || true)"
   if [ -n "$CODESIGN_IDENTITY" ]; then
     echo "==> Auto-detected Developer ID signing identity: $CODESIGN_IDENTITY"
+  elif [ "${CODESIGN_REQUIRE_IDENTITY:-0}" = "1" ]; then
+    # Strict opt-in for permission-dependent builds (live/on-device testing). A
+    # Developer ID signature keys TCC grants to a STABLE Team ID + bundle id, so
+    # a grant survives every rebuild; an ad-hoc signature re-pins to a fresh
+    # cdhash each build, orphaning the grant and forcing re-onboarding. When
+    # CODESIGN_REQUIRE_IDENTITY=1 we refuse to silently produce that throwaway
+    # build — fail loudly so the tester notices the missing cert instead of
+    # chasing "permissions denied" on a binary that can never keep them.
+    echo "ERROR: CODESIGN_REQUIRE_IDENTITY=1 but no Developer ID Application identity is in the keychain." >&2
+    echo "       An ad-hoc build's TCC grants re-pin to the binary and are lost on the next rebuild." >&2
+    echo "       Install the Developer ID cert, or set CODESIGN_IDENTITY explicitly, or unset" >&2
+    echo "       CODESIGN_REQUIRE_IDENTITY to allow the ad-hoc fallback." >&2
+    exit 1
   else
     CODESIGN_IDENTITY="-"
     echo "==> No Developer ID Application identity in keychain — falling back to ad-hoc signing"
+    echo "    NOTE: ad-hoc TCC grants re-pin to the binary and are LOST on the next rebuild." >&2
+    echo "    For repeatable permission-dependent testing, sign with Developer ID" >&2
+    echo "    (set CODESIGN_REQUIRE_IDENTITY=1 to make a missing cert a hard error)." >&2
   fi
 fi
 # Secure timestamp only with a real identity: Apple's timestamp service needs a

@@ -95,6 +95,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// path that needs the two OS grants.
     private let backendKind = BackendKind.resolved()
 
+    /// The four OS permission seams (audio capture, Local Network, Accessibility,
+    /// PTP helper), resolved ONCE from `AIRPLAY_PERMISSIONS` (see
+    /// ``PermissionMode``). Default `.system` = the real production probes, so a
+    /// plain launch is unchanged; `granted`/`denied` inject simulated seams so
+    /// the whole permission flow can be driven without touching real TCC (which
+    /// re-pins to the binary on every ad-hoc rebuild — the iteration tax this
+    /// knob removes). Threaded into BOTH `SetupModel` construction sites,
+    /// `registerPTPHelperIfNeeded()`, and `MediaKeyController` so nothing reads a
+    /// real grant behind the simulation's back.
+    private let permissionProviders = PermissionMode.resolved().makeProviders()
+
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Check Permissions…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
@@ -168,7 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Turns a transport key pressed ON A SPEAKER (`BackendEvent.remoteTransport`)
     /// into a Mac media key so the frontmost player responds. Owns the one-time
     /// Accessibility prompt the feature needs.
-    private let mediaKeyController = MediaKeyController()
+    private lazy var mediaKeyController = MediaKeyController(
+        remoteControl: permissionProviders.remoteControl)
 
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
@@ -430,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func registerPTPHelperIfNeeded() {
         guard case .native = backendKind else { return }
-        let ptpHelper = SMAppServicePTPHelper()
+        let ptpHelper = permissionProviders.ptpHelper
         guard ptpHelper.status == .notRegistered else { return }
         do {
             try ptpHelper.register()
@@ -455,10 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return }
 
         let model = permissionAuditModel ?? SetupModel(
-            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
-            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
-            remoteControl: RemoteControlPrimerFactory.makeDefault(),
-            ptpHelper: SMAppServicePTPHelper(),
+            providers: permissionProviders,
             settings: settings,
             localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model
@@ -505,10 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func presentSetup(reason: OnboardingReason = .firstRun, model providedModel: SetupModel? = nil) {
         let model = providedModel ?? SetupModel(
-            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
-            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
-            remoteControl: RemoteControlPrimerFactory.makeDefault(),
-            ptpHelper: SMAppServicePTPHelper(),
+            providers: permissionProviders,
             settings: settings,
             localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model

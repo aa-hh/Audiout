@@ -163,9 +163,11 @@ final class MixerWindowControllerTests: IsolatedTestCase {
         let (window, _, _) = try await makeWindow()
         let frame = try XCTUnwrap(window.window?.frame)
         XCTAssertEqual(frame.width, 720, accuracy: 0.5)
-        XCTAssertEqual(frame.height, 460, accuracy: 0.5,
-                       "460 = the exact content size — .fullSizeContentView means content fills the " +
-                       "whole frame, no separate title-bar addition")
+        XCTAssertEqual(frame.height, 505, accuracy: 0.5,
+                       "505 = the exact content size — .fullSizeContentView means content fills the " +
+                       "whole frame, no separate title-bar addition. Grew from 460 when the group " +
+                       "editor gained its two bordered grouped sections (design review 2026-07-25); " +
+                       "the pane's fitting height had been within 1pt of the old default")
 
         // AppKit's `center()` isn't the screen's exact geometric midpoint (it's
         // nudged for visual balance), so compare against a same-size probe that

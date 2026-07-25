@@ -64,6 +64,12 @@ public final class GroupEditorViewController: NSViewController {
     private static let wellLeadingInset: CGFloat =
         PopoverColumnGrid.railGutterCenterX + PopoverColumnGrid.busNodeDiameterSelected / 2 + 4
 
+    /// Inset from the header section's top/bottom borders to the icon and
+    /// title. Deliberately roomier than the list section's `verticalPadding`:
+    /// the header holds one tall icon over one short title, so tight padding
+    /// left the name looking pinned to the bottom edge of a mostly-empty box.
+    private static let headerPadding: CGFloat = 14
+
     /// The continuous membership-rail spine, drawn ONCE for the whole pane on
     /// top of everything else so it reads unbroken where it crosses the header
     /// band and the "Speakers" label's row. Non-interactive.
@@ -97,8 +103,13 @@ public final class GroupEditorViewController: NSViewController {
     private let nameField = NSTextField(string: "")
     private let membershipStack = NSStackView()
     /// The checklist's recessed background + inter-row hairlines (T5) — see
-    /// ``MembershipWellView`` below. Sits BEHIND `membershipStack` in z-order.
-    private let membershipWell = MembershipWellView()
+    /// ``GroupedSectionView`` below. Sits BEHIND `membershipStack` in z-order.
+    private let membershipWell = GroupedSectionView()
+    /// The header's own bounded section (icon + title), the sibling of
+    /// ``membershipWell``. Holds no rows, so it draws fill + border only — the
+    /// rail climbs out of the list section and lands on the TITLE inside this
+    /// one, which is what visually ties the members to the group they belong to.
+    private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
 
     /// Width cap for the editable title field (design feedback 2026-07-18:
@@ -191,12 +202,13 @@ public final class GroupEditorViewController: NSViewController {
         // surface at all — measured ~1.06:1 dark / ~1.08:1 light against
         // `panel`, an invisible boundary). Non-interactive (`hitTest` always
         // nil), so it never intercepts a row's click.
-        membershipWell.translatesAutoresizingMaskIntoConstraints = false
-        // Dividers align to the row icon, which sits at `railContentInset` from
-        // the COLUMN's edge — the container starts further right, so the offset
-        // inside it is the difference.
-        membershipWell.contentLeadingInset = Self.railContentInset - Self.wellLeadingInset
-        column.addSubview(membershipWell)
+        // Both sections span the column's full width (rail gutter included), so
+        // their dividers inset by the same gutter reserve every child uses.
+        for well in [headerWell, membershipWell] {
+            well.translatesAutoresizingMaskIntoConstraints = false
+            well.contentLeadingInset = Self.railContentInset
+            column.addSubview(well)
+        }
         for v in [iconWell, nameField, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
@@ -219,10 +231,14 @@ public final class GroupEditorViewController: NSViewController {
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
             // Header parity with DeviceDetailViewController: left-aligned large
-            // icon, left-aligned (editable) title beneath it — now both offset
-            // by the rail gutter, which is also where the rail's origin hook
-            // plugs into the icon well's left edge.
-            iconWell.topAnchor.constraint(equalTo: column.topAnchor),
+            // icon, left-aligned (editable) title beneath it, BOTH panes using
+            // the same `railContentInset` so switching sidebar selection doesn't
+            // shift the header sideways (design review 2026-07-25 — it used to
+            // jump ~22.5pt because only this pane reserved the gutter).
+            // Inset by the header's own padding so the icon doesn't touch its
+            // top border.
+            iconWell.topAnchor.constraint(equalTo: column.topAnchor,
+                                          constant: Self.headerPadding),
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                               constant: Self.railContentInset),
 
@@ -234,9 +250,19 @@ public final class GroupEditorViewController: NSViewController {
             // rendered invisible — snapshot-caught 2026-07-18).
             nameField.widthAnchor.constraint(equalToConstant: Self.titleFieldMaxWidth),
 
-            speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 20),
+            // Sits BETWEEN the two sections, on bare pane — the gap below the
+            // header section's bottom border, above the list section's top.
+            speakersLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor, constant: 14),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                                    constant: Self.railContentInset),
+
+            // The header section: wraps the icon + title, padded off both, and
+            // spans the column's full width so the rail lands INSIDE it.
+            headerWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            headerWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            headerWell.topAnchor.constraint(equalTo: column.topAnchor),
+            headerWell.bottomAnchor.constraint(equalTo: nameField.bottomAnchor,
+                                               constant: Self.headerPadding),
 
             // The ROWS, uniquely, start at the column's own leading edge: each
             // row applies `railContentInset` internally to its icon and places
@@ -251,20 +277,16 @@ public final class GroupEditorViewController: NSViewController {
             membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
-            // The grouped-list container. Its leading edge sits to the RIGHT of
-            // the rail (`wellLeadingInset`), leaving the spine and its nodes in
-            // clean pane background — the rail frames the list, it is not inside
-            // it. Padded off the stack's top/bottom so rows breathe; that costs
-            // `verticalPadding` at each end, which the tightened
-            // "Speakers"-to-stack gap below pays for rather than growing the
-            // pane's fitting height into the window's 720x460 default.
-            membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                    constant: Self.wellLeadingInset),
+            // The list section. Spans the column's FULL width, gutter included,
+            // so the rail's nodes sit inside it (design review 2026-07-25 —
+            // holding the spine outside left it reading as a detached stripe).
+            // Padded off the stack's top/bottom so rows breathe.
+            membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             membershipWell.topAnchor.constraint(equalTo: membershipStack.topAnchor,
-                                                constant: -MembershipWellView.verticalPadding),
+                                                constant: -GroupedSectionView.verticalPadding),
             membershipWell.bottomAnchor.constraint(equalTo: membershipStack.bottomAnchor,
-                                                   constant: MembershipWellView.verticalPadding),
+                                                   constant: GroupedSectionView.verticalPadding),
 
             deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor,
                                                   constant: Self.railContentInset),
@@ -575,8 +597,13 @@ public final class GroupEditorViewController: NSViewController {
         return railOverlay.convert(NSPoint(x: centerX, y: 0), from: row).x
     }
 
+    /// The title field's laid-out width — the rail's origin "ring" reports half
+    /// of this as its radius, so a test can assert the hook geometry without
+    /// re-deriving the field's width cap.
+    public var test_titleFieldWidth: CGFloat { nameField.bounds.width }
+
     /// T5: the number of rows currently fed to the checklist's recessed
-    /// background (`MembershipWellView.rows`) — mirrors `candidateDevices`
+    /// background (`GroupedSectionView.rows`) — mirrors `candidateDevices`
     /// when the well is correctly kept in sync with the row rebuild.
     public var test_membershipWellRowCount: Int { membershipWell.rows.count }
 
@@ -593,21 +620,26 @@ public final class GroupEditorViewController: NSViewController {
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
 
 extension GroupEditorViewController: RailHookProviding {
-    /// The group's own icon well is this pane's origin — the analogue of the
-    /// popover's Main Audio ring: the rail curves out of the group tile's left
-    /// edge and drops into the gutter, so the members visibly hang off the group
-    /// they belong to. The well is a rounded-rect tile rather than a circle, so
-    /// the "ring" reported here is its inscribed circle; only the left edge and
-    /// centre-y are actually drawn to. `gold` follows the SAME active-group
-    /// truth as the well's §5.3 gold ring, so an inactive group's hook reads in
-    /// the quiet `ember` idle tone.
+    /// The group's TITLE is this pane's origin — the analogue of the popover's
+    /// Main Audio ring: the rail curves out of the gutter and lands on the
+    /// group's name, so the members visibly hang off the group they belong to.
+    /// It hooked the ICON well until a design review (2026-07-25) moved it down
+    /// to the title: the name is what the members belong to, and the shorter
+    /// climb keeps the spine from cutting past the whole header.
+    ///
+    /// The protocol is phrased in terms of a ring because the popover's origin
+    /// IS one; only `ringCenterX - ringRadius` (the left edge) and `centerY` are
+    /// ever drawn to, so a rectangular title reports its own half-width and the
+    /// hook lands on the field's leading edge. `gold` still follows the SAME
+    /// active-group truth as the icon well's §5.3 gold ring, so an inactive
+    /// group's hook reads in the quiet `ember` idle tone.
     public func railHookAnchor(in view: NSView)
         -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
-        guard isViewLoaded, iconWell.superview != nil else { return nil }
-        iconWell.layoutSubtreeIfNeeded()
-        let center = iconWell.convert(
-            NSPoint(x: iconWell.bounds.midX, y: iconWell.bounds.midY), to: view)
-        return (center.y, center.x, DeviceIconWellView.size / 2, iconWell.isActiveGroup)
+        guard isViewLoaded, nameField.superview != nil else { return nil }
+        nameField.layoutSubtreeIfNeeded()
+        let center = nameField.convert(
+            NSPoint(x: nameField.bounds.midX, y: nameField.bounds.midY), to: view)
+        return (center.y, center.x, nameField.bounds.width / 2, iconWell.isActiveGroup)
     }
 }
 
@@ -617,7 +649,7 @@ extension GroupEditorViewController: RailHookProviding {
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
 private final class RailRepaintingView: NSView {
     weak var railOverlay: BusRailOverlayView?
-    weak var membershipWell: MembershipWellView?
+    weak var membershipWell: GroupedSectionView?
     override func layout() {
         super.layout()
         railOverlay?.needsDisplay = true
@@ -640,27 +672,25 @@ private final class RailRepaintingView: NSView {
 /// light (floor 1.25:1, the same separator floor `Tokens.Color.hairline`
 /// itself documents against `panel`).
 ///
-/// A GROUPED-LIST container (the macOS System Settings idiom), not a raw tint
-/// band. Its first draft spanned the full column width — swallowing the rail's
-/// gutter so the gold spine sat INSIDE the fill — was pinned flush to the row
-/// stack with no padding, drew full-bleed dividers straight across the gutter,
-/// and used a 6pt radius that reads square at this size. The result looked like
-/// an arbitrary stripe rather than a deliberate object (design review
-/// 2026-07-25). The corrected geometry, all of it load-bearing:
+/// A GROUPED-SECTION container (the macOS System Settings idiom), used TWICE in
+/// this pane: once around the header (icon + title) and once around the
+/// membership list. Two stacked sections with the rail threading out of the
+/// list up into the header mirrors the popover's own composition — bounded
+/// sections, tied together by the spine (design review 2026-07-25).
 ///
-/// - **Starts to the RIGHT of the rail** (`wellLeadingInset`), so the spine and
-///   its nodes run in clean pane background. The rail is chrome for the list,
-///   never content inside it.
-/// - **Padded** top/bottom (`verticalPadding`) so rows breathe instead of
+/// The geometry, all of it load-bearing:
+///
+/// - **Spans the full column width**, gutter included, so the rail's nodes sit
+///   INSIDE the section rather than floating beside it. Content within is inset
+///   past the gutter (`contentLeadingInset`) so the spine keeps a clear lane.
+/// - **Padded** top/bottom (`verticalPadding`) so content breathes instead of
 ///   touching the container's edges.
-/// - **Inset dividers** starting at the row icon's leading edge
-///   (`contentLeadingInset`), the standard grouped-list separator treatment —
-///   never full-bleed, never crossing the gutter.
-/// - **A visible border** plus a radius large enough to read as a shape.
-///
-/// It spans the full column width to its trailing edge, so the container reads
-/// as one list even though the rows inside it are only as wide as their own
-/// content (`MembershipRowView` has no width tie to the stack).
+/// - **Inset dividers** starting at `contentLeadingInset` — the standard
+///   grouped-list separator treatment, never full-bleed under the corners. A
+///   section holding fewer than two rows draws none, which is what lets this
+///   same view serve as the plain header container.
+/// - **A visible border** plus a radius large enough to read as a shape; the
+///   first draft's 6pt radius rendered visually square.
 ///
 /// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern
 /// for a rounded/solid-fill background view in this same file's neighborhood:
@@ -671,7 +701,7 @@ private final class RailRepaintingView: NSView {
 /// affected; the small dead area to the right of a narrower row (the well is
 /// wider than a row's intrinsic content) simply swallows a click with no
 /// target, same as clicking blank pane background anywhere else.
-private final class MembershipWellView: NSView {
+private final class GroupedSectionView: NSView {
     /// Large enough to read as a rounded shape at this container's size — the
     /// 6pt first draft rendered visually square.
     static let cornerRadius: CGFloat = 10

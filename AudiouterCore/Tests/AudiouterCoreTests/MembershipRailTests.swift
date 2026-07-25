@@ -205,18 +205,25 @@ final class MembershipRailTests: IsolatedTestCase {
         XCTAssertEqual(editor.test_railNodes.last, .member)
     }
 
-    func testEditorRailPlanResolvesFromTheIconWellOrigin() throws {
+    func testEditorRailPlanResolvesFromTheGroupTitleOrigin() throws {
         let (editor, _, _) = try makeEditor()
         let plan = try XCTUnwrap(editor.test_railPlan(), "the rail resolves from live frames")
 
         guard case let .ring(centerY, ringCenterX, ringRadius) = plan.origin else {
-            return XCTFail("the origin hooks into the group icon well, not a header dot")
+            return XCTFail("the origin hooks into the group title, not a header dot")
         }
-        XCTAssertEqual(ringRadius, DeviceIconWellView.size / 2, accuracy: 0.01)
+        // The hook moved from the icon well DOWN to the title (design review
+        // 2026-07-25): the name is what the members belong to. The protocol is
+        // ring-shaped because the popover's origin is a ring, so a rectangular
+        // title reports its own half-width and only the left edge is drawn to.
+        XCTAssertEqual(ringRadius, editor.test_titleFieldWidth / 2, accuracy: 0.01)
+        // ~2pt inside the content inset: an editable `NSTextField`'s alignment
+        // rect (what the leading constraint pins) is inset from its frame, and
+        // the hook lands on the frame's visual edge.
         XCTAssertEqual(ringCenterX - ringRadius,
-                       PopoverColumnGrid.firstElementLeading(indented: false), accuracy: 0.5,
-                       "the hook leaves the well's LEFT edge, which sits at the content inset")
-        XCTAssertGreaterThan(centerY, plan.railTopY, "the rail drops below the well's centre")
+                       PopoverColumnGrid.firstElementLeading(indented: false), accuracy: 2.5,
+                       "the hook lands on the title's LEFT edge, at the content inset")
+        XCTAssertGreaterThan(centerY, plan.railTopY, "the rail drops below the title's centre")
 
         // Four in-span stops (a, office, c, mixer); `echo` is bare, so it
         // contributes no stop. Nothing cuts the rail short — this pane has no
@@ -292,9 +299,16 @@ final class MembershipRailTests: IsolatedTestCase {
     }
 
     func testEditorStillFitsTheGroupsWindowDefaultHeight() throws {
-        // `MixerWindowController` opens at 720×460 and the editor pane has no
+        // `MixerWindowController` opens at 720×505 and the editor pane has no
         // scroll view, so its fitting height is a hard budget. A 7-device fleet
         // is the demo fleet AND a realistic household ceiling.
+        //
+        // The default grew 460 → 505 when the editor gained its two bordered
+        // grouped sections (design review 2026-07-25): borders and internal
+        // padding cost real height, and the pane had been sitting at ~459 of
+        // the old 460 — one point of slack. The window is user-resizable, so
+        // the honest fix was a default that fits the content rather than
+        // squeezing the design to fit a number.
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
@@ -306,7 +320,7 @@ final class MembershipRailTests: IsolatedTestCase {
         editor.show(groupID: group.id, devices: devices)
         editor.view.layoutSubtreeIfNeeded()
 
-        XCTAssertLessThanOrEqual(editor.view.fittingSize.height, 460,
+        XCTAssertLessThanOrEqual(editor.view.fittingSize.height, 505,
                                  "the editor must still fit the window's default content height")
     }
 }

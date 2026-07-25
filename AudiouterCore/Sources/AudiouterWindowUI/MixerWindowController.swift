@@ -142,7 +142,7 @@ public final class MixerWindowController: NSWindowController {
         if hasSavedFrame {
             window.setFrame(restoredFrame, display: false)
         } else {
-            window.setContentSize(NSSize(width: 720, height: 460))
+            window.setContentSize(NSSize(width: 720, height: 505))
             window.center()
         }
         // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
@@ -212,7 +212,7 @@ public final class MixerWindowController: NSWindowController {
     /// going forward; re-applying an already-restored frame is a harmless no-op.
     private static func makeContainer(autosaveName: NSWindow.FrameAutosaveName) -> (window: NSWindow, hasSavedFrame: Bool) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 505),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -530,6 +530,25 @@ final class WarmPanelView: NSView {
     }
 }
 
+/// A one-token divider line. `draw(_:)`-based rather than a frozen layer color
+/// for the same reason as `WarmPanelView`: `Tokens.Color.hairline` re-resolves
+/// per appearance and Increase Contrast on every paint. Non-interactive — it is
+/// pure chrome and must never swallow a click meant for what it borders.
+final class HairlineView: NSView {
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Tokens.Color.hairline.setFill()
+        bounds.fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
 // MARK: - ContentPaneHostViewController
 
 /// Hosts the swapped content pane (editor / detail / empty) plus the
@@ -569,9 +588,28 @@ final class ContentPaneHostViewController: NSViewController {
         // sits on the warm `panel` canvas; the split view / sidebar / title
         // bar around it stay stock. The root of this host is that canvas.
         let root = WarmPanelView()
+        // The seam between the stock title bar and this warm pane (design
+        // review 2026-07-25). Without it the two surfaces just abut: tolerable
+        // in light mode, where both are near-white, but in dark mode the title
+        // bar's COOL grey meets the pane's WARM near-black and the join reads
+        // muddy rather than deliberate. A hairline makes it an edge on purpose.
+        // Scoped to the content pane only — the sidebar runs full height under
+        // the title bar by design, so a border there would cut across it.
+        let titleBarSeam = HairlineView()
+        titleBarSeam.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentContainer)
         root.addSubview(footerLabel)
+        root.addSubview(titleBarSeam)
         NSLayoutConstraint.activate([
+            // The SAFE-AREA top, not the root's: the window is
+            // `.fullSizeContentView`, so this pane extends UNDER the title bar
+            // and a seam at `root.topAnchor` would be hidden behind it. The
+            // safe-area edge is where the title bar actually ends.
+            titleBarSeam.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            titleBarSeam.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            titleBarSeam.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            titleBarSeam.heightAnchor.constraint(equalToConstant: 1),
+
             contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),

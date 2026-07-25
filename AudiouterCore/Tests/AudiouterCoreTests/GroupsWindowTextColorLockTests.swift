@@ -296,7 +296,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
     // MARK: 8. POSITIVE — the membership checklist's well/hairline really are
     // Tokens.Color.well/.hairline (T5) — surfaces changed, text didn't.
     //
-    // `MembershipWellView` is `private` to GroupEditorViewController.swift, so
+    // `GroupedSectionView` is `private` to GroupEditorViewController.swift, so
     // it can't be named or constructed here even under `@testable import` —
     // access control on the TYPE still applies; only the stored-property
     // VALUE is reachable via runtime reflection, and only as its public `NSView`
@@ -342,7 +342,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
             }
             let matches = colors.filter { sameColor($0, expectedWell, tolerance: 0.02) }
             XCTAssertFalse(matches.isEmpty,
-                "MembershipWellView's fill under \(appearanceName.rawValue) never matched " +
+                "GroupedSectionView's fill under \(appearanceName.rawValue) never matched " +
                 "Tokens.Color.well — the T5 recessed checklist background must stay the well " +
                 "token; if this legitimately changed, that's a design decision for Alec, not a " +
                 "silent repaint.")
@@ -362,7 +362,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
             }
             let matches = colors.filter { sameColor($0, expectedHairline, tolerance: 0.02) }
             XCTAssertFalse(matches.isEmpty,
-                "MembershipWellView never painted a Tokens.Color.hairline-colored pixel under " +
+                "GroupedSectionView never painted a Tokens.Color.hairline-colored pixel under " +
                 "\(appearanceName.rawValue) despite \(editor.test_membershipWellRowCount) rows — " +
                 "the T5 divider between adjacent rows must stay the hairline token.")
         }

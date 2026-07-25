@@ -47,6 +47,12 @@ public final class DeviceDetailViewController: NSViewController {
     /// `GroupEditorViewController.contentMaxWidth`.
     private static let contentMaxWidth: CGFloat = 400
 
+    /// Leading inset for this pane's content, matching
+    /// `GroupEditorViewController.railContentInset` so the shared header sits
+    /// at the same x in both panes (header parity — see the constraint below).
+    /// Derived from the popover's grid, the same source the editor uses.
+    private static let headerLeadingInset = PopoverColumnGrid.firstElementLeading(indented: false)
+
     /// Fixed caption-column width so the five metadata rows line up.
     private static let captionWidth: CGFloat = 90
 
@@ -153,7 +159,16 @@ public final class DeviceDetailViewController: NSViewController {
 
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            // HEADER PARITY (design review 2026-07-25): matches
+            // `GroupEditorViewController.railContentInset` exactly, so the
+            // shared icon-well + title header lands on the same x in both panes
+            // and switching sidebar selection no longer shifts it ~22.5pt
+            // sideways. This pane draws no rail, so the reserved gutter simply
+            // reads as a slightly wider left margin — the alignment is worth
+            // more than reclaiming it. Derived from the same grid constant, not
+            // a copied literal, so the two can't drift apart again.
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                            constant: Self.headerLeadingInset),
             column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 

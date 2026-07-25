@@ -301,6 +301,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// first reconnect, on a new sleep/wake cycle, or on `stop()`.
     private var wakeWatchdog: DispatchWorkItem?
 
+    /// The armed scheduling snapshot polling work item, scheduled on `stateQueue`.
+    /// Polls every ~5s while capture is active; cancelled on `stop()` or when
+    /// capture goes idle. Used by T2 to bridge scheduling metrics to telemetry.
+    private var schedulingSnapshotPollWork: DispatchWorkItem?
+
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
     // The 2026-07-17 gated session wedged a device with rapid enable/disable spam:
@@ -922,6 +927,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.localPlaybackEngine?.onAppLevel = { [weak self] bundleID, rms in
                 self?.emitAppLevel(bundleID: bundleID, rms: rms)
             }
+
+            // T2: Start the scheduling snapshot polling. Polls while capture is active,
+            // logging scheduling metrics to telemetry every ~5s. Runs on stateQueue so
+            // it is safe from the realtime audio path.
+            self.stateQueue.async { self.startSchedulingSnapshotPolling() }
         }
     }
 
@@ -998,6 +1008,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.awaitingWakeReconnect = false
             self.wakeCaptureOverride = false
             self.suspended = false
+            // T2: stop the scheduling snapshot polling.
+            self.schedulingSnapshotPollWork?.cancel()
+            self.schedulingSnapshotPollWork = nil
             // `captureControlQueue` gets the last word — and, since the eager
             // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
             // caller-thread stop would be unordered against a start still queued from
@@ -2750,6 +2763,53 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.reconcileCaptureGate()
     }
 
+    // MARK: Scheduling snapshot polling (T2)
+
+    /// Arm the scheduling snapshot polling on `stateQueue`. Polls while capture is
+    /// active (at least one real AirPlay device is selected and capture has started).
+    /// On `stateQueue`.
+    private func startSchedulingSnapshotPolling() {   // on stateQueue
+        self.schedulingSnapshotPollWork?.cancel()
+        self.schedulingSnapshotPollWork = nil
+        self.pollSchedulingSnapshot()
+    }
+
+    /// Poll the engine's scheduling snapshot every ~5s while capture is active,
+    /// logging via telemetry. Reschedules itself on `stateQueue` so it continues
+    /// until cancelled or capture stops. On `stateQueue` (scheduled there).
+    private func pollSchedulingSnapshot() {   // on stateQueue (scheduled there)
+        guard self.started, self.captureRunning else { return }
+
+        // Read the snapshot on this thread (it's lock-free, bounded, cheap).
+        let snapshot = self.engine.writeSchedulingSnapshot()
+
+        // Format and log the three metric families (each with count, p50/p95/p99/max).
+        // Using snake_case to match existing telemetry key conventions in this file.
+        Telemetry.log(.airplay, "send_sched", [
+            "wake_count": "\(snapshot.wakeLatency.count)",
+            "wake_p50_ms": String(format: "%.1f", snapshot.wakeLatency.p50Ms),
+            "wake_p95_ms": String(format: "%.1f", snapshot.wakeLatency.p95Ms),
+            "wake_p99_ms": String(format: "%.1f", snapshot.wakeLatency.p99Ms),
+            "wake_max_ms": String(format: "%.1f", snapshot.wakeLatency.maxMs),
+            "in_cycle_count": "\(snapshot.inCycleWork.count)",
+            "in_cycle_p50_ms": String(format: "%.1f", snapshot.inCycleWork.p50Ms),
+            "in_cycle_p95_ms": String(format: "%.1f", snapshot.inCycleWork.p95Ms),
+            "in_cycle_p99_ms": String(format: "%.1f", snapshot.inCycleWork.p99Ms),
+            "in_cycle_max_ms": String(format: "%.1f", snapshot.inCycleWork.maxMs),
+            "gap_count": "\(snapshot.interArrivalGap.count)",
+            "gap_p50_ms": String(format: "%.1f", snapshot.interArrivalGap.p50Ms),
+            "gap_p95_ms": String(format: "%.1f", snapshot.interArrivalGap.p95Ms),
+            "gap_p99_ms": String(format: "%.1f", snapshot.interArrivalGap.p99Ms),
+            "gap_max_ms": String(format: "%.1f", snapshot.interArrivalGap.maxMs),
+        ])
+
+        // Schedule the next poll (~5s). This reschedules on stateQueue, matching the
+        // pattern of the wake watchdog above (stateQueue.asyncAfter with a weak self).
+        let work = DispatchWorkItem { [weak self] in self?.pollSchedulingSnapshot() }
+        self.schedulingSnapshotPollWork = work
+        self.stateQueue.asyncAfter(deadline: .now() + 5.0, execute: work)
+    }
+
     // MARK: Discovery → app model (all on stateQueue)
 
     private func handleDiscovery(_ event: DiscoveryEvent) {
@@ -3836,6 +3896,13 @@ protocol EngineControlling: Sendable {
     /// `NativeBackendTests` spy) compiles unchanged and keeps its prior
     /// all-healthy behavior.
     var ptpClockAvailable: Bool { get async }
+
+    /// Snapshot of the write-path scheduling metrics (T1 — mirrors
+    /// `AirPlayEngine/writeSchedulingSnapshot()`). Cheap to read from any thread
+    /// (lock-free, bounded, small copy). Returns an empty snapshot by default so
+    /// a conformer that predates this (e.g., a test spy) compiles unchanged.
+    /// Called by T2 polling every ~5s to log to telemetry while capture is active.
+    nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot
 }
 
 extension EngineControlling {
@@ -3855,6 +3922,14 @@ extension EngineControlling {
     /// `NativeBackendTests` spies) compiles unchanged and reports "available".
     var ptpClockAvailable: Bool {
         get async { true }
+    }
+
+    /// Default: empty snapshot (T1). ``EngineAdapter`` overrides this to forward
+    /// to the real engine's `writeSchedulingSnapshot()`; a conformer that
+    /// predates T1 (existing `NativeBackendTests` spies) compiles unchanged
+    /// and reports no metrics.
+    nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
+        WriteSchedulingSnapshot()
     }
 }
 
@@ -3886,6 +3961,9 @@ struct EngineAdapter: EngineControlling {
     var dacpID: UInt64 { engine.dacpID }
     var ptpClockAvailable: Bool {
         get async { await engine.ptpClockAvailable }
+    }
+    nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
+        engine.writeSchedulingSnapshot()
     }
 }
 

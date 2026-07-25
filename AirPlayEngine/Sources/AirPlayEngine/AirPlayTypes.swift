@@ -244,3 +244,60 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
         self.lastGapSeconds = lastGapSeconds
     }
 }
+
+/// One metric family's aggregated stats from `WriteSchedulingProbe`
+/// (T-ENG-SCHED-1, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md task T1):
+/// count/p50/p95/p99/max in milliseconds, computed over that probe's bounded
+/// ring-buffer window (see `WriteSchedulingProbe` for why `count` is
+/// cumulative-since-start while the percentiles are windowed).
+public struct WriteSchedulingMetricSnapshot: Sendable, Equatable {
+    /// Total samples recorded since the probe was created (not bounded by
+    /// the percentile window).
+    public var count: UInt64
+    public var p50Ms: Double
+    public var p95Ms: Double
+    public var p99Ms: Double
+    public var maxMs: Double
+
+    public init(
+        count: UInt64 = 0,
+        p50Ms: Double = 0,
+        p95Ms: Double = 0,
+        p99Ms: Double = 0,
+        maxMs: Double = 0
+    ) {
+        self.count = count
+        self.p50Ms = p50Ms
+        self.p95Ms = p95Ms
+        self.p99Ms = p99Ms
+        self.maxMs = maxMs
+    }
+}
+
+/// A consistent snapshot of `WriteSchedulingProbe`'s three independent
+/// metric families, each discriminating a different candidate cause of
+/// audio dropouts under system load (plan §B.4):
+///   - `wakeLatency` — enqueue instant to `body` start (H1: send-thread
+///     starvation).
+///   - `inCycleWork` — `body` entry to exit (in-cycle stalls; also
+///     calibrates a future real-time `computation` budget, T14).
+///   - `interArrivalGap` — gap between successive `write` calls (H2:
+///     capture-side underrun, distinct from anything downstream of arrival).
+///
+/// Cheap to read from any thread (see `WriteSchedulingProbe.snapshot()`) —
+/// T2 polls this every ~5s from a non-RT thread, never the engine thread.
+public struct WriteSchedulingSnapshot: Sendable, Equatable {
+    public var wakeLatency: WriteSchedulingMetricSnapshot
+    public var inCycleWork: WriteSchedulingMetricSnapshot
+    public var interArrivalGap: WriteSchedulingMetricSnapshot
+
+    public init(
+        wakeLatency: WriteSchedulingMetricSnapshot = WriteSchedulingMetricSnapshot(),
+        inCycleWork: WriteSchedulingMetricSnapshot = WriteSchedulingMetricSnapshot(),
+        interArrivalGap: WriteSchedulingMetricSnapshot = WriteSchedulingMetricSnapshot()
+    ) {
+        self.wakeLatency = wakeLatency
+        self.inCycleWork = inCycleWork
+        self.interArrivalGap = interArrivalGap
+    }
+}

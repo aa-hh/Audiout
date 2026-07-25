@@ -324,6 +324,13 @@ let package = Package(
                 // references no ffmpeg symbols (T-SHIM-1 adds avcodec/avutil/
                 // swresample when it implements the real ALAC encoder).
                 .unsafeFlags(brewLibFlags),
+                // CoreAudio — shims/engine_workgroup.c (T5) reads
+                // kAudioDevicePropertyIOThreadOSWorkgroup off an AudioObjectID
+                // via AudioObjectGetPropertyData/AudioObjectHasProperty. A
+                // system framework, not a Homebrew dep, so it needs its own
+                // explicit link (SwiftPM does not auto-link frameworks for a
+                // C target the way Xcode project targets do).
+                .linkedFramework("CoreAudio"),
                 .linkedLibrary("event"),
                 // libevent's pthreads support lives in a separate library.
                 // evthread_use_pthreads() (EngineThread) needs it so that

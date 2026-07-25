@@ -172,6 +172,62 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ~124s warm), so `auto` picks parallel when nothing else is testing and
     serial when something is — including a bare `swift test` started outside
     this script, which it detects via `pgrep`.
+  - **Remote Mac (opt-in, off by default).** Configure with `git config`, NOT an
+    env var or a committed file:
+
+    ```
+    git config --local audiouter.remoteHost 'user@192.168.4.41'
+    git config --local audiouter.testPrefer remote   # or: local (default)
+    ```
+
+    This lands in `.git/config`, which is **not tracked** — so a personal
+    username and LAN address never enter the repo — and which every worktree
+    shares, so one command covers all of them. It is also read by git itself
+    rather than by a shell, which matters: hooks run NON-interactively and a
+    non-interactive zsh does not source `~/.zshrc`, so an `export` there would
+    reach some runs and not others. `AUDIOUTER_TEST_REMOTE_HOST` /
+    `AUDIOUTER_TEST_PREFER` still override per-invocation.
+
+    `testPrefer=local` (default) treats the two machines as ONE POOL: two runs
+    locally, and the third and fourth agent overflow to the remote rather than
+    queueing. `testPrefer=remote` sends every run there first instead. Either way
+    an asleep/offline remote costs one 5s probe and then behaves exactly as if
+    none were configured.
+
+    **A remote PASS is accepted; a remote FAILURE is re-run locally before it
+    can block anything.** Guard 4 refuses commits on this result, and the remote
+    is on a different Swift/SDK — a toolchain difference presenting as "your code
+    is broken" would send an agent hunting a bug that does not exist. The
+    asymmetry is deliberate: the expensive error is a false REFUSAL, not a false
+    pass on code paths that are provably identical (highest gate `macOS 15`,
+    Swift 5 language mode). Cost is one extra run, and only when something
+    actually failed. `rsync`s the WORKING TREE
+    (so uncommitted edits go too, which `git push` cannot do) into a per-worktree
+    directory under `AUDIOUTER_TEST_REMOTE_ROOT`. Cost is negligible: ~22MB/446
+    files on first sync, **~3KB after editing one file**. `.build` is excluded —
+    it bakes in absolute paths and is per-machine.
+    Probe timeout is a deliberate 5s: the known failure mode is the host being
+    ASLEEP, where it answers ping via a sleep proxy but refuses TCP, so a
+    generous timeout would stall every contended run behind a host that will
+    never answer. Any "cannot reach / cannot sync / connection dropped" outcome
+    falls back to the local queue and is NEVER reported as a test failure —
+    toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26)
+    and an agent reading infrastructure trouble as a code failure will chase a
+    bug that does not exist. A genuine remote FAILURE is reported, but flagged
+    to confirm locally first.
+    **Version parity is a smaller risk than it sounds:** the highest OS gate in
+    this repo is `#available(macOS 15, *)` and the deployment target is
+    `.macOS(.v14)`, so a macOS 26 host takes byte-identical code paths to a
+    macOS 27 one — nothing here knows macOS 26/27 exists. The package is also
+    `swift-tools-version:5.10` with no language-mode override, i.e. Swift 5
+    language mode, which does not diverge between 6.3 and 6.4.
+    **VERIFIED end-to-end 2026-07-25** against the real M3 (Apple M3, 8 cores,
+    24GB, macOS 26.5.2, Swift 6.3.1): builds clean on 6.3.1 with **zero errors**
+    (only cosmetic `ld` warnings about Homebrew dylibs built for macOS 26 vs the
+    macOS 14 deployment target), full suite **1025/1025 green in 45s** (vs
+    ~90-180s locally under contention), the audio gate skips its 7 correctly
+    there, and overflow triggers only once both local slots are held. Sync of
+    the whole tree takes ~1.6s over LAN.
   - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while

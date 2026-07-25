@@ -4,6 +4,107 @@
 `claude/reliability-audit-0defe7`). Audit was code-reading only — no audio was
 played, no code changed. Every finding cites the file/line it was verified at.*
 
+---
+
+## Execution status (updated 2026-07-24)
+
+**Waves 1–3 are code-complete, adversarially reviewed, and merged with `main`
+— all on `claude/reliability-audit-0defe7`, NOT yet merged into `main`.**
+Nothing here has ever been verified with real audio; every claim below is
+build + hermetic-test only, per the standing no-agent-plays-audio rule. Live
+verification is a separate, not-yet-done step (see "What remains").
+
+### Done and committed
+
+| Wave | Fixes | Commits |
+|---|---|---|
+| 1 — Multi-process capture core | R1, R2, R9, R14 | `106b5e4`→`06b017b` (7 commits) + remediation `e3e577c` |
+| 2 — Never-silent guardrails | R10, R11, R12 | `e42e629`, `4eac431`, `ea83e48`, `6c74057` + remediation `219ceaf` |
+| 3 — Default-output correctness | R13 | `ca446a3`, `8bb042f` + hardening `8337445` |
+
+Three rounds of adversarial (skeptic-agent) review ran against this work —
+one per wave, plus a final pass — and every REFUTED finding they produced was
+fixed before the next wave started. Two lower-severity PLAUSIBLE items were
+deliberately deferred (see below).
+
+**Merge with `main` (2026-07-24, commits `fe19ce8` + `a20ce72`):** `main` had
+independently grown a telemetry system and a "dropout-fix" workstream that
+duplicated several of the same fixes (whole-system RTP reset, nominal-rate
+listener, `convergeDevice` serialization) with a more surgical trigger
+(reset only on a device/rate rebuild, never on the routine per-connect/
+exclusion rebuild — main's version, kept). 122 conflict blocks were resolved
+on the rule "prefer main's version for the overlapping audio fixes, keep our
+unique reliability fixes, take main's unique fixes + telemetry." A dedicated
+adversarial pass then challenged that reconciliation itself (not just the
+code) — 5 of 6 decisions held; one did not (below). Verified post-merge:
+1059+ tests green, serial, on Xcode 27 / Swift 6.4 (the toolchain default
+changed mid-session; see build note at bottom).
+
+**Superseded by the merge, not by us:** the `ProcessSetResolver` /
+`AppProcessResolver` seam from Wave 1 was replaced by main's
+`AudioProcessResolver`, with our Wave-1 hardening (live-membership diffing,
+the exclusion storm-guard, the translated-object-set leak fix) ported onto
+it. **This retires the Wave 7 "Finding 5 — Chrome channel over-match" entry
+below**: `AudioProcessResolver.resolve(bundleID:)` matches on an *exact*
+effective bundle ID (own reported id, or a parent-pid walk) — there is no
+dotted-prefix string match anywhere in the code that's actually in the tree
+now, so the Chrome Canary/Beta/Dev sibling-capture bug the old resolver had
+does not exist in the current implementation. No action needed; the entry
+is kept below only as history.
+
+### What remains
+
+1. **One fix needs to be redone.** The final adversarial pass on the merge
+   found a real regression: our teardown-race guard (re-check `started &&
+   !suspended` before the whole-system RTP reset re-adds engine outputs) was
+   dropped in favor of main's mechanism, which turns out NOT to cover the
+   **sleep** interleaving — `handleSystemWillSleep` (unlike `stop()`) never
+   clears the in-flight rebind-recovery state, so a sleep landing mid-reset
+   can strand a selected AirPlay device silent after wake with no
+   self-recovery. An agent was assigned to restore the guarantee and
+   re-instate the dropped regression test, but the session was interrupted
+   before it committed — **no code change landed; this still needs to be
+   done from scratch.** Low urgency (mitigated by the R11 watchdog falling
+   back to local audio) but a real, confirmed gap.
+2. **Live testing — not yet done, and not this session's job right now.**
+   Per Alec's 2026-07-24 decision, all live audio testing is consolidated
+   into the `claude/memory-leak-live-testing` session (bundle-id / PTP-port
+   collision risk from running two Audiouter instances). The full live
+   checklist per wave is unchanged and listed under each wave below. Two
+   live-testing findings from that session, for context (not this branch's
+   bugs): the ~8% pitch-up was root-caused and fixed there (a per-app tap
+   format-reconciliation bug, commit `196e5b7` on their branch — this
+   branch's Wave 1–3 work never touched that code path); a judder→stop→
+   silence symptom on redirecting Firefox is still being chased there.
+3. **R9's dedicated regression test was not re-ported** after the merge
+   (the underlying fix — `refreshExcludedProcessSet` called from both
+   `handlePerAppCaptureHealthChange` and `handleAppLaunched` — is confirmed
+   still wired and functional; only its explicit unit test is missing).
+4. **A minor completeness gap in the surgical RTP reset**, found by the
+   post-merge adversarial pass: an exclusion-only tap rebuild that lands in
+   the narrow window between the old tap's teardown and the new tap's
+   listener arm can silently re-anchor onto a different default device's
+   clock without triggering a reset. Self-heals on the next device/rate
+   event; transient silence window only. Not yet fixed — low priority.
+5. **Waves 4–7 have not been started** (R5, R8, R6's resume affordance, R3,
+   R16, and Wave 7's regression-armor items). Out of scope for this
+   execution pass per the original instruction to run only Waves 1–3.
+
+### Build note for whoever picks this up
+
+The machine's toolchain changed mid-session — `xcode-select` now defaults to
+Xcode 27 / Swift 6.4. A clean rebuild of `CAirPlayEngine` needs
+`CPATH=/opt/homebrew/include:/opt/homebrew/opt/libevent/include` set (Xcode
+27's explicit-module scanner can't find `event2/thread.h` otherwise);
+incremental builds with a warm cache don't need it. `main` has since gained
+commits capping test-suite parallelism at 4 workers and pinning
+`--build-system native` for Xcode 27 compat — both already merged into this
+branch. Prefer **serial** `swift test` over `--parallel` when verifying;
+`PerAppCaptureCoordinatorTests` has a known pre-existing signal-5 crash
+under parallel load, unrelated to this plan's changes.
+
+---
+
 The goal: make Audiouter one of the most reliable audio-switching apps that
 exists. Concretely, that means four invariants the app must uphold at all
 times. Every wave below exists to make one of them true.
@@ -199,7 +300,10 @@ the honest stopgap if (a) slips.
   waves proceed on their own plan (shared tap-lifecycle code — coordinate
   merges, single live session per the single-instance PTP rule).
 - **Finding 5 — Chrome channel over-match in `ProcessSetResolver`
-  (DEFERRED to this wave, not yet fixed):** `ProcessSetResolver.pids(forBundleID:)`
+  (RETIRED — see "Execution status" at top; `ProcessSetResolver` no longer
+  exists, superseded by main's `AudioProcessResolver` during the 2026-07-24
+  merge, which does not have this bug. Kept below as history only, not a
+  remaining Wave-7 task.):** `ProcessSetResolver.pids(forBundleID:)`
   groups helpers by a bare dotted-prefix match — a candidate bundle ID matches the
   target when it equals it OR `hasPrefix(bundleID + ".")`. That prefix
   over-captures Chrome *channel* siblings: `com.google.Chrome.canary`,

@@ -1253,8 +1253,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   subtitle: "Plays locally with its own volume"),
         ])
         for device in available {
+            // R3 stopgap: a device already carrying a DIFFERENT app's redirect
+            // gets an honest heads-up rather than a silent quality regression —
+            // two independently-captured streams mixed onto one speaker warble
+            // (`AppRouteMixer`'s multi-contributor path re-grids onto a wall-clock
+            // frame index with no fractional interpolation; see the mixer's own
+            // comments). Compares by bundleID (not `routedAppNames`' display
+            // names) so two apps that happen to share a display name can't hide
+            // this row's own route from itself. No engine/routing change — copy
+            // only.
+            let othersAlreadyRoutedHere = appRouting.appRoutes.contains { other in
+                if case .device(let otherID) = other.destination, otherID == device.id,
+                   other.bundleID != bundleID { return true }
+                return false
+            }
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
-                                 symbolName: device.kind.symbolName))
+                                 symbolName: device.kind.symbolName,
+                                 subtitle: othersAlreadyRoutedHere ? Self.sameSpeakerQualitySubtitle : nil))
         }
         if case .device(let id) = current,
            !available.contains(where: { $0.id == id }),
@@ -1273,6 +1288,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// selection points — and the redirect resumes on its own once the device is
     /// back, with nothing for the user to re-pick.
     static let offlineDestinationSubtitle = "Offline — playing with system audio"
+
+    /// The secondary line on an AirPlay device entry that already carries a
+    /// DIFFERENT app's redirect (R3 stopgap). The real fix — resampling
+    /// contributors onto one shared capture clock instead of a wall-clock frame
+    /// grid — is a separate, larger follow-up; this is the honest heads-up in the
+    /// meantime, not a claim the quality issue is solved.
+    static let sameSpeakerQualitySubtitle = "Already in use — may reduce quality"
 
     /// The available AirPlay redirect targets: present, reachable (`isAvailable`),
     /// non-local devices, in the same stable order as the Selected Devices card.

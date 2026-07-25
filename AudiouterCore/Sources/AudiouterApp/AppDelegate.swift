@@ -335,10 +335,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
+        // A persisted `.device` redirect must never survive a full Audiouter
+        // restart (simplification of the app-quit reset, scaled to every route
+        // at once) — mirrors the existing "the live routing set is not
+        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
+        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
+        // below so the backend never sees a stale `.device` route even
+        // transiently at launch.
+        appRouting.clearAllDeviceRoutes()
         // Seed the backend with the persisted route table + excluded set (T7). A
-        // prune above would already have pushed via `onRoutesDidChange`, but that
-        // fires only when something changed — this unconditional push syncs the
-        // loaded routes even when nothing was pruned.
+        // prune/clear above would already have pushed via `onRoutesDidChange`, but
+        // that fires only when something changed — this unconditional push syncs
+        // the loaded routes even when nothing was pruned/cleared.
         pushAppRoutesToBackend()
 
         // A routed app quitting now RESETS its route (product decision 2026-07-22):

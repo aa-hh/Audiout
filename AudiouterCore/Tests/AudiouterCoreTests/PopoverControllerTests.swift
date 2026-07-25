@@ -1387,6 +1387,45 @@ final class PopoverControllerTests: XCTestCase {
                        "the offline entry is injected only into the row that actually targets it")
     }
 
+    /// R3 stopgap: a device that already carries a DIFFERENT app's redirect must
+    /// show an honest heads-up on its OWN destination entry — the real mixing fix
+    /// is a separate follow-up; this only stops the surprise. Comparing by
+    /// bundleID (not display name) means the row that ALREADY targets the device
+    /// must never warn about itself, and a still-unrouted-elsewhere device must
+    /// stay silent.
+    func testAirPlayDeviceShowsQualityWarningWhenAnotherAppAlreadyRoutedThere() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        seedRoute(appRouting, bundleID: "com.example.safari", displayName: "Safari",
+                  destination: .noRedirect)
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+
+        // Safari's OWN destination list: the office entry (already carrying
+        // Music's redirect) must warn.
+        let officeFromSafari = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.safari")?
+                .test_destinationPopUpMenuItem(forDestinationID: "office"))
+        XCTAssertEqual(officeFromSafari.toolTip, PopoverController.sameSpeakerQualitySubtitle,
+                       "a device already routed by a DIFFERENT app must warn before doubling up")
+
+        // Music's OWN destination list: its OWN office entry must NOT warn about
+        // itself — there is only one app there from Music's point of view.
+        let officeFromMusic = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.music")?
+                .test_destinationPopUpMenuItem(forDestinationID: "office"))
+        XCTAssertNil(officeFromMusic.toolTip,
+                     "a row must never warn about its own existing route to a device")
+
+        // A device nothing is routed to yet must stay silent for everyone.
+        let bedFromSafari = try XCTUnwrap(
+            popover.test_appRow(for: "com.example.safari")?
+                .test_destinationPopUpMenuItem(forDestinationID: "homepod-bed"))
+        XCTAssertNil(bedFromSafari.toolTip,
+                     "an unrouted device must not carry the quality warning")
+    }
+
     /// R5 recovery, UI half: the target coming back needs no route-table edit at
     /// all — the route was never reset, so the row simply stops carrying the offline
     /// subtitle and the device is a normal available entry again.

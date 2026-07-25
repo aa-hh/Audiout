@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterCore
+import AudiouterSharedUI
 
 /// Owns the menu-bar status item.
 ///
@@ -8,9 +10,21 @@ import AppKit
 /// - never init `NSStatusItem` directly — use `statusItem(withLength:)`;
 /// - customize ONLY via `.button` (the item's `.view`/`.title`/`.image` are
 ///   deprecated);
-/// - the button image is an SF Symbol `speaker.wave.3.fill` whose `variableValue`
-///   tracks master volume (the waves fill with level);
-/// - the image is template-rendered so it's correct in a dark/light menu bar.
+/// - the button image is an SF Symbol whose `variableValue` tracks master
+///   volume (the waves fill with level) in BOTH the idle and streaming states;
+/// - **idle/passthrough**: the OUTLINE variant (`speaker.wave.3`),
+///   template-rendered so it tints automatically with the menu bar's
+///   light/dark appearance, exactly like before this distinction existed;
+/// - **actively streaming** (`MenuBarStatus.isStreaming` — anything leaving
+///   the Mac by any mechanism, Main Out or a per-app redirect): the FILLED
+///   variant (`speaker.wave.3.fill`), rendered with the system accent color
+///   (`NSColor.controlAccentColor`, never a hardcoded hex — house UI
+///   convention) via `isTemplate = false` + an `NSImage.SymbolConfiguration`
+///   palette, instead of a plain template image.
+///
+/// The idle/streaming decision itself is pure and AppKit-free
+/// (`AudiouterSharedUI.MenuBarStatus`) — this controller only turns that
+/// decision into `NSImage`/`NSColor` work.
 ///
 /// SPEC §9 revised (NSMenu → NSPopover): the dropdown is now an `NSPopover`, so
 /// the button's *action* toggles the popover (rather than assigning `.menu`,
@@ -20,6 +34,7 @@ final class StatusItemController {
 
     private let statusItem: NSStatusItem
     private var masterVolume: Double = 0
+    private var isStreaming: Bool = false
 
     /// Invoked when the user clicks the status button — the app toggles the
     /// popover relative to `button`.
@@ -78,15 +93,43 @@ final class StatusItemController {
         renderButtonImage()
     }
 
+    /// Update the idle/streaming state the status symbol reflects, deciding
+    /// via the pure `MenuBarStatus.isStreaming(devices:liveRoutedAppNames:)` —
+    /// "anything leaving the Mac by any mechanism," Main Out membership OR a
+    /// live per-app redirect, per the resolved design question ("anything
+    /// counts," not just Main Out). Rebuilds the button image only on an
+    /// actual state change, mirroring `updateMasterVolume`'s guard.
+    func updateStreamingState(devices: [Device], liveRoutedAppNames: [String: [String]]) {
+        let streaming = MenuBarStatus.isStreaming(devices: devices, liveRoutedAppNames: liveRoutedAppNames)
+        guard streaming != isStreaming else { return }
+        isStreaming = streaming
+        renderButtonImage()
+    }
+
     private func renderButtonImage() {
         guard let button = statusItem.button else { return }
+        let symbolName = MenuBarStatus.symbolName(isStreaming: isStreaming)
         let image = NSImage(
-            systemSymbolName: "speaker.wave.3.fill",
+            systemSymbolName: symbolName,
             variableValue: masterVolume,
             accessibilityDescription: "AirPlay volume"
         )
-        image?.isTemplate = true   // correct rendering in dark/light menu bar
-        button.image = image
+        if isStreaming {
+            // Actively streaming: filled symbol in the system accent color —
+            // never a hardcoded hex (house UI convention, AGENTS.md). Layering
+            // a palette `SymbolConfiguration` onto the variable-value image
+            // preserves the `variableValue` notch fill while adding color.
+            let configured = image?.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(paletteColors: [NSColor.controlAccentColor])
+            )
+            configured?.isTemplate = false
+            button.image = configured ?? image
+        } else {
+            // Idle/passthrough: plain template image, exactly as before this
+            // distinction existed — tints automatically in dark/light menu bars.
+            image?.isTemplate = true
+            button.image = image
+        }
         // Opt-in dev disambiguator: when `AUDIOUTER_STATUS_LABEL` is set, show it
         // as a text tag beside the icon so a side-by-side test build is visually
         // distinct from an installed copy (identical bundle glyphs otherwise look

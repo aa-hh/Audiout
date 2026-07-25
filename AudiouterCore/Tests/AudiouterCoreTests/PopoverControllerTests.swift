@@ -1890,31 +1890,69 @@ final class PopoverControllerTests: XCTestCase {
     // MARK: A2 — live Selected Devices count
 
     /// The "Selected Devices (n)" title tracks the count of checked rows and
-    /// updates as toggles change it — visible on both the dropdown item and the
-    /// popup's collapsed title.
+    /// updates as toggles change it — visible on the open dropdown item. The
+    /// collapsed button (`test_buttonTitle`) instead names the real destination
+    /// (reliability audit follow-up: a bare count didn't say WHERE audio goes).
     func testSelectedDevicesCountUpdatesOnToggle() async throws {
         let (popover, _, _) = try await makePopover()
-        // Default selection is {local-mac} ⇒ 1.
+        // Default selection is {local-mac} ⇒ 1, pure passthrough.
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "→ This Mac",
+                       "Mac-only selection names the real destination, not a count")
 
         // Toggle office on (auto-swap drops local) ⇒ {office} still 1.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
                        "auto-swap kept the count at 1")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "→ Office",
+                       "one AirPlay speaker selected names it directly")
 
         // Add a second AirPlay device ⇒ {office, homepod-bed} = 2.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (2)",
                        "the count rose to 2 on the toggle")
-        // The full count lives in the menu title; the collapsed button shows the
-        // shorter "Selected (n)" so the count survives the fixed trailing width.
-        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected (2)",
-                       "the collapsed button shows the count in the short form")
+        // The full count lives in the menu title; the collapsed button names both
+        // speakers (ordered the same way the Devices card lists them — by name).
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "→ Bedroom HomePod + Office",
+                       "the collapsed button names every selected speaker")
 
         // Remove one ⇒ back to 1.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false)
         XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices (1)",
                        "the count fell to 1 on the untoggle")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "→ Office",
+                       "back to naming the one remaining speaker")
+    }
+
+    /// A saved GROUP as the active Main Out target names the GROUP ITSELF on the
+    /// collapsed button ("→ Kitchen"), not its member device(s) — shorter, never
+    /// truncates, and matches exactly what the user picked from the dropdown.
+    func testCollapsedButtonNamesGroupItselfNotMembers() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        XCTAssertEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
+                       "the open menu still shows the bare group name")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "→ \(group.name)",
+                       "the collapsed button names the group itself, not 'office'")
+    }
+
+    /// Toggling the Mac's own row off directly (a deliberate act, not a
+    /// disconnect — `GroupController.setDeviceSelected`'s reverse-auto-swap only
+    /// fires for an AirPlay member leaving) can leave Selected Devices completely
+    /// empty. There is no destination to name in that state, so the collapsed
+    /// button preserves the pre-existing bare "Selected (n)" copy rather than
+    /// asserting a Mac destination with nothing backing it.
+    func testCollapsedButtonKeepsBareCountWhenNothingSelectedAtAll() async throws {
+        let (popover, controller, _) = try await makePopover()
+        XCTAssertEqual(controller.selectedDeviceIDs, ["local-mac"], "starts Mac-only")
+        _ = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: false)
+        XCTAssertTrue(controller.selectedDeviceIDs.isEmpty, "the Mac's own toggle can empty the set")
+        XCTAssertEqual(popover.test_mainOutRow.test_buttonTitle, "Selected (0)",
+                       "no destination to name — preserves the existing bare-count copy")
     }
 
     // MARK: A4 — auto-swap flashes the local row

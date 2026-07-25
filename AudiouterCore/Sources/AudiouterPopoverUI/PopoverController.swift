@@ -854,18 +854,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard let controller = groupController else { return }
         // A2: the "Selected Devices" option carries a live count of every checked
         // row (the Mac included). `MainOutRowView` matches options by TARGET, not
-        // title, so a changing title is safe; the count feeds both the dropdown
-        // item and the popup's collapsed title, staying in sync because
-        // `refreshMainOutRow` re-runs on every selection change. The open menu
-        // shows the full "Selected Devices (n)"; the collapsed button shows the
-        // shorter "Selected (n)" (via `buttonTitle`) so the count isn't truncated
-        // to "Selected Device…" by the fixed trailing-control width — the "DEVICE"
-        // column header already supplies the "Devices" word.
+        // title, so a changing title is safe; the count feeds the open menu's
+        // "Selected Devices (n)" item, staying in sync because `refreshMainOutRow`
+        // re-runs on every selection change.
+        //
+        // The COLLAPSED button, though, names the real destination instead of a
+        // bare count (a count alone doesn't answer "where is my audio going?") —
+        // via each option's `buttonTitle`, which only the closed pop-up button
+        // reads (the open menu keeps the full `title`).
         let selectedCount = controller.selectedDeviceIDs.count
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
             .init(title: "Selected Devices (\(selectedCount))", target: .selectedDevices,
-                  buttonTitle: "Selected (\(selectedCount))"),
+                  buttonTitle: mainOutSelectedDevicesButtonTitle(controller: controller)),
         ]
         // Only groups that actually have a device are offered as routing targets —
         // an empty group can't be activated (and shouldn't exist under the
@@ -875,13 +876,47 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if !routableGroups.isEmpty {
             options.append(.init(title: "Output Groups", isHeader: true))
             for group in routableGroups {
-                options.append(.init(title: group.name, target: .group(id: group.id)))
+                // A saved GROUP names ITSELF on the collapsed button ("→ Kitchen"),
+                // never its member devices — shorter, never truncates, and matches
+                // exactly what the user picked from this same menu.
+                options.append(.init(title: group.name, target: .group(id: group.id),
+                                      buttonTitle: "→ \(group.name)"))
             }
         }
         mainOutRow.apply(options: options,
                          current: controller.mainOut,
                          master: controller.mainOutMasterVolume,
                          isMuted: controller.isMainOutMuted)
+    }
+
+    /// The collapsed destination-button label for the "Selected Devices" target:
+    /// names the real destination instead of a bare "Selected (n)" count, which
+    /// told the user how many devices were checked but not WHERE audio actually
+    /// goes.
+    ///
+    ///  - ≥1 AirPlay speaker selected: the speaker name(s) themselves, e.g.
+    ///    "→ Kitchen + Move 2" (ordered the same way the Devices card lists them;
+    ///    joined with " + " — the destination pop-up already tail-truncates long
+    ///    titles via `.byTruncatingTail`, so no separate manual truncation is
+    ///    needed here for a long list).
+    ///  - Only the Mac selected (or the Mac plus nothing else) — pure passthrough:
+    ///    "→ This Mac".
+    ///  - Nothing selected at all (the local device's own row was toggled off
+    ///    directly, `GroupController.setDeviceSelected`'s "deliberate act, not a
+    ///    disconnect" case): there is no destination to name, so this preserves
+    ///    the pre-existing bare "Selected (n)" (n == 0) copy rather than
+    ///    inventing new copy for a state the file already renders.
+    private func mainOutSelectedDevicesButtonTitle(controller: GroupController) -> String {
+        let selectedSpeakerNames = orderedDevices()
+            .filter { !$0.isLocalDevice && controller.selectedDeviceIDs.contains($0.id) }
+            .map(\.name)
+        if !selectedSpeakerNames.isEmpty {
+            return "→ " + selectedSpeakerNames.joined(separator: " + ")
+        }
+        guard !controller.selectedDeviceIDs.isEmpty else {
+            return "Selected (\(controller.selectedDeviceIDs.count))"
+        }
+        return "→ This Mac"
     }
 
     // MARK: Device rows

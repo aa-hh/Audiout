@@ -172,6 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// placeholder master-volume value the status symbol tracks.
     private var devicesByID: [String: Device] = [:]
 
+    /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
+    /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
+    /// bookkeeping — kept here too because the status item's idle/streaming
+    /// decision (`MenuBarStatus.isStreaming`) needs it and has no other route
+    /// to it (the popover's copy is private). An empty `appNames` clears the
+    /// entry for that device, same discipline as the popover's copy.
+    private var routedAppNamesByDeviceID: [String: [String]] = [:]
+
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -954,6 +962,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // every other event — this call only updates state, it doesn't repaint
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+            if appNames.isEmpty {
+                routedAppNamesByDeviceID.removeValue(forKey: deviceID)
+            } else {
+                routedAppNamesByDeviceID[deviceID] = appNames
+            }
             log("event: \(describe(event))")
         case .routedAppRunning(let bundleID, let isRunning):
             // T4 (bug fix): a routed app quit or relaunched — update the popover's
@@ -1003,6 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
         statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
     }

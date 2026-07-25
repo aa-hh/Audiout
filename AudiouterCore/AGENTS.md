@@ -139,20 +139,90 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
   change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full pre-commit run is `swift test --parallel --num-workers 4`**
-  (capped to 4 concurrent test processes to keep CPU/fan load reasonable on
-  an 8-core machine; ~70s warm vs ~124s for a bare serial `swift test`, only
-  marginally slower than an uncapped `--parallel`). It parallelizes at the
-  test-CLASS level: each suite runs in its own process, so tests must not
-  race on cross-process shared state.
+- **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
+  wraps `swift test --parallel` and adds the two things a bare run cannot do
+  on a machine with several worktrees in flight:
+  - **A machine-wide concurrency CAP** (`AUDIOUTER_TEST_SLOTS`, default **2**) —
+    a counting semaphore over `/tmp/audiouter-suite.lock.N`, shared across every
+    worktree and clone. `--num-workers 4` caps one PROCESS; it cannot see the
+    other agents each running their own capped suite. Four concurrent Guard 4
+    runs put 16 xctest processes plus four independent compiles on 8 cores —
+    measured 15-minute load averages of 29-73. The cap is 2, NOT 1: measured, a
+    warm run uses only ~2.6 of 8 cores (411s user + 66s sys over 181s wall), so
+    the suite is WAIT-bound, not CPU-bound, and two runs genuinely overlap.
+    Serialising to one would idle most of the machine and needlessly queue
+    agents behind each other.
+  - **Adaptive serial/parallel (`AUDIOUTER_TEST_MODE=auto|parallel|serial`).**
+    Measured on the same machine for the identical 1025 tests:
+
+    | mode | wall | user CPU | sys CPU |
+    |---|---|---|---|
+    | `--parallel 6` | 127s | **358s** | **51.7s** |
+    | `--parallel 2` | 278s | 316s | 46.6s |
+    | serial | 124s | **69.7s** | **6.0s** |
+
+    Serial does the same work for **~1/5 the CPU and ~1/8 the system time**.
+    `--parallel` forks one process per test CLASS and this suite has **57**, so
+    each spawn re-execs and re-links a large AppKit/CoreAudio/AirPlayEngine
+    binary to run a handful of tests. Real test work is ~70 CPU-seconds;
+    parallel spends ~290 MORE on fork/exec + dyld. That is also why lowering
+    `--num-workers` barely helps — it staggers the 57 spawns rather than
+    removing them (6→2 workers was 2.2x SLOWER for the same load).
+    On an idle machine parallel is still ~1.8x faster in wall time (~70s vs
+    ~124s warm), so `auto` picks parallel when nothing else is testing and
+    serial when something is — including a bare `swift test` started outside
+    this script, which it detects via `pgrep`.
+  - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
+    agent that types `swift test` or `swift build` directly bypasses it
+    entirely, and that is the dominant real-world source of load: while
+    measuring this, two other worktrees were independently running a full serial
+    suite and a `-c release` product build, driving load average to 29 and
+    making an unrelated 4s filtered run take 117s. Prefer `scripts/run-tests.sh`
+    for any full run. This is convention, not enforcement (the PreToolUse nudge
+    hook that tried to enforce it was deliberately removed and must not be
+    rebuilt).
+  - **A content-addressed pass cache**: if these exact sources already passed,
+    the run is skipped. Agents routinely run the suite by hand and then
+    commit, firing Guard 4 on byte-identical sources seconds later.
+
+  Escape hatches: `AUDIOUTER_TEST_MODE=parallel` (force the fast path when you
+  are watching the terminal), `AUDIOUTER_TEST_SLOTS=N` (concurrency cap,
+  default 2), `AUDIOUTER_TEST_NO_LOCK=1` (skip the cap entirely),
+  `AUDIOUTER_TEST_NO_CACHE=1` (force a real run), `AUDIOUTER_TEST_WORKERS=N`.
+  If all slots stay busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
+  the runner proceeds **uncapped** rather than failing — it exists to protect
+  the CPU, not to gate correctness, and must never block a commit for a reason
+  the committer cannot see. `swift test` parallelizes at the test-CLASS level:
+  each suite runs in its own process, so tests must not race on cross-process
+  shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
-  Guard 4 runs the full `swift test --parallel --num-workers 4` whenever a commit's staged
+  Guard 4 runs the full suite via `scripts/run-tests.sh` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
   fails. So a too-narrow filter in the loop can never ship a regression — it
   only costs one extra fix cycle at commit. Everything that reaches `main` was
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
+  `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
+  `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,
+  not CPU** — measured, these tests cost 0.9 `coreaudiod` CPU-seconds, and the
+  whole suite costs ~10 across an 87s run (~11% of ONE core, ~1.4% of an 8-core
+  machine). Core Audio is NOT a meaningful part of suite cost; test execution
+  is. (Earlier "coreaudiod at 38-45%" figures were instantaneous `ps` %CPU
+  samples — they overstate sustained load badly; don't cite them.) What the gate
+  buys: these seven tests depend on real hardware and a machine-wide daemon, so
+  they are timing-sensitive to whatever else the Mac is doing — the documented
+  cause of three unrelated tests flaking under `--parallel` on a busy machine.
+  `AudioHardwareTestGate.skipUnlessEnabled()` is called from that file's
+  `makeStartedEngine()` — the one choke point all seven hardware tests share, so
+  a newly added test inherits the gate rather than silently reintroducing the
+  load. The 7 skip by default (visibly, with a reason); the 3 that only exercise
+  the pure static `isFollowableTransport` still run. Run the real ones
+  deliberately when working on local playback:
+  `AIRPLAY_AUDIO_HARDWARE_TESTS=1 swift test --filter LocalPlaybackEngineTests`.
+  They are NOT faked — `LocalPlaybackControlling` is the protocol fakes already
+  implement, so spying here would delete the only coverage of the real engine.
 - **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
   each suite its own process, two suites that both write `UserDefaults.standard`
   or the same `FileManager.default.temporaryDirectory` path race and flake.

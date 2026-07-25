@@ -2359,9 +2359,12 @@ public extension DeviceRowView.Delegate {
 /// only the DRAWING changes"). It suppresses the cell's own bezel/interior
 /// rendering; state, target/action, keyEquivalent handling, and accessibility
 /// all come from the un-subclassed `NSButtonCell`/`NSButton` machinery, untouched.
-private final class InvisibleSwitchCell: NSButtonCell {
-    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {}
-    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {}
+///
+/// PUBLIC because the Groups window's `MembershipRowView` wears the same skin on
+/// its warm-pane surface — one invisible-cell implementation, not two.
+public final class InvisibleSwitchCell: NSButtonCell {
+    public override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {}
+    public override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {}
 
     /// The keyboard focus ring traces the NODE, not the (invisible) switch
     /// glyph's box (spec §4.8): a circle centered on the cell frame — the
@@ -2372,11 +2375,11 @@ private final class InvisibleSwitchCell: NSButtonCell {
         return NSRect(x: cellFrame.midX - d / 2, y: cellFrame.midY - d / 2, width: d, height: d)
     }
 
-    override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {
+    public override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {
         nodeRingRect(for: cellFrame)
     }
 
-    override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
+    public override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
         NSBezierPath(ovalIn: nodeRingRect(for: cellFrame)).fill()
     }
 }

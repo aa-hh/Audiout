@@ -55,8 +55,13 @@ public final class GroupCreationSheetController: NSViewController {
     /// Form width cap (approved design: ~380–420pt for a creation sheet).
     private static let formWidth: CGFloat = 400
     /// Caps the checklist's height before it scrolls, so a long fleet doesn't
-    /// grow the sheet past a reasonable size.
-    private static let checklistMaxHeight: CGFloat = 220
+    /// grow the sheet past a reasonable size. Sized so a SEVEN-device fleet (the
+    /// demo fleet, and a realistic household ceiling) fits without scrolling —
+    /// at 220 a 7-row list overflowed by a few points and scrolled for no
+    /// visible reason. Recompute this if `MembershipRowView.rowHeight` or the
+    /// stack spacing changes: 7 rows + 6 gaps + the document view's 4pt top and
+    /// bottom insets.
+    private static let checklistMaxHeight: CGFloat = 240
 
     /// Icon well square size (matches `IconPickerViewController`'s curated
     /// grid cells so the well previews at the same scale as the grid it opens).
@@ -225,9 +230,14 @@ public final class GroupCreationSheetController: NSViewController {
         for v in stackView.arrangedSubviews { stackView.removeArrangedSubview(v); v.removeFromSuperview() }
         rowsByID.removeAll()
         for device in candidateDevices {
+            // `.systemSheet` (Alec, Q6): this is a STOCK AppKit sheet on the
+            // system's own white/grey, where `ember` measures ~2.34–2.48:1 and
+            // a gold node would be near-invisible. The rail/node language is
+            // warm-pane-only — plain stock rows here, no node, no gold.
             let row = MembershipRowView(
                 device: device, checked: checkedIDs.contains(device.id),
-                iconSymbolName: deviceIconController?.symbolName(for: device))
+                iconSymbolName: deviceIconController?.symbolName(for: device),
+                surface: .systemSheet)
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.handleToggle(deviceID: deviceID, isChecked: isChecked)
             }
@@ -365,6 +375,15 @@ public final class GroupCreationSheetController: NSViewController {
 
     /// Whether Create is currently enabled (>= 1 row checked).
     public var test_isCreateEnabled: Bool { isCreateEnabled }
+
+    /// Whether the checklist would scroll at its current content height — its
+    /// rows are taller than the cap that stops the sheet growing. Pure
+    /// arithmetic against the same two numbers Auto Layout resolves, so it
+    /// holds headlessly without a presented sheet.
+    public var test_checklistScrolls: Bool {
+        guard let documentView = scrollView.documentView else { return false }
+        return documentView.fittingSize.height > Self.checklistMaxHeight + 0.5
+    }
 
     /// The live selection-count label's current text.
     public var test_countText: String { countLabel.stringValue }

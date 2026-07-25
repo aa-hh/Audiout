@@ -44,6 +44,28 @@ public final class GroupEditorViewController: NSViewController {
     /// edge-to-edge in a wide window.
     private static let contentMaxWidth: CGFloat = 400
 
+    /// The pane's LEFT SPINE gutter (Warm Signal v4 §Call-1): every piece of
+    /// content — icon well, title, "Speakers", each row's icon, the delete
+    /// button — starts at this inset, leaving the lane to its left owned
+    /// entirely by the rail. v4 is explicit that the gutter is kept clear by
+    /// MOVING THE TITLES, not by threading the rail around them; this constant
+    /// is that move. Derived from the popover's own grid so the two surfaces
+    /// can't drift: it already reserves `railGutterCenterX` plus the node radius
+    /// plus `busNodeClearance`.
+    private static let railContentInset = PopoverColumnGrid.firstElementLeading(indented: false)
+
+    /// The continuous membership-rail spine, drawn ONCE for the whole pane on
+    /// top of everything else so it reads unbroken where it crosses the header
+    /// band and the "Speakers" label's row. Non-interactive.
+    ///
+    /// Its leading edge is pinned to the CONTAINER's, and the membership rows'
+    /// leading edges are pinned there too — that alignment is load-bearing:
+    /// `BusRailOverlayView` draws the spine at the literal
+    /// `PopoverColumnGrid.railGutterCenterX` in its own coordinate space, while
+    /// each row places its node at that same x from the ROW's leading edge. Move
+    /// one without the other and the nodes float off the line.
+    private let railOverlay = BusRailOverlayView()
+
     private let groupController: GroupController
 
     /// Resolves/persists per-device icon overrides for `MembershipRowView`
@@ -139,7 +161,11 @@ public final class GroupEditorViewController: NSViewController {
         deleteButton.action = #selector(deleteTapped(_:))
         deleteButton.hasDestructiveAction = true
 
-        let container = NSView()
+        // A host that re-invalidates the rail on every layout pass, so the spine
+        // always reflects the CURRENT row frames (rebuild, resize, pane swap)
+        // with no cached geometry — the popover's `RailHostView` pattern.
+        let container = RailRepaintingView()
+        container.railOverlay = railOverlay
         // The form column: capped to `contentMaxWidth`, leading-aligned,
         // pinned below the safe area. Everything hangs off this column's
         // edges rather than the container's, so the cap applies uniformly.
@@ -152,36 +178,59 @@ public final class GroupEditorViewController: NSViewController {
         for v in [column, deleteButton] {
             container.addSubview(v)
         }
+        // Added LAST so the spine composites ON TOP of the header and the rows
+        // it passes; non-interactive, so nothing beneath it loses a click.
+        railOverlay.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(railOverlay)
 
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
+            // The column starts at the container's own leading edge — the 16pt
+            // margin moved INTO `railContentInset`, which every child below
+            // applies, so the rail gets an exclusive lane to their left.
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            column.widthAnchor.constraint(
+                lessThanOrEqualToConstant: Self.contentMaxWidth + Self.railContentInset),
             column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
 
             // Header parity with DeviceDetailViewController: left-aligned large
-            // icon, left-aligned (editable) title beneath it.
+            // icon, left-aligned (editable) title beneath it — now both offset
+            // by the rail gutter, which is also where the rail's origin hook
+            // plugs into the icon well's left edge.
             iconWell.topAnchor.constraint(equalTo: column.topAnchor),
-            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                              constant: Self.railContentInset),
 
             nameField.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
-            nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            nameField.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                               constant: Self.railContentInset),
             // FIXED width, not a cap: an EDITABLE text field has no intrinsic
             // width, so a "<=" alone lets auto layout collapse it to zero (it
             // rendered invisible — snapshot-caught 2026-07-18).
             nameField.widthAnchor.constraint(equalToConstant: Self.titleFieldMaxWidth),
 
             speakersLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 20),
-            speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                                   constant: Self.railContentInset),
 
+            // The ROWS, uniquely, start at the column's own leading edge: each
+            // row applies `railContentInset` internally to its icon and places
+            // its node in the gutter, so row icons still line up with the header
+            // content above them.
             membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 8),
             membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
-            deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                                  constant: Self.railContentInset),
             deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 16),
             deleteButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+
+            railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
+            railOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         view = container
@@ -209,6 +258,9 @@ public final class GroupEditorViewController: NSViewController {
         let isActive = groupController.activeGroupID == groupID
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Active group" : "")
+        // The origin hook's tone follows the same active-group truth the well's
+        // gold ring does (`railHookAnchor`), so repaint the rail with it.
+        railOverlay.needsDisplay = true
         rebuildCandidates(memberSet: Set(group.memberIDs))
     }
 
@@ -241,7 +293,8 @@ public final class GroupEditorViewController: NSViewController {
             let row = MembershipRowView(
                 device: device,
                 checked: memberSet.contains(device.id),
-                iconSymbolName: deviceIconController?.symbolName(for: device))
+                iconSymbolName: deviceIconController?.symbolName(for: device),
+                surface: .warmPane)
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
             }
@@ -255,6 +308,29 @@ public final class GroupEditorViewController: NSViewController {
             rowsByID[onlyMemberID]?.setCheckboxEnabled(
                 false, tooltip: "A group needs at least one device. Use \u{201C}Delete group\u{2026}\u{201D} to remove it.")
         }
+        updateRail()
+    }
+
+    /// Re-point the pane-level rail at the current rows and set each row's
+    /// extent in the spine (Warm Signal v4 §Call-1): the rail runs from the
+    /// group icon well down to the LOWEST CHECKED row, detouring around the
+    /// unchecked rows inside that span; rows below the terminus render as bare
+    /// nodes with no rail through them, so the spine's LENGTH reads as "how far
+    /// down this group reaches." Called after every rebuild — which is also
+    /// after every membership toggle, so the terminus follows the checkboxes.
+    private func updateRail() {
+        let rows = candidateDevices.compactMap { rowsByID[$0.id] }
+        let terminus = rows.lastIndex { $0.isChecked }
+        for (index, row) in rows.enumerated() {
+            if let terminus, index <= terminus {
+                row.setRail(above: true, below: index < terminus)
+            } else {
+                row.setRail(above: false, below: false)
+            }
+        }
+        railOverlay.mainOutRow = self
+        railOverlay.deviceRows = rows
+        railOverlay.needsDisplay = true
     }
 
     // MARK: Actions
@@ -417,6 +493,67 @@ public final class GroupEditorViewController: NSViewController {
         try? groupController.deleteGroup(id: editingGroupID)
         self.editingGroupID = nil
         onDidDeleteGroup?()
+    }
+
+    /// The rail geometry the overlay would draw from its CURRENT live frames.
+    public func test_railPlan() -> RailPlan? {
+        view.layoutSubtreeIfNeeded()
+        return railOverlay.test_resolvePlan()
+    }
+
+    /// Each candidate row's drawn node, in candidate order.
+    public var test_railNodes: [MembershipBusView.Node?] {
+        candidateDevices.compactMap { rowsByID[$0.id] }.map(\.railNode)
+    }
+
+    /// Each candidate row's rail extent, in candidate order — `above` is
+    /// "inside the spine", `below` is "the rail continues past me".
+    public var test_railExtents: [(above: Bool, below: Bool)] {
+        candidateDevices.compactMap { rowsByID[$0.id] }.map { ($0.railHasSpine, $0.railBelow) }
+    }
+
+    /// Where a row's node centre lands in the RAIL OVERLAY's own coordinate
+    /// space. The overlay draws the spine at the literal
+    /// `PopoverColumnGrid.railGutterCenterX` in that space, so this MUST equal
+    /// it — the one invariant that silently breaks if the row's leading edge and
+    /// the overlay's leading edge ever stop coinciding.
+    public func test_nodeCenterXInOverlaySpace(for deviceID: String) -> CGFloat? {
+        guard let row = rowsByID[deviceID], let centerX = row.test_nodeCenterX else { return nil }
+        view.layoutSubtreeIfNeeded()
+        return railOverlay.convert(NSPoint(x: centerX, y: 0), from: row).x
+    }
+}
+
+// MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
+
+extension GroupEditorViewController: RailHookProviding {
+    /// The group's own icon well is this pane's origin — the analogue of the
+    /// popover's Main Audio ring: the rail curves out of the group tile's left
+    /// edge and drops into the gutter, so the members visibly hang off the group
+    /// they belong to. The well is a rounded-rect tile rather than a circle, so
+    /// the "ring" reported here is its inscribed circle; only the left edge and
+    /// centre-y are actually drawn to. `gold` follows the SAME active-group
+    /// truth as the well's §5.3 gold ring, so an inactive group's hook reads in
+    /// the quiet `ember` idle tone.
+    public func railHookAnchor(in view: NSView)
+        -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+        guard isViewLoaded, iconWell.superview != nil else { return nil }
+        iconWell.layoutSubtreeIfNeeded()
+        let center = iconWell.convert(
+            NSPoint(x: iconWell.bounds.midX, y: iconWell.bounds.midY), to: view)
+        return (center.y, center.x, DeviceIconWellView.size / 2, iconWell.isActiveGroup)
+    }
+}
+
+/// The editor pane's container: re-invalidates the rail overlay on every layout
+/// pass so the spine tracks the current row frames with no cached geometry
+/// (the popover's `RailHostView` pattern). The overlay draws from settled
+/// frames, so `cacheDisplay` snapshots stay deterministic.
+private final class RailRepaintingView: NSView {
+    weak var railOverlay: BusRailOverlayView?
+    override func layout() {
+        super.layout()
+        railOverlay?.needsDisplay = true
     }
 }
 

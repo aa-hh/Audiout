@@ -139,7 +139,21 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # with N full suites at once, and skips the run outright when these exact
     # sources already passed. It hashes the WORKING TREE, which is what this
     # guard has always actually tested (it never stashed unstaged changes).
-    if ! "$repo_root/scripts/run-tests.sh"; then
+    # Fallback matters: core.hooksPath is an ABSOLUTE path to the primary
+    # checkout's .githooks, so EVERY worktree runs THIS file the moment it
+    # lands on main — while $repo_root/scripts/run-tests.sh resolves to each
+    # worktree's OWN root, where a branch predating the script has no such
+    # file. Without this fallback, landing the runner would break `git commit`
+    # in every worktree still on an older branch. Degrade to the previous
+    # inline command instead.
+    if [ -x "$repo_root/scripts/run-tests.sh" ]; then
+        run_suite="$repo_root/scripts/run-tests.sh"
+    else
+        echo "  (no scripts/run-tests.sh on this branch — running unserialised)" >&2
+        run_suite=""
+    fi
+    if ! { if [ -n "$run_suite" ]; then "$run_suite"; \
+           else ( cd "$repo_root/AudiouterCore" && swift test --parallel --num-workers 4 >&2 ); fi; }; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2

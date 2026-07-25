@@ -154,12 +154,50 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// attach/start/stop below runs on.
     private var syncedLocalSink: SyncedLocalSinkControlling?
 
-    /// Whether "play everywhere" is currently enabled — the last decision made
-    /// by `setOutputSet`'s synced-local-sink reconciliation. Confined to
+    /// Whether "play everywhere" is currently enabled — the last DESIRED decision
+    /// made by `setOutputSet`'s synced-local-sink reconciliation. Confined to
     /// `stateQueue` like every other selection-derived flag (`captureRunning`,
     /// `expectedSelected`); the actual attach/start/stop work it triggers runs
-    /// on `captureControlQueue`.
+    /// on `captureControlQueue`, and only after the T1 settle below fires — so
+    /// this flag can be AHEAD of `syncedLocalSinkApplied` during a debounce window.
     private var syncedLocalSinkEnabled = false
+
+    // MARK: Synced-local settle debounce (T1/T2)
+    //
+    // Every Mac select/deselect calls `applySyncedLocalSinkTransition`, and each
+    // attach/detach forces the whole-system tap to rebuild AND re-fires the
+    // sink's ~977ms session anchor. RAPID toggling turned that into a storm
+    // (~19 tap rebuilds in 2.5s), none of which reset the AirPlay receiver's RTP
+    // session (an `.exclusionChange` rebuild deliberately skips that reset), which
+    // desyncs/corrupts the receiver → permanent silence. The fix coalesces a burst
+    // into AT MOST ONE real transition on the trailing edge of a quiet window, and
+    // re-establishes the receiver session exactly once IFF the burst actually
+    // churned (≥2 coalesced toggles). A normal single toggle collapses to exactly
+    // one coalesced decision and NEVER pays that re-sync — reintroducing a redundant
+    // RTP re-establish on every ordinary connect is the exact bug a prior fix
+    // removed (`dev/notes/synced-local-mixed-selection-dropout-fix.md`).
+
+    /// What the last EXECUTED synced-local transition actually set — the applied
+    /// state, distinct from the desired `syncedLocalSinkEnabled` above. The T1
+    /// settle only runs a real transition when `desired != applied`, so a burst
+    /// that collapses back to its starting point is a true no-op. On `stateQueue`.
+    private var syncedLocalSinkApplied = false
+
+    /// The pending trailing-edge settle; a newer toggle cancels + reschedules it,
+    /// so a burst fires only once, 250ms after the LAST toggle. On `stateQueue`.
+    private var pendingSyncedLocalSettle: DispatchWorkItem?
+
+    /// How many distinct synced-local toggle DECISIONS have coalesced into the
+    /// currently-pending settle. `>= 2` when the settle fires means genuine churn
+    /// (rapid clicking) and arms the one-shot T2 RTP re-sync; exactly `1` is a
+    /// normal single toggle and must never trigger it. Reset to 0 on each fire.
+    /// On `stateQueue`.
+    private var syncedLocalCoalescedCount = 0
+
+    /// Trailing-edge quiet window for coalescing synced-local toggles. A single
+    /// toggle still fires after just this delay (an accepted tradeoff — kept
+    /// simple, trailing-edge only, no leading-edge fast path).
+    private static let syncedLocalSettleWindow: TimeInterval = 0.25
 
     // MARK: Per-app routing (T6)
     //
@@ -1000,6 +1038,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // mid-wait can't leave capture wedged off (override) or suspended.
             self.wakeWatchdog?.cancel()
             self.wakeWatchdog = nil
+            // T1: drop any pending synced-local settle so a debounced transition
+            // can't fire against a torn-down backend after stop().
+            self.pendingSyncedLocalSettle?.cancel()
+            self.pendingSyncedLocalSettle = nil
+            self.syncedLocalCoalescedCount = 0
+            self.syncedLocalSinkEnabled = false
+            self.syncedLocalSinkApplied = false
             self.awaitingWakeReconnect = false
             self.wakeCaptureOverride = false
             self.suspended = false
@@ -1175,7 +1220,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // flips for one device overwrite `desiredOn[id]` N times but issue at most
         // one op at a time (root cause 1) — intermediate flips are simply dropped.
         // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
-        let (toKick, syncedLocalTransition): ([(id: String, outputID: OutputID)], Bool?) = stateQueue.sync {
+        let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             // T4: captured BEFORE the overwrite below so the Telemetry line at the
             // end of this critical section can log the actual added/removed diff.
             let previouslySelected = self.expectedSelected
@@ -1250,10 +1295,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // the attach/start work.
             let macSelected = self.selectedDevicesQuery?(Self.localDeviceID) ?? false
             let wantSyncedLocal = macSelected && !ids.isEmpty
-            var syncedLocalDecision: Bool?
             if wantSyncedLocal != self.syncedLocalSinkEnabled {
                 self.syncedLocalSinkEnabled = wantSyncedLocal
-                syncedLocalDecision = wantSyncedLocal
+                // T1/T2: don't run the attach/detach here — record the desired
+                // state and (re)schedule a trailing-edge settle. A burst of rapid
+                // on/off toggles collapses to AT MOST one real transition, killing
+                // both the tap-rebuild storm and the sink re-anchor storm (both are
+                // driven from `applySyncedLocalSinkTransition`).
+                self.scheduleSyncedLocalSettleLocked()
                 // Metering fix: re-emit the local device's combined `.level`
                 // immediately on this transition, mirroring the per-app "a
                 // torn-down stream gets a final combined .level" discipline
@@ -1282,18 +1331,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     Set(self.order.filter { self.desiredOn[$0] == true }), known: self.known),
             ])
 
-            return (kicks, syncedLocalDecision)
+            return kicks
         }
 
-        // Runs on `captureControlQueue` — the same serial queue the capture
-        // gate's start/stop above was just enqueued on — so a tap recreate
-        // triggered by `attachSyncedLocalSink` (self-exclude pid change, T-FANOUT)
-        // never races a capture-gate start/stop for the same tap.
-        if let enable = syncedLocalTransition {
-            captureControlQueue.async { [weak self] in
-                self?.applySyncedLocalSinkTransition(enable: enable)
-            }
-        }
+        // The synced-local transition is no longer enqueued here — it fires from
+        // the debounced `fireSyncedLocalSettle` (scheduled inside the critical
+        // section above via `scheduleSyncedLocalSettleLocked`), so a rapid burst
+        // collapses to one transition instead of one per toggle (T1).
 
         for (id, outputID) in toKick {
             Task { [weak self] in
@@ -1336,6 +1380,72 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             sink.stop()
             sink.stopObservingLifecycleEvents()
             attachSyncedLocalSink(nil)
+        }
+    }
+
+    /// T1: record another coalesced synced-local toggle and (re)schedule the
+    /// trailing-edge settle. Mirrors `armWakeWatchdog`'s idiom exactly — cancel
+    /// the pending `DispatchWorkItem` and re-arm it on `stateQueue`, so the body
+    /// runs serialized with every other state mutation and a supersede simply
+    /// drops the older one. MUST hold `stateQueue`.
+    private func scheduleSyncedLocalSettleLocked() {   // on stateQueue
+        self.syncedLocalCoalescedCount += 1
+        self.pendingSyncedLocalSettle?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.fireSyncedLocalSettle() }
+        self.pendingSyncedLocalSettle = work
+        // Scheduled ON `stateQueue`, so a newer toggle's cancel (above) before this
+        // fires simply drops it — no double-firing, no stale work after a newer
+        // decision landed.
+        self.stateQueue.asyncAfter(
+            deadline: .now() + Self.syncedLocalSettleWindow, execute: work)
+    }
+
+    /// T1/T2: the quiet window elapsed — run AT MOST one real transition for the
+    /// whole coalesced burst, and re-establish the receiver session exactly once
+    /// IFF the burst genuinely churned. On `stateQueue` (scheduled there).
+    private func fireSyncedLocalSettle() {   // on stateQueue (scheduled there)
+        self.pendingSyncedLocalSettle = nil
+        let coalesced = self.syncedLocalCoalescedCount
+        self.syncedLocalCoalescedCount = 0
+        let desired = self.syncedLocalSinkEnabled
+
+        // Net no-op: a burst that collapsed back to the currently-applied state
+        // (e.g. on→off→on while already on, or on→off while already off) never
+        // tore the tap/sink down, so there is NOTHING to apply — and, critically,
+        // NOTHING to re-sync. Bailing here keeps the T2 reset off this path.
+        guard desired != self.syncedLocalSinkApplied else { return }
+        self.syncedLocalSinkApplied = desired
+
+        // Churn = the settle absorbed ≥2 distinct toggle decisions (rapid
+        // clicking). A NORMAL single toggle coalesces exactly one decision and
+        // MUST NEVER take the reset branch — that redundant RTP re-establish on
+        // every ordinary connect is the exact bug a prior fix removed
+        // (`dev/notes/synced-local-mixed-selection-dropout-fix.md`). This is the
+        // sharpest correctness constraint in the fix.
+        let churned = coalesced >= 2
+
+        // Runs on `captureControlQueue` — the same serial queue the capture gate's
+        // start/stop is enqueued on — so a tap recreate triggered by
+        // `attachSyncedLocalSink` (self-exclude pid change, T-FANOUT) never races a
+        // capture-gate start/stop for the same tap.
+        self.captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            self.applySyncedLocalSinkTransition(enable: desired)
+            if churned {
+                // Rapid toggling drove many tap rebuilds with NO receiver-session
+                // reset (an `.exclusionChange` rebuild deliberately skips it),
+                // desyncing/corrupting the receiver even while the Mac-side capture
+                // reports healthy — the permanent-silence bug. Now that the tap has
+                // settled into `desired`, re-establish the session ONCE.
+                // `resetAirPlaySessionForWholeSystem` is already single-flighted
+                // (per-device `converging` claim + `rebindRecoveryGen`) and
+                // ownership-guarded (`stillOwnsRebind`), so this can't fight a
+                // concurrent converge or thrash a healthy session.
+                Telemetry.log(.airplay, "synced_local_churn_resync", [
+                    "coalesced": "\(coalesced)", "desired": "\(desired)",
+                ])
+                self.resetAirPlaySessionForWholeSystem()
+            }
         }
     }
 

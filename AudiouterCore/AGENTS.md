@@ -172,7 +172,42 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply.
+  Saved groups still persist and re-apply. A per-app `.device` route follows
+  the SAME discipline at launch: `AppRoutingController.clearAllDeviceRoutes()`
+  reverts every `.device` route to `.noRedirect` once, called before the
+  initial route push, so a redirect never silently survives a full restart
+  regardless of how long its target was gone for.
+- **A per-app `.device` route survives its target going merely UNREACHABLE
+  (`isAvailable == false`) — it does NOT survive the target DISAPPEARING
+  entirely.** These are different signals and only the second resets the
+  route (`AppRoutingController.handleDeviceDisappeared`, fired from
+  `PopoverController.update(devices:)`). While a kept route's target is
+  unreachable, `NativeBackend` computes an EFFECTIVE route table — a
+  `.device` route whose target can't currently carry audio reads as
+  `.noRedirect` for every per-app mechanism (capture start/stop, the
+  whole-system tap's exclusion set, the mixer, local playback, metering) —
+  so the app rejoins whatever the system is currently outputting to instead
+  of being excluded in favor of a stream that goes nowhere. The USER's real
+  route table (`lastRoutes`) is untouched throughout; the redirect re-engages
+  itself the instant the device is reachable again, with no route-table edit
+  in either direction. Never make this decision from discovery events alone —
+  reachability also changes via engine-state transitions and converge
+  failures, all of which must funnel through `NativeBackend.commitKnownDevice`
+  so the effective table never goes stale in the direction that hurts (an app
+  excluded from the whole-system tap with nowhere for its own stream to go is
+  silence with no visible cause).
+- **A saved GROUP containing the local Mac must reach the backend the same
+  way the Selected-Devices path already does: the Mac filtered OUT of
+  `setOutputSet`, and the synced-local sink armed by whether the Mac is a
+  member of whatever MAIN OUT currently targets** — `GroupController
+  .isMainOutMember(_:)`, not `isSpeakerSelected(_:)` (the latter reads
+  Selected Devices only and is blind to group membership; wrong in BOTH
+  directions under a group target — a group containing the Mac never arms
+  the sink, and the Mac can arm the sink wrongly while merely sitting
+  untargeted in Selected Devices during an AirPlay-only group). Under
+  `.selectedDevices` `isMainOutMember` and `isSpeakerSelected` are
+  *provably* the same read (`mainOutMemberIDs` is `Array(selectedDeviceIDs)`
+  in that branch) — so this only changes behavior on the group path.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.

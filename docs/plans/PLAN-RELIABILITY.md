@@ -6,13 +6,107 @@ played, no code changed. Every finding cites the file/line it was verified at.*
 
 ---
 
-## Execution status (updated 2026-07-24)
+## Execution status (updated 2026-07-25)
 
-**Waves 1–3 are code-complete, adversarially reviewed, and merged with `main`
-— all on `claude/reliability-audit-0defe7`, NOT yet merged into `main`.**
-Nothing here has ever been verified with real audio; every claim below is
-build + hermetic-test only, per the standing no-agent-plays-audio rule. Live
-verification is a separate, not-yet-done step (see "What remains").
+**Waves 1–7 are ALL code-complete** — all on `claude/reliability-audit-0defe7`,
+NOT yet merged into `main`. Nothing here has ever been verified with real
+audio; every claim below is build + hermetic-test only, per the standing
+no-agent-plays-audio rule. Live verification is a separate, not-yet-done step
+(see "What remains").
+
+### Waves 4–7 (2026-07-25)
+
+Executed via `/orchestrate` (research → explicit tasks → per-task model/effort
+→ parallelization waves → watched background agents), with every batch
+reviewed against spec + a real build/test pass before committing — not just
+trusted from an agent's own report (see the T6/T9 note below on why that
+distinction mattered in practice).
+
+| Landed as | Fixes | Files | Commit |
+|---|---|---|---|
+| Gap-closing (pre-Wave-4) | Sleep must clear in-flight rebind recovery | `NativeBackend.swift` | `1c68727` |
+| Gap-closing | Re-ported R9 regression test | `NativeBackendTests.swift` | `5510593` |
+| Gap-closing | Exclusion-rebuild clock re-anchor window (completeness gap #4 below) | `NativeCaptureCoordinator.swift` | `5d42fb7` |
+| T1 (Wave 4, R5) + T11 (Wave 7 armor) | Per-app route survives target going briefly unreachable; `DefaultSystemOutputDevice` selector guard | `AppRoutingController.swift`, `PopoverController.swift`, `NativeBackend.swift` + new `OutputSelectorGuardTests.swift` | `1da459f` |
+| T2, T4, T7 (Wave 4 cont'd + Wave 6/R4) | Failed per-app bind stops lying about streaming; "Resume → device" offer after relaunch; Mac+AirPlay groups actually play everywhere | `NativeBackend.swift`, `AppRoutingController.swift`, `PopoverController.swift`, `AppRowView.swift`, `GroupController.swift`, `AppDelegate.swift` | `850922f` |
+| T3, T6 (Wave 4 cont'd + Wave 5 stopgap) | `.device` routes clear on every app launch; "may reduce quality" note for same-speaker double-routing | `AppRoutingController.swift`, `AppDelegate.swift`, `PopoverController.swift` | `fe452ae` |
+| T8, T9 (Wave 6, R16) | Popover states the real Audio Out destination; menu-bar icon distinguishes idle/streaming | `PopoverController.swift`, `Package.swift`, `AppDelegate.swift`, `StatusItemController.swift` + new `MenuBarStatus.swift` | `7ad75e6` |
+
+R5's actual shape ended up broader than the plan's one-line "keep the route,
+badge it offline" sketch, resolved live with Alec before implementation: the
+app rejoins normal system audio while its target is unreachable (not silence,
+not forced local-only), the route clears only on TRUE device disappearance or
+an Audiouter relaunch (not the old "isAvailable == false" trigger — that now
+keeps the route), and `NativeBackend` computes an *effective* route table (a
+`.device` route whose target can't carry audio right now reads as
+`.noRedirect` for every per-app mechanism — capture start/stop, the
+whole-system tap's exclusion set, the mixer, local playback, metering — while
+`lastRoutes`, the user's real intent, is untouched) so the redirect re-engages
+itself the instant the device is reachable again, with no route-table edit in
+either direction.
+
+R4's real mechanism, corrected from the original finding: it is NOT that
+`GroupEditorViewController` offers the Mac while `GroupController.applyRouting`
+filters it back out with no explanation (that popover-side local-mix block was
+already retired when synced-local playback shipped — verified via
+`GroupController.canSelectLocalSpeaker` unconditionally returning `true`). The
+actual bugs were `GroupController.activateGroup` never filtering the local
+device out of `setOutputSet` (violating that call's own documented contract)
+and `NativeBackend`'s synced-local-sink arming decision reading
+`isSpeakerSelected` (Selected Devices only) instead of true Main Out
+membership — so a group containing the Mac never armed the sink. Fixing the
+second bug also fixed a third, previously-unknown one for free: the old wiring
+could arm the sink WRONGLY, playing the Mac when an AirPlay-only group was
+active and the Mac merely still sat in the untargeted Selected Devices set.
+
+**R3 (Wave 5) is the honest stopgap now, with a build recommendation for
+later, not a decision to leave it as-is.** A dedicated investigation (T5)
+confirmed the root cause precisely — two independently-scheduled per-app
+Core Audio taps get nearest-frame-quantized onto a shared nominal-44100Hz
+wall-clock grid with zero fractional interpolation
+(`AppRouteMixer.swift:342-350`'s own comment names this) — and found the two
+hardest components a real fix would need (a resampler proven click-free to
+±200ppm, and a control loop proven convergent/non-oscillatory) **already
+exist in this codebase**, built for the unrelated synced-local-sink problem
+(`PhaseController.swift`'s `FractionalResampler`/`PhaseController`). The
+investigation's recommendation: build the real fix as a near-term follow-up
+rather than treat the label as permanent — it's well-scoped integration work,
+not open-ended DSP risk. Not scheduled; needs its own task when picked up.
+
+**R16's virtual-output-device idea (Wave 6, the bigger half) got a dedicated
+research spike (T10), not a build.** The literal ask — a single "Audiouter"
+entry in System Settings → Sound that becomes the visibly-selected output
+while routing, so a glance there makes obvious what's active — is achievable
+only via the legacy `AudioServerPlugIn` HAL-plugin API (DriverKit/
+AudioDriverKit explicitly does not support virtual devices, confirmed twice in
+Apple's own docs). Recommendation: **don't build the full driver.** It's
+root-installed and reboot-gated on install/uninstall, and — the decisive
+point — if Audiouter crashes or is force-quit while set as the default output,
+the user is left silent with no real device selected, which inverts the
+safety rationale that motivated the feature (today a crash leaves you on real
+speakers). Instead, the spike surfaced a cheap ~1-day alternative worth trying
+first: a *public* `AudioAggregateDevice` named "Audiouter"
+(`kAudioAggregateDeviceIsPrivateKey: false` — the tap coordinators already
+create aggregates, just always private) — no root, no install, no reboot,
+using an API this app already calls. Two things are unverified and would need
+testing before trusting it: whether a public aggregate actually surfaces in
+the Sound *pane* (only Audio MIDI Setup's manual "make default" is documented),
+and whether "aggregate of aggregates" breaks the existing capture taps built on
+top of it (one third-party forum report says it does; not confirmed here).
+Not scheduled; the cheap visibility half (T8/T9 above) shipped instead.
+
+**A process note worth keeping**: the first attempt at T6 (Wave 5's stopgap
+label) came back from a background agent as a fully-described, verified
+success — specific test names, a stash-based pre/post-fix proof, all of it —
+but `git status`/`git diff` afterward showed ZERO trace of any change; the
+actual edits were lost, most likely mishandled during the agent's own
+`git stash` verification step in a worktree shared with other concurrently
+running agents. Caught only because every agent batch in this run was diffed
+and independently rebuilt/retested before committing, never taken on the
+strength of its report alone — re-implemented directly rather than trust a
+second report without re-verifying. Worth remembering next time multiple
+agents share one worktree: `git stash` there is riskier than it looks, and a
+completion report is a claim, not proof.
 
 ### Done and committed
 
@@ -54,41 +148,33 @@ is kept below only as history.
 
 ### What remains
 
-1. **One fix needs to be redone.** The final adversarial pass on the merge
-   found a real regression: our teardown-race guard (re-check `started &&
-   !suspended` before the whole-system RTP reset re-adds engine outputs) was
-   dropped in favor of main's mechanism, which turns out NOT to cover the
-   **sleep** interleaving — `handleSystemWillSleep` (unlike `stop()`) never
-   clears the in-flight rebind-recovery state, so a sleep landing mid-reset
-   can strand a selected AirPlay device silent after wake with no
-   self-recovery. An agent was assigned to restore the guarantee and
-   re-instate the dropped regression test, but the session was interrupted
-   before it committed — **no code change landed; this still needs to be
-   done from scratch.** Low urgency (mitigated by the R11 watchdog falling
-   back to local audio) but a real, confirmed gap.
-2. **Live testing — not yet done, and not this session's job right now.**
-   Per Alec's 2026-07-24 decision, all live audio testing is consolidated
-   into the `claude/memory-leak-live-testing` session (bundle-id / PTP-port
+Items 1, 3, and 4 from the original list (sleep/rebind-recovery gap, R9's
+missing test, the exclusion-rebuild clock window) are CLOSED — see the
+gap-closing commits at the top of the table above. What's actually left:
+
+1. **Live testing — not yet done, not this session's job right now.** Per
+   Alec's 2026-07-24 decision, all live audio testing is consolidated into
+   the `claude/memory-leak-live-testing` session (bundle-id / PTP-port
    collision risk from running two Audiouter instances). The full live
-   checklist per wave is unchanged and listed under each wave below. Two
-   live-testing findings from that session, for context (not this branch's
-   bugs): the ~8% pitch-up was root-caused and fixed there (a per-app tap
-   format-reconciliation bug, commit `196e5b7` on their branch — this
-   branch's Wave 1–3 work never touched that code path); a judder→stop→
-   silence symptom on redirecting Firefox is still being chased there.
-3. **R9's dedicated regression test was not re-ported** after the merge
-   (the underlying fix — `refreshExcludedProcessSet` called from both
-   `handlePerAppCaptureHealthChange` and `handleAppLaunched` — is confirmed
-   still wired and functional; only its explicit unit test is missing).
-4. **A minor completeness gap in the surgical RTP reset**, found by the
-   post-merge adversarial pass: an exclusion-only tap rebuild that lands in
-   the narrow window between the old tap's teardown and the new tap's
-   listener arm can silently re-anchor onto a different default device's
-   clock without triggering a reset. Self-heals on the next device/rate
-   event; transient silence window only. Not yet fixed — low priority.
-5. **Waves 4–7 have not been started** (R5, R8, R6's resume affordance, R3,
-   R16, and Wave 7's regression-armor items). Out of scope for this
-   execution pass per the original instruction to run only Waves 1–3.
+   checklist per wave is unchanged and listed under each wave below, now
+   joined by Waves 4–7's own checklist items. Two live-testing findings from
+   that session, for context (not this branch's bugs): the ~8% pitch-up was
+   root-caused and fixed there (a per-app tap format-reconciliation bug,
+   commit `196e5b7` on their branch — this branch's work never touched that
+   code path); a judder→stop→silence symptom on redirecting Firefox is still
+   being chased there.
+2. **R3's real fix** (shared-clock resampling instead of the wall-clock
+   frame grid) — sized and recommended by T5's investigation above, not yet
+   scheduled as its own task.
+3. **R16's virtual-output-device idea** — spiked and NOT recommended as a
+   full driver build by T10 above; the cheap public-aggregate alternative is
+   unverified and untried. Not scheduled.
+4. **A CONFIRM item from the original findings register worth reconsidering
+   now that Waves 4-7 are done**: R7 (AirPlay-1 speakers excluded from
+   per-app destinations) is a deliberate product decision documented at
+   `PopoverController.swift` (search `availableAirPlayDestinations`'s doc
+   comment) — NOT a defect, and intentionally never had a task in this
+   execution pass.
 
 ### Build note for whoever picks this up
 
@@ -248,57 +334,70 @@ Zoom call mid-stream → speakers keep playing.
 route an app to Current Device while wearing BT — audio in the headphones, not
 the room; start a stream, then plug/unplug headphones — speakers keep playing.
 
-### Wave 4 — Per-app route durability *(fixes R5, R8; revisits R6)*
+### Wave 4 — Per-app route durability *(fixes R5, R8; revisits R6)* — EXECUTED
 
-- **Grace period instead of silent reset.** A route whose target goes
-  unavailable is **kept**, badged "speaker offline", and auto-resumes when the
-  device returns. It is only cleared by the user. (Replaces the
-  reset-on-unavailable in `PopoverController.update`; the store's silent
-  fallback remains only for devices gone > a long horizon, e.g. days.)
-- **Connection dot for redirect targets.** A device receiving a per-app stream
-  shows the same connected/connecting state a Selected device does — driven
-  from the stream-binding lifecycle instead of the output-set lifecycle.
-- **R6 stays as decided** (quit clears a device route — deliberate,
-  2026-07-22), but the relaunch path gets a lightweight "Resume route to
-  *Kitchen*?" affordance on the app's row instead of silent nothing.
+- **Grace period instead of silent reset — DONE, shape resolved live with
+  Alec.** Rather than "keep + badge 'speaker offline'", the app REJOINS
+  normal system audio while the target is unreachable (the smallest, safest
+  option of three considered — a forced local-only mode was rejected as
+  higher-risk, silence-with-a-badge was rejected as violating invariant 2)
+  and the route clears only on a TRUE disappearance or an Audiouter relaunch
+  (simpler than "gone > a long horizon" — no new persisted timestamp needed).
+  See "Execution status" above for the full mechanism (`1da459f`, `fe452ae`).
+- **Connection dot for redirect targets — folded into the R5 work, smaller
+  than scoped.** R8 as originally described (no dot at all for a
+  redirect-only device) turned out to already be fixed in this tree by the
+  time this wave ran; what remained was that a bind FAILURE still falsely
+  claimed to stream (`850922f`, T2) — that's now fixed. `Device
+  .connectionState` itself was deliberately left untouched (out of scope —
+  feeds the diagnosis panel/failedGate/R11 watchdog, a separate concern).
+- **R6's relaunch affordance — DONE** (`850922f`, T4): a "Resume → Kitchen"
+  entry in the app's destination dropdown, in-memory only (forgotten on
+  Audiouter's own quit, not persisted), consumed the moment any destination
+  is picked.
 
-### Wave 5 — Same-speaker multi-app quality *(R3 — decide after Wave 1)*
+### Wave 5 — Same-speaker multi-app quality *(R3 — decide after Wave 1)* — EXECUTED (stopgap; real fix sized, not built)
 
-Two options, decided once Wave 1's converter infrastructure is in:
-**(a)** proper shared-clock mixing (resample members onto the capture clock of
-the newest contributor rather than the wall-clock grid), or **(b)** keep the
-limitation and say so in the UI — the second app routed to an already-routed
-speaker gets a one-line "may reduce quality" note. (a) is the real fix; (b) is
-the honest stopgap if (a) slips.
+The stopgap (b) shipped (`fe452ae`, T6): a device already carrying a
+different app's redirect gets "Already in use — may reduce quality" on its
+own destination-menu entry. The real fix (a) was investigated, not built
+(`T5`) — see "Execution status" above for the recommendation: it's
+well-scoped integration work (the hard DSP primitives already exist in this
+codebase for an unrelated problem), worth doing as a near-term follow-up
+rather than leaving the label as the permanent answer.
 
-### Wave 6 — "We are the output" visibility *(R16 + Alec's Sound-panel idea)*
+### Wave 6 — "We are the output" visibility *(R16 + Alec's Sound-panel idea)* — EXECUTED (cheap half; driver half spiked, not built)
 
-- **Now (cheap, recommended):** the popover's System row reads as an explicit
-  statement — **"Audio Out → Kitchen + Move 2"** / "→ This Mac" — and the
-  menu-bar icon carries a streaming state, so one glance answers "who owns my
-  audio right now". Group editor also gains the R4 fix here: the same
-  local-mix block + explanation the popover already shows (until the
-  synced-local engine work lands and lifts the restriction for real).
-- **Decision item (the literal ask):** shipping a **virtual output device**
-  named "Audiouter" that appears in macOS Sound settings. Upside: the exact
-  visibility Alec described, plus the industrial-strength capture path
-  (SoundSource/Loopback-class); downside: an AudioServerPlugIn driver to
-  build, sign, install, and keep alive — a genuinely large lift the SPEC
-  deliberately avoided. Recommendation: do the labeling now, schedule a
-  half-day spike on the driver before committing either way.
+- **The cheap half — DONE** (`7ad75e6`, T8/T9): the popover's Audio Out row
+  states the real destination ("→ Kitchen + Move 2" / "→ This Mac" / "→
+  Kitchen Group" for a saved group — named, not enumerated), and the
+  menu-bar icon distinguishes idle (outline) from actively streaming (filled,
+  system accent color) — "streaming" counts either Main Out or a live
+  per-app route, not just the former.
+- **R4 (the group-editor half of this wave) — DONE, but the real bug was
+  different from this plan's description**, and no editor UI change was
+  needed. See "Execution status" above: the popover-side local-mix block this
+  entry describes was already retired before this wave ran; the actual fix
+  was backend wiring (`850922f`, T7).
+- **The virtual-output-device decision item — SPIKED, not built** (`T10`):
+  don't build the full driver (reboot-gated install, and a crash while set as
+  default output leaves the user silent — inverts the safety rationale that
+  motivated it). A cheap public-aggregate-device alternative surfaced instead,
+  unverified. See "Execution status" above.
 
-### Wave 7 — Regression armor
+### Wave 7 — Regression armor — PARTIALLY EXECUTED
 
-- **Selector guard in CI:** a test that greps the tree for
-  `DefaultSystemOutputDevice` and fails if it ever returns (this bug has
-  drifted back in twice).
-- **Route-truth test suite:** for every R# above, a hermetic test that models
-  the triggering sequence against fake taps/process lists and asserts the
-  invariant — so no future refactor can silently reintroduce one.
-- **Cross-plan landings folded in:** LocalPlaybackEngine deadlock fix live
-  smoke test; CPU-storm T8/T10 (arrives inside Wave 2); memory-leak audit
-  waves proceed on their own plan (shared tap-lifecycle code — coordinate
-  merges, single live session per the single-instance PTP rule).
+- **Selector guard in CI — DONE** (`1da459f`, T11): `OutputSelectorGuardTests`
+  scans `AudiouterCore/Sources` + `AirPlayEngine/Sources`, comment-stripped,
+  for `kAudioHardwarePropertyDefaultSystemOutputDevice`.
+- **Route-truth test suite — NOT a separate task; folded into each
+  implementing task's own hermetic tests** instead (a dedicated omnibus task
+  would have been redundant with what T1/T2/T3/T4/T6/T7/T8/T9 each already
+  needed to prove their own fix). Every R# fixed in Waves 4-6 above has its
+  own regression coverage, each independently confirmed to fail pre-fix.
+- **Cross-plan landings** (LocalPlaybackEngine deadlock live smoke test,
+  memory-leak audit coordination) — untouched by this execution pass, still
+  open, tracked on their own plans.
 - **Finding 5 — Chrome channel over-match in `ProcessSetResolver`
   (RETIRED — see "Execution status" at top; `ProcessSetResolver` no longer
   exists, superseded by main's `AudioProcessResolver` during the 2026-07-24

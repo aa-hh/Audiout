@@ -54,6 +54,16 @@ public final class GroupEditorViewController: NSViewController {
     /// plus `busNodeClearance`.
     private static let railContentInset = PopoverColumnGrid.firstElementLeading(indented: false)
 
+    /// Leading edge of the membership grouped-list container, measured from the
+    /// column's own leading edge. Placed just past the rail's widest point — a
+    /// selected node's right edge (`railGutterCenterX + busNodeDiameterSelected
+    /// / 2`) — plus a small gap, so the spine runs in clean pane background and
+    /// never sits inside the container's fill. Derived from the shared grid, so
+    /// widening the gutter moves the container in lockstep instead of silently
+    /// overlapping the nodes.
+    private static let wellLeadingInset: CGFloat =
+        PopoverColumnGrid.railGutterCenterX + PopoverColumnGrid.busNodeDiameterSelected / 2 + 4
+
     /// The continuous membership-rail spine, drawn ONCE for the whole pane on
     /// top of everything else so it reads unbroken where it crosses the header
     /// band and the "Speakers" label's row. Non-interactive.
@@ -182,6 +192,10 @@ public final class GroupEditorViewController: NSViewController {
         // `panel`, an invisible boundary). Non-interactive (`hitTest` always
         // nil), so it never intercepts a row's click.
         membershipWell.translatesAutoresizingMaskIntoConstraints = false
+        // Dividers align to the row icon, which sits at `railContentInset` from
+        // the COLUMN's edge — the container starts further right, so the offset
+        // inside it is the difference.
+        membershipWell.contentLeadingInset = Self.railContentInset - Self.wellLeadingInset
         column.addSubview(membershipWell)
         for v in [iconWell, nameField, speakersLabel, membershipStack] {
             column.addSubview(v)
@@ -228,26 +242,37 @@ public final class GroupEditorViewController: NSViewController {
             // row applies `railContentInset` internally to its icon and places
             // its node in the gutter, so row icons still line up with the header
             // content above them.
-            membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 8),
+            // 8 → 10: the container now extends `verticalPadding` ABOVE the
+            // first row, so the visible gap from the "Speakers" label to the
+            // container's top edge is this minus that padding. Nudged up so the
+            // label doesn't crowd the container's new border.
+            membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 10),
             membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
-            // T5's recessed well: pinned EXACTLY to the stack's own top/bottom
-            // (adds ZERO extra height — T6 left only ~13pt of slack against the
-            // Groups window's 720x460 default, none to spend on padding) but
-            // spans the FULL column width (leading/trailing), including the
-            // rail's gutter on the left, so the recessed card reads as one
-            // list container even though the rows it holds are only as wide
-            // as their own content.
-            membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            // The grouped-list container. Its leading edge sits to the RIGHT of
+            // the rail (`wellLeadingInset`), leaving the spine and its nodes in
+            // clean pane background — the rail frames the list, it is not inside
+            // it. Padded off the stack's top/bottom so rows breathe; that costs
+            // `verticalPadding` at each end, which the tightened
+            // "Speakers"-to-stack gap below pays for rather than growing the
+            // pane's fitting height into the window's 720x460 default.
+            membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                                    constant: Self.wellLeadingInset),
             membershipWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-            membershipWell.topAnchor.constraint(equalTo: membershipStack.topAnchor),
-            membershipWell.bottomAnchor.constraint(equalTo: membershipStack.bottomAnchor),
+            membershipWell.topAnchor.constraint(equalTo: membershipStack.topAnchor,
+                                                constant: -MembershipWellView.verticalPadding),
+            membershipWell.bottomAnchor.constraint(equalTo: membershipStack.bottomAnchor,
+                                                   constant: MembershipWellView.verticalPadding),
 
             deleteButton.leadingAnchor.constraint(equalTo: container.leadingAnchor,
                                                   constant: Self.railContentInset),
-            deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 16),
+            // 16 → 20: the grouped-list container extends `verticalPadding`
+            // BELOW the last row, so this gap minus that padding is what's
+            // actually visible between the container's bottom border and the
+            // button. 16 left it reading cramped against the border.
+            deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 20),
             deleteButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
 
             railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
@@ -615,13 +640,27 @@ private final class RailRepaintingView: NSView {
 /// light (floor 1.25:1, the same separator floor `Tokens.Color.hairline`
 /// itself documents against `panel`).
 ///
-/// Pinned EXACTLY to `membershipStack`'s own top/bottom (zero extra height —
-/// T6's commit left only ~13pt of slack in the editor's fitting height
-/// against the Groups window's 720×460 default, none to spend on padding) but
-/// spans the FULL column width, including the rail's gutter on the left, so
-/// the recessed card reads as one list container even though the rows inside
-/// it are only as wide as their own content (`MembershipRowView` has no width
-/// tie to the stack).
+/// A GROUPED-LIST container (the macOS System Settings idiom), not a raw tint
+/// band. Its first draft spanned the full column width — swallowing the rail's
+/// gutter so the gold spine sat INSIDE the fill — was pinned flush to the row
+/// stack with no padding, drew full-bleed dividers straight across the gutter,
+/// and used a 6pt radius that reads square at this size. The result looked like
+/// an arbitrary stripe rather than a deliberate object (design review
+/// 2026-07-25). The corrected geometry, all of it load-bearing:
+///
+/// - **Starts to the RIGHT of the rail** (`wellLeadingInset`), so the spine and
+///   its nodes run in clean pane background. The rail is chrome for the list,
+///   never content inside it.
+/// - **Padded** top/bottom (`verticalPadding`) so rows breathe instead of
+///   touching the container's edges.
+/// - **Inset dividers** starting at the row icon's leading edge
+///   (`contentLeadingInset`), the standard grouped-list separator treatment —
+///   never full-bleed, never crossing the gutter.
+/// - **A visible border** plus a radius large enough to read as a shape.
+///
+/// It spans the full column width to its trailing edge, so the container reads
+/// as one list even though the rows inside it are only as wide as their own
+/// content (`MembershipRowView` has no width tie to the stack).
 ///
 /// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern
 /// for a rounded/solid-fill background view in this same file's neighborhood:
@@ -633,8 +672,19 @@ private final class RailRepaintingView: NSView {
 /// wider than a row's intrinsic content) simply swallows a click with no
 /// target, same as clicking blank pane background anywhere else.
 private final class MembershipWellView: NSView {
-    private static let cornerRadius: CGFloat = 6
+    /// Large enough to read as a rounded shape at this container's size — the
+    /// 6pt first draft rendered visually square.
+    static let cornerRadius: CGFloat = 10
+    /// Breathing room above the first row and below the last, so rows never
+    /// touch the container's edges.
+    static let verticalPadding: CGFloat = 6
     private static let hairlineThickness: CGFloat = 1
+    private static let borderWidth: CGFloat = 1
+
+    /// Where the row's ICON starts, measured from this view's own leading edge
+    /// — the inset dividers align to it. Set by the controller so it stays
+    /// derived from the shared grid rather than re-typed here.
+    var contentLeadingInset: CGFloat = 0 { didSet { needsDisplay = true } }
 
     /// The membership rows currently laid out in the stack above this view,
     /// in top-to-bottom order — read for LIVE frames on every draw, exactly
@@ -645,8 +695,16 @@ private final class MembershipWellView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Stroke sits ON the boundary, so inset by half its width to keep the
+        // 1pt line crisp instead of straddling the pixel edge.
+        let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
+        let shape = NSBezierPath(roundedRect: borderRect,
+                                 xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
         Tokens.Color.well.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: Self.cornerRadius, yRadius: Self.cornerRadius).fill()
+        shape.fill()
+        Tokens.Color.hairline.setStroke()
+        shape.lineWidth = Self.borderWidth
+        shape.stroke()
 
         guard rows.count > 1 else { return }
         Tokens.Color.hairline.setFill()
@@ -660,8 +718,13 @@ private final class MembershipWellView: NSView {
             // view needing to know which axis direction is "down".
             let ys = [aFrame.minY, aFrame.maxY, bFrame.minY, bFrame.maxY].sorted()
             let midY = (ys[1] + ys[2]) / 2
-            let lineRect = NSRect(x: bounds.minX, y: midY - Self.hairlineThickness / 2,
-                                  width: bounds.width, height: Self.hairlineThickness)
+            // INSET to the icon's leading edge (grouped-list separator
+            // treatment) — a full-bleed line would run under the container's
+            // rounded corners and read as a slab, not a list.
+            let lineRect = NSRect(x: bounds.minX + contentLeadingInset,
+                                  y: midY - Self.hairlineThickness / 2,
+                                  width: bounds.width - contentLeadingInset,
+                                  height: Self.hairlineThickness)
             NSBezierPath(rect: lineRect).fill()
         }
     }

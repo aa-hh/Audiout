@@ -211,6 +211,20 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-CORRECTION's control loop nulls; with frame-accurate placement it is < 1
     /// frame at release, and a future correction loop keeps it there over time.
     private var lastPhaseErrorNanos: Int64 = 0
+    /// `group × device` gain applied to this sink's real-time output — deliberately
+    /// EXCLUDING Main, which the Mac's own system volume already applies to this
+    /// device; multiplying it again here would double-apply it. Set via `setGain(_:)`
+    /// (``NativeBackend`` calls it whenever the computed gain changes).
+    ///
+    /// razor: piggybacked onto the render path's existing `stateLock.try()` (see
+    /// `renderInterleaved`) rather than a dedicated atomic — the lock is already
+    /// taken every cycle for `anchored`/`released`/`lastPhaseErrorNanos`, so one more
+    /// `Float` costs nothing extra, and a missed `try()` just replays the previous
+    /// cycle's gain for one render (inaudible), the same tradeoff the phase-error
+    /// readout above already makes. If gain ever needs a harder guarantee (e.g.
+    /// sample-accurate fades), upgrade to a lock-free atomic (bit-cast the `Float`
+    /// into an `UnsafeAtomic<UInt32>`) instead of adding a second lock.
+    private var gain: Float = 1.0
 
     public init(
         renderSampleRate: Double = 48_000,
@@ -267,6 +281,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-SPIKE-PHASE reads and T-CORRECTION drives to zero.
     public var latestPhaseErrorNanos: Int64 {
         stateLock.withLock { lastPhaseErrorNanos }
+    }
+
+    /// Sets the `group × device` gain applied to this sink's output (see `gain`
+    /// above for the synchronization contract and why Main is excluded). Callable
+    /// from any thread — `NativeBackend` calls this off the render path whenever
+    /// the computed gain changes.
+    public func setGain(_ gain: Float) {
+        stateLock.withLock { self.gain = gain }
     }
 
     // MARK: Lifecycle
@@ -594,7 +616,9 @@ public final class SyncedLocalSink: @unchecked Sendable {
         var silentFrames = frameCount
         var shouldDrain = false
         var target: Int64 = 0
+        var gainSnapshot: Float = 1.0
         if stateLock.try() {
+            gainSnapshot = gain
             if anchored {
                 target = targetReleaseNanos
                 if released {
@@ -651,6 +675,15 @@ public final class SyncedLocalSink: @unchecked Sendable {
             into: out, outFrameOffset: silentFrames, outFrames: outFrames, ratio: ratio
         ) { framePtr in
             ring.read(into: framePtr, maxCount: channelCount) == channelCount
+        }
+
+        // Apply the group×device gain (never Main — see `gain`'s doc comment) to the
+        // real samples this cycle produced. Skipped entirely at unity so a gain of
+        // 1.0 is byte-identical to the ungained render, not just numerically equal.
+        if gainSnapshot != 1.0 {
+            let start = silentFrames * channelCount
+            let producedSamples = produced * channelCount
+            for i in 0..<producedSamples { base[start + i] *= gainSnapshot }
         }
 
         // Underrun: zero-fill the shortfall so a starved ring is silence, not garbage.
@@ -771,6 +804,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public var latestPhaseErrorNanos: Int64 { 0 }
     public func start() throws {}
     public func stop() {}
+    public func setGain(_ gain: Float) {}
     public func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
     // T-LIFECYCLE: API parity no-ops for the AVFoundation-less fallback.
     public func handleSystemWillSleep() {}

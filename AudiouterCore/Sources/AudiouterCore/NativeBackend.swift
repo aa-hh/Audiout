@@ -3023,24 +3023,75 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .bind(let outputID, let stream):
             Telemetry.log(.airplay, "engine_bind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
-                try await engine.addOutput(outputID, streamId: stream)
+                try await bindOutput(outputID, toStream: stream)
             } catch {
                 handleBindFailure(outputID: outputID, stream: stream, op: "bind", error: error)
             }
         case .rebind(let outputID, let stream):
             Telemetry.log(.airplay, "engine_rebind", ["output": "\(outputID)", "stream": "\(stream)"])
-            // The removeOutput throw is tolerated (the device may not currently be
-            // added — a no-op teardown is fine); only the addOutput result determines
-            // whether the rebind actually re-established the session.
-            try? await engine.removeOutput(outputID)
             do {
-                try await engine.addOutput(outputID, streamId: stream)
+                try await bindOutput(outputID, toStream: stream, tearDownWhenBindingUnknown: true)
             } catch {
                 handleBindFailure(outputID: outputID, stream: stream, op: "rebind", error: error)
             }
         case .unbind(let outputID):
             Telemetry.log(.airplay, "engine_unbind", ["output": "\(outputID)"])
             try? await engine.removeOutput(outputID)
+        }
+    }
+
+    /// THE single call site that puts a device's engine session onto a stream —
+    /// shared by the whole-system converge (`convergeDevice`, stream 0, serialized
+    /// by `converging`) and the per-app binding pass (`performBindOp`, stream ≥ 1,
+    /// serialized by `bindTail`). T7 / architecture review defect B.
+    ///
+    /// Those two Swift-side FIFOs are separate and neither knows the other exists,
+    /// so a device changing SCOPE — whole-system → per-app, or per-app →
+    /// whole-system — crosses the seam between them. The old failure was silent:
+    /// `addOutput` no-ops on an already-live session rather than moving it, so the
+    /// device kept streaming its old stream while Swift bookkeeping recorded the
+    /// new one and audio was written where the device had never joined. `added`
+    /// and `streamBindings` never cross-invalidate, so nothing noticed.
+    ///
+    /// The fix arbitrates on the ENGINE's own answer instead of on either FIFO's
+    /// bookkeeping: ask which stream the live session is really on, and if that is
+    /// not the stream we want, move it with `rebindOutput` — one op that holds the
+    /// engine's per-`OutputID` `opsInFlight` slot across both the stop and the
+    /// re-add. That makes the transition atomic from the engine's perspective with
+    /// NO new Swift-level lock (a second lock spanning `converging` and `bindTail`
+    /// would be a deadlock surface for no extra safety; the engine's per-output
+    /// slot is already the one place both paths necessarily meet).
+    ///
+    /// A live session already on `streamId` needs no engine call at all — that is
+    /// the redundant-op window closed rather than merely narrowed.
+    ///
+    /// `tearDownWhenBindingUnknown` covers the one case the query can't answer: a
+    /// `.rebind` against an engine that reports no live binding (or a conformer
+    /// that predates the query). Then we keep the historical unconditional
+    /// stop-then-re-add, whose tolerated `removeOutput` throw is fine because the
+    /// device may simply not be added.
+    ///
+    /// The accepted ~1 s audible gap on a real move is deliberately kept — there
+    /// is no crossfade/pre-buffer machinery here, by decision.
+    private func bindOutput(
+        _ outputID: OutputID, toStream streamId: UInt32, tearDownWhenBindingUnknown: Bool = false
+    ) async throws {
+        if let live = await engine.boundStreamId(for: outputID) {
+            guard live != streamId else { return }   // engine already owns the stream we want
+            Telemetry.log(.airplay, "engine_scope_rebind", [
+                "output": "\(outputID)", "from": "\(live)", "to": "\(streamId)",
+            ])
+            try await engine.rebindOutput(outputID, toStreamId: streamId)
+            return
+        }
+        if tearDownWhenBindingUnknown { try? await engine.removeOutput(outputID) }
+        // Stream 0 keeps using the legacy single-stream entry point: it is the exact
+        // op `convergeDevice` has always issued, and the per-app seam is reserved for
+        // stream ≥ 1 (see `EngineControlling.write(pcm:streamId:pts:)`).
+        if streamId == 0 {
+            try await engine.addOutput(outputID)
+        } else {
+            try await engine.addOutput(outputID, streamId: streamId)
         }
     }
 
@@ -3160,7 +3211,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // completion) — the gap between these two events is the AirPlay
                     // receiver's own negotiation time, not anything this app controls.
                     Telemetry.log(.airplay, "connect_addoutput_start", ["device": id, "output": "\(outputID)"])
-                    try await engine.addOutput(outputID)
+                    // T7: go through the shared scope-transition call site, not a
+                    // bare `addOutput`. If this device is currently carrying a
+                    // per-app redirect (a live session on stream ≥ 1, bound by the
+                    // `bindTail` FIFO this loop knows nothing about), a plain
+                    // `addOutput` would silently no-op and leave the whole-system
+                    // mix written to a stream the device never joined — selected,
+                    // shown as connected, inaudible. `bindOutput` asks the engine
+                    // which stream the session is really on and MOVES it to 0.
+                    try await bindOutput(outputID, toStream: 0)
                     Telemetry.log(.airplay, "connect_addoutput_resolved", ["device": id, "output": "\(outputID)"])
                     stateQueue.sync {
                         // An out-of-band `.failed` for this id can arrive on the state
@@ -5106,6 +5165,21 @@ protocol EngineControlling: Sendable {
     /// called anywhere in `NativeBackend` — T6 wires the real per-app routing
     /// decision that picks a non-zero `streamId` and calls this instead.
     func addOutput(_ id: OutputID, streamId: UInt32) async throws
+    /// Which stream `id`'s LIVE engine session is actually bound to, or `nil`
+    /// when the engine has no live session for it (T7 — see
+    /// ``AirPlayEngine/AirPlayEngine/boundStreamId(for:)``). This is the query
+    /// the architecture review's defect B says the engine lacked: without it the
+    /// Swift side cannot tell "I bound it where I asked" from `addOutput`'s
+    /// silent already-live no-op, so a device that never moved streams reads as
+    /// routed and is inaudible. Default returns `nil` ("can't tell"), which makes
+    /// every pre-T7 conformer fall through to exactly its previous behavior.
+    func boundStreamId(for id: OutputID) async -> UInt32?
+    /// Move `id`'s live session to `streamId` as ONE engine-serialized op (T7 —
+    /// see ``AirPlayEngine/AirPlayEngine/rebindOutput(_:toStreamId:)``). The real
+    /// engine holds its per-`OutputID` `opsInFlight` slot across both the stop and
+    /// the re-add, so nothing can slip between them and leave the device on a
+    /// third stream. Default is the historical stop-then-re-add pair.
+    func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws
     func removeOutput(_ id: OutputID) async throws
     func setVolume(_ id: OutputID, _ volume: Double) async throws
     func setStartBufferMs(_ ms: Int) async
@@ -5161,6 +5235,21 @@ extension EngineControlling {
         try await addOutput(id)
     }
 
+    /// Default: "can't tell" (T7). ``EngineAdapter`` overrides this with the real
+    /// live-session read; a conformer that predates T7 keeps its previous
+    /// behavior, because every caller falls back to the plain add path on `nil`.
+    func boundStreamId(for id: OutputID) async -> UInt32? { nil }
+
+    /// Default: the historical stop-then-re-add pair (T7). The tolerated
+    /// `removeOutput` throw matches the old inline `.rebind` op — the device may
+    /// not currently be added, and a no-op teardown is fine; only the add half
+    /// determines success. ``EngineAdapter`` overrides this with the engine's
+    /// genuinely serialized primitive.
+    func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+        try? await removeOutput(id)
+        if streamId == 0 { try await addOutput(id) } else { try await addOutput(id, streamId: streamId) }
+    }
+
     /// Default: drop the buffer. ``EngineAdapter`` overrides this to forward to the
     /// real engine; a conformer that never receives per-app mixed audio ignores it.
     func write(pcm: Data, streamId: UInt32, pts: timespec) {}
@@ -5200,6 +5289,10 @@ struct EngineAdapter: EngineControlling {
     func addOutput(_ id: OutputID) async throws { try await engine.addOutput(id) }
     func addOutput(_ id: OutputID, streamId: UInt32) async throws {
         try await engine.addOutput(id, streamId: streamId)
+    }
+    func boundStreamId(for id: OutputID) async -> UInt32? { await engine.boundStreamId(for: id) }
+    func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+        try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }

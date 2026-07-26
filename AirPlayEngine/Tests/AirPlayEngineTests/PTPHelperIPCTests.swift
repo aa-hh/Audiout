@@ -42,10 +42,11 @@
 // NOT nested under `SerializedEngineState` (migration cookbook §22): this
 // file mutates a completely different set of process-globals — libairptp's
 // `airptp_event_port` / `airptp_general_port` / `airptp_shm_name` — not
-// `shims/outputs.c`'s device registry. It is the only test in its file, so
-// nothing collides with it today; if a second PTP-IPC test is ever added,
-// give this suite its own `.serialized` rather than folding it into that
-// unrelated lock.
+// `shims/outputs.c`'s device registry. That second PTP suite has now arrived
+// (`PTPHelperLifecycleTests.swift`), so as `SerializedEngineStateSuite.swift`
+// anticipated, this file nests under the libairptp globals' OWN serialized
+// parent, `SerializedPTPGlobals` (declared in that file) — not the unrelated
+// outputs-registry lock. Do NOT add `.serialized` here; it inherits.
 
 import Testing
 import Foundation
@@ -94,6 +95,8 @@ enum PortBindGate {
         return true
     }()
 }
+
+extension SerializedPTPGlobals {
 
 @Suite(.enabled(
     if: PortBindGate.canBindTestPorts,
@@ -211,3 +214,5 @@ final class PTPHelperIPCTests {
         return ptp_test_peer_active_count(hdl) == target
     }
 }
+
+} // extension SerializedPTPGlobals

@@ -981,10 +981,11 @@ public actor AirPlayEngine {
     /// delivering again but the receiver pinned to a now-stale RTP timeline
     /// (silent forever — Apple Dev Forums 825780); today `NativeBackend` recovers
     /// with a full `removeOutput`→`addOutput` (a fresh RTSP/RTP session — audible
-    /// drop). A FLUSH re-anchors in place, so the connection never drops. Whether
-    /// FLUSH alone fully cures the stale timeline after a *capture* rebuild (vs a
-    /// deliberate pause/seek, which is what FLUSH was designed for) is empirical —
-    /// `NativeBackend` gates the swap behind `AIRPLAY_REBUILD_RECOVERY=flush`.
+    /// drop). A FLUSH re-anchors in place, so the connection never drops — live
+    /// testing confirmed it cures the stall after a *capture* rebuild (not just the
+    /// deliberate pause/seek FLUSH was designed for), so `NativeBackend` now uses it
+    /// as the default whole-system rebuild recovery, with the teardown+rebuild kept
+    /// only as an automatic fallback when a flush throws.
     ///
     /// Mirrors `unbind`'s guards: the vendored flush is a no-op (returns 0, arms no
     /// completion) unless the device is STREAMING, and it dereferences

@@ -107,13 +107,17 @@ import AudiouterProtocol
         try CompanionEnvelope(message: message, v: v).encoded()
     }
 
+    /// Fixed valid identity for direct `MacConnection` tests (the
+    /// controller-level tests exercise the real load-or-create path).
+    static let testClientID = "A6E1F0C4-6A4B-4E7B-9D2C-1B2F3A4C5D6E"
+
     /// A connection wired to a fake transport, its `start()` already
     /// flushed so the transport's `events` hook is installed.
     private func makeConnection() -> (MacConnection, FakeTransport, DispatchQueue, EventLog) {
         let queue = DispatchQueue(label: "NetworkingStateTests.connection")
         let transport = FakeTransport()
         let log = EventLog()
-        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
         conn.onEvent = { log.append($0) }
         conn.start()
         queue.sync {} // flush startOnQueue
@@ -215,7 +219,7 @@ import AudiouterProtocol
         let frames = transport.sentFrames
         try #require(frames.count == 1)
         let hello = try CompanionEnvelope.decode(frames[0])
-        #expect(hello.message == .hello(clientName: "TestPhone", protoVersion: CompanionProto.version))
+        #expect(hello.message == .hello(clientID: Self.testClientID, clientName: "TestPhone", protoVersion: CompanionProto.version))
         #expect(hello.v == CompanionProto.version)
     }
 
@@ -517,7 +521,7 @@ import AudiouterProtocol
     @Test func handshakingEscapesWhenWelcomeNeverArrives() throws {
         let queue = DispatchQueue(label: "NetworkingStateTests.welcomeTimeout")
         let transport = FakeTransport()
-        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
         conn.welcomeTimeout = 0.05
         conn.start()
         queue.sync { transport.events?(.ready) }
@@ -531,7 +535,7 @@ import AudiouterProtocol
     @Test func aPromptWelcomeCancelsTheDeadline() throws {
         let queue = DispatchQueue(label: "NetworkingStateTests.welcomeInTime")
         let transport = FakeTransport()
-        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
         conn.welcomeTimeout = 0.05
         conn.start()
         let welcome = try encoded(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot()))
@@ -551,7 +555,7 @@ import AudiouterProtocol
         // on inbound frames instead.
         let queue = DispatchQueue(label: "NetworkingStateTests.appLiveness")
         let transport = FakeTransport()
-        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
         conn.appLivenessTimeout = 0.2
         conn.start()
         let welcome = try encoded(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot()))
@@ -835,5 +839,228 @@ import AudiouterProtocol
         #expect(waitUntil { failed.value == 1 }, "the probe's failure must surface as a transport failure")
         #expect(queue.sync { transport.probe == nil },
                 "every probe exit funnels through abandonProbe — the NWConnection must be cancelled and released")
+    }
+
+    // MARK: - T24: client identity
+
+    @Test func identityIsStableAcrossLaunchesAndUppercaseCanonical() throws {
+        let defaults = try makeDefaults()
+
+        // First "launch": generated, persisted, uppercase, valid.
+        let first = ClientIdentity.stableID(in: defaults)
+        #expect(UUID(uuidString: first) != nil)
+        #expect(first == first.uppercased(),
+                "the server canonicalizes to uppercase — generating anything else risks becoming 'a different phone'")
+        #expect(defaults.string(forKey: ClientIdentity.defaultsKey) == first)
+
+        // Second "launch" over the same defaults: SAME id, no churn.
+        #expect(ClientIdentity.stableID(in: defaults) == first)
+
+        // A lowercase-stored id (e.g. written by an older build) is
+        // canonicalized in place, not regenerated — same phone.
+        defaults.set(first.lowercased(), forKey: ClientIdentity.defaultsKey)
+        #expect(ClientIdentity.stableID(in: defaults) == first)
+        #expect(defaults.string(forKey: ClientIdentity.defaultsKey) == first)
+
+        // Garbage in the slot is repaired to a fresh VALID identity.
+        defaults.set("not-a-uuid", forKey: ClientIdentity.defaultsKey)
+        let repaired = ClientIdentity.stableID(in: defaults)
+        #expect(UUID(uuidString: repaired) != nil)
+        #expect(defaults.string(forKey: ClientIdentity.defaultsKey) == repaired)
+    }
+
+    @Test func theControllerSendsThePersistedIdentityInItsHello() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let persisted = try #require(defaults.string(forKey: ClientIdentity.defaultsKey),
+                                     "constructing the controller must mint + persist the identity")
+
+        controller.connect(to: makeMac())
+        controller.queue.sync {}
+        controller.queue.sync { factory.transports[0].events?(.ready) }
+        let hello = try CompanionEnvelope.decode(factory.transports[0].sentFrames[0])
+        #expect(hello.message == .hello(clientID: persisted, clientName: "TestPhone", protoVersion: CompanionProto.version))
+    }
+
+    // MARK: - T24: awaitingApproval
+
+    @Test func awaitingApprovalOutlivesTheWelcomeDeadlineAndAcceptsALateWelcome() throws {
+        let queue = DispatchQueue(label: "NetworkingStateTests.awaitingApproval")
+        let transport = FakeTransport()
+        let log = EventLog()
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
+        conn.welcomeTimeout = 0.05
+        conn.onEvent = { log.append($0) }
+        conn.start()
+        queue.sync { transport.events?(.ready) }
+        try queue.sync { transport.events?(.message(try encoded(.awaitingApproval))) }
+        #expect(queue.sync { conn.state } == .awaitingApproval)
+
+        // Far past the (cancelled) welcome deadline: still waiting — the
+        // user may literally be walking to their Mac.
+        Thread.sleep(forTimeInterval: 0.2)
+        #expect(queue.sync { conn.state } == .awaitingApproval,
+                "awaitingApproval must cancel the welcome deadline, not be killed by it")
+
+        // The user pressed Allow: the late welcome is the happy exit.
+        let snapshot = makeSnapshot(volume: 42)
+        try queue.sync {
+            transport.events?(.message(try encoded(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot))))
+        }
+        #expect(queue.sync { conn.state } == .live)
+        #expect(log.snapshots == [snapshot])
+    }
+
+    @Test func awaitingApprovalIsExemptFromAppLivenessButItsOwnDeadlineStillBounds() throws {
+        let queue = DispatchQueue(label: "NetworkingStateTests.approvalLiveness")
+        let transport = FakeTransport()
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientID: Self.testClientID, clientName: "TestPhone", queue: queue)
+        conn.welcomeTimeout = 0.05
+        conn.appLivenessTimeout = 0.05 // would kill a quiet handshake/live link
+        conn.approvalTimeout = 0.5
+        conn.start()
+        queue.sync { transport.events?(.ready) }
+        try queue.sync { transport.events?(.message(try encoded(.awaitingApproval))) }
+
+        // A Mac showing its prompt sends NOTHING for minutes; ticks past
+        // the app-liveness window must not read that silence as a hang
+        // (pings are ponged — the socket is provably alive).
+        Thread.sleep(forTimeInterval: 0.1)
+        queue.sync {
+            conn.keepaliveTick()
+            transport.pong()
+        }
+        #expect(queue.sync { conn.state } == .awaitingApproval,
+                "app-level liveness must be suspended while the Mac's prompt is up")
+
+        // But not FOREVER: if the server's own timeout goodbye is lost,
+        // the local approval deadline is the backstop.
+        #expect(waitUntil { queue.sync { conn.state } == .disconnected(.failed("approval wait timed out")) })
+        #expect(transport.cancelled)
+    }
+
+    @Test func approvalTimeoutOutlastsTheServersWindow() {
+        let (conn, _, queue, _) = makeConnection()
+        #expect(queue.sync { conn.approvalTimeout } > 180,
+                "the local backstop must never fire before the server's own 180s prompt window")
+    }
+
+    // MARK: - T24: goodbye classification + redial policy
+
+    @Test func approvalGoodbyesClassifyAsSpecified() {
+        #expect(MacDisconnectReason.goodbye("notApproved").reconnectClass == .terminal)
+        #expect(MacDisconnectReason.goodbye("approvalTimedOut").reconnectClass == .retry)
+        #expect(MacDisconnectReason.goodbye("invalidClientID").reconnectClass == .repairIdentity)
+    }
+
+    @Test func notApprovedStopsRedialing() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        controller.queue.sync { factory.transports[0].events?(.ready) }
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "notApproved"))))
+        }
+        Thread.sleep(forTimeInterval: 0.2) // the eager-retry window, were one scheduled
+        controller.queue.sync {}
+        #expect(factory.count == 1, "a remembered denial gets the same goodbye every time — redialing is harassment")
+        #expect(controller.queue.sync { controller.connectionState } == .disconnected(.goodbye("notApproved")))
+        #expect(MacConnectionState.disconnected(.goodbye("notApproved")).approvalStatus == .denied)
+
+        // Browse refreshes must not resurrect it either.
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        Thread.sleep(forTimeInterval: 0.1)
+        controller.queue.sync {}
+        #expect(factory.count == 1)
+
+        // An explicit user connect (after fixing it on the Mac) is the way back.
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        #expect(factory.count == 2)
+    }
+
+    @Test func approvalTimedOutRetriesOnTheNormalBackoff() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        controller.queue.sync { factory.transports[0].events?(.ready) }
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "approvalTimedOut"))))
+        }
+        #expect(waitUntil { factory.count == 2 },
+                "an unanswered prompt is retryable — reconnecting re-asks the Mac's user")
+        #expect(MacConnectionState.disconnected(.goodbye("approvalTimedOut")).approvalStatus == .promptTimedOut)
+    }
+
+    @Test func invalidClientIDRegeneratesOnceThenSettlesIfItRecurs() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+        let originalID = try #require(defaults.string(forKey: ClientIdentity.defaultsKey))
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        controller.queue.sync { factory.transports[0].events?(.ready) }
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "invalidClientID"))))
+        }
+
+        // Repair: exactly one fresh, persisted identity + one redial.
+        #expect(waitUntil { factory.count == 2 },
+                "the first invalidClientID must repair the identity and retry")
+        let repairedID = try #require(defaults.string(forKey: ClientIdentity.defaultsKey))
+        #expect(repairedID != originalID)
+        #expect(UUID(uuidString: repairedID) != nil)
+
+        // The redial's hello carries the REPAIRED identity.
+        controller.queue.sync { factory.transports[1].events?(.ready) }
+        let hello = try CompanionEnvelope.decode(factory.transports[1].sentFrames[0])
+        #expect(hello.message == .hello(clientID: repairedID, clientName: "TestPhone", protoVersion: CompanionProto.version))
+
+        // The fresh identity is refused too: NOT an identity problem —
+        // settle, do not mint identities in a loop.
+        try controller.queue.sync {
+            factory.transports[1].events?(.message(try encoded(.goodbye(reason: "invalidClientID"))))
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+        controller.queue.sync {}
+        #expect(factory.count == 2, "a recurring invalidClientID must settle, not loop")
+        #expect(defaults.string(forKey: ClientIdentity.defaultsKey) == repairedID,
+                "settling must not churn the identity again")
+        #expect(controller.queue.sync { controller.connectionState } == .disconnected(.goodbye("invalidClientID")))
+    }
+
+    @Test func aWelcomeResetsTheIdentityRepairBudget() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        controller.queue.sync { factory.transports[0].events?(.ready) }
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "invalidClientID"))))
+        }
+        try #require(waitUntil { factory.count == 2 })
+        try goLive(controller, transport: factory.transports[1])
+
+        // A whole successful session later, a (far-fetched) second
+        // invalidClientID gets a fresh repair budget instead of instantly
+        // settling on the stale "already repaired once" flag.
+        try controller.queue.sync {
+            factory.transports[1].events?(.message(try encoded(.goodbye(reason: "invalidClientID"))))
+        }
+        #expect(waitUntil { factory.count == 3 },
+                "the repair budget is per failure streak, not per controller lifetime")
     }
 }

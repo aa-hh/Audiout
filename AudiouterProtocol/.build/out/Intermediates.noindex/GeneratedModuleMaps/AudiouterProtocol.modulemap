@@ -1,4 +1,0 @@
-module AudiouterProtocol {
-header "AudiouterProtocol-Swift.h"
-export *
-}

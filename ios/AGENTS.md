@@ -38,11 +38,13 @@ Build for the simulator:
 xcodebuild -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote -destination 'generic/platform=iOS Simulator' build
 ```
 
-Run tests on a booted simulator (pick an installed device with
-`xcrun simctl list devices available`):
+Run tests on the simulator — a working runtime IS installed on this Mac
+(don't trust an earlier report that none was; that was a sandbox visibility
+artifact). Pick an installed device with `xcrun simctl list devices
+available`; today that's the iPhone 17 family:
 
 ```
-xcodebuild test -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote -destination 'platform=iOS Simulator,name=iPhone 16'
+xcodebuild test -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 ## Map

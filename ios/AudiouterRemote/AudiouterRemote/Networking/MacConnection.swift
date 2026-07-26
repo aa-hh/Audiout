@@ -4,10 +4,16 @@ import Foundation
 import Network
 import AudiouterProtocol
 
-/// idle → connecting → handshaking → live → disconnected(reason).
-/// `handshaking`/`live` are the two phases of "connected": transport up +
-/// hello sent, vs. welcome received. Terminal state is always
-/// `disconnected` — there is no path out of it (a reconnect is a NEW
+/// idle → connecting → handshaking → (awaitingApproval →) live →
+/// disconnected(reason). `handshaking`/`live` are the two phases of
+/// "connected": transport up + hello sent, vs. welcome received.
+/// `awaitingApproval` is the optional third phase in between: the server
+/// answered the hello with an `awaitingApproval` frame — the Mac is showing
+/// its user an allow/deny prompt RIGHT NOW. It is NOT an error: the UI shows
+/// "check your Mac" (see ``MacConnectionState/approvalStatus``) and the
+/// connection is held open for minutes (``MacConnection/approvalTimeout``),
+/// resolving into `welcome` → `live` or a `goodbye`. Terminal state is
+/// always `disconnected` — there is no path out of it (a reconnect is a NEW
 /// `MacConnection`; see ``ConnectionController``), which is what makes
 /// zombie states impossible: after `disconnected`, every handler guards
 /// out and the transport is detached.
@@ -15,8 +21,63 @@ enum MacConnectionState: Equatable, Sendable {
     case idle
     case connecting
     case handshaking
+    case awaitingApproval
     case live
     case disconnected(MacDisconnectReason)
+}
+
+/// The approval-flow slice of connection state, pre-digested for the
+/// Connect tab: one value to switch on, with the human-readable copy
+/// attached, instead of the UI pattern-matching goodbye strings. `nil` for
+/// every state that has nothing to do with per-phone approval.
+enum ApprovalStatus: Equatable, Sendable {
+    /// The Mac is showing its user the allow/deny prompt. Long-lived and
+    /// healthy — render a waiting surface, never an error.
+    case waitingForApproval
+    /// The Mac's user pressed "Don't Allow" (now or on an earlier connect —
+    /// denials are remembered). TERMINAL: no auto-redial; recovery is on
+    /// the Mac (remove this iPhone from Settings › General), then a manual
+    /// reconnect.
+    case denied
+    /// The prompt sat unanswered past the Mac's deadline. Retryable:
+    /// reconnecting asks again (and auto-reconnect does keep retrying).
+    case promptTimedOut
+
+    var headline: String {
+        switch self {
+        case .waitingForApproval: return "Waiting for approval"
+        case .denied: return "This iPhone wasn't allowed"
+        case .promptTimedOut: return "Your Mac didn't answer"
+        }
+    }
+
+    var guidance: String {
+        switch self {
+        case .waitingForApproval:
+            return "Audiouter on your Mac is asking to allow this iPhone. Answer the prompt there — this can take a few minutes."
+        case .denied:
+            return "To connect, open Audiouter's Settings › General on your Mac, remove this iPhone from Remembered iPhones, then connect again."
+        case .promptTimedOut:
+            return "The approval prompt on your Mac went unanswered. Reconnect to ask again."
+        }
+    }
+}
+
+extension MacConnectionState {
+    /// See ``ApprovalStatus``. This is the API the Connect tab renders the
+    /// approval flow from — `RemoteSession.connectionStatus.approvalStatus`.
+    var approvalStatus: ApprovalStatus? {
+        switch self {
+        case .awaitingApproval:
+            return .waitingForApproval
+        case .disconnected(.goodbye(CompanionGoodbyeReason.notApproved)):
+            return .denied
+        case .disconnected(.goodbye(CompanionGoodbyeReason.approvalTimedOut)):
+            return .promptTimedOut
+        default:
+            return nil
+        }
+    }
 }
 
 enum MacDisconnectReason: Equatable, Sendable {
@@ -31,8 +92,8 @@ enum MacDisconnectReason: Equatable, Sendable {
     /// its reaper, state broadcasts, command results), i.e. a hung app on a
     /// healthy socket.
     case keepaliveTimeout
-    /// The server said goodbye; carries its reason (`"disabled"` /
-    /// `"shutdown"` / `"protoMismatch"` / `"serverFull"`). See
+    /// The server said goodbye; carries its reason (one of
+    /// `CompanionGoodbyeReason`'s constants). See
     /// `MacDisconnectReason.reconnectClass` (ConnectionController.swift)
     /// for how each is treated; unknown reasons are retryable by design.
     case goodbye(String)
@@ -94,10 +155,18 @@ final class MacConnection: @unchecked Sendable {
     /// first broadcast runs on its main actor, so a Mac with a stalled main
     /// thread would otherwise leave us in `.handshaking` FOREVER (the
     /// socket is healthy — no transport event will ever save us). `var` so
-    /// tests shrink it; set before `start()`. Deliberately a plain deadline
-    /// today: a future "waiting for the user to approve this phone" server
-    /// signal would cancel/extend `welcomeDeadline` on arrival.
+    /// tests shrink it; set before `start()`. An `awaitingApproval` frame
+    /// cancels this deadline and replaces it with the (much longer)
+    /// ``approvalTimeout`` — the FIX-D deadline was left cancellable for
+    /// exactly this.
     var welcomeTimeout: TimeInterval = 10
+    /// Bound on `awaitingApproval → live`: the server holds an unapproved
+    /// connection for up to 180s while its user answers the prompt (they
+    /// may be walking to the Mac), then sends `goodbye(approvalTimedOut)`
+    /// itself. This local deadline is belt-and-braces for that goodbye
+    /// getting lost — 180s + generous slack, NEVER shorter than the
+    /// server's window. `var` so tests shrink it; set before `start()`.
+    var approvalTimeout: TimeInterval = 240
     /// App-level liveness bound after `.live`: the server pings every
     /// client (its reaper loop) and those pings surface here as
     /// `.activity`, so a healthy-but-idle link still produces inbound
@@ -114,6 +183,9 @@ final class MacConnection: @unchecked Sendable {
     private let queue: DispatchQueue
     private let transport: MacTransport
     private let clientName: String
+    /// The stable per-phone identity the hello carries (see
+    /// ``ClientIdentity``) — what the Mac's approval is keyed on.
+    private let clientID: String
     /// Touched on `queue` only.
     private(set) var state: MacConnectionState = .idle
     private(set) var missedPings = 0
@@ -122,9 +194,10 @@ final class MacConnection: @unchecked Sendable {
     /// Uptime of the last inbound frame (`.message` or `.activity`).
     private var lastInboundUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
-    init(mac: DiscoveredMac, transport: MacTransport, clientName: String, queue: DispatchQueue) {
+    init(mac: DiscoveredMac, transport: MacTransport, clientID: String, clientName: String, queue: DispatchQueue) {
         self.mac = mac
         self.transport = transport
+        self.clientID = clientID
         self.clientName = clientName
         self.queue = queue
     }
@@ -180,7 +253,7 @@ final class MacConnection: @unchecked Sendable {
         case .ready:
             guard case .connecting = state else { return }
             guard let hello = try? CompanionEnvelope(
-                message: .hello(clientName: clientName, protoVersion: CompanionProto.version)
+                message: .hello(clientID: clientID, clientName: clientName, protoVersion: CompanionProto.version)
             ).encoded() else {
                 tearDown(.failed("could not encode hello"))
                 return
@@ -204,7 +277,7 @@ final class MacConnection: @unchecked Sendable {
 
     private func handleFrame(_ data: Data) {
         switch state {
-        case .handshaking, .live: break
+        case .handshaking, .awaitingApproval, .live: break
         default: return
         }
         // Length safety is enforced below the decode (the transport caps
@@ -220,7 +293,10 @@ final class MacConnection: @unchecked Sendable {
         }
         switch envelope.message {
         case .welcome(let serverName, let protoVersion, let snapshot):
-            guard case .handshaking = state else { return }
+            switch state {
+            case .handshaking, .awaitingApproval: break // approval resolved → welcome is the happy exit
+            default: return
+            }
             guard !CompanionProto.isIncompatible(peerVersion: protoVersion) else {
                 tearDown(.incompatiblePeer)
                 return
@@ -229,6 +305,14 @@ final class MacConnection: @unchecked Sendable {
             welcomeDeadline = nil
             transition(to: .live)
             onEvent?(.welcome(serverName: serverName, snapshot: snapshot))
+        case .awaitingApproval:
+            // Only meaningful as the server's answer to our hello; a repeat
+            // must not restart the (already long) approval deadline.
+            guard case .handshaking = state else { return }
+            welcomeDeadline?.cancel()
+            welcomeDeadline = nil
+            transition(to: .awaitingApproval)
+            startApprovalDeadline()
         case .state(let snapshot):
             onEvent?(.snapshot(snapshot))
         case .commandResult(let requestID, let applied, let refusalReason, let autoSwapped):
@@ -258,7 +342,7 @@ final class MacConnection: @unchecked Sendable {
     func keepaliveTick() {
         dispatchPrecondition(condition: .onQueue(queue))
         switch state {
-        case .handshaking, .live: break
+        case .handshaking, .awaitingApproval, .live: break
         default: return
         }
         if missedPings >= Self.maxMissedPings {
@@ -267,7 +351,12 @@ final class MacConnection: @unchecked Sendable {
         }
         // App-level liveness (independent of socket pongs, which the peer's
         // Network.framework answers even when the Mac app is hung).
-        if ProcessInfo.processInfo.systemUptime - lastInboundUptime > appLivenessTimeout {
+        // Suspended while awaiting approval: the Mac app is deliberately
+        // quiet for up to 180s while its prompt is up — the (longer)
+        // approval deadline owns that window; socket death is still caught
+        // by the ping misses above.
+        if state != .awaitingApproval,
+           ProcessInfo.processInfo.systemUptime - lastInboundUptime > appLivenessTimeout {
             tearDown(.keepaliveTimeout)
             return
         }
@@ -288,6 +377,21 @@ final class MacConnection: @unchecked Sendable {
         }
         welcomeDeadline = item
         queue.asyncAfter(deadline: .now() + welcomeTimeout, execute: item)
+    }
+
+    /// Replaces the welcome deadline once `awaitingApproval` arrives (same
+    /// `welcomeDeadline` slot — exactly one handshake-phase deadline is ever
+    /// armed). Fires only if the approval never resolves AND the server's
+    /// own `goodbye(approvalTimedOut)` was lost.
+    private func startApprovalDeadline() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.welcomeDeadline = nil
+            guard case .awaitingApproval = self.state else { return }
+            self.tearDown(.failed("approval wait timed out"))
+        }
+        welcomeDeadline = item
+        queue.asyncAfter(deadline: .now() + approvalTimeout, execute: item)
     }
 
     private func startKeepalive() {

@@ -226,6 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fresh install never opens an always-on listener uninvited.
     private let companionServer = CompanionServer()
 
+    /// The per-phone approval model (T24): remembers each phone's
+    /// allow/deny answer (`CompanionApprovalStore`, alongside the other
+    /// stores), funnels unknown phones into ONE prompt per clientID, and
+    /// backs the Settings › General "Remembered iPhones" list. Wired to the
+    /// server (gate + revocation-drop) and to the prompt in
+    /// `wireCompanionServer()`.
+    private let companionApprovals = CompanionApprovalController()
+
     /// Mirrors whether `companionServer` is currently running, so the many
     /// broadcast triggers can no-op cheaply while the feature is off (the
     /// default) and `updateCompanionServerState()` only acts on a real edge.
@@ -1126,7 +1134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller = SettingsWindowController(settings: settings,
                                                   excludedApps: excludedApps,
                                                   latency: makeLatencySettingModel(),
-                                                  wakeRestore: makeWakeRestoreSettingModel())
+                                                  wakeRestore: makeWakeRestoreSettingModel(),
+                                                  companionApprovals: companionApprovals)
             controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
             // Accent dial (W1, spec §1.3): the pane has already persisted and
             // remapped `Tokens.accentStyle`; this nudge repaints whatever is
@@ -1479,7 +1488,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Per-phone approval gate (T24). The server holds every helloed
+        // connection until `companionApprovals` answers — from the store for
+        // a remembered phone (instant, no UI), via the one-per-clientID
+        // prompt below for an unknown one. Server queue → main ASYNC, the
+        // same discipline as onCommand; if we're terminating, don't answer —
+        // the server teardown closes the held connection, and no decision
+        // gets persisted on the way out.
+        companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.companionApprovals.handleRequest(
+                    clientID: clientID, clientName: clientName, decide: decide)
+            }
+        }
+        companionApprovals.presentPrompt = { [weak self] clientName, respond in
+            self?.presentCompanionApprovalPrompt(clientName: clientName, respond: respond)
+        }
+        // Revoking a phone in Settings must also disconnect it if it's live.
+        companionApprovals.dropClient = { [weak self] clientID in
+            self?.companionServer.dropClient(clientID: clientID)
+        }
+
         updateCompanionServerState()
+    }
+
+    /// The T24 approval alert: names the phone, explains the stakes, and
+    /// reports the answer back to `CompanionApprovalController` (which
+    /// persists it and settles every connection waiting on it). Main-actor
+    /// and modal — the SERVER never blocks (its queue keeps running; only
+    /// this app's own UI waits), and the controller guarantees one open
+    /// prompt per clientID, so a reconnecting phone can't stack duplicates.
+    @MainActor
+    private func presentCompanionApprovalPrompt(clientName: String, respond: @escaping (Bool) -> Void) {
+        // Headless harnesses must never flash real UI; not answering leaves
+        // the decision unmade (no persisted denial) and the server's own
+        // approval deadline closes the connection.
+        guard !HeadlessRuntime.isActive, !isTerminating else { return }
+        let alert = NSAlert()
+        alert.messageText = "Allow \u{201C}\(clientName)\u{201D} to control audio on this Mac?"
+        alert.informativeText = "It will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings."
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Don't Allow")
+        // A menu-bar app usually has no key window; activate so the alert is
+        // actually seen (same treatment as SettingsWindowController.showWindow).
+        NSApp.activate(ignoringOtherApps: true)
+        respond(alert.runModal() == .alertFirstButtonReturn)
     }
 
     /// Start or stop the companion server to match

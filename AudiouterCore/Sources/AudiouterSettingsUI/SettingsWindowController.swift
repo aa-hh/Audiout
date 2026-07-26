@@ -148,13 +148,16 @@ public final class SettingsWindowController: NSWindowController {
     ///   - latency: the Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md);
     ///     nil (the default) when the backend isn't `LatencyConfigurable`, in
     ///     which case the Audio tab renders no Advanced sub-section at all.
+    ///   - companionApprovals: the per-phone approval model (T24) backing the
+    ///     General tab's "Remembered iPhones" list; nil mounts no list.
     public init(settings: AppSettings,
                 loginItem: LoginItemManaging = SMAppServiceLoginItem(),
                 excludedApps: ExcludedAppsController = ExcludedAppsController(),
                 runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
                 latency: LatencySettingModel? = nil,
-                wakeRestore: WakeAudioRestoreModel? = nil) {
-        generalVC = GeneralSettingsViewController(loginItem: loginItem)
+                wakeRestore: WakeAudioRestoreModel? = nil,
+                companionApprovals: CompanionApprovalController? = nil) {
+        generalVC = GeneralSettingsViewController(loginItem: loginItem, approvals: companionApprovals)
         appearanceVC = AppearanceSettingsViewController(settings: settings)
         audioVC = AudioSettingsViewController(excluded: excludedApps,
                                               runningAppsProvider: runningAppsProvider,

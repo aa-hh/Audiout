@@ -42,12 +42,21 @@ import AudiouterProtocol
     private final class Rig: @unchecked Sendable {
         static let serverName = "TestMac"
 
+        /// The phone identity every test client hellos with. Pre-APPROVED in
+        /// the rig's `CompanionApprovalStore` fixture (T24): these scenarios
+        /// exercise the command/broadcast stack, not the approval gate — the
+        /// gate has its own suites (`CompanionServerTests`,
+        /// `CompanionApprovalStoreTests`) — so the store fixture stands in
+        /// for a user who already answered "Allow".
+        static let approvedClientID = "6A3B84E4-4E0E-4B37-9D25-8E4CE9B0B2C1"
+
         let backend: MockBackend
         let groupController: GroupController
         let appRouting: AppRoutingController
         let excludedApps: ExcludedAppsController
         let settings: AppSettings
         let dispatcher: CompanionCommandDispatcher
+        let approvals: CompanionApprovalController
         let server = CompanionServer()
 
         init(scratchDir: URL, defaults: UserDefaults, fleet: [Device] = .demoFleet) {
@@ -62,6 +71,20 @@ import AudiouterProtocol
             appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
             excludedApps = ExcludedAppsController(store: ExcludedAppsStore(directory: scratchDir), loadPersisted: false)
             settings = AppSettings(defaults: defaults)
+
+            // T24: pre-approved store fixture (see `approvedClientID`),
+            // wired the way AppDelegate wires the real gate — the REAL
+            // controller answers from the REAL store; only the user's
+            // one-time "Allow" is pre-recorded.
+            let approvalStore = CompanionApprovalStore(directory: scratchDir)
+            try? approvalStore.save([CompanionApproval(
+                clientID: Self.approvedClientID,
+                lastKnownName: "test phone",
+                decision: .approved,
+                firstSeen: .distantPast,
+                lastSeen: .distantPast)])
+            approvals = CompanionApprovalController(store: approvalStore)
+
             let excluded = excludedApps
             dispatcher = CompanionCommandDispatcher(
                 groupController: groupController,
@@ -86,6 +109,15 @@ import AudiouterProtocol
             // onStateDidChange broadcast above for state-changing commands;
             // harmless since CompanionServer suppresses identical repeats,
             // and load-bearing for refusals/no-ops that never touch state).
+            // T24 gate, wired the way AppDelegate wires it: server queue →
+            // main-actor hop → the approval controller (which answers from
+            // the pre-approved fixture with no prompt).
+            server.onApprovalRequest = { [self] clientID, clientName, decide in
+                Task { @MainActor in
+                    self.approvals.handleRequest(clientID: clientID, clientName: clientName, decide: decide)
+                }
+            }
+
             server.onCommand = { [self] requestID, command, clientID, reply in
                 Task { @MainActor in
                     let result = self.dispatcher.execute(command)
@@ -307,7 +339,7 @@ import AudiouterProtocol
     }
 
     nonisolated private func sendHello(over client: NWConnection, name: String = "phone") throws {
-        sendText(try CompanionEnvelope(message: .hello(clientName: name, protoVersion: CompanionProto.version)).encoded(), over: client)
+        sendText(try CompanionEnvelope(message: .hello(clientID: Rig.approvedClientID, clientName: name, protoVersion: CompanionProto.version)).encoded(), over: client)
     }
 
     nonisolated private func sendCommand(_ command: CompanionCommand, requestID: String, over client: NWConnection) throws {

@@ -177,8 +177,21 @@ import AudiouterProtocol
         client.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
     }
 
-    private func sendHello(over client: NWConnection, name: String = "phone", protoVersion: Int = CompanionProto.version) throws {
-        sendText(try CompanionEnvelope(message: .hello(clientName: name, protoVersion: protoVersion)).encoded(), over: client)
+    /// A syntactically valid phone identity for tests that aren't about the
+    /// clientID itself.
+    static let validClientID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+
+    private func sendHello(over client: NWConnection, name: String = "phone", clientID: String = CompanionServerTests.validClientID, protoVersion: Int = CompanionProto.version) throws {
+        sendText(try CompanionEnvelope(message: .hello(clientID: clientID, clientName: name, protoVersion: protoVersion)).encoded(), over: client)
+    }
+
+    /// A server whose T24 approval gate answers `.approved` instantly — what
+    /// every pre-approval test below means by "a client hellos and is
+    /// promoted". The gate's own behavior is tested separately at the end.
+    private func makeAutoApprovingServer() -> CompanionServer {
+        let server = CompanionServer()
+        server.onApprovalRequest = { _, _, decide in decide(.approved) }
+        return server
     }
 
     /// A minimal-but-real snapshot; `volume` differentiates fixtures so
@@ -207,7 +220,7 @@ import AudiouterProtocol
     @Test func handshakeYieldsWelcomeCarryingTheCachedSnapshot() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         let snapshot = makeSnapshot()
@@ -224,7 +237,7 @@ import AudiouterProtocol
     @Test func newerProtoHelloIsRefusedWithGoodbye() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -243,7 +256,7 @@ import AudiouterProtocol
     @Test func silentClientIsCancelledAfterTheHandshakeDeadline() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_handshakeTimeoutOverride = 0.3 // real default is 10s
         defer { server.stop() }
 
@@ -260,7 +273,7 @@ import AudiouterProtocol
     @Test func commandRoundTripDeliversTheReply() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         server.onCommand = { requestID, command, _, reply in
@@ -287,7 +300,7 @@ import AudiouterProtocol
     @Test func broadcastReachesEveryClientAndSuppressesIdenticalSnapshots() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         let snap1 = makeSnapshot(volume: 10)
@@ -323,7 +336,7 @@ import AudiouterProtocol
     @Test func malformedFrameClosesOnlyTheOffender() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         let snap1 = makeSnapshot(volume: 10)
@@ -352,7 +365,7 @@ import AudiouterProtocol
     @Test func oversizedFrameClosesTheOffender() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         let (client, log) = try connectClient(via: hub, to: server)
@@ -370,7 +383,7 @@ import AudiouterProtocol
     @Test func clientCapRefusesPolitelyAndKeepsExistingClients() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_maxClientsOverride = 1 // real cap is 16
         defer { server.stop() }
 
@@ -404,7 +417,7 @@ import AudiouterProtocol
     @Test func stopCancelsEveryConnection() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() } // idempotent second stop
 
         let counts = LockedBox<[Int]>([])
@@ -436,7 +449,7 @@ import AudiouterProtocol
     @Test func stopSendsGoodbyeCarryingTheGivenReason() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -465,7 +478,7 @@ import AudiouterProtocol
     @Test func preHelloConnectionsDoNotConsumeClientSlots() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_maxClientsOverride = 1
         defer { server.stop() }
         server.broadcast(makeSnapshot())
@@ -493,7 +506,7 @@ import AudiouterProtocol
     @Test func pendingFloodBeyondTheCapIsDroppedImmediately() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_pendingCapOverride = 1 // real cap is 32
         defer { server.stop() }
 
@@ -533,7 +546,7 @@ import AudiouterProtocol
     @Test func silentDeadClientIsReapedByLivenessPings() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_pingIntervalOverride = 0.1  // real default is 20 s
         server.test_livenessTimeoutOverride = 0.3 // real default is 60 s
         defer { server.stop() }
@@ -558,7 +571,7 @@ import AudiouterProtocol
     @Test func pongAnsweringClientSurvivesLivenessPings() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         server.test_pingIntervalOverride = 0.1
         // Generous vs. the 0.1 s ping cadence: several agents' suites share
         // this machine, and a scheduling stall must not read as death.
@@ -591,7 +604,7 @@ import AudiouterProtocol
     @Test func clientNameIsTruncatedAtParse() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -610,7 +623,7 @@ import AudiouterProtocol
     @Test func newerEnvelopeVersionOnALaterFrameIsRefused() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -634,7 +647,7 @@ import AudiouterProtocol
     @Test func disconnectReportsTheSameClientIDCommandsCarried() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeAutoApprovingServer()
         defer { server.stop() }
 
         let commandClientID = LockedBox<UUID?>(nil)
@@ -659,5 +672,202 @@ import AudiouterProtocol
         client.cancel()
         #expect(waitUntil { disconnectedIDs.value.contains(observedID) },
                 "the disconnect never reported the client's ID (or reported a different one)")
+    }
+
+    // MARK: - Per-phone approval gate (T24)
+
+    @Test func approvedDecisionPromotesAndWelcomes() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let asked = LockedBox<(id: String, name: String)?>(nil)
+        server.onApprovalRequest = { clientID, clientName, decide in
+            asked.value = (clientID, clientName)
+            decide(.approved)
+        }
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client, name: "Alec's iPhone")
+
+        #expect(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                "the approved client was never welcomed")
+        let request = try #require(asked.value)
+        #expect(request.id == Self.validClientID, "the gate must see the (canonicalized) clientID")
+        #expect(request.name == "Alec's iPhone")
+        // No awaitingApproval frame on the fast path: an already-approved
+        // phone must never flash "check your Mac".
+        #expect(!log.contains(.awaitingApproval),
+                "an instantly-approved client must not be told it's awaiting approval")
+    }
+
+    @Test func deniedDecisionSendsNotApprovedAndCloses() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.denied) }
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.notApproved)) },
+                "the denied client never learned why it was refused")
+        #expect(waitUntil { log.closed }, "the denied client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } },
+                "a denied client must never be welcomed")
+    }
+
+    /// The full unknown-phone arc: hold (awaitingApproval frame, connection
+    /// alive well past the PRE-HELLO deadline — that guards un-helloed
+    /// connections only) → late `.approved` → welcome.
+    @Test func unknownClientIsHeldPastTheHandshakeDeadlineThenPromotedOnApproval() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        // Short enough to outlive cheaply below, long enough that the hello
+        // itself always lands inside it even on a loaded machine.
+        server.test_handshakeTimeoutOverride = 0.5
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let decider = LockedBox<(@Sendable (CompanionServer.ApprovalDecision) -> Void)?>(nil)
+        server.onApprovalRequest = { _, _, decide in
+            decide(.pending)
+            decider.value = decide
+        }
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+
+        #expect(waitUntil { log.contains(.awaitingApproval) },
+                "the unknown client was never told it's awaiting approval")
+        // Outlive the pre-hello deadline several times over while the
+        // human decides.
+        Thread.sleep(forTimeInterval: 1.5)
+        #expect(!log.closed, "the awaiting client was killed by the pre-hello deadline")
+
+        let decide = decider.value
+        try #require(decide != nil, "the gate never asked the app layer")
+        decide?(.approved)
+        #expect(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                "the late-approved client was never welcomed")
+    }
+
+    @Test func awaitingApprovalTimesOutWithARetryableReason() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.pending) } // never answered
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.approvalTimedOut)) },
+                "the unanswered client never got the timeout goodbye")
+        #expect(waitUntil { log.closed }, "the timed-out client's connection was never closed")
+
+        // A verdict arriving AFTER the timeout must be a no-op, not a crash
+        // or a ghost promotion.
+        #expect(server.test_awaitingCount() == 0)
+    }
+
+    @Test func helloWithoutClientIDIsRefusedWithAClearReason() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        // Raw frame with NO clientID key — the exact shape a pre-T24 client
+        // would send. It must decode (not read as malformed) and be refused
+        // with a reason the phone can act on.
+        sendText(Data("""
+        {"v": 1, "type": "hello", "payload": {"clientName": "old phone", "protoVersion": 1}}
+        """.utf8), over: client)
+
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientID)) },
+                "the clientID-less hello never got its reasoned refusal")
+        #expect(waitUntil { log.closed }, "the refused client's connection was never closed")
+    }
+
+    @Test func helloWithAMalformedClientIDIsRefused() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client, clientID: "definitely-not-a-uuid")
+
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientID)) },
+                "the malformed clientID was never refused")
+        #expect(waitUntil { log.closed }, "the refused client's connection was never closed")
+    }
+
+    @Test func awaitingPoolIsBounded() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_awaitingCapOverride = 1 // real cap is 8
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.pending) } // hold everyone
+
+        let (held, heldLog) = try connectClient(via: hub, to: server)
+        defer { held.cancel() }
+        try sendHello(over: held, clientID: UUID().uuidString)
+        try #require(waitUntil { heldLog.contains(.awaitingApproval) },
+                     "the first client was never held")
+
+        let (overflow, overflowLog) = try connectClient(via: hub, to: server)
+        defer { overflow.cancel() }
+        try sendHello(over: overflow, clientID: UUID().uuidString)
+        #expect(waitUntil { overflowLog.contains(.goodbye(reason: CompanionGoodbyeReason.serverFull)) },
+                "the over-cap awaiting client was never refused")
+        #expect(!heldLog.closed, "the held client must survive the overflow refusal")
+    }
+
+    @Test func dropClientClosesTheLiveClientWithThatPhoneIdentity() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let disconnected = LockedBox<[UUID]>([])
+        server.onClientDisconnected = { id in disconnected.withLock { $0.append(id) } }
+
+        let revokedID = UUID().uuidString
+        let (revoked, revokedLog) = try connectClient(via: hub, to: server)
+        defer { revoked.cancel() }
+        try sendHello(over: revoked, name: "revoked", clientID: revokedID)
+        let (kept, keptLog) = try connectClient(via: hub, to: server)
+        defer { kept.cancel() }
+        try sendHello(over: kept, name: "kept", clientID: UUID().uuidString)
+        try #require(waitUntil { Set(server.test_clientNames()) == ["revoked", "kept"] },
+                     "both clients must be promoted first")
+
+        server.dropClient(clientID: revokedID)
+
+        #expect(waitUntil { revokedLog.closed }, "revoking never dropped the live client")
+        #expect(waitUntil { !disconnected.value.isEmpty },
+                "the revoked drop must fire the normal disconnect signal (orphaned-drag cleanup)")
+        #expect(!keptLog.closed, "an unrelated client must survive another phone's revocation")
+        #expect(waitUntil { server.test_clientNames() == ["kept"] })
     }
 }

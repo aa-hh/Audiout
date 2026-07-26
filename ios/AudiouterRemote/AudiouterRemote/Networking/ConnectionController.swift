@@ -4,6 +4,40 @@ import Foundation
 import Network
 import AudiouterProtocol
 
+/// The phone's stable identity for per-phone approval: ONE
+/// `UUID().uuidString`, generated on first use and persisted forever (a
+/// `UserDefaults` sibling of `lastUsedMacID`). The Mac's approvals store is
+/// keyed on it — a regenerated identity IS "a different phone" and
+/// re-prompts the Mac's user — so it must never churn casually. The server
+/// canonicalizes to uppercase; we generate and persist uppercase
+/// (`UUID().uuidString` already is) and re-canonicalize on read, so the
+/// same phone can never drift into looking like two.
+enum ClientIdentity {
+    static let defaultsKey = "companionClientID"
+
+    /// Load-or-create. Repairs in place: a stored value that no longer
+    /// parses as a UUID (or isn't uppercase) is replaced/canonicalized and
+    /// re-persisted before being returned.
+    static func stableID(in defaults: UserDefaults) -> String {
+        if let stored = defaults.string(forKey: defaultsKey), UUID(uuidString: stored) != nil {
+            let canonical = stored.uppercased()
+            if canonical != stored { defaults.set(canonical, forKey: defaultsKey) }
+            return canonical
+        }
+        return regenerate(in: defaults)
+    }
+
+    /// Mint and persist a fresh identity — ONLY for first launch and for
+    /// the `invalidClientID` repair path (the Mac told us our identity is
+    /// malformed, so keeping it can never succeed).
+    @discardableResult
+    static func regenerate(in defaults: UserDefaults) -> String {
+        let id = UUID().uuidString
+        defaults.set(id, forKey: defaultsKey)
+        return id
+    }
+}
+
 /// Owns the browser, the (single) live ``MacConnection``, and the Wi-Fi
 /// path monitor; gives the app layer its scenePhase API
 /// (`enterBackground()` / `enterForeground()`).
@@ -11,8 +45,9 @@ import AudiouterProtocol
 /// Everything — browser callbacks, connection transitions, reconnect
 /// timers, path updates — runs on the one serial `queue`, and all
 /// callbacks fire on it too; the session layer (T12) hops to the main
-/// actor. The ONLY persisted value is the last-used Mac id — routing state
-/// is never persisted on the phone (house rule).
+/// actor. The only persisted values are the last-used Mac id and the
+/// phone's ``ClientIdentity`` — routing state is never persisted on the
+/// phone (house rule).
 ///
 /// Reconnect policy: while foregrounded, if the connection drops for a
 /// RETRYABLE reason (see `MacDisconnectReason.reconnectClass`) and the
@@ -20,7 +55,7 @@ import AudiouterProtocol
 /// immediately (eager), then capped exponential backoff (`NetworkBackoff`).
 /// If the Mac is not currently browsed, the next browse result that
 /// contains it triggers the attempt. Terminal reasons (`protoMismatch`,
-/// `incompatiblePeer`) settle instead: `connectionState` stays
+/// `incompatiblePeer`, `notApproved`) settle instead: `connectionState` stays
 /// `.disconnected(reason)` with NO redial until the next explicit
 /// `connect(to:)`. `serverFull` retries on a long fixed delay;
 /// `"disabled"` waits for the Mac's advertisement to disappear and come
@@ -119,8 +154,19 @@ final class ConnectionController: @unchecked Sendable {
     /// schedule.
     static let serverFullRetryDelay: TimeInterval = 60
 
+    /// One repair per settled failure: `goodbye("invalidClientID")`
+    /// regenerates the identity ONCE and redials; a second
+    /// `invalidClientID` with the fresh identity means the problem is not
+    /// the identity — settle (like `.terminal`) instead of minting
+    /// identities in a loop. Cleared on `.live` and on every explicit
+    /// `connect(to:)`.
+    private(set) var identityRepairAttempted = false
+
     private let defaults: UserDefaults
     private let clientName: String
+    /// See ``ClientIdentity`` — loaded at init, replaced only by the
+    /// `invalidClientID` repair path. Touched on `queue` after init.
+    private var clientID: String
     private let transportFactory: @Sendable (DiscoveredMac) -> MacTransport
     private let browser: MacBrowser
     private var pathMonitor: NWPathMonitor?
@@ -143,6 +189,7 @@ final class ConnectionController: @unchecked Sendable {
     ) {
         self.defaults = defaults
         self.clientName = clientName
+        self.clientID = ClientIdentity.stableID(in: defaults)
         self.transportFactory = transportFactory
         self.browser = MacBrowser(queue: queue)
         // Auto-reconnect to the remembered Mac out of the gate — unless
@@ -216,6 +263,7 @@ final class ConnectionController: @unchecked Sendable {
             self.reconnectAttempts = 0
             self.reconnectSuppressed = false
             self.awaitingReadvertise = false
+            self.identityRepairAttempted = false
             self.defaults.set(mac.id, forKey: Self.lastUsedMacIDKey)
             // Refuse-forward, enforced: a Mac advertising a NEWER protocol
             // is shown but never dialed — dialing it just burns one of its
@@ -273,7 +321,7 @@ final class ConnectionController: @unchecked Sendable {
             old.closeOnQueue(reason: .closedByUs)
         }
         let transport = transportFactory(mac)
-        let conn = MacConnection(mac: mac, transport: transport, clientName: clientName, queue: queue)
+        let conn = MacConnection(mac: mac, transport: transport, clientID: clientID, clientName: clientName, queue: queue)
         connection = conn
         conn.onEvent = { [weak self, weak conn] event in
             guard let self, let conn else { return }
@@ -291,6 +339,7 @@ final class ConnectionController: @unchecked Sendable {
             switch state {
             case .live:
                 reconnectAttempts = 0
+                identityRepairAttempted = false
             case .disconnected(let reason):
                 connection = nil
                 // Staleness: whatever snapshot this session delivered is
@@ -305,6 +354,16 @@ final class ConnectionController: @unchecked Sendable {
                     awaitingReadvertise = true
                 case .terminal:
                     reconnectSuppressed = true
+                case .repairIdentity:
+                    if identityRepairAttempted {
+                        // The fresh identity was ALSO refused — this is not
+                        // an identity problem; stop minting them.
+                        reconnectSuppressed = true
+                    } else {
+                        identityRepairAttempted = true
+                        clientID = ClientIdentity.regenerate(in: defaults)
+                        scheduleReconnectIfNeeded()
+                    }
                 case .quiet:
                     break
                 }
@@ -398,7 +457,16 @@ enum ReconnectClass: Equatable, Sendable {
     case waitForReadvertise
     /// `"protoMismatch"` / `.incompatiblePeer`: redialing can never
     /// succeed with this app version — settle until an explicit connect.
+    /// Also `"notApproved"`: the Mac's user pressed Don't Allow, and the
+    /// denial is remembered server-side — every redial gets the same
+    /// goodbye until they remove this phone in the Mac's Settings ›
+    /// General, so redialing is harassment, not recovery.
     case terminal
+    /// `"invalidClientID"`: our stored identity is malformed by the
+    /// server's rules. Regenerate + persist a fresh one and retry — ONCE
+    /// (see `ConnectionController.identityRepairAttempted`); if the fresh
+    /// identity is refused too, settle like `.terminal`.
+    case repairIdentity
     /// `.closedByUs`: we hung up; no redial, no error surface.
     case quiet
 }
@@ -411,6 +479,10 @@ extension MacDisconnectReason {
         case .goodbye(CompanionGoodbyeReason.protoMismatch): return .terminal
         case .goodbye(CompanionGoodbyeReason.serverFull): return .longBackoff
         case .goodbye(CompanionGoodbyeReason.disabled): return .waitForReadvertise
+        case .goodbye(CompanionGoodbyeReason.notApproved): return .terminal
+        case .goodbye(CompanionGoodbyeReason.invalidClientID): return .repairIdentity
+        // `approvalTimedOut` lands in the catch-all on purpose: retryable,
+        // normal backoff — reconnecting re-asks the Mac's user.
         case .goodbye, .failed, .keepaliveTimeout: return .retry
         }
     }

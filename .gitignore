@@ -22,6 +22,7 @@ AirPlayEngine/vendor/
 
 # SwiftPM build artifacts for the other local packages (same reasoning).
 AudiouterCore/.build/
+AudiouterProtocol/.build/
 AudiouterCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/

@@ -10,7 +10,7 @@ import Foundation
 struct ProtocolLinkTests {
     @Test("CompanionMessage round-trips through the wire envelope")
     func roundTripsHello() throws {
-        let original = CompanionMessage.hello(clientName: "iPhone", protoVersion: CompanionProto.version)
+        let original = CompanionMessage.hello(clientID: UUID().uuidString, clientName: "iPhone", protoVersion: CompanionProto.version)
         let envelope = CompanionEnvelope(message: original)
 
         let data = try envelope.encoded()

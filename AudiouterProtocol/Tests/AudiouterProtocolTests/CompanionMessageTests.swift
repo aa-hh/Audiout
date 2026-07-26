@@ -80,8 +80,27 @@ import Testing
     // MARK: - Message round-trips
 
     @Test func helloRoundTrips() throws {
-        let message = CompanionMessage.hello(clientName: "Alec's iPhone", protoVersion: 1)
+        let message = CompanionMessage.hello(
+            clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A",
+            clientName: "Alec's iPhone",
+            protoVersion: 1)
         #expect(try roundTrip(message) == message)
+    }
+
+    /// A hello with NO clientID key (a hand-rolled or pre-T24 client) must
+    /// decode — as `clientID: ""` — rather than throw, so the server can
+    /// refuse it with `CompanionGoodbyeReason.invalidClientID` instead of
+    /// closing it as malformed.
+    @Test func helloWithoutClientIDDecodesAsEmptyClientID() throws {
+        let json = """
+        {"v": 1, "type": "hello", "payload": {"clientName": "iPhone", "protoVersion": 1}}
+        """
+        let envelope = try CompanionEnvelope.decode(Data(json.utf8))
+        #expect(envelope.message == .hello(clientID: "", clientName: "iPhone", protoVersion: 1))
+    }
+
+    @Test func awaitingApprovalRoundTrips() throws {
+        #expect(try roundTrip(.awaitingApproval) == .awaitingApproval)
     }
 
     @Test func commandMessageRoundTrips() throws {
@@ -175,10 +194,10 @@ import Testing
 
     @Test func decodingIgnoresUnknownExtraKeysInPayload() throws {
         let json = """
-        {"v": 1, "type": "hello", "payload": {"clientName": "iPhone", "protoVersion": 1, "somethingNewAndUnexpected": true}}
+        {"v": 1, "type": "hello", "payload": {"clientID": "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", "clientName": "iPhone", "protoVersion": 1, "somethingNewAndUnexpected": true}}
         """
         let envelope = try CompanionEnvelope.decode(Data(json.utf8))
-        #expect(envelope.message == .hello(clientName: "iPhone", protoVersion: 1))
+        #expect(envelope.message == .hello(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "iPhone", protoVersion: 1))
     }
 
     @Test func decodingIgnoresUnknownExtraKeysInCommand() throws {
@@ -215,9 +234,9 @@ import Testing
     /// Server-side direction: the Mac receives `hello` and checks the
     /// phone's `protoVersion`.
     @Test func serverRefusesAHelloAdvertisingANewerProtoVersion() throws {
-        let envelope = CompanionEnvelope(message: .hello(clientName: "iPhone", protoVersion: CompanionProto.version + 1))
+        let envelope = CompanionEnvelope(message: .hello(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "iPhone", protoVersion: CompanionProto.version + 1))
         let decoded = try CompanionEnvelope.decode(envelope.encoded())
-        guard case .hello(_, let protoVersion) = decoded.message else {
+        guard case .hello(_, _, let protoVersion) = decoded.message else {
             Issue.record("expected .hello")
             return
         }
@@ -228,11 +247,19 @@ import Testing
 
     @Test func helloDecodesFromAHandWrittenWireLiteral() throws {
         let json = """
-        {"v": 1, "type": "hello", "payload": {"clientName": "Alec's iPhone", "protoVersion": 1}}
+        {"v": 1, "type": "hello", "payload": {"clientID": "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", "clientName": "Alec's iPhone", "protoVersion": 1}}
         """
         let envelope = try CompanionEnvelope.decode(Data(json.utf8))
         #expect(envelope.v == 1)
-        #expect(envelope.message == .hello(clientName: "Alec's iPhone", protoVersion: 1))
+        #expect(envelope.message == .hello(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "Alec's iPhone", protoVersion: 1))
+    }
+
+    @Test func awaitingApprovalDecodesFromAHandWrittenWireLiteral() throws {
+        let json = """
+        {"v": 1, "type": "awaitingApproval", "payload": {}}
+        """
+        let envelope = try CompanionEnvelope.decode(Data(json.utf8))
+        #expect(envelope.message == .awaitingApproval)
     }
 
     @Test func setDeviceSelectedCommandDecodesFromAHandWrittenWireLiteral() throws {

@@ -1,8 +1,14 @@
 # Companion App — Mac-Only Live Gate (Phase 1)
 
-*Run this checklist before merging T1–T9 to main. The gate passes only when R4 (firewall)
-shows no per-launch prompts on a Developer-ID build, and all boxes below are checked.
-Two builds run here: mock (fastest discovery validation) and native (Bonjour/network).*
+*Run this checklist before merging the Mac side to main. The gate passes only when R4
+(firewall) shows no per-launch prompts on a Developer-ID build, and all boxes below are
+checked. Two builds run here: mock (fastest discovery validation) and native
+(Bonjour/network).*
+
+*Updated 2026-07-27 for the review-fix wave and the per-phone approval gate (D2 REVISED):
+step 4 now checks the checkbox cannot lie, step 6 needs a `clientID` and expects an
+approval alert, step 6b covers approval memory / denial / revoke, and step 8 checks the
+approvals file. No phone required — websocat stands in for one throughout.*
 
 ---
 
@@ -66,7 +72,11 @@ Two builds run here: mock (fastest discovery validation) and native (Bonjour/net
   ```bash
   AUDIOUTER_COMPANION=1 AIRPLAY_BACKEND=mock open build/Audiouter.app
   ```
-  Verify server advertises (`dns-sd -B _audiouter._tcp`); Settings toggle shows ON.
+  Verify server advertises (`dns-sd -B _audiouter._tcp`). In Settings › General the
+  checkbox must show **ON, greyed out, with an explanatory line** naming the override —
+  it must NOT show OFF while the server runs, and clicking it must do nothing. (This was
+  a real bug found in review: the checkbox used to lie. If it lies again, that's a
+  regression, not a quirk.)
 
 - [ ] **Override OFF via env** (reverts to OFF despite Settings, explicit opt-out for testing)
   ```bash
@@ -118,12 +128,18 @@ reaches it and gets a snapshot response.
   ```
   (Replace PORT with the ephemeral port shown by `dns-sd`. The TXT record carries it.)
 
-- [ ] **Send the hello handshake**. Paste this exactly:
+- [ ] **Send the hello handshake**. Paste this exactly (the `clientID` must be a real
+  UUID — any one you invent is fine, but reuse the SAME one later in step 6b):
   ```json
-  {"v": 1, "type": "hello", "payload": {"clientName": "TestClient", "protoVersion": 1}}
+  {"v": 1, "type": "hello", "payload": {"clientID": "11111111-2222-3333-4444-555555555555", "clientName": "TestClient", "protoVersion": 1}}
   ```
-  Expected response: a frame starting with `"type":"welcome"` containing a `snapshot`
-  with devices, groups, settings, etc. If you see this, protocol is working.
+  Expected FIRST response: `"type":"awaitingApproval"` — because this identity is
+  unknown, the Mac is now prompting you. **A native alert should appear on the Mac**
+  naming "TestClient". Click **Allow**. Expected SECOND response: a frame starting with
+  `"type":"welcome"` containing a `snapshot` with devices, groups, settings, etc.
+
+  If the alert never appears but you get a `welcome` immediately, the approval gate is
+  not engaged — **stop and report**, that's the whole privacy feature bypassed.
 
 - [ ] **Trigger a state change in the popover** (e.g., toggle a speaker selected) and
   **expect a state frame** from the server immediately:
@@ -133,14 +149,37 @@ reaches it and gets a snapshot response.
 
 - [ ] **Close websocat** (Ctrl+C).
 
+### 6b. Approval memory, denial, and revoke
+
+- [ ] **Reconnect with the SAME clientID** from step 6. Expected: **no prompt this time**
+  — straight to `welcome`. The Mac remembers approved phones.
+
+- [ ] **Settings › General now lists it.** A "Remembered iPhones" list should show
+  "TestClient — Allowed" under the companion checkbox.
+
+- [ ] **Revoke it** (minus button on that row). Expected: the live websocat connection
+  is dropped, and the row disappears.
+
+- [ ] **Connect with a DIFFERENT clientID** (change one digit) and click **Don't Allow**
+  on the alert. Expected: `goodbye` with reason `notApproved`, connection closes, and
+  the row appears as "TestClient — Denied". Reconnecting with that same id must be
+  refused **without re-prompting** (a denied phone must not be able to nag you).
+
+- [ ] **Revoke the denied row** so the gate is clean for the next test.
+
+- [ ] **Untick the companion checkbox while a client is connected.** Expected: the
+  client receives `goodbye` with reason `disabled` before the socket closes (not a bare
+  connection drop — the phone uses this to settle quietly instead of redialling).
+
 **If websocat is not installed:**
 
 - [ ] **Run the AudiouterProtocol test suite** instead (proves wire format round-trips)
   ```bash
   cd AudiouterProtocol && swift test
   ```
-  Expected: all CompanionMessageTests pass (hello, welcome, command, state, goodbye
-  round-trips + all 18 command cases).
+  Expected: all CompanionMessageTests pass (hello, welcome, awaitingApproval, command,
+  state, goodbye round-trips + all 19 command cases). Note this does NOT exercise the
+  approval alert — that part of the gate is skipped, so say so when reporting.
 
 ---
 
@@ -174,7 +213,20 @@ CompanionSnapshotBuilder logs.
   scripts/run-tests.sh
   ```
   Expected: all tests pass, including CompanionMessageTests, CompanionSnapshotBuilderTests,
-  CompanionCommandDispatcherTests, CompanionServerTests, CompanionEndToEndTests.
+  CompanionCommandDispatcherTests, CompanionServerTests, CompanionEndToEndTests,
+  CompanionApprovalStoreTests, CompanionCommandRateLimiterTests.
+
+  **Watch for flakes.** One unidentified failure occurred in a single full-suite run
+  during development (machine heavily loaded), not reproduced in nine runs since.
+  Several liveness tests are timing-sensitive. If you see a failure, capture the test
+  NAME before re-running — that identification is the valuable part.
+
+- [ ] **Confirm the approvals file was written**
+  ```bash
+  cat ~/Library/Application\ Support/Audiouter/companion-approvals.json
+  ```
+  Expected: a `{"schemaVersion":1,...}` envelope. It should be EMPTY of entries if you
+  revoked everything in step 6b.
 
 - [ ] **Run AudiouterProtocol tests** explicitly (not in the standard suite)
   ```bash

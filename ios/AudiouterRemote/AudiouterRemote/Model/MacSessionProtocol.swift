@@ -27,6 +27,11 @@ protocol MacSessionProtocol: AnyObject {
     /// The latest full app state, or `nil` before the first snapshot arrives.
     var snapshot: Snapshot? { get }
     /// For header display — `DemoMacSession` reports a fixed `.live`.
+    /// The per-phone approval flow rides on this too: `.awaitingApproval`
+    /// (Mac is prompting its user — waiting surface, NOT an error) and the
+    /// `notApproved` / `approvalTimedOut` goodbyes are all reachable, with
+    /// ready-made copy, via `connectionStatus.approvalStatus`
+    /// (``ApprovalStatus``, MacConnection.swift).
     var connectionStatus: MacConnectionState { get }
     /// True only for `DemoMacSession` — drives the "Demo" badge (T14+).
     var isDemo: Bool { get }

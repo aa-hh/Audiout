@@ -29,6 +29,16 @@ public final class GeneralSettingsViewController: NSViewController {
     private let aboutButton = NSButton()
     private let aboutWindowController: AboutWindowController
 
+    // Remembered iPhones (T24): the per-phone approval list, mounted under
+    // the remote-control checkbox — nil when the app layer didn't inject the
+    // controller (headless constructions), in which case the section never
+    // exists.
+    private let approvals: CompanionApprovalController?
+    private let phoneListHeading = SettingsForm.label("Remembered iPhones")
+    private let phoneListStack = NSStackView()
+    private let phoneListContainer = BorderedListView()
+    private static let phoneRowHeight: CGFloat = 28
+
     /// Resolved once at init (the env var, if any, can't change for the life of
     /// this process) — what the checkbox must honestly reflect: the EFFECTIVE
     /// state, not the raw persisted ``AppSettings/allowRemoteControl`` (FIX-C).
@@ -61,13 +71,19 @@ public final class GeneralSettingsViewController: NSViewController {
     ///   - openURL: opens the About window's "View Source Code" link; defaults
     ///     to `NSWorkspace`, injected as a recording closure in tests so a
     ///     test run never actually launches a browser.
+    ///   - approvals: the per-phone approval model (T24) backing the
+    ///     "Remembered iPhones" list; nil (the default) mounts no list at
+    ///     all. The pane claims its `onChange` — a prompt answered while
+    ///     the window is open must appear in the list live.
     public init(loginItem: LoginItemManaging,
                 settings: AppSettings = AppSettings(),
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 aboutInfo: AboutInfo = .current(),
-                openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
+                openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+                approvals: CompanionApprovalController? = nil) {
         self.loginItem = loginItem
         self.settings = settings
+        self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, settings: settings)
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
@@ -146,8 +162,115 @@ public final class GeneralSettingsViewController: NSViewController {
         if remoteControlResolution.isForced {
             rows.append(remoteControlOverrideNote)
         }
+        if approvals != nil {
+            rows.append(contentsOf: makePhoneListViews())
+        }
         rows.append(contentsOf: [setupRow, aboutRow])
         view = SettingsForm.paneView(rows: rows)
+        rebuildPhoneList()
+        // Claimed here (single-assignment, like the app layer's claims on
+        // this pane's own callbacks): a prompt answered or a phone revoked
+        // while the window is open repaints the list live.
+        approvals?.onChange = { [weak self] in self?.rebuildPhoneList() }
+    }
+
+    /// The "Remembered iPhones" section (T24): a caption + bordered
+    /// `name · decision · remove` list, the Audio pane's excluded-apps idiom
+    /// compacted. Both views are hidden (not unmounted) while the list is
+    /// empty, so a first phone appearing mid-session can show up live.
+    private func makePhoneListViews() -> [NSView] {
+        phoneListHeading.font = Tokens.Font.captionEmphasized
+        phoneListHeading.textColor = Tokens.Color.secondaryLabel
+
+        phoneListStack.orientation = .vertical
+        phoneListStack.alignment = .leading
+        phoneListStack.spacing = 0
+        phoneListStack.translatesAutoresizingMaskIntoConstraints = false
+        phoneListContainer.translatesAutoresizingMaskIntoConstraints = false
+        phoneListContainer.addSubview(phoneListStack)
+        NSLayoutConstraint.activate([
+            phoneListStack.leadingAnchor.constraint(equalTo: phoneListContainer.leadingAnchor),
+            phoneListStack.trailingAnchor.constraint(equalTo: phoneListContainer.trailingAnchor),
+            phoneListStack.topAnchor.constraint(equalTo: phoneListContainer.topAnchor, constant: 4),
+            phoneListStack.bottomAnchor.constraint(equalTo: phoneListContainer.bottomAnchor, constant: -4),
+        ])
+        return [phoneListHeading, phoneListContainer]
+    }
+
+    /// Repopulate the phone list and republish the pane's size (the same
+    /// `preferredContentSize` route the Audio pane's excluded-apps list uses
+    /// to reach the window — see `AudioSettingsViewController.rebuildList`).
+    private func rebuildPhoneList() {
+        guard let approvals, isViewLoaded else { return }
+        for row in phoneListStack.arrangedSubviews {
+            phoneListStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        let isEmpty = approvals.approvals.isEmpty
+        phoneListHeading.isHidden = isEmpty
+        phoneListContainer.isHidden = isEmpty
+        for approval in approvals.approvals {
+            phoneListStack.addArrangedSubview(makePhoneRow(approval))
+        }
+        for row in phoneListStack.arrangedSubviews {
+            row.widthAnchor.constraint(equalTo: phoneListStack.widthAnchor).isActive = true
+        }
+        // (The container itself is width-pinned by `SettingsForm.paneView`,
+        // like every other row.)
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
+    }
+
+    /// One remembered phone: name · Allowed/Denied · ✕. The identity shown is
+    /// only the phone's (already truncated) display name — the raw clientID
+    /// never reaches UI; it rides the remove button's identifier.
+    private func makePhoneRow(_ approval: CompanionApproval) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let nameLabel = SettingsForm.label(approval.lastKnownName)
+        nameLabel.lineBreakMode = .byTruncatingTail
+
+        let decisionLabel = SettingsForm.label(approval.decision == .approved ? "Allowed" : "Denied")
+        decisionLabel.font = Tokens.Font.caption
+        decisionLabel.textColor = approval.decision == .approved
+            ? Tokens.Color.secondaryLabel : Tokens.Color.warning
+
+        let remove = NSButton()
+        remove.translatesAutoresizingMaskIntoConstraints = false
+        remove.isBordered = false
+        remove.setButtonType(.momentaryChange)
+        remove.imagePosition = .imageOnly
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")?
+            .withSymbolConfiguration(config)
+        remove.contentTintColor = Tokens.Color.secondaryLabel
+        remove.target = self
+        remove.action = #selector(revokePhoneTapped(_:))
+        remove.identifier = NSUserInterfaceItemIdentifier(approval.clientID)
+        remove.setAccessibilityLabel("Remove \(approval.lastKnownName)")
+
+        row.addSubview(nameLabel)
+        row.addSubview(decisionLabel)
+        row.addSubview(remove)
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: Self.phoneRowHeight),
+            nameLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
+            nameLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: decisionLabel.leadingAnchor, constant: -8),
+            decisionLabel.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -8),
+            decisionLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            remove.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+            remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+        return row
+    }
+
+    @objc private func revokePhoneTapped(_ sender: NSButton) {
+        guard let clientID = sender.identifier?.rawValue else { return }
+        // The controller persists, drops any live client with that identity,
+        // and fires onChange — which rebuilds this list.
+        approvals?.revoke(clientID: clientID)
     }
 
     public override func viewDidLoad() {
@@ -255,6 +378,38 @@ public final class GeneralSettingsViewController: NSViewController {
         _ = view
         remoteControlCheckbox.state = on ? .on : .off
         remoteControlToggled()
+    }
+
+    // MARK: Test-support hooks (Remembered iPhones — T24)
+
+    /// The rendered phone rows as `(name, decision)` pairs, in list order —
+    /// read from the controller the way the rebuild does, after forcing the
+    /// same load/rebuild a real show performs.
+    public var test_rememberedPhones: [(name: String, decision: String)] {
+        _ = view
+        return approvals?.approvals.map {
+            ($0.lastKnownName, $0.decision == .approved ? "Allowed" : "Denied")
+        } ?? []
+    }
+
+    /// Whether the list section is currently visible (it hides entirely when
+    /// no phone was ever remembered).
+    public var test_phoneListIsVisible: Bool {
+        _ = view
+        return !phoneListContainer.isHidden && phoneListContainer.superview != nil
+    }
+
+    /// The number of rendered phone rows (proves the VIEW rebuilt, not just
+    /// the model).
+    public var test_phoneRowCount: Int {
+        _ = view
+        return phoneListStack.arrangedSubviews.count
+    }
+
+    /// Revoke a phone through the same path its row's ✕ button runs.
+    public func test_revokePhone(clientID: String) {
+        _ = view
+        approvals?.revoke(clientID: clientID)
     }
 
     // MARK: Test-support hooks (About)

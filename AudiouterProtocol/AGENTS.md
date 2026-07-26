@@ -34,6 +34,6 @@ graph with none of that.
 ## Map
 
 - `CompanionProto` — service type, TXT keys, protocol version, refuse-forward check.
-- `CompanionMessage` / `CompanionEnvelope` — the six message cases + the `{v, type, payload}` wire envelope.
+- `CompanionMessage` / `CompanionEnvelope` — the seven message cases + the `{v, type, payload}` wire envelope.
 - `CompanionCommand` — the phone's 19 outbound commands, hand-Codable.
 - `Snapshot` / `DeviceState` / `GroupState` / `AppRouteState` / `MainOutState` / `SettingsState` — full app state, `Equatable` for change-suppression on the server.

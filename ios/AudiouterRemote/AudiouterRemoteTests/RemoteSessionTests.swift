@@ -515,4 +515,65 @@ import AudiouterProtocol
         try? await Task.sleep(for: .milliseconds(200))
         #expect(session.toasts.current == nil)
     }
+
+    // MARK: - T24: approval flow surface (what the Connect tab renders)
+
+    /// A session whose controller is mid-handshake (hello sent, nothing
+    /// answered yet) — the on-ramp for driving approval-flow frames.
+    @MainActor
+    private func makeHandshakingSession() throws -> (session: RemoteSession, controller: ConnectionController, transport: FakeTransport) {
+        let defaults = try makeDefaults()
+        let box = TransportBox()
+        let controller = ConnectionController(
+            defaults: defaults,
+            clientName: "TestPhone",
+            transportFactory: { _ in
+                let transport = FakeTransport()
+                box.store(transport)
+                return transport
+            }
+        )
+        let session = RemoteSession(controller: controller)
+        controller.connect(to: makeMac())
+        controller.queue.sync {}
+        let transport = try #require(box.transport)
+        controller.queue.sync { transport.events?(.ready) }
+        return (session, controller, transport)
+    }
+
+    @MainActor
+    @Test func awaitingApprovalSurfacesAsAWaitingStateNotAnError() async throws {
+        let (session, controller, transport) = try makeHandshakingSession()
+        try controller.queue.sync { transport.events?(.message(try encoded(.awaitingApproval))) }
+
+        #expect(await waitUntilMain { session.connectionStatus == .awaitingApproval })
+        #expect(session.connectionStatus.approvalStatus == .waitingForApproval)
+        #expect(session.toasts.current == nil, "waiting is healthy — no error surface")
+
+        // The Mac's user pressed Allow: the late welcome lands normally.
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(
+                .welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot())
+            )))
+        }
+        #expect(await waitUntilMain { session.connectionStatus == .live })
+        #expect(session.snapshot == makeSnapshot())
+        #expect(session.connectionStatus.approvalStatus == nil)
+    }
+
+    @MainActor
+    @Test func deniedAndTimedOutAreDistinguishableWithGuidance() async throws {
+        let (session, controller, transport) = try makeHandshakingSession()
+        try controller.queue.sync { transport.events?(.message(try encoded(.awaitingApproval))) }
+        try controller.queue.sync { transport.events?(.message(try encoded(.goodbye(reason: "notApproved")))) }
+
+        #expect(await waitUntilMain { session.connectionStatus.approvalStatus == .denied })
+
+        // The three surfaces are distinct AND carry human-readable copy.
+        let statuses: [ApprovalStatus] = [.waitingForApproval, .denied, .promptTimedOut]
+        #expect(Set(statuses.map(\.headline)).count == 3)
+        #expect(Set(statuses.map(\.guidance)).count == 3)
+        #expect(ApprovalStatus.denied.guidance.contains("Settings"),
+                "denial recovery lives in the Mac's Settings — the copy must point there")
+    }
 }

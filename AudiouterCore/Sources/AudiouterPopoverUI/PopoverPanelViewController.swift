@@ -791,17 +791,27 @@ final class PopoverPanelViewController: NSViewController {
     /// keyed on `SystemAirPlayNoteBannerView` instead so the two banners never
     /// interfere with each other's add/remove. `clearRows()` drops it along with
     /// the cards, so the host re-applies it at the tail of every `rebuild()`.
-    func setSystemAirPlayNote(_ text: String?) {
+    private weak var systemAirPlayNoteView: SystemAirPlayNoteBannerView?
+
+    /// `action`, when non-nil, renders a trailing call-to-action button (T6,
+    /// takeover status strip state 1 — "needs permission" deep-links to Login
+    /// Items & Extensions). Every other note (the double-path guard, and
+    /// takeover states 2-4) passes `nil` and gets the plain note this method
+    /// has always rendered.
+    func setSystemAirPlayNote(_ text: String?, action: SystemAirPlayNoteBannerView.Action? = nil) {
         if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         systemAirPlayNoteLabel = nil
+        systemAirPlayNoteView = nil
         guard let text else { return }
         let note = SystemAirPlayNoteBannerView(
             text: text,
-            maxTextWidth: panelWidth - 28 - 30)
+            maxTextWidth: panelWidth - 28 - 30,
+            action: action)
         systemAirPlayNoteLabel = note.label
+        systemAirPlayNoteView = note
         stackView.insertArrangedSubview(note, at: 0)
         NSLayoutConstraint.activate([
             note.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
@@ -811,6 +821,10 @@ final class PopoverPanelViewController: NSViewController {
 
     /// Test-only: the note's copy, or `nil` when no note is shown.
     var test_systemAirPlayNoteText: String? { systemAirPlayNoteLabel?.stringValue }
+    /// Test-only: whether the currently-shown note has an action button.
+    var test_systemAirPlayNoteHasActionButton: Bool { systemAirPlayNoteView?.test_hasActionButton ?? false }
+    /// Test-only: simulate a click on the note's action button, if any.
+    func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
 
     /// Wire the header bar's three icon buttons (task A + the Quit button that
     /// replaced the removed footer, 2026-07-14).

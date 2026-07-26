@@ -9,6 +9,7 @@ import Testing
 import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
+import PTPHelperTestSupport
 
 // Nested into `SerializedEngineState` because — despite the "cheap, pure,
 // no-session" framing above — most of these tests read AND WRITE
@@ -99,33 +100,6 @@ extension SerializedEngineState {
 
         #expect(safe_hextou64("nope", &v) == -1)
         #expect(safe_hextou64(nil, &v) == -1)
-    }
-
-    // MARK: - ptpd teardown idempotency (T-ENG-SIGABRT-1 regression)
-
-    // The vendored airplay_deinit() already calls ptpd_deinit() (airplay.c:
-    // "After freeing sessions, since that's where the active ptp peers get
-    // removed"), and the engine's stop() then calls ptpd_deinit() a second time
-    // for symmetry with the hosting-added ptpd_find_or_bind() in start(). Before
-    // the shim was made idempotent that second call re-entered daemon_stop() on
-    // an already-joined pthread — pthread_join() on a stale tid → SIGABRT
-    // (exit 134) at "Stopping airptp event loop" (first-light backlog #1).
-    //
-    // The full crash only manifests with a live, privileged, bound-and-started
-    // daemon (binds UDP 319/320, spawns the PTP thread) — that is the gated
-    // path, so this headless test pins the reachable half of the contract: with
-    // no daemon ever bound (ptpd_hdl == NULL), ptpd_deinit() is a safe no-op and
-    // stays safe when called repeatedly. It guards against a regression that
-    // drops the post-airptp_end() NULL-out (which is what makes the live
-    // double-call safe).
-    @Test func ptpdDeinitIsIdempotentNoOpWithoutBind() {
-        // No ptpd_find_or_bind()/ptpd_init() in this process, so ptpd_hdl is NULL.
-        // Each call routes to airptp_end(NULL), which returns immediately. The
-        // NULL-out keeps it NULL, so any number of calls stay no-ops. A crash
-        // here (double free / pthread_join on a stale tid) fails the test.
-        ptpd_deinit()
-        ptpd_deinit()
-        ptpd_deinit()
     }
 
     // MARK: - conffile defaults (the global keys airplay.c reads at init)
@@ -390,3 +364,176 @@ extension SerializedEngineState {
 }
 
 } // extension SerializedEngineState
+
+// MARK: - T2b: shims/ptpd.c deferred-lookup contract (ptp-helper-design.md
+// §1.3/§5.1-5.2)
+//
+// The root ptp-helper daemon is demand-started (spins up on the user's first
+// connect, not at engine launch), so ptpd_init() finding no daemon yet must
+// NOT permanently disable PTP for the process — see shims/ptpd.h's
+// "DEFERRED LOOKUP CONTRACT" comment for the full contract. These tests
+// exercise shims/ptpd.c directly, not the vendored sender, so they can't
+// observe airplay.c's airplay_ptp_is_disabled latch itself (sender/airplay.c
+// is vendored and untouched by this task; that flag is only reachable via a
+// live session) — they pin the shim-level return values that latch depends on.
+//
+// Nested under `SerializedLibairptpState` (SerializedLibairptpStateSuite.swift),
+// NOT `SerializedEngineState` above: every test here reads/writes
+// shims/ptpd.c's module-static `ptpd_hdl` and/or overrides libairptp's
+// process-wide `airptp_event_port`/`airptp_general_port`/`airptp_shm_name`
+// (the same globals PTPHelperIPCTests.swift uses) — a different shared-state
+// domain from this file's `ShimUnitTests` (shims/outputs.c's device
+// registry), and one that must stay mutually exclusive with
+// PTPHelperIPCTests.swift's own daemon bind/start/find, not just with itself.
+extension SerializedLibairptpState {
+
+    @Suite struct PtpdShimTests {
+
+        /// Dedicated test-only shm name / high ports for this suite — never
+        /// the production "/airptp_shm" (a real root ptp-helper daemon may
+        /// actually be running on this machine outside of CI, per
+        /// ptp-helper-design.md §2; reading its real shm would make "no
+        /// daemon present" nondeterministic) and distinct from
+        /// PTPHelperIPCTests.swift's own test values (serialized against it
+        /// via the shared parent, but kept distinct so it's never ambiguous
+        /// which suite owns a given name/port in a log or a leaked shm).
+        private static let testShmName = "/airptp_shm_test_ptpd_shim"
+        private static let testEventPort: UInt16 = 30419
+        private static let testGeneralPort: UInt16 = 30420
+
+        /// Point libairptp's process-globals at this suite's dedicated
+        /// test-only shm name/ports. Every test below calls this before
+        /// touching shims/ptpd.c's entry points, so the airptp_daemon_find()
+        /// they call internally can never see a real production daemon.
+        private func overrideToTestNamespace() {
+            Self.testShmName.withCString { ptp_test_shm_name_override($0) }
+            ptp_test_ports_override(Self.testEventPort, Self.testGeneralPort)
+        }
+
+        /// Restore the shipping defaults so this suite can't leak its
+        /// overrides into PTPHelperIPCTests.swift or a future real session in
+        /// this same process (mirrors that file's own `deinit`).
+        private func restoreProductionNamespace() {
+            "/airptp_shm".withCString { ptp_test_shm_name_override($0) }
+            ptp_test_ports_override(319, 320)
+        }
+
+        // MARK: ptpd teardown idempotency (T-ENG-SIGABRT-1 regression) —
+        // moved here from ShimUnitTests/SerializedEngineState (T2b): it
+        // reads/writes the same ptpd_hdl static the rest of this suite does,
+        // so it belongs in this lock domain, not that one (see this suite's
+        // header comment).
+        //
+        // The vendored airplay_deinit() already calls ptpd_deinit() (airplay.c:
+        // "After freeing sessions, since that's where the active ptp peers get
+        // removed"), and the engine's stop() then calls ptpd_deinit() a second
+        // time for symmetry with the hosting-added ptpd_find_or_bind() in
+        // start(). Before the shim was made idempotent that second call
+        // re-entered daemon_stop() on an already-joined pthread —
+        // pthread_join() on a stale tid → SIGABRT (exit 134) at "Stopping
+        // airptp event loop" (first-light backlog #1).
+        //
+        // The full crash only manifests with a live, privileged,
+        // bound-and-started daemon (binds UDP 319/320, spawns the PTP
+        // thread) — that is the gated path, so this headless test pins the
+        // reachable half of the contract: with no daemon ever bound
+        // (ptpd_hdl == NULL), ptpd_deinit() is a safe no-op and stays safe
+        // when called repeatedly.
+        @Test func ptpdDeinitIsIdempotentNoOpWithoutBind() {
+            // No ptpd_find_or_bind()/ptpd_init() ran first in this test, so
+            // ptpd_hdl is NULL. Each call routes to airptp_end(NULL), which
+            // returns immediately. The NULL-out keeps it NULL, so any number
+            // of calls stay no-ops. A crash here (double free / pthread_join
+            // on a stale tid) fails the test.
+            ptpd_deinit()
+            ptpd_deinit()
+            ptpd_deinit()
+        }
+
+        // MARK: T2b — ptpd_init() defers rather than latching "unavailable"
+        @Test func ptpdInitReturnsDeferredZeroWithNoDaemonPresent() {
+            overrideToTestNamespace()
+            defer { ptpd_deinit(); restoreProductionNamespace() }
+
+            // No daemon was ever bound under this suite's dedicated test shm
+            // name, so ptpd_init()'s internal airptp_daemon_find() finds
+            // nothing. Pre-T2b this returned -1, which the vendored
+            // airplay.c latches into airplay_ptp_is_disabled for the rest of
+            // the process; it must now return 0 ("deferred", not
+            // "unavailable") so a helper daemon that starts later is still
+            // picked up (see ptpdLazyFindPicksUpDaemonStartedAfterInit
+            // below).
+            #expect(ptpd_init(0xC0FFEE) == 0, "ptpd_init() must return 0 (deferred) rather than -1 when no daemon is found yet")
+        }
+
+        // MARK: T2b — no crash, existing sentinels, with no daemon
+        @Test func ptpdClockIdGetAndSlaveAddReturnFailureSentinelsWithNoDaemon() {
+            overrideToTestNamespace()
+            defer { ptpd_deinit(); restoreProductionNamespace() }
+
+            // ptpd_hdl is NULL (no prior bind/find in this test); both
+            // functions must lazily attempt airptp_daemon_find(), fail (no
+            // daemon at this shm name), and return their pre-existing
+            // failure sentinels rather than dereferencing a NULL handle —
+            // airptp_clock_id_get()/airptp_peer_add() read hdl->state
+            // immediately with no NULL check of their own.
+            #expect(ptpd_clock_id_get() == UInt64.max, "ptpd_clock_id_get() must return the (uint64_t)-1 sentinel, not crash, with no daemon")
+
+            var slaveID: UInt32 = 0
+            let addRet = "127.0.0.1".withCString { ptpd_slave_add(&slaveID, $0) }
+            #expect(addRet != 0, "ptpd_slave_add() must return a non-zero failure sentinel, not crash, with no daemon")
+
+            // ptpd_slave_remove() only NULL-guards (no lazy find — removing
+            // a slave that was never added is correctly a no-op); must also
+            // not crash.
+            ptpd_slave_remove(slaveID)
+        }
+
+        // MARK: T2b — the actual deferred-lookup payoff: a daemon that
+        // starts AFTER ptpd_init() ran is still found, lazily, at
+        // connect/session time.
+        @Test func ptpdLazyFindPicksUpDaemonStartedAfterInit() {
+            overrideToTestNamespace()
+            defer { ptpd_deinit(); restoreProductionNamespace() }
+
+            // 1. ptpd_init() runs first, exactly like AirPlayEngine.start()
+            //    would against a helper that hasn't been demand-started yet.
+            #expect(ptpd_init(0xC0FFEE) == 0)
+            // Confirm the "no daemon yet" half of the contract: a call right
+            // now still gets the failure sentinel, proving what follows is
+            // genuinely a LATE find rather than something ptpd_init() itself
+            // already cached.
+            #expect(ptpd_clock_id_get() == UInt64.max, "no daemon should be reachable yet")
+
+            // 2. NOW start a test daemon on the same overridden shm
+            //    name/ports — stands in for the helper's demand-start
+            //    happening after the engine already ran ptpd_init() (the
+            //    exact race this task fixes). High ports + explicit
+            //    loopback bind, per PTPHelperIPCTests.swift's documented
+            //    CI-safe convention (never 319/320; an all-interfaces bind
+            //    trips the Application Firewall prompt for the xctest host).
+            guard let masterHdl = "127.0.0.1".withCString({ ptp_test_daemon_bind($0) }) else {
+                Issue.record("Could not bind PTP test ports \(Self.testEventPort)/\(Self.testGeneralPort) - \(String(cString: ptp_test_errmsg_get()))")
+                return
+            }
+            defer { ptp_test_end(masterHdl) }
+
+            let startRet = ptp_test_daemon_start(masterHdl, 0xFEED_BEEF, /* is_shared: */ true)
+            #expect(startRet == 0, "airptp_daemon_start() failed: \(String(cString: ptp_test_errmsg_get()))")
+            guard startRet == 0 else { return }
+
+            // 3. The lazy find inside ptpd_clock_id_get()/ptpd_slave_add()
+            //    must now pick up the daemon that just started — this is the
+            //    behavior T2b adds; pre-T2b these functions only ever used
+            //    whatever ptpd_hdl was left after ptpd_init()/ptpd_find_or_bind
+            //    and never retried.
+            let clockID = ptpd_clock_id_get()
+            #expect(clockID != UInt64.max, "ptpd_clock_id_get() must lazily find the daemon that started after ptpd_init()")
+
+            var slaveID: UInt32 = 0
+            let addRet = "127.0.0.1".withCString { ptpd_slave_add(&slaveID, $0) }
+            #expect(addRet == 0, "ptpd_slave_add() must lazily find the daemon that started after ptpd_init()")
+            ptpd_slave_remove(slaveID)
+        }
+    }
+}

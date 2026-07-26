@@ -24,6 +24,23 @@
 // This is a full port, not a no-op stub, because ptpd.c has no OwnTone-
 // plumbing entanglement beyond logger + cfg + thread_setname (all shimmed).
 // It does NOT run anything at build time — T-BUILD-1 is compile+link only.
+//
+// DEFERRED LOOKUP CONTRACT (T2b, docs/ptp-helper-design.md §1.3/§5.1-5.2):
+// the root helper daemon is demand-started (starts on the user's first
+// connect, not at engine launch), so "no daemon found" is never permanent.
+//   - ptpd_init() ALWAYS returns 0, even with no daemon found yet — it must
+//     never latch airplay.c's airplay_ptp_is_disabled, which would
+//     permanently disable PTP for every device discovered afterwards.
+//   - ptpd_clock_id_get() / ptpd_slave_add() lazily retry
+//     airptp_daemon_find() themselves whenever the module-global ptpd_hdl
+//     is still NULL (single-assignment: once found, cached until
+//     ptpd_deinit()), so a helper that starts after ptpd_init() ran is
+//     still picked up at actual connect/session time. On failure they
+//     return their pre-existing sentinels ((uint64_t)-1 / non-zero) rather
+//     than crash — libairptp's airptp_clock_id_get()/airptp_peer_add()
+//     dereference the handle immediately with no NULL check of their own.
+//   - ptpd_slave_remove() only NULL-guards (no lazy find — removing a slave
+//     that was never added is correctly a no-op).
 
 #ifndef CAIRPLAYENGINE_SHIM_PTPD_H
 #define CAIRPLAYENGINE_SHIM_PTPD_H
@@ -42,6 +59,15 @@ ptpd_slave_add(uint32_t *slave_id, const char *addr);
 
 void
 ptpd_slave_remove(uint32_t slave_id);
+
+// T4 (PLAN-AIRPLAY-COEXISTENCE.md): connect-time readiness probe — "is a
+// shared airptpd daemon up and its heartbeat fresh RIGHT NOW?" Returns 0 if
+// so, -1 otherwise. Uses its own local airptp_daemon_find()/airptp_end()
+// pair, NEVER the module-global ptpd_hdl ptpd_find_or_bind() maintains —
+// safe to call repeatedly (e.g. while polling for the on-demand helper to
+// come up) with no side effect on the real session lookup.
+int
+ptpd_daemon_probe(void);
 
 // Looks for a shared airptpd daemon. If not found, binds privileged ports 319
 // and 320, so must be called before the server drops privileges.

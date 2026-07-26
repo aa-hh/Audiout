@@ -50,6 +50,18 @@ airptp_peer_add(uint32_t *peer_id, const char *addr, struct airptp_handle *hdl);
 void
 airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl);
 
+// Number of peers seen within the staleness window (15s) - i.e. peers a
+// client registered via airptp_peer_add() and/or that are actively sending
+// PTP traffic. Only valid on a daemon handle (bind+start); returns -1 for a
+// client (find()'d) handle. Safe to call from any thread. Note the count
+// only decays between add/del calls when the daemon runs is_shared (the
+// shared-mem heartbeat drives the refresh); a daemon whose peers have all
+// gone stale reports 0 even though they are not physically pruned until the
+// next peer add. Intended use: an on-demand daemon polling for idleness so
+// it can exit and release ports 319/320.
+int
+airptp_peer_active_count(struct airptp_handle *hdl);
+
 // Frees ressources (incl. stops daemon if relevant)
 void
 airptp_end(struct airptp_handle *hdl);

@@ -2437,6 +2437,74 @@ import AppKit
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once the guard ends")
     }
+
+    // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
+
+    /// All four takeover states render their own copy, and the "Open Login
+    /// Items…" action button is present ONLY for state 1 (`.needsApproval`) —
+    /// states 2/3/4 have no remedy this button could offer (brief: state 2's
+    /// own doc says approval UX can't fix a missing bundle component, 3 is
+    /// transient, 4 needs a different app to yield).
+    @Test func takeoverStripRendersEachStateWithButtonOnlyForState1() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        #expect(popover.test_systemAirPlayNoteText == nil, "no strip by default")
+
+        popover.setTakeoverStatus(.needsApproval(.requiresApproval))
+        #expect(popover.test_systemAirPlayNoteText == "Speaker Sync needs permission to run. Open Login Items to approve it.")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "state 1 is the one state with a real remedy")
+
+        popover.setTakeoverStatus(.helperMissing)
+        #expect(popover.test_systemAirPlayNoteText == "Speaker Sync is missing from this copy of Audiouter. Reinstall Audiouter to fix it.")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton, "a packaging bug has no approval-UX remedy")
+
+        popover.setTakeoverStatus(.takingOver)
+        #expect(popover.test_systemAirPlayNoteText == "Taking audio back from macOS…")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton, "the transient state has nothing to tap")
+
+        popover.setTakeoverStatus(.timedOut)
+        #expect(popover.test_systemAirPlayNoteText == "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment.")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton, "a different app must yield — no settings pane fixes that")
+
+        popover.setTakeoverStatus(nil)
+        #expect(popover.test_systemAirPlayNoteText == nil, "clearing the status clears the strip")
+    }
+
+    /// Tapping state 1's action button invokes `onOpenPTPHelperLoginItems`,
+    /// wired by the host (`AppDelegate`) to the PTP helper's real
+    /// `openSystemSettingsLoginItems()` deep link.
+    @Test func takeoverStripActionButtonInvokesLoginItemsCallback() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        var opened = false
+        popover.onOpenPTPHelperLoginItems = { opened = true }
+        popover.setTakeoverStatus(.needsApproval(.notRegistered))
+        popover.test_tapSystemAirPlayNoteAction()
+
+        #expect(opened, "tapping state 1's button must call onOpenPTPHelperLoginItems")
+    }
+
+    /// PRECEDENCE (T6): a takeover status outranks the double-path guard note —
+    /// there is one physical slot, never two stacked notes — and the double-path
+    /// note reappears underneath the instant the takeover status clears.
+    @Test func takeoverStatusOutranksDoublePathNoteAndDoublePathReturnsWhenCleared() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        popover.setSystemAirPlayNoteActive(true)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.systemAirPlayNoteText,
+                "with no takeover in progress, the double-path note owns the slot")
+
+        popover.setTakeoverStatus(.takingOver)
+        #expect(popover.test_systemAirPlayNoteText == "Taking audio back from macOS…",
+                "a takeover status must outrank the double-path note in the shared slot")
+
+        popover.setTakeoverStatus(nil)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.systemAirPlayNoteText,
+                "the double-path note must reappear once the takeover status clears")
+
+        popover.setSystemAirPlayNoteActive(false)
+        #expect(popover.test_systemAirPlayNoteText == nil, "both conditions ended — the slot is empty")
+    }
 }
 
 private actor PopoverTestCountBox {

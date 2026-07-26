@@ -854,10 +854,19 @@ management_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, u
 
 /* ----------------------------- Message sending ---------------------------- */
 
+// [AirPlayEngine vendored change 2026-07-26] Added the `family` parameter -
+// upstream resolved "localhost" with AF_UNSPEC and always sent to the FIRST
+// getaddrinfo result. On macOS that's ::1, so a daemon bound IPv4-only (as
+// the shipped ptp-helper design and PTPHelperIPCTests's loopback-only bind
+// both do) silently dropped every peer_add/peer_remove control message -
+// sendto() still returned success, so callers saw no error at all. The
+// caller now passes the ONE family the daemon actually bound (from its
+// published `daemon_info`), so resolution is exact instead of guessing via
+// resolver order. See docs/VENDORED-DIFFS.md Entry 6.
 static int
-localhost_msg_send(void *msg, size_t msg_len, unsigned short port)
+localhost_msg_send(void *msg, size_t msg_len, unsigned short port, sa_family_t family)
 {
-  struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
+  struct addrinfo hints = { .ai_family = family, .ai_socktype = SOCK_DGRAM };
   struct addrinfo *info = NULL;
   char strport[8];
   int fd = -1;
@@ -966,7 +975,10 @@ ptp_msg_peer_add_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsig
   struct ptp_peer_signaling_message msg;
 
   msg_peer_add_make(&msg, peer, hdl->daemon_info.clock_id);
-  return localhost_msg_send(&msg, sizeof(msg), port);
+  // [AirPlayEngine vendored change 2026-07-26] Resolve "localhost" in the
+  // family the daemon actually bound, not resolver order - see
+  // localhost_msg_send()'s comment and docs/VENDORED-DIFFS.md Entry 6.
+  return localhost_msg_send(&msg, sizeof(msg), port, hdl->daemon_info.ipv4_enabled ? AF_INET : AF_INET6);
 }
 
 int
@@ -975,7 +987,9 @@ ptp_msg_peer_del_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsig
   struct ptp_peer_signaling_message msg;
 
   msg_peer_del_make(&msg, peer, hdl->daemon_info.clock_id);
-  return localhost_msg_send(&msg, sizeof(msg), port);
+  // [AirPlayEngine vendored change 2026-07-26] Same family selection as
+  // ptp_msg_peer_add_send() above.
+  return localhost_msg_send(&msg, sizeof(msg), port, hdl->daemon_info.ipv4_enabled ? AF_INET : AF_INET6);
 }
 
 

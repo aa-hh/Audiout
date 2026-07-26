@@ -181,6 +181,63 @@ public enum BackendEvent: Sendable, Equatable {
     /// of this event's scope. Only ``NativeBackend`` emits it; `MockBackend`/
     /// `OwnToneBackend` never do (no rebind-recovery machinery to observe).
     case streamHealth(id: String, recovering: Bool)
+
+    /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a
+    /// progressive explanation, alongside a connecting row, of what's
+    /// happening while `convergeDevice` races macOS off the PTP timing ports
+    /// (T5's switch-away + T4's bounded ``PTPHelperActivating`` wait) — never
+    /// a bare row failure with no context. `nil` clears the strip.
+    ///
+    /// Mirrors ``systemDefaultIsAirPlayActive(_:)``'s shape: a whole-app
+    /// condition with no home on a single `Device`, emitted edge-triggered (a
+    /// repeat of the current state is never re-emitted) so the strip can
+    /// never strand showing a stale "taking over" state. Only
+    /// ``NativeBackend`` emits it — it's the only backend with a real PTP
+    /// handover to explain; `MockBackend`/`OwnToneBackend` never do.
+    case takeoverStatus(TakeoverStatus?)
+}
+
+/// View-facing state for the takeover status strip (T6). Almost exactly
+/// ``PTPHelperActivationOutcome`` (declared by T4 in `PTPHelperService.swift`
+/// — deliberately reused rather than re-derived) with one addition:
+/// ``takingOver``, which the outcome type structurally cannot express because
+/// it is a TERMINAL result, not a "the wait is currently in flight" signal.
+///
+/// The four cases are the plan's four states, and the ORDER they're checked
+/// in (``resolved(from:)``) is the point — 1/2 are knowable before any wait
+/// at all, 3 is transient, 4 is the timeout backstop.
+public enum TakeoverStatus: Sendable, Equatable {
+    /// State 1: the helper isn't approved (or registered) yet — the most
+    /// common real-world case, known INSTANTLY, never behind a wait. Carries
+    /// the exact ``PTPHelperStatus`` so a caller can log why.
+    case needsApproval(PTPHelperStatus)
+    /// State 2: the helper is missing from the bundle entirely (mirrors
+    /// ``PTPHelperStatus/notFound``) — a packaging bug; no approval UX can
+    /// fix it.
+    case helperMissing
+    /// State 3: the bounded wait for the clock actually started (the helper
+    /// was already `.enabled`). Transient — clears the instant the wait
+    /// resolves, one way or another.
+    case takingOver
+    /// State 4: the wait ran out with the helper `.enabled` — something else
+    /// (macOS's own AirPlay session, or a third-party PTP holder, R6) still
+    /// holds the timing ports.
+    case timedOut
+
+    /// Maps a resolved ``PTPHelperActivationOutcome`` to the strip's
+    /// vocabulary. `.ready` has nothing to show, hence `nil`.
+    public static func resolved(from outcome: PTPHelperActivationOutcome) -> TakeoverStatus? {
+        switch outcome {
+        case .ready:
+            return nil
+        case .needsApproval(.notFound):
+            return .helperMissing
+        case .needsApproval(let status):
+            return .needsApproval(status)
+        case .timingPortsUnavailable:
+            return .timedOut
+        }
+    }
 }
 
 /// The seam between the app and wherever audio actually goes.

@@ -66,6 +66,10 @@ func describe(_ event: BackendEvent) -> String? {
     case .streamHealth(let id, let recovering):
         // Also native-only (T8 rebind-recovery signal); never under mock.
         return "⚠ stream health \(id) recovering:\(recovering)"
+    case .takeoverStatus(let status):
+        // Also native-only (T6 takeover status strip); never under mock. Handled
+        // so the switch stays exhaustive.
+        return "♪ takeover status \(status.map { "\($0)" } ?? "cleared")"
     }
 }
 

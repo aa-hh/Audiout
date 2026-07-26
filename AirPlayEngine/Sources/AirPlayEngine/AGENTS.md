@@ -86,9 +86,10 @@ flowchart LR
    `remoteHub`).
 3. `applyConfigOnEngineThread()` pushes `EngineConfig` into the vendored
    `conffile` setters (retained C strings, not copied by the C side).
-4. `ptpd_find_or_bind()` runs (non-fatal; result published as
-   `ptpClockAvailable`), then both `output_airplay.init` and `output_raop.init`
-   run so AP2 and RAOP discovery/session paths are both live.
+4. **`ptpd_init()` runs** (deferred, no-op at startup since the daemon is
+   demand-started per-session, T2b) — both `output_airplay.init` and
+   `output_raop.init` run so AP2 and RAOP discovery/session paths are both live.
+   **PTP clock lookup is deferred to connect time** (T4: `ptpd_daemon_probe()`).
 5. `updateDiscovery(_:)` feeds a resolved `DeviceDescriptor` into the vendored
    discovery callback (`feedDescriptor`, engine thread) and seeds
    `knownOutputs[id] = .stopped`.
@@ -103,10 +104,13 @@ flowchart LR
 
 ## Folder Map
 
-This target has no subfolders — all four files sit directly in
-`Sources/AirPlayEngine/`. `Sources/CAirPlayEngine/`, `Sources/engine-probe/`,
-and `Sources/ptp-helper/` are sibling targets documented in the package-root
-`../../AGENTS.md`.
+This target has no subfolders — all five files sit directly in
+`Sources/AirPlayEngine/` (the fifth, `PTPClockProbe.swift`, is a one-function
+wrapper over the shim's connect-time `ptpd_daemon_probe()` — the seam
+`AudiouterCore`'s PTP-helper activation polls, kept package-boundary-thin
+rather than folded into `AirPlayEngine.swift`). `Sources/CAirPlayEngine/`,
+`Sources/engine-probe/`, and `Sources/ptp-helper/` are sibling targets
+documented in the package-root `../../AGENTS.md`.
 
 ## Key Types
 
@@ -121,12 +125,13 @@ and `Sources/ptp-helper/` are sibling targets documented in the package-root
 | `RemoteEventHub` | AirPlayEngine.swift (~1435) | Multicasts `RemoteEvent` (speaker-originated transport/volume) from the vendored reverse-event thread. |
 | `WriteCadenceTracker` / `WriteLatencyProbe` | AirPlayEngine.swift (~1537, ~1671) | Diagnostic-only hot-path instrumentation; never gate a write. |
 | `OutputID`, `DeviceDescriptor`, `OutputState`, `RemoteEvent`, `AirPlayEngineError`, `PCMFormat` | AirPlayTypes.swift | Public, OwnTone-free value types at the FFI boundary. |
+| `PTPClockProbe` | PTPClockProbe.swift | One-function connect-time readiness check (`ptpd_daemon_probe()`) for `AudiouterCore`'s PTP-helper activation to poll. |
 
 ## External Dependencies
 
 | Dependency | Used for |
 |---|---|
-| `CAirPlayEngine` (sibling C target) | All vendored AirPlay 2/RAOP sender + PTP-client calls; imported by all four files here. |
+| `CAirPlayEngine` (sibling C target) | All vendored AirPlay 2/RAOP sender + PTP-client calls; imported by all five files here. |
 | `os` (Logger) | Structured logging (`ptp-clock`, `completion`, `engine-thread` subsystems/categories). |
 | Foundation (`Thread`, `DispatchSource`, `NSLock`) | `EngineThread`'s OS thread + timers; `CompletionRegistry`'s lock and timeout timers. |
 

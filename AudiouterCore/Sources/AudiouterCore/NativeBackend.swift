@@ -280,14 +280,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var continuations: [UUID: AsyncStream<BackendEvent>.Continuation] = [:]
     private var started = false
 
-    /// Whether the engine's last `start()` found a PTP clock (T4). Read from
-    /// ``EngineControlling/ptpClockAvailable`` once `engine.start()` resolves
-    /// and confined to `stateQueue` like every other piece of backend state;
-    /// `true` before the first `start()` completes (optimistic, matching the
-    /// engine's own pre-start default — see ``AirPlayEngine/ptpClockAvailable``).
-    /// Exposed publicly so the app can surface a degraded "clock unavailable"
-    /// state (T6 owns the actual UI); this task only makes the fact observable.
+    /// Whether the last connect attempt found a ready PTP clock (T4,
+    /// PLAN-AIRPLAY-COEXISTENCE.md). Confined to `stateQueue` like every other
+    /// piece of backend state; `true` before any connect (optimistic — no
+    /// receiver has been rejected yet). NOT sourced from `engine.start()`
+    /// (superseded): the on-demand helper is never touched at launch (Q1=B),
+    /// so that reading is now permanently false and would be misleading.
+    /// Instead `convergeDevice` sets this from `ptpHelperActivator`'s own
+    /// verdict at the moment it actually gates a connect. Exposed publicly so
+    /// the app can surface a degraded "clock unavailable" state (T6 owns the
+    /// actual UI); this task only makes the fact observable.
     private var ptpClockAvailable = true
+
+    /// Wakes the on-demand PTP helper and waits, bounded, for its clock
+    /// before a connect (T4). Defaults to the real `PTPHelperActivator`, so
+    /// every existing caller of the designated initializer compiles
+    /// unchanged; tests inject a fake.
+    private let ptpHelperActivator: PTPHelperActivating
+
+    /// Bind-retry budget T2 gives the helper itself (~10 s) plus the connect
+    /// click's own switch-away race — matches `AirPlayEngine/Sources/ptp-helper/main.c`'s
+    /// default `AUDIOUTER_PTP_BIND_RETRY_SECS`.
+    private static let ptpActivationTimeout: TimeInterval = 10
+
+    /// Frees UDP 319/320 before a connect by moving the Mac's own default
+    /// output off an AirPlay receiver (T5). **`nil` = inert**, and that is the
+    /// default deliberately: this is the one component in the backend that
+    /// writes a system-wide setting a human is currently using, so it is opted
+    /// IN by the composition root (`makeBackend`) rather than opted out by
+    /// every test — the same shape `syncedLocalSinkFactory` uses, for the same
+    /// "must not touch the real machine from a test" reason.
+    private let defaultOutputSwitcher: DefaultOutputSwitcher?
 
     /// The colon-hex `Device.id` ⟷ ``OutputID`` lookup, populated from discovery.
     /// Kept so `setOutputSet`/`setVolume` can translate the UI's string ids to the
@@ -436,6 +459,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// true→false edge and the popover note can never strand ON. Confined to
     /// `stateQueue`.
     private var systemAirPlayGuardActive = false
+
+    /// The takeover status strip's current state (T6, PLAN-AIRPLAY-COEXISTENCE.md),
+    /// or `nil` when there's nothing to explain. Set only from ``setTakeoverStatus(_:)``,
+    /// which is the edge-triggered emit point — mirrors ``systemAirPlayGuardActive``'s
+    /// discipline so the strip can never strand showing a stale "taking over" state.
+    /// Confined to `stateQueue`.
+    private var takeoverStatus: TakeoverStatus?
 
     /// Fix C (R11): whether we are in the immediate post-wake reconnection window,
     /// set by ``handleSystemDidWake()`` and cleared once a desired device reconnects,
@@ -869,6 +899,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// in. It flows to BOTH the per-app capture coordinator (owned here) and the
     /// whole-system `NativeCaptureCoordinator` (wired by `makeBackend`, which
     /// uses the same resolver).
+    ///
+    /// This is also where the T5 takeover switch-away is opted in: the real
+    /// (HAL-writing) ``DefaultOutputSwitcher`` exists ONLY on this shipping
+    /// path, never on the designated initializer's default — see
+    /// ``defaultOutputSwitcher``.
     public convenience init(
         engine: AirPlayEngine,
         discovery: NativeDiscovery = NativeDiscovery(),
@@ -877,7 +912,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
-            processResolver: processResolver)
+            processResolver: processResolver,
+            defaultOutputSwitcher: DefaultOutputSwitcher())
     }
 
     /// Injectable designated initializer (internal — tests pass a spy engine and an
@@ -914,6 +950,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discoverySource: DiscoverySource,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
+        ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
@@ -926,8 +963,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryMaxBackoff: TimeInterval = 10.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass
+        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
+        defaultOutputSwitcher: DefaultOutputSwitcher? = nil
     ) {
+        self.defaultOutputSwitcher = defaultOutputSwitcher
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
         // so this queue only needs to time the delay — a plain serial queue is fine.
@@ -938,6 +977,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.discovery = discoverySource
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
+        self.ptpHelperActivator = ptpHelperActivator
         self.connectVolumeProvider = connectVolume
         self.systemDefaultOutputIsAirPlayClassProvider = systemDefaultOutputIsAirPlayClass
         self.perAppCapture = injectedPerAppCapture ?? PerAppCaptureCoordinator(processResolver: processResolver)
@@ -1043,11 +1083,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { order.compactMap { known[$0] } }
     }
 
-    /// Whether the engine's last `start()` found a PTP clock (T4). `true`
-    /// before the first `start()` resolves. A `false` reading is NOT itself an
-    /// error — NTP-only receivers still work — but a PTP-only receiver (Sonos
-    /// et al, SPEC.md §8 0b) will fail to stream despite the engine/backend
-    /// otherwise looking healthy, so a degraded-state UI (T6) can key off this.
+    /// Whether the last connect attempt found the PTP helper's clock ready
+    /// (T4, PLAN-AIRPLAY-COEXISTENCE.md). `true` before any connect has been
+    /// attempted. A connect that finds it `false` is hard-failed (see
+    /// `convergeDevice`'s `ptpHelperActivator` check and
+    /// `ConnectionFailure.Cause.timingUnavailable`) rather than left
+    /// degraded — a PTP-only receiver (Sonos et al, SPEC.md §8 0b) plays
+    /// silence with no clock, so a degraded-but-"connected" state would be
+    /// worse than an honest failure.
     public var isPTPClockAvailable: Bool {
         stateQueue.sync { ptpClockAvailable }
     }
@@ -1211,15 +1254,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 return
             }
 
-            // 2b. T4: capture the engine's PTP clock-availability verdict from
-            //     this same `start()` (the ONLY time it's determined — the
-            //     engine doesn't re-check mid-session). A `false` reading here
-            //     does not stop the app from proceeding (PTP-only receivers
-            //     simply won't stream; NTP-only ones are unaffected) — it's
-            //     surfaced, not fatal, exactly like the engine's own non-fatal
-            //     handling of the same fact.
-            let ptpAvailable = await self.engine.ptpClockAvailable
-            self.stateQueue.async { self.ptpClockAvailable = ptpAvailable }
+            // 2b. (T4, superseded by PLAN-AIRPLAY-COEXISTENCE.md's own T4): this
+            //     used to read `engine.ptpClockAvailable` here, right after
+            //     `start()`. That reading is now ALWAYS false at this point —
+            //     the on-demand helper is never touched at launch (Q1=B), so
+            //     nothing has bound yet — which would make `isPTPClockAvailable`
+            //     permanently and misleadingly false before the user ever tries
+            //     a speaker. `self.ptpClockAvailable` is re-sourced instead from
+            //     `convergeDevice`'s own `ptpHelperActivator` check, at the one
+            //     moment that actually matters: immediately before a real
+            //     connect.
 
             // 3. Subscribe the engine's device-state stream: every transition
             //    (armed-op terminal AND out-of-band, e.g. RTSP drop → .failed) maps
@@ -1378,6 +1422,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // W3-T3: capture just stopped (above) — clear the double-path guard too,
             // on the true→false edge, so a stop mid-note can't strand the popover note.
             self.clearSystemAirPlayGuard()
+            // T6: a stop mid-takeover-attempt must not strand the strip either —
+            // there is no more connect for it to explain.
+            self.setTakeoverStatus(nil)
             // T1: drop any pending synced-local settle so a debounced transition
             // can't fire against a torn-down backend after stop(). Independent of
             // the watchdog above — this is the synced-local debounce, not R11.
@@ -3293,6 +3340,60 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         try await engine.updateDiscovery(descriptor)
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
+
+                    // T5 (PLAN-AIRPLAY-COEXISTENCE.md): if the Mac's OWN default
+                    // output is an AirPlay receiver, macOS is holding UDP
+                    // 319/320 and will neither share them nor signal a yield
+                    // (both measured — see the plan's "Known asymmetry"). It
+                    // DOES release them ~1-3 s after its default output is
+                    // switched away (G1), so moving the default output to the
+                    // built-in speakers IS the takeover, and it must happen
+                    // BEFORE T4's bounded wait below — that wait is what races
+                    // macOS's teardown while the helper retries the bind. The
+                    // click is the consent (locked decision 2): no dialog.
+                    // Inert unless the composition root opted in.
+                    if let defaultOutputSwitcher {
+                        let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
+                        if takeover != .notAirPlay {
+                            Telemetry.log(.airplay, "takeover_switch_away", [
+                                "device": id, "outcome": "\(takeover)",
+                            ])
+                        }
+                    }
+
+                    // T4 (PLAN-AIRPLAY-COEXISTENCE.md): wake the on-demand PTP
+                    // helper and wait, bounded, for its clock HERE — immediately
+                    // before addOutput, never before engine.start() (Q1=B locks
+                    // that the helper is woken ONLY by an actual speaker click,
+                    // never at launch). A PTP-only receiver (Sonos/HomePod)
+                    // accepts the session but plays silence with no clock, so
+                    // failing the connect now beats a "connected" row that never
+                    // makes a sound.
+                    //
+                    // T6 (the takeover status strip): peek `willWaitForClock`
+                    // BEFORE calling `activate` so "taking over" only ever shows
+                    // when a bounded wait genuinely starts — never for the
+                    // (most common) unapproved-helper case, which resolves
+                    // `activate` instantly below with no suspension in between.
+                    if ptpHelperActivator.willWaitForClock {
+                        stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+                    }
+                    let ptpOutcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
+                    let ptpReady = (ptpOutcome == .ready)
+                    stateQueue.sync {
+                        self.ptpClockAvailable = ptpReady
+                        self.setTakeoverStatus(TakeoverStatus.resolved(from: ptpOutcome))
+                    }
+                    guard ptpReady else {
+                        stateQueue.sync {
+                            self.added.remove(id)
+                            self.failedGate.insert(id)
+                            self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+                            self.enterFailure(id, cause: .timingUnavailable)
+                        }
+                        return
+                    }
+
                     // Connect-latency diagnosis: brackets the real RTSP/negotiate
                     // handshake `addOutput` awaits (device_start through the STREAMING
                     // completion) — the gap between these two events is the AirPlay
@@ -4020,6 +4121,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         systemAirPlayGuardActive = false
         emit(.systemDefaultIsAirPlayActive(false))
         return true
+    }
+
+    // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
+
+    /// Update the takeover-status strip, edge-triggered exactly like
+    /// ``reconcileSystemAirPlayGuard()``/``clearSystemAirPlayGuard()`` above: a
+    /// repeat of the current state (including repeated `nil`) is a no-op, so a
+    /// caller can call this unconditionally at every step of the T5+T4 sequence
+    /// without storming the event stream. Every path that could otherwise leave
+    /// the strip stuck — the wait resolving, `stop()` — routes through here, so
+    /// it can never strand showing a stale "taking over" state. On `stateQueue`.
+    private func setTakeoverStatus(_ status: TakeoverStatus?) {   // on stateQueue
+        guard status != takeoverStatus else { return }
+        takeoverStatus = status
+        emit(.takeoverStatus(status))
     }
 
     // MARK: Scheduling snapshot polling (T2)
@@ -4904,9 +5020,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band
     /// `.failed`/`.passwordRequired` from the engine's state stream). NativeBackend
     /// has no diagnostics seam (T3 is OwnTone-only per the brief; the engine's
-    /// completion IS the evidence) — always `.unknown`.
-    private func enterFailure(_ id: String) {   // on stateQueue
-        setConnectionState(.failed(ConnectionFailure(cause: .unknown)), for: id)
+    /// completion IS the evidence), so every caller but one has no better guess
+    /// than `.unknown`; the connect-time PTP gate (T4) is the one exception and
+    /// passes its own `cause` explicitly.
+    private func enterFailure(_ id: String, cause: ConnectionFailure.Cause = .unknown) {   // on stateQueue
+        setConnectionState(.failed(ConnectionFailure(cause: cause)), for: id)
     }
 
     /// Recompute the effective (wire) volume after an unmute: push the stashed

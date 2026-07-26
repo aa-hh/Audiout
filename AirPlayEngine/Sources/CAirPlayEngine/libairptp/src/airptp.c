@@ -275,6 +275,15 @@ airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl)
   ptp_msg_peer_del_send(&peer, hdl, airptp_general_port);
 }
 
+int
+airptp_peer_active_count(struct airptp_handle *hdl)
+{
+  if (!hdl || !hdl->is_daemon || hdl->state != AIRPTP_STATE_RUNNING)
+    return -1;
+
+  return atomic_load(&hdl->daemon.active_peers_published);
+}
+
 void
 airptp_end(struct airptp_handle *hdl)
 {

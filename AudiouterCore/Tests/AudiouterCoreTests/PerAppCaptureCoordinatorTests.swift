@@ -430,7 +430,7 @@ extension SerializedSharedState {
     // MARK: - Telemetry (T3): a sample-rate-triggered rebuild emits a
     // capturePA/rate_rebuild line with old/new rate fields populated.
     //
-    // The real HAL detection point (CoreAudioProcessTap.installSampleRateListener,
+    // The real HAL detection point (CoreAudioProcessTap.subscribeToDefaultOutput,
     // PerAppCaptureCoordinator.swift) isn't reachable hermetically — this
     // suite never touches that concrete Core Audio class (no live Core Audio
     // here; see that file's own doc comment on why FakeProcessTap exists).
@@ -827,6 +827,55 @@ extension SerializedSharedState {
         #expect(tap.lastProcesses == [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 22, pid: 702)],
                 "the coalesced diff applies the SETTLED process set")
         coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    // MARK: - DefaultOutputDeviceMonitor subscription (T2 consolidation)
+
+    /// GUARD SEMANTICS, per-app side. Same contract the whole-system tap is held
+    /// to (`wholeSystemTapReportsItsOwnStateLiveToTheMonitor`): the tap reports
+    /// its OWN live device/rate at every notification. The middle expectation is
+    /// the load-bearing one — the tap's format drifts while the device's rate
+    /// stays put, which only a fresh read can see.
+    @available(macOS 14.2, *)
+    @Test func perAppTapReportsItsOwnStateLiveToTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 7, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioProcessTap(name: "test", monitor: monitor)
+        let fires = TapMonitorFireCounter()
+        tap.onDefaultDeviceChanged = { fires.bump() }
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput(bundleID: "com.example.app")
+
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        #expect(fires.count == 0, "a no-op re-announcement must not rebuild this per-app tap")
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 44_100)
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        #expect(fires.count == 1,
+            "a per-app tap whose own format drifted must still be told — proves `tracked` is read live, not captured at subscribe time")
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        hal.deviceID = 8
+        hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        #expect(fires.count == 2, "a genuine default-output-device change must rebuild the per-app tap")
+
+        tap.teardown()
+    }
+
+    @available(macOS 14.2, *)
+    @Test func perAppTapTeardownUnsubscribesFromTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 7, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioProcessTap(name: "test", monitor: monitor)
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput(bundleID: "com.example.app")
+        #expect(monitor.subscriberCount == 1)
+
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "teardown must release the tap's monitor subscription")
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "a second teardown must stay a no-op")
     }
     }
 }

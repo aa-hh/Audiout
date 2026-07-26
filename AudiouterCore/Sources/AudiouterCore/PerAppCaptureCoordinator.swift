@@ -930,13 +930,24 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     private var format = TapFormat(
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var asbd = AudioStreamBasicDescription()
-    private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
-    /// The physical output device our aggregate is built on. Kept so we can
-    /// listen for ITS nominal-sample-rate changes (see `installSampleRateListener`).
+    /// The physical output device our aggregate is built on. Kept so the monitor
+    /// subscription can report ITS identity/rate as what this tap is built on
+    /// (see `subscribeToDefaultOutput(bundleID:)`).
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
-    private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
-    init(name: String) { self.name = name }
+    /// The process-wide default-output watcher this tap observes through, and the
+    /// handle for its one subscription (nil until `createAndStart`, and again
+    /// after `teardown()`).
+    private let monitor: DefaultOutputDeviceMonitor
+    private var monitorToken: DefaultOutputDeviceMonitor.SubscriptionToken?
+
+    /// `monitor` defaults to the process-wide ``SharedDefaultOutputMonitor`` —
+    /// the parameter exists so the hermetic suite can hand in a monitor built
+    /// over a fake HAL.
+    init(name: String, monitor: DefaultOutputDeviceMonitor = SharedDefaultOutputMonitor.instance) {
+        self.name = name
+        self.monitor = monitor
+    }
 
     /// Backstop against leaking a per-process tap / aggregate device if this
     /// tap is dropped without an explicit `teardown()`. `teardown()` is
@@ -950,12 +961,11 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try startIOProc()
             // Correct the converter's input rate to the aggregate's REAL rate
             // BEFORE the format is returned (the converter is built from it) and
-            // before the rate listener is installed (its compare-before-rebuild
+            // before the monitor subscription is made (its compare-before-rebuild
             // guard reads `format.sampleRate`). Mirrors the whole-system tap's
             // ordering exactly — see `reconcileFormatWithAggregate`.
             reconcileFormatWithAggregate(bundleID: bundleID)
-            installDefaultDeviceListener()
-            installSampleRateListener(bundleID: bundleID)
+            subscribeToDefaultOutput(bundleID: bundleID)
         } catch {
             // Any step after the tap/aggregate was created leaves live system
             // objects; tear them down before propagating so we never orphan a
@@ -1145,45 +1155,26 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         }
     }
 
-    // MARK: Default-device-change listener
-
-    private func installDefaultDeviceListener() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.onDefaultDeviceChanged?()
-        }
-        self.deviceChangeBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
-    }
-
-    private func removeDefaultDeviceListener() {
-        guard let block = deviceChangeBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
-        deviceChangeBlock = nil
-    }
-
-    // MARK: Nominal-sample-rate listener (documented process-tap silent-buffer fix)
+    // MARK: Default-output subscription (device identity + nominal sample rate)
     //
-    // A process tap keeps delivering buffers at full cadence but goes SILENT
-    // (all-zero PCM) when the tapped output device renegotiates its nominal
-    // sample rate (44.1 ↔ 48 kHz) — classically triggered by another app taking
-    // the mic and forcing voice-processing mode. This is a known, Apple-
-    // unresolved Core Audio behaviour (Developer Forums thread 825780); the only
-    // reliable recovery is a FULL teardown + rebuild of the tap AND aggregate,
-    // which `handleDeviceChange` already performs. The catch: this rate change
-    // happens with the default output device's UID UNCHANGED, so the
-    // `kAudioHardwarePropertyDefaultOutputDevice` (identity) listener never fires.
-    // Listening for the device's `kAudioDevicePropertyNominalSampleRate` catches
-    // it and drives the same rebuild via `onDefaultDeviceChanged`.
+    // This tap used to install two private HAL property listeners of its own:
+    // `kAudioHardwarePropertyDefaultOutputDevice` (the default output changing
+    // identity) and `kAudioDevicePropertyNominalSampleRate` on the tapped device
+    // (the documented process-tap silent-buffer case — a tap keeps delivering
+    // buffers at full cadence but goes SILENT/all-zero when the tapped device
+    // renegotiates 44.1 ↔ 48 kHz, classically another app taking the mic and
+    // forcing voice-processing mode; Apple-unresolved, Developer Forums thread
+    // 825780, and the only reliable recovery is the full teardown+rebuild
+    // `handleDeviceChange` performs. It happens with the device's UID UNCHANGED,
+    // which is why the identity listener alone could never catch it).
+    //
+    // Both are now observed ONCE for the whole process by
+    // ``DefaultOutputDeviceMonitor`` and fanned out here (architecture review
+    // 2026-07-26, defect D). The compare-before-rebuild guards did NOT move: the
+    // monitor evaluates the same pure decision per subscriber, against the values
+    // `tracked` reports for THIS tap, so `onChange` runs only when this tap's own
+    // pinned device or effective rate genuinely diverged — the loop-breaker that
+    // stopped the observed per-app rebuild storm still holds.
 
     /// Best-effort human-readable label for `deviceID`, for the Telemetry
     /// `rate_rebuild` event's `device` field only — never used for any
@@ -1252,101 +1243,108 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         self.format = reconciled
     }
 
-    /// Best-effort CURRENT nominal sample rate of `deviceID`
-    /// (`kAudioDevicePropertyNominalSampleRate`), read fresh at the moment
-    /// the rate-change notification fires, so the Telemetry `newRate` field
-    /// below reflects the device's actual new rate rather than waiting for
-    /// the rebuilt tap's own ASBD read. `nil` on any HAL error (never throws
-    /// — logging must never risk the caller).
-    private static func telemetryNominalSampleRate(_ deviceID: AudioObjectID) -> Double? {
-        guard deviceID != kAudioObjectUnknown else { return nil }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var rate: Float64 = 0
-        var size = UInt32(MemoryLayout<Float64>.size)
-        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
-        return err == noErr ? rate : nil
+    func subscribeToDefaultOutput(bundleID: String) {
+        monitor.start()
+        monitorToken = monitor.subscribe(
+            label: "capturePA:\(bundleID)",
+            tracked: { [weak self] in
+                // READ LIVE at every notification — never a value snapshotted
+                // here at subscribe time. The monitor compares against each
+                // subscriber's OWN current device/rate precisely so that a tap
+                // whose format drifted independently still gets told even when
+                // the device's rate looks unchanged from the monitor's point of
+                // view. `format.sampleRate` is the right thing to report
+                // specifically because `reconcileFormatWithAggregate` already
+                // corrected it to the aggregate's real rate at start —
+                // reporting the unreconciled pre-aggregate rate would make the
+                // guard never match and rebuild on every notification (the
+                // observed per-app rebuild storm).
+                guard let self else {
+                    return DefaultOutputDeviceMonitor.Tracked(
+                        deviceID: kAudioObjectUnknown, rate: 0)
+                }
+                return DefaultOutputDeviceMonitor.Tracked(
+                    deviceID: self.tappedOutputDeviceID, rate: self.format.sampleRate)
+            },
+            onChange: { [weak self] snapshot in
+                guard let self else { return }
+                // The rebuild below is unconditional: the monitor only delivers
+                // here when a guard already said this tap diverged. The two
+                // Telemetry events are preserved verbatim from the rate listener
+                // this replaced (the live-diagnosis workflow greps them by name)
+                // and now distinguish WHICH divergence drove the delivery — a
+                // rate change, or a device-identity change at an unchanged rate.
+                // Never exercised by the hermetic suite (no live Core Audio) —
+                // see the coordinator-level emission in
+                // `handleDeviceChange(bundleID:)`, which is.
+                let rate = self.format.sampleRate
+                let device = Self.telemetryDeviceLabel(self.tappedOutputDeviceID)
+                if CoreAudioSystemTap.shouldRebuildForNominalRate(
+                    notifiedRate: snapshot.nominalRate, currentEffectiveRate: rate) {
+                    Telemetry.log(.capturePA, "rate_rebuild", [
+                        "bundleID": bundleID,
+                        "device": device,
+                        "oldRate": String(rate),
+                        "newRate": snapshot.nominalRate.map { String(Int($0.rounded())) } ?? "unknown",
+                    ])
+                } else {
+                    Telemetry.log(.capturePA, "rate_notification_skipped", [
+                        "bundleID": bundleID,
+                        "device": device,
+                        "rate": String(rate),
+                    ])
+                }
+                self.onDefaultDeviceChanged?()
+            })
     }
 
-    private func installSampleRateListener(bundleID: String) {
-        guard tappedOutputDeviceID != kAudioObjectUnknown else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
-            // COMPARE-BEFORE-REBUILD LOOP-BREAKER (reuses
-            // `CoreAudioSystemTap.shouldRebuildForNominalRate`, pure/tested):
-            // Core Audio posts this listener for a set-to-same-value too, not
-            // just a genuine change. Without this guard EVERY such spurious
-            // re-announcement tore this per-app tap down and rebuilt it —
-            // observed live as a per-app capture restarting every few seconds
-            // with no real rate change. `format.sampleRate` is safe to compare
-            // against here specifically because `reconcileFormatWithAggregate`
-            // already corrected it to the aggregate's real rate at start —
-            // comparing against the unreconciled pre-aggregate rate would make
-            // this guard never match and rebuild on every notification.
-            guard CoreAudioSystemTap.shouldRebuildForNominalRate(
-                notifiedRate: newRate, currentEffectiveRate: self.format.sampleRate) else {
-                Telemetry.log(.capturePA, "rate_notification_skipped", [
-                    "bundleID": bundleID,
-                    "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
-                    "rate": String(self.format.sampleRate),
-                ])
-                return
-            }
-            // The Telemetry call below is the real HAL detection point, so it
-            // carries the richest fields (device name, and a fresh HAL read of
-            // the NEW rate rather than waiting for the rebuilt tap's ASBD).
-            // Never exercised by the hermetic suite (no live Core Audio) — see
-            // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
-            // which is.
-            Telemetry.log(.capturePA, "rate_rebuild", [
-                "bundleID": bundleID,
-                "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
-                "oldRate": String(self.format.sampleRate),
-                "newRate": newRate.map { String(Int($0.rounded())) } ?? "unknown",
-            ])
-            self.onDefaultDeviceChanged?()
-        }
-        self.sampleRateBlock = block
-        AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+    private func unsubscribeFromDefaultOutput() {
+        guard let token = monitorToken else { return }
+        monitor.unsubscribe(token)
+        monitorToken = nil
     }
 
-    private func removeSampleRateListener() {
-        guard let block = sampleRateBlock, tappedOutputDeviceID != kAudioObjectUnknown else {
-            sampleRateBlock = nil
-            return
-        }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
-        sampleRateBlock = nil
+    /// Test seam (hermetic suite only): seed the device/rate a live
+    /// `createAndStart` would have resolved, so the monitor subscription can be
+    /// exercised without real Core Audio.
+    func test_seedTrackedState(deviceID: AudioObjectID, sampleRate: Int) {
+        tappedOutputDeviceID = deviceID
+        format = TapFormat(
+            sampleRate: sampleRate, channels: 2, bitsPerSample: 32,
+            isFloat: true, isInterleaved: false)
     }
 
     // MARK: Teardown (order matters: stop -> destroy IOProc -> destroy aggregate -> destroy tap)
 
+    // Every destroy below is checked and logged rather than discarded: a failing
+    // `AudioHardwareDestroyProcessTap`/`…AggregateDevice` is exactly how a live
+    // per-app tap leaks a system object, and it used to vanish silently here
+    // while the whole-system tap logged the same failures. Log-and-continue —
+    // teardown must never stop partway and orphan the objects further down.
     func teardown() {
-        removeDefaultDeviceListener()
-        removeSampleRateListener()
+        unsubscribeFromDefaultOutput()
         tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)")
+            }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)")
+            }
             aggregateID = kAudioObjectUnknown
         }
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)")
+            }
             tapID = kAudioObjectUnknown
         }
     }

@@ -71,6 +71,7 @@ public struct AppSettings {
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let allowRemoteControl = "companion.allowRemoteControl"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -226,6 +227,53 @@ public struct AppSettings {
         }
         nonmutating set {
             defaults.set(min(max(newValue, Self.minSyncOffsetMs), Self.maxSyncOffsetMs), forKey: Keys.syncOffsetMs)
+        }
+    }
+
+    /// Whether the iPhone companion app may connect to and control this Mac
+    /// (Settings › General "Allow control from iPhone on this network").
+    /// Defaults to **`false`** when unset — the companion server is opt-in; a
+    /// fresh install/upgrade never starts an always-on network listener
+    /// without the user choosing it (flip planned for a later release, once
+    /// the companion has shipped a few cycles). See ``resolvedAllowRemoteControl(explicit:environment:)``
+    /// for the env-var override AppDelegate actually reads at launch.
+    public var allowRemoteControl: Bool {
+        get { defaults.bool(forKey: Keys.allowRemoteControl) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
+    }
+
+    /// The env var that force-overrides ``allowRemoteControl`` for one launch,
+    /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
+    public static let allowRemoteControlEnvironmentVariableName = "AUDIOUTER_COMPANION"
+
+    /// Resolve whether the companion server should run, in priority order: an
+    /// explicit argument → the `AUDIOUTER_COMPANION` env var (`1`/`0` or
+    /// `on`/`off`, case-insensitive) → the persisted ``allowRemoteControl``
+    /// setting.
+    ///
+    /// This is an explicit knob, never a silent fallback (mirrors
+    /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
+    /// env value is treated as absent — it falls back to the setting and
+    /// prints one warning to stderr rather than silently guessing which way
+    /// to go.
+    public static func resolvedAllowRemoteControl(
+        explicit: Bool? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings
+    ) -> Bool {
+        if let explicit { return explicit }
+
+        guard let raw = environment[allowRemoteControlEnvironmentVariableName] else {
+            return settings.allowRemoteControl
+        }
+        switch raw.lowercased() {
+        case "1", "on":  return true
+        case "0", "off": return false
+        default:
+            FileHandle.standardError.write(
+                Data("warning: unrecognized \(allowRemoteControlEnvironmentVariableName) value \"\(raw)\" — falling back to the setting\n".utf8)
+            )
+            return settings.allowRemoteControl
         }
     }
 }

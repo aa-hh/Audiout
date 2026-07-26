@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Foundation
+import Testing
+@testable import AudiouterCore
+
+/// `CompanionSnapshotBuilder` is a pure mapper, but every field it maps has a
+/// specific, easy-to-get-wrong source (PLAN-COMPANION-APP.md T3). These tests
+/// exist to pin the traps the plan calls out — each one starts from a fixture
+/// where the "obvious" (wrong) source and the real source actively disagree,
+/// so a regression to the wrong source fails loudly rather than by
+/// coincidence.
+///
+/// NOTE: every call to `CompanionSnapshotBuilder.build(...)` below is written
+/// out in full rather than behind a local wrapper. A wrapper `func` would
+/// have to spell `-> Snapshot` (or any `AudiouterProtocol` type) as an
+/// explicit return-type annotation, which requires `import AudiouterProtocol`
+/// — a module this test target does not (and per this task, should not)
+/// depend on directly. `let snapshot = CompanionSnapshotBuilder.build(...)`
+/// with no annotation, followed by plain member access, needs no such import
+/// (the type is only ever inferred, never spelled).
+@Suite struct CompanionSnapshotBuilderTests {
+
+    // MARK: Shared inert defaults (plain stdlib types only — see the note above)
+
+    private let noExcludedBundleIDs: Set<String> = []
+    private let noAddableApps: [(bundleID: String, displayName: String)] = []
+    private let noRunningRouted: Set<String> = []
+    private let noLiveRoutedAppNames: [String: [String]] = [:]
+    private let defaultServerName = "Test Mac"
+    private let defaultConnectVolume = 35
+    private let defaultConnectVolumeMin = 5
+    private let defaultConnectVolumeMax = 100
+    private let defaultStartBufferMs = 1000
+    private let defaultStartBufferOptionsMs = [1000, 1500, 2250]
+
+    // MARK: Fixture fleet
+    //
+    // `speaker-a` bakes in `isSelected: true` / `isMuted: true` directly on
+    // the `Device` value — the backend's own passthrough notions — while
+    // nothing in this suite ever tells `GroupController` to select or mute
+    // it. That makes the two sources disagree from the moment the fleet is
+    // discovered, with no extra setup required (mirrors `.demoFleet`'s own
+    // sonos-move fixture, which bakes in the same disagreement).
+
+    private static let fixtureFleet: [Device] = [
+        Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true),
+        Device(id: "speaker-a", name: "Speaker A", kind: .sonos, isMuted: true, isSelected: true),
+        Device(id: "speaker-b", name: "Speaker B", kind: .homePod,
+               connectionState: .failed(ConnectionFailure(cause: .refusedOrBusy))),
+    ]
+
+    /// Deterministic backend, pre-populated synchronously via a blocking
+    /// discovery wait — same pattern as `GroupControllerTests.makeBackend`.
+    private func makeBackend(_ fleet: [Device] = fixtureFleet) async throws -> MockBackend {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
+                                  simulatesDropouts: false)
+        let stream = backend.makeEventStream()
+        let box = CountBox()
+        try await confirmation("fleet discovered") { discovered in
+            let task = Task {
+                for await event in stream {
+                    if case .deviceAdded = event, await box.increment() >= fleet.count {
+                        discovered(); break
+                    }
+                }
+            }
+            defer { task.cancel() }
+            backend.start()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { _ = await task.value }
+                group.addTask { try await Task.sleep(for: .seconds(2)) }
+                try await group.next()
+                group.cancelAll()
+            }
+        }
+        return backend
+    }
+
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    /// A marker icon closure — `CompanionSnapshotBuilder` never inspects the
+    /// device beyond identity here, so a fixed per-id string is enough to
+    /// prove the closure's return value (not some hardcoded fallback) reaches
+    /// the snapshot.
+    private func iconFor(_ device: Device) -> String { "icon:\(device.id)" }
+
+    private func makeAppRouting() -> AppRoutingController {
+        AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+    }
+
+    private func makeGroupController(backend: MockBackend) -> GroupController {
+        GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                        routingStore: RoutingStore(directory: tempDirectory()), loadPersisted: false)
+    }
+
+    // MARK: Trap 1 — isSelected
+
+    @Test func deviceIsSelectedComesFromGroupControllerNeverDeviceIsSelected() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        // Sanity: the fixture really does bake `isSelected: true` into the
+        // raw Device — if this ever stops being true the test proves nothing.
+        #expect(backend.devices.first { $0.id == "speaker-a" }?.isSelected == true)
+        // GroupController never selected it (loadPersisted: false, no
+        // ensureDefaultSelection call) — its own notion disagrees.
+        #expect(controller.isSpeakerSelected("speaker-a") == false)
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let speakerA = try #require(snapshot.devices.first { $0.id == "speaker-a" })
+        #expect(speakerA.isSelected == false, "must follow GroupController.isSpeakerSelected, not Device.isSelected")
+
+        // Deliberately selecting it brings the two into agreement — proving
+        // the snapshot tracks the controller's notion, not a frozen copy.
+        controller.setDeviceSelected("speaker-a", true)
+        let after = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(after.devices.first { $0.id == "speaker-a" }?.isSelected == true)
+    }
+
+    // MARK: Trap 2 — isMuted
+
+    @Test func deviceIsMutedComesFromGroupControllerNeverDeviceIsMuted() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        // Sanity: speaker-a's raw Device bakes in isMuted: true.
+        #expect(backend.devices.first { $0.id == "speaker-a" }?.isMuted == true)
+        #expect(controller.isMuted("speaker-a") == false)
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let speakerA = try #require(snapshot.devices.first { $0.id == "speaker-a" })
+        #expect(speakerA.isMuted == false, "must follow GroupController.isMuted, not Device.isMuted")
+
+        // Reverse direction: mute a device via the controller. `setMuted`
+        // never calls `backend.setMuted` (it zeroes the volume instead), so
+        // the raw Device's `isMuted` field never moves — only the snapshot
+        // built from the controller should reflect the mute.
+        controller.setMuted(true, for: "speaker-b")
+        #expect(backend.devices.first { $0.id == "speaker-b" }?.isMuted == false, "backend field never written")
+        let after = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(after.devices.first { $0.id == "speaker-b" }?.isMuted == true)
+    }
+
+    // MARK: Trap 3 — isMainOutMember
+
+    @Test func deviceIsMainOutMemberComesFromGroupControllerIsMainOutMemberNotSelectedDevices() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        try controller.saveGroup(Group(id: "g1", name: "Group 1", memberIDs: ["speaker-b"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        // Composes the (independent) Selected Devices set without re-routing,
+        // since Main Out currently targets the group, not `.selectedDevices`.
+        controller.setDeviceSelected("speaker-a", true)
+
+        #expect(controller.isSpeakerSelected("speaker-a") == true)
+        #expect(controller.isMainOutMember("speaker-a") == false, "not a member of the active group")
+        #expect(controller.isSpeakerSelected("speaker-b") == false, "never added to Selected Devices")
+        #expect(controller.isMainOutMember("speaker-b") == true, "the active group's only member")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let speakerA = try #require(snapshot.devices.first { $0.id == "speaker-a" })
+        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(speakerA.isSelected == true)
+        #expect(speakerA.isMainOutMember == false)
+        #expect(speakerB.isSelected == false)
+        #expect(speakerB.isMainOutMember == true)
+    }
+
+    // MARK: Trap 4 — excluded apps
+
+    @Test func excludedAppsAreAbsentFromAddableAppsAndAppRoutes() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        appRouting.addRoute(bundleID: "com.excluded.app", displayName: "Excluded")
+        appRouting.addRoute(bundleID: "com.kept.app", displayName: "Kept")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: ["com.excluded.app"], iconFor: iconFor,
+            addableApps: [
+                (bundleID: "com.excluded.app", displayName: "Excluded"),
+                (bundleID: "com.addable.app", displayName: "Addable"),
+            ],
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+
+        #expect(!snapshot.appRoutes.contains { $0.bundleID == "com.excluded.app" })
+        #expect(snapshot.appRoutes.contains { $0.bundleID == "com.kept.app" }, "non-excluded route survives")
+        #expect(!snapshot.addableApps.contains { $0.bundleID == "com.excluded.app" })
+        #expect(snapshot.addableApps.contains { $0.bundleID == "com.addable.app" }, "non-excluded addable app survives")
+    }
+
+    // MARK: Connection fields (D9 full parity)
+
+    @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        let failure = ConnectionFailure(cause: .refusedOrBusy)
+        #expect(speakerB.connection.state == "failed")
+        #expect(speakerB.connection.failureHeadline == failure.headline)
+        #expect(speakerB.connection.failureSuggestion == failure.suggestion)
+
+        // A device with no failure carries no headline/suggestion.
+        let local = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(local.connection.state == "off")
+        #expect(local.connection.failureHeadline == nil)
+        #expect(local.connection.failureSuggestion == nil)
+    }
+
+    // MARK: Passthrough fields
+
+    @Test func passthroughFieldsReachTheSnapshotUnchanged() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: ["speaker-b": ["Some App"]],
+            localFallbackActive: true, takeoverStatus: "taking over", serverName: "Alec's Mac",
+            connectVolume: 42, connectVolumeMin: 5, connectVolumeMax: 100,
+            startBufferMs: 1500, startBufferOptionsMs: [1000, 1500, 2250]
+        )
+
+        #expect(snapshot.serverName == "Alec's Mac")
+        #expect(snapshot.liveRoutedAppNames == ["speaker-b": ["Some App"]])
+        #expect(snapshot.localFallbackActive == true)
+        #expect(snapshot.takeoverStatus == "taking over")
+        #expect(snapshot.settings.connectVolume == 42)
+        #expect(snapshot.settings.connectVolumeMin == 5)
+        #expect(snapshot.settings.connectVolumeMax == 100)
+        #expect(snapshot.settings.startBufferMs == 1500)
+        #expect(snapshot.settings.startBufferOptionsMs == [1000, 1500, 2250])
+        #expect(snapshot.devices.first { $0.id == "speaker-a" }?.iconSymbolName == "icon:speaker-a")
+    }
+
+    // MARK: Main Out target mapping
+
+    @Test func mainOutStateReflectsSelectedDevicesOrGroupTarget() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let selectedSnapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(selectedSnapshot.mainOut.kind == "selected")
+        #expect(selectedSnapshot.mainOut.groupID == nil)
+
+        try controller.saveGroup(Group(id: "g1", name: "Group 1", memberIDs: ["speaker-b"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        let groupSnapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(groupSnapshot.mainOut.kind == "group")
+        #expect(groupSnapshot.mainOut.groupID == "g1")
+    }
+
+    // MARK: Group mute mapping (same trap shape as device mute — GroupState.isMuted
+    // must read GroupController.isGroupMuted, not a hardcoded default)
+
+    @Test func groupStateIsMutedComesFromGroupControllerIsGroupMuted() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        try controller.saveGroup(Group(id: "g1", name: "Group 1", memberIDs: ["speaker-b"], memberVolumes: [:]))
+
+        let before = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(before.groups.first { $0.id == "g1" }?.isMuted == false)
+
+        controller.setGroupMuted(true, groupID: "g1")
+        let after = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(after.groups.first { $0.id == "g1" }?.isMuted == true)
+    }
+}
+
+private actor CountBox {
+    private var count = 0
+    func increment() -> Int { count += 1; return count }
+}

@@ -32,3 +32,10 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
 .swiftpm/xcode/
+*.xcuserstate
+
+# iOS app (ios/AudiouterRemote) build artifacts — DerivedData defaults to
+# ~/Library/Developer/Xcode/DerivedData, but xcodebuild can be pointed at an
+# in-tree build dir with -derivedDataPath; ignore that case too.
+ios/DerivedData/
+ios/**/DerivedData/

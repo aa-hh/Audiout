@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterCore
 
 /// Settings › **General** pane. Step 1: a single "Launch at login" switch wired
 /// to the `LoginItemManaging` seam. Also the entry point to **About Audiouter…**
@@ -19,7 +20,9 @@ import AppKit
 public final class GeneralSettingsViewController: NSViewController {
 
     private let loginItem: LoginItemManaging
+    private let settings: AppSettings
     private let launchSwitch = NSSwitch()
+    private let remoteControlCheckbox = NSButton()
     private let setupButton = NSButton()
     private let aboutButton = NSButton()
     private let aboutWindowController: AboutWindowController
@@ -29,7 +32,16 @@ public final class GeneralSettingsViewController: NSViewController {
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
 
+    /// Fired after "Allow control from iPhone on this network" changes and
+    /// persists (T6), so the app layer can start/stop the companion server to
+    /// match. Nil (unset) leaves the checkbox inert beyond persisting the
+    /// setting — the app layer claims it in `openSettings`, matching
+    /// ``onRunSetupAgain``'s single-assignment idiom.
+    public var onAllowRemoteControlChanged: (() -> Void)?
+
     /// - Parameters:
+    ///   - settings: backs the "Allow control from iPhone" checkbox; injectable
+    ///     so tests use a throwaway `UserDefaults` suite, never `.standard`.
     ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
@@ -38,9 +50,11 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     to `NSWorkspace`, injected as a recording closure in tests so a
     ///     test run never actually launches a browser.
     public init(loginItem: LoginItemManaging,
+                settings: AppSettings = AppSettings(),
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.loginItem = loginItem
+        self.settings = settings
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
         super.init(nibName: nil, bundle: nil)
         title = "General"
@@ -57,6 +71,19 @@ public final class GeneralSettingsViewController: NSViewController {
             title: "Launch at login",
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
+
+        // AppKit checkbox (matches DeviceRowView/MembershipRowView's boolean
+        // idiom) — no inline title, the row label carries it.
+        remoteControlCheckbox.setButtonType(.switch)
+        remoteControlCheckbox.title = ""
+        remoteControlCheckbox.state = settings.allowRemoteControl ? .on : .off
+        remoteControlCheckbox.target = self
+        remoteControlCheckbox.action = #selector(remoteControlToggled)
+        remoteControlCheckbox.setAccessibilityLabel("Allow control from iPhone on this network")
+        let remoteControlRow = SettingsForm.row(
+            title: "Allow control from iPhone on this network",
+            subtitle: "Lets the Audiouter companion app on your iPhone see and control this Mac's speakers.",
+            control: remoteControlCheckbox)
 
         // "Check Permissions…" re-opens the first-run permission-priming window —
         // the way a user re-checks the System Audio / Local Network grants after
@@ -82,7 +109,7 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Version, license, and third-party credits.",
             control: aboutButton)
 
-        view = SettingsForm.paneView(rows: [launchRow, setupRow, aboutRow])
+        view = SettingsForm.paneView(rows: [launchRow, remoteControlRow, setupRow, aboutRow])
     }
 
     public override func viewDidLoad() {
@@ -98,6 +125,11 @@ public final class GeneralSettingsViewController: NSViewController {
 
     private func syncFromLoginItem() {
         launchSwitch.state = loginItem.isEnabled ? .on : .off
+    }
+
+    @objc private func remoteControlToggled() {
+        settings.allowRemoteControl = remoteControlCheckbox.state == .on
+        onAllowRemoteControlChanged?()
     }
 
     @objc private func runSetupAgainTapped() { onRunSetupAgain?() }
@@ -142,6 +174,21 @@ public final class GeneralSettingsViewController: NSViewController {
     public func test_tapRunSetupAgain() {
         _ = view
         runSetupAgainTapped()
+    }
+
+    // MARK: Test-support hooks (Companion — T6)
+
+    /// Whether the checkbox currently reads "on".
+    public var test_allowRemoteControlIsOn: Bool {
+        _ = view
+        return remoteControlCheckbox.state == .on
+    }
+
+    /// Drive the checkbox to `on`/`off` and run the same action a real click would.
+    public func test_toggleAllowRemoteControl(_ on: Bool) {
+        _ = view
+        remoteControlCheckbox.state = on ? .on : .off
+        remoteControlToggled()
     }
 
     // MARK: Test-support hooks (About)

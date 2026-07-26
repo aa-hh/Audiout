@@ -115,6 +115,12 @@ public final class AudioSettingsViewController: NSViewController {
     /// routes) and refresh the popover.
     public var onChange: (() -> Void)?
 
+    /// Fired after a connect-volume change or a buffer-apply commits (T6), so
+    /// the app can broadcast the new settings to the companion app. Nil
+    /// (unset) is a no-op — the app layer claims it in `openSettings`, same
+    /// single-assignment idiom as ``onChange``.
+    public var onSettingChanged: (() -> Void)?
+
     private let listStack = NSStackView()
     private let listContainer = BorderedListView()
 
@@ -293,6 +299,7 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
         connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
         settings.connectVolume = percent
+        onSettingChanged?()
     }
 
     // MARK: Wake restore (B6b)
@@ -546,6 +553,7 @@ public final class AudioSettingsViewController: NSViewController {
         await latency.apply(target)
 
         appliedMs = target
+        onSettingChanged?()
         isApplying = false
         applySpinner.stopAnimation(nil)
         applyStatusLabel.stringValue = wasStreaming ? "Speakers reconnected" : "Applied"

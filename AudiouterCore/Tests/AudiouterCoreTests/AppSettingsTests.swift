@@ -183,4 +183,64 @@ import Testing
         #expect(AppSettings.maxSyncOffsetMs > 0)
         #expect((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
     }
+
+    // MARK: Companion — allow remote control (T6)
+
+    @Test func allowRemoteControlDefaultsFalseWhenUnset() {
+        // Opt-in only: a fresh install/upgrade never starts the companion
+        // server's always-on listener without the user choosing it.
+        #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    @Test func allowRemoteControlRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(settings.allowRemoteControl)
+        #expect(AppSettings(defaults: defaults).allowRemoteControl)
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    @Test func resolvedAllowRemoteControlExplicitWins() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = false
+        #expect(AppSettings.resolvedAllowRemoteControl(explicit: true, environment: [:], settings: settings))
+        #expect(!AppSettings.resolvedAllowRemoteControl(explicit: false, environment: ["AUDIOUTER_COMPANION": "1"], settings: settings))
+    }
+
+    @Test func resolvedAllowRemoteControlFallsBackToSettingWhenEnvUnset() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+    }
+
+    @Test(arguments: [
+        ("1", true), ("0", false),
+        ("on", true), ("off", false),
+        ("ON", true), ("OFF", false),
+        ("On", true), ("Off", false),
+    ])
+    func resolvedAllowRemoteControlEnvMatrix(raw: String, expected: Bool) {
+        let settings = AppSettings(defaults: defaults)
+        // The setting disagrees with every expected outcome, so a pass proves
+        // the env var actually won rather than merely matching the default.
+        settings.allowRemoteControl = !expected
+        #expect(AppSettings.resolvedAllowRemoteControl(
+            environment: ["AUDIOUTER_COMPANION": raw], settings: settings) == expected)
+    }
+
+    @Test func resolvedAllowRemoteControlUnrecognizedEnvFallsBackToSetting() {
+        // An explicit but garbage value is treated as absent (falls back to
+        // the setting), never silently guessed — mirrors BackendKind.resolved.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUTER_COMPANION": "banana"], settings: settings))
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUTER_COMPANION": "banana"], settings: settings))
+    }
 }

@@ -129,11 +129,11 @@ import AppKit
     @Test func generalPaneStaysCompactAboutIsNotInlined() {
         let controller = GeneralSettingsViewController(loginItem: FakeLoginItem())
         controller.view.layoutSubtreeIfNeeded()
-        // Three short button rows (Launch at login / Setup / About), not the
-        // full About content — comfortably under half of what full inlining
-        // measured (~1039pt, the change that broke
+        // Four short rows (Launch at login / iPhone control / Setup / About),
+        // not the full About content — comfortably under half of what full
+        // inlining measured (~1039pt, the change that broke
         // `testContentSizeIsFittedNotDegenerate`'s 750pt regression bound).
-        #expect(controller.view.fittingSize.height < 250)
+        #expect(controller.view.fittingSize.height < 300)
     }
 
     // MARK: Renders offscreen without crashing, in both appearances

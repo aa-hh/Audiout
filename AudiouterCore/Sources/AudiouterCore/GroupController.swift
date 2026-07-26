@@ -108,6 +108,16 @@ public final class GroupController {
     /// progress. See ``setMasterVolume(_:)``.
     private var dragRatios: [String: Double]?
 
+    /// Fired AFTER a public mutation that actually changed pure-model state —
+    /// Selected Devices membership, Main Out target, groups, the active group,
+    /// or mute — never on a no-op early return. Deliberately NOT fired from a
+    /// pure-backend-write path (``setMemberVolume(_:for:)``, the master-drag
+    /// scaling methods, ``mirrorSystemVolumeToMainOut(_:)``): those write
+    /// straight to ``OutputBackend`` and echo back as `BackendEvent
+    /// .deviceUpdated`, so firing here too would double-notify. Single-assignment
+    /// per house idiom — `AppDelegate` is the sole assignee.
+    public var onStateDidChange: (() -> Void)?
+
     /// - Parameters:
     ///   - backend: where volume/output-set changes actually go.
     ///   - store: persistence for saved groups. Defaults to the on-disk store
@@ -168,6 +178,7 @@ public final class GroupController {
         loadedPersistedRouting = true
         applyRouting()
         persistRouting()
+        onStateDidChange?()
     }
 
     /// Persist the current routing state (Selected Devices + Main Out target).
@@ -289,6 +300,7 @@ public final class GroupController {
             selectedDeviceIDs.insert(id)
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
+            onStateDidChange?()
             return autoSwapped ? .okAutoSwap : .ok
         } else {
             guard selectedDeviceIDs.contains(id) else { return .ok }
@@ -311,6 +323,7 @@ public final class GroupController {
 
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
+            onStateDidChange?()
             return autoSwapped ? .okAutoSwap : .ok
         }
     }
@@ -409,6 +422,7 @@ public final class GroupController {
         mainOut = target
         applyRouting()
         persistRouting()
+        onStateDidChange?()
     }
 
     /// Realize `mainOut` against the backend's output set.
@@ -483,7 +497,11 @@ public final class GroupController {
         // group target). For `.selectedDevices` there is no active group even if
         // the set coincidentally equals one.
         guard case .group = mainOut else {
-            if activeGroupID != nil { activeGroupID = nil; memberState.removeAll() }
+            if activeGroupID != nil {
+                activeGroupID = nil
+                memberState.removeAll()
+                onStateDidChange?()
+            }
             return activeGroupID
         }
         let derived = groupMatchingCurrentSelection?.id
@@ -492,6 +510,7 @@ public final class GroupController {
             // A different (or no) active group invalidates mute bookkeeping
             // tied to the previous group's membership.
             memberState.removeAll()
+            onStateDidChange?()
         }
         return activeGroupID
     }
@@ -512,6 +531,7 @@ public final class GroupController {
             groups.append(group)
         }
         try store.save(groups)
+        onStateDidChange?()
         return group
     }
 
@@ -573,12 +593,14 @@ public final class GroupController {
 
     /// Remove a group. Deactivates it first if it was active, and if Main Out
     /// pointed at it, falls back to `.selectedDevices` so the routing target
-    /// never dangles at a deleted group.
+    /// never dangles at a deleted group. No-op if `id` names no saved group.
     public func deleteGroup(id: String) throws {
+        guard groups.contains(where: { $0.id == id }) else { return }
         if activeGroupID == id { activeGroupID = nil }
         if mainOut == .group(id: id) { setMainOut(.selectedDevices) }
         groups.removeAll { $0.id == id }
         try store.save(groups)
+        onStateDidChange?()
     }
 
     // MARK: Activation
@@ -620,13 +642,17 @@ public final class GroupController {
                 backend.setVolume(volume, for: memberID)
             }
         }
+        onStateDidChange?()
     }
 
     /// Clear the active group without changing the current output set
-    /// (devices remain individually selectable — SPEC.md §9).
+    /// (devices remain individually selectable — SPEC.md §9). No-op if no
+    /// group is currently active.
     public func deactivateGroup() {
+        guard activeGroupID != nil else { return }
         activeGroupID = nil
         memberState.removeAll()
+        onStateDidChange?()
     }
 
     private var activeMemberIDs: [String] {
@@ -1014,6 +1040,7 @@ public final class GroupController {
     private func applySilence(for id: String, state: inout MemberState, wasSilent: Bool) {
         let isSilent = state.explicitMute
         guard isSilent != wasSilent else { return }
+        onStateDidChange?()
 
         if isSilent {
             state.priorVolume = device(id)?.volume

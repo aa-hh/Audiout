@@ -81,4 +81,48 @@ import Testing
         controller.exclude(bundleID: "c", displayName: "C")
         #expect(controller.excludedApps.map(\.bundleID) == ["a", "b", "c"])
     }
+
+    // MARK: onChange — change hook (T2, PLAN-COMPANION-APP.md)
+
+    @Test func excludeFiresOnChangeOnRealChange() {
+        let controller = ExcludedAppsController(store: ExcludedAppsStore(directory: directory))
+        var fireCount = 0
+        controller.onChange = { fireCount += 1 }
+
+        controller.exclude(bundleID: "us.zoom.xos", displayName: "Zoom")
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func excludingTwiceDoesNotFireOnChangeTwice() {
+        let controller = ExcludedAppsController(store: ExcludedAppsStore(directory: directory))
+        controller.exclude(bundleID: "us.zoom.xos", displayName: "Zoom")
+        var fireCount = 0
+        controller.onChange = { fireCount += 1 }
+
+        controller.exclude(bundleID: "us.zoom.xos", displayName: "Zoom (renamed)")   // already excluded — no-op
+
+        #expect(fireCount == 0, "excluding an already-excluded bundle must not fire onChange")
+    }
+
+    @Test func removeFiresOnChangeOnRealChange() {
+        let controller = ExcludedAppsController(store: ExcludedAppsStore(directory: directory))
+        controller.exclude(bundleID: "us.zoom.xos", displayName: "Zoom")
+        var fireCount = 0
+        controller.onChange = { fireCount += 1 }
+
+        controller.remove(bundleID: "us.zoom.xos")
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func removeDoesNotFireOnChangeForNonExcludedBundle() {
+        let controller = ExcludedAppsController(store: ExcludedAppsStore(directory: directory))
+        var fireCount = 0
+        controller.onChange = { fireCount += 1 }
+
+        controller.remove(bundleID: "us.zoom.xos")   // never excluded — no-op
+
+        #expect(fireCount == 0, "removing a bundle that was never excluded must not fire onChange")
+    }
 }

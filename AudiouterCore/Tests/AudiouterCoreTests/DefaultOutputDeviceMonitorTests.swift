@@ -121,6 +121,12 @@ import CoreAudio
     private let rateSelector = kAudioDevicePropertyNominalSampleRate
     private let deviceSelector = kAudioHardwarePropertyDefaultOutputDevice
 
+    /// A settle window the real timer can never win inside a test, so fan-out
+    /// happens only where a test asks for it via `_drainForTesting()`. Zero would
+    /// be worse than useless: each notification's work item would run before the
+    /// next notification could cancel it, and nothing would ever coalesce.
+    private let testSettleWindow: TimeInterval = 60
+
     // MARK: - Tests
 
     /// A set-to-same-value notification (Core Audio genuinely posts these) must
@@ -128,13 +134,14 @@ import CoreAudio
     /// loop-breaker.
     @Test func noFireWhenNotifiedValueIsUnchanged() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         recorder.attach(to: monitor)
         monitor.start()
 
         hal.fire(rateSelector)
         hal.fire(deviceSelector)
+        monitor._drainForTesting()
 
         #expect(recorder.received.isEmpty)
     }
@@ -143,13 +150,14 @@ import CoreAudio
     /// the silent-tap case the identity listener alone cannot see.
     @Test func firesOnGenuineRateChange() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         recorder.attach(to: monitor)
         monitor.start()
 
         hal.rate = 44_100
         hal.fire(rateSelector)
+        monitor._drainForTesting()
 
         #expect(recorder.received.count == 1)
         #expect(recorder.received.first?.nominalRate == 44_100)
@@ -161,13 +169,14 @@ import CoreAudio
     /// listener onto the new device.
     @Test func firesOnDeviceChangeAndRetargetsRateListener() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         recorder.attach(to: monitor)
         monitor.start()
 
         hal.deviceID = 99
         hal.fire(deviceSelector)
+        monitor._drainForTesting()
 
         #expect(recorder.received.count == 1)
         #expect(recorder.received.first?.deviceID == 99)
@@ -180,17 +189,19 @@ import CoreAudio
     /// ``TapRebuildDecision``'s documented rule.
     @Test func firesWhenReadIsUnreadable() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         recorder.attach(to: monitor)
         monitor.start()
 
         hal.rate = nil
         hal.fire(rateSelector)
+        monitor._drainForTesting()
         #expect(recorder.received.count == 1)
 
         hal.deviceID = nil
         hal.fire(deviceSelector)
+        monitor._drainForTesting()
         #expect(recorder.received.count == 2)
         #expect(recorder.received.last?.deviceID == nil)
     }
@@ -199,7 +210,7 @@ import CoreAudio
     /// consolidation.
     @Test func allSubscribersNotifiedFromOneListenerInstallation() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorders = (0..<4).map { _ in Recorder(deviceID: 42, rate: 48_000) }
         for (index, recorder) in recorders.enumerated() { recorder.attach(to: monitor, label: "sub\(index)") }
         monitor.start()
@@ -210,6 +221,7 @@ import CoreAudio
 
         hal.rate = 44_100
         hal.fire(rateSelector)
+        monitor._drainForTesting()
 
         #expect(recorders.allSatisfy { $0.received.count == 1 })
     }
@@ -219,7 +231,7 @@ import CoreAudio
     /// subscribers that did NOT drift must still be spared.
     @Test func onlyTheSubscriberWhoseOwnFormatDriftedIsNotified() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let aligned = Recorder(deviceID: 42, rate: 48_000)
         let drifted = Recorder(deviceID: 42, rate: 44_100)
         aligned.attach(to: monitor, label: "aligned")
@@ -228,6 +240,7 @@ import CoreAudio
 
         // Device rate unchanged (48k) from the monitor's own last reading.
         hal.fire(rateSelector)
+        monitor._drainForTesting()
 
         #expect(aligned.received.isEmpty)
         #expect(drifted.received.count == 1)
@@ -237,7 +250,7 @@ import CoreAudio
     /// closures (and whatever they captured) are released.
     @Test func unsubscribeStopsDeliveryAndReleasesTheSubscriber() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let kept = Recorder(deviceID: 42, rate: 48_000)
         kept.attach(to: monitor, label: "kept")
 
@@ -258,6 +271,7 @@ import CoreAudio
 
         hal.rate = 44_100
         hal.fire(rateSelector)
+        monitor._drainForTesting()
         #expect(kept.received.count == 1)
     }
 
@@ -265,7 +279,7 @@ import CoreAudio
     /// stack registrations.
     @Test func stopRemovesBothListenersAndStartIsIdempotent() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         monitor.start()
         monitor.start()
         #expect(hal.addCount == 2)
@@ -285,7 +299,7 @@ import CoreAudio
     /// and traps on, rather than hanging. This test simply must return.
     @Test func startCalledReentrantlyFromOnChangeDoesNotDeadlock() {
         let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         _ = monitor.subscribe(
             label: "reentrant",
@@ -298,8 +312,64 @@ import CoreAudio
 
         hal.deviceID = 99
         hal.fire(deviceSelector)  // must return, not deadlock/trap
+        monitor._drainForTesting()
 
         #expect(recorder.received.count == 1)
         #expect(monitor.current.deviceID == 99)
+    }
+
+    // MARK: - Settle window (F-SETTLE)
+
+    /// Rapid flaps (the actual BT headset scenario) produce exactly 1 delivery.
+    @Test func settleWindowCoalescesRapidFlaps() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        // Four rapid fires — like the WH-1000XM3 connect sequence.
+        hal.rate = 16_000; hal.fire(rateSelector)
+        hal.rate = 44_100; hal.fire(rateSelector)
+        hal.rate = 16_000; hal.fire(rateSelector)
+        hal.rate = 44_100; hal.fire(rateSelector)
+        // Drain once at the end — not after each fire.
+        monitor._drainForTesting()
+
+        // Only the last settled value delivered, exactly once.
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.nominalRate == 44_100)
+    }
+
+    /// A single genuine change still delivers after the window drains.
+    @Test func settleWindowDeliversAfterWindowExpires() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100
+        hal.fire(rateSelector)
+        // Nothing yet — the fan-out is armed, not run.
+        #expect(recorder.received.isEmpty)
+        monitor._drainForTesting()
+        // Exactly one delivery once the window collapses.
+        #expect(recorder.received.count == 1)
+    }
+
+    /// `stop()` before the window expires cancels the pending delivery.
+    @Test func stopCancelsPendingSettleDelivery() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100
+        hal.fire(rateSelector)
+        monitor.stop()  // cancels the pending fan-out
+        monitor._drainForTesting()
+        #expect(recorder.received.isEmpty)
     }
 }

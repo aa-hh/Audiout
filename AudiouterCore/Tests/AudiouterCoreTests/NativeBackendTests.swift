@@ -1216,10 +1216,19 @@ extension SerializedSharedState {
         } after: { discovery.fire(.appeared(speaker)) }
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
+        let isolatedDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let controller = GroupController(
             backend: backend,
-            store: GroupStore(directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+            store: GroupStore(directory: isolatedDir),
+            // Isolate BOTH persistence sinks. `ensureDefaultSelection`/`setDeviceSelected`
+            // call persistRouting() → routingStore.save(), and the default RoutingStore()
+            // targets the real ~/Library/Application Support/Audiouter — clobbering a
+            // dev's actual routing.json every run. And this controller writes
+            // settings.mainOutVolume, so the default AppSettings() (UserDefaults.standard)
+            // would pollute the real defaults domain. Both go to a per-test temp/suite.
+            routingStore: RoutingStore(directory: isolatedDir),
+            settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
             loadPersisted: false)
         controller.ensureDefaultSelection()                     // {local} — passthrough
         _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming
@@ -1297,6 +1306,27 @@ extension SerializedSharedState {
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.20) < 0.0001 } }
         #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.20) < 0.0001 },
                        "Main 40 × device 50 must reach the engine as ONE Double product (0.40 × 0.50 = 0.20), with no intermediate rounding")
+    }
+
+    /// The GROUP stage actually multiplies into the wire — not just Main × Device.
+    /// Every other `setMasterGain` in these tests passes `group: 100`, so a
+    /// regression dropping the group term from `masterGainFraction` would ship
+    /// green. 0.10 is unreachable unless all three stages multiply.
+    @Test func groupGainMultipliesIntoTheWireProductAllThreeStages() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()   // stored volume settles at 50
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Main 50 × Group 40 × Device 50 = 0.5 × 0.4 × 0.5 = 0.10.
+        backend.setMasterGain(mainOut: 50, group: 40, mirrorToSystemVolume: false)
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.10) < 0.0001 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.10) < 0.0001 },
+                       "all three stages multiply: Main 50 × Group 40 × Device 50 → 0.10 (0.25 would mean the group term was dropped)")
     }
 
     // MARK: Zero means silent — on AirPlay 1 too
@@ -1478,7 +1508,8 @@ extension SerializedSharedState {
         // A GENUINE knob turn: the speaker reports a DIFFERENT level (0.40, not
         // our 0.25). It must be inverse-gain-mapped back into the stored domain
         // (0.40 wire / 50% gain = 0.80 → stored 80) and pushed back out at that
-        // same wire level.
+        // same wire level — AirPlay volume is sender-owned, so the receiver's
+        // audible level only moves once we write it back (SET_PARAMETER).
         backend.applyDacpVolume(activeRemote: token, level: 0.40)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
 
@@ -1839,6 +1870,44 @@ extension SerializedSharedState {
                        "an auto-recovery reconnect must reseed from the connect default (35), not preserve the pre-drop in-session level (75)")
         #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 } ?? false,
                       "the auto-recovery reconnect must push the connect default to the engine, not skip the seed")
+    }
+
+    /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
+    /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
+    /// `connectVolumeSeed`'s muted branch used to push the AP2-only
+    /// `Self.engineVolume(0)` = 0.0, which on AP1 maps to an audible ~−30 dB; it now
+    /// routes through `engineVolume(forID:)`, so AP1 gets its −1.0 true-mute
+    /// sentinel. On an AP2 device both map to 0.0, so this can ONLY be caught on AP1.
+    @Test func mutedAirPlay1ReconnectSeedsTrueSilenceSentinelNotTheCurveFloor() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+
+        // Mute it, then drop it out of band (the RTSP session died, not a user toggle).
+        backend.setMuted(true, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == true }
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        // Reconnect: the muted-reconnect seed fires.
+        let callsBefore = engine.volumeCalls.count
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { engine.volumeCalls.count > callsBefore }
+
+        let afterReconnect = engine.volumeCalls.dropFirst(callsBefore)
+        #expect(afterReconnect.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "a muted AP1 reconnect must push the −144 dB true-mute sentinel (−1.0)")
+        #expect(!afterReconnect.contains { $0.0 == device.outputID && $0.1 == 0.0 },
+                       "...and must NOT push 0.0 — the AP2-only map, audible ~−30 dB on an AP1 receiver")
     }
 
     /// Regression (live Sonos Move test, 2026-07-17): the vendored C dispatcher

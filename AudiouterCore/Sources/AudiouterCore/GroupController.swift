@@ -737,23 +737,32 @@ public final class GroupController {
     }
 
     /// The real (AirPlay) outputs of whatever Main Out currently targets — exactly
-    /// what ``applyRouting()`` hands `OutputBackend.setOutputSet`. Single source of
-    /// that expression so ``localRowDrivesMain`` below cannot drift from the set
-    /// routing actually opens.
+    /// what ``applyRouting()`` hands `OutputBackend.setOutputSet`. This is
+    /// DISCOVERY-filtered (`device($0)` is nil for an undiscovered id, so it drops
+    /// out) because you cannot open a route to a device that isn't there.
     private var routableOutputIDs: Set<String> { routableOutputs(in: mainOutMemberIDs) }
 
-    /// True exactly when the current Main Out target has NO real AirPlay output —
+    /// True exactly when the current Main Out target has no non-local MEMBER —
     /// nothing selected but the Mac, an empty selection, or a Mac-only group. In
     /// that state the Mac's own row and the Main Out master are the same physical
     /// control; see ``setMemberVolume(_:for:)`` for the one behaviour that keys off
     /// this.
     ///
-    /// Deliberately NOT ``isPassthrough``: that predicate is
-    /// `selectedDeviceIDs == [local]`, which answers *false* in two states this one
-    /// must answer *true* for (nothing selected at all, and a Mac-only GROUP
-    /// target), and it carries a standing warning that nothing in the audio path
-    /// may key off it.
-    public var localRowDrivesMain: Bool { routableOutputIDs.isEmpty }
+    /// Keyed off MEMBERSHIP, deliberately NOT ``routableOutputIDs``. Those two must
+    /// diverge: routing needs the *discovered* outputs, but this predicate must not.
+    /// A saved group that names a currently-powered-off AirPlay speaker still has a
+    /// non-local member, so the Mac's row is NOT the master there — even though the
+    /// speaker isn't discovered and so isn't routable yet. Keying off
+    /// `routableOutputIDs` (discovery-filtered) would wrongly flip this true while
+    /// the speaker is off and flip it back when it powers on, moving the Mac row
+    /// between "drives Main" and "its own fader" under the user's hand.
+    ///
+    /// Also NOT ``isPassthrough`` (`selectedDeviceIDs == [local]`), which answers
+    /// *false* for a Mac-only GROUP and an empty selection, and carries a standing
+    /// warning that nothing in the audio path may key off it.
+    public var localRowDrivesMain: Bool {
+        !mainOutMemberIDs.contains { $0 != localDeviceID }
+    }
 
     /// Whether `id` is a member of whatever Main Out currently points at — the
     /// Selected Devices set, or the active group's members.

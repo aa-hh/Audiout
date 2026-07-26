@@ -1559,6 +1559,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let main = mainOut.clampedToVolume
         let newGroup = group.clampedToVolume
         stateQueue.async {
+            // When we mirror to hardware, the system volume is about to become `main`,
+            // so record it as the last system level we've seen — BEFORE the
+            // gain-changed guard below, which would otherwise skip this on a
+            // same-value re-push. `SystemOutputVolume` suppresses the echo of that
+            // write, so `onExternalChange` never delivers it to update the memo for
+            // us; without this, a later genuine external change back to the
+            // pre-drag value compares equal to a stale memo and is silently dropped
+            // (Main desyncs from the system). Owned by `stateQueue`, like the memo.
+            //
+            // razor: KNOWN EDGE — a readable-but-UNWRITABLE default output (some USB
+            // DACs) no-ops the write below, so the system is NOT at `main`, yet this
+            // memo says it is; a later external change *to `main`* would then be
+            // dropped. Can't gate on the result — `setVolume` is fire-and-forget async
+            // (SystemOutputVolume.swift:369). This line fixes the COMMON settable case
+            // (the one the original bug bit); the writability-aware sync for unsettable
+            // outputs belongs to the follow-up (PLAN-VOLUME-KEY-INTERCEPTION §0b).
+            if mirrorToSystemVolume { self.lastSeenSystemVolume = main }
             guard main != self.mainOutGain || newGroup != self.groupGain else { return }
             let groupChanged = newGroup != self.groupGain
             self.mainOutGain = main

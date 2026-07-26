@@ -579,15 +579,22 @@ public final class MainOutRowView: NSView {
     }
 
     @objc private func masterChanged(_ sender: NSSlider) {
-        let event = NSApp.currentEvent
-        if !isDraggingMaster {
+        // `isDraggingMaster` exists so `apply(...)` won't yank the thumb out from
+        // under a live MOUSE drag. Set it from whether a drag is actually in flight,
+        // NOT "set on first change, clear only on .leftMouseUp": a keyboard or
+        // VoiceOver change arrives as a single event that is never a `.leftMouseUp`,
+        // so the old logic set the flag and never cleared it — the thumb then stopped
+        // tracking the model forever (stability-audit-2026-07-18 §D4). A keyboard
+        // change has no drag in flight, so it leaves the flag false and repaints stay
+        // live.
+        switch NSApp.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged:
             isDraggingMaster = true
+        default:
+            isDraggingMaster = false
         }
         delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
         readoutLabel.stringValue = "\(sender.integerValue)%"
-        if event?.type == .leftMouseUp {
-            isDraggingMaster = false
-        }
     }
 
     // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill

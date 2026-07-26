@@ -85,16 +85,50 @@ Do not confuse the two. **But reuse its two assets:**
 
 ## The work
 
-### 0. Fix a prerequisite bug in the same machinery FIRST
-The write-boundary review of the decoupling work found: **`lastSeenSystemVolume` goes
-stale after a mirrored Main drag** (`NativeBackend.swift`, the `.systemVolumeChanged`
-emit basis). After the user drags Main (which writes hardware but whose echo
-`SystemOutputVolume` suppresses), `lastSeenSystemVolume` is never updated, so a later
-genuine external change back to the *exact pre-drag value* is compared equal and
-**silently dropped** — Main desyncs from the system. Fix: the `mirrorToSystemVolume`
-arm of `setMasterGain` must also set `lastSeenSystemVolume = main`. This is in the path
-the interceptor builds on, so fix it before layering on top. (One line; verify the
-field name against current source.)
+### 0. Prerequisite bug — ALREADY FIXED on the decoupling branch
+The write-boundary review found **`lastSeenSystemVolume` goes stale after a mirrored
+Main drag** (`NativeBackend.swift`, the `.systemVolumeChanged` emit basis): after a Main
+drag, a later external change back to the *exact pre-drag value* was compared equal and
+silently dropped, desyncing Main from the system. This is **fixed on the decoupling
+branch** — `setMasterGain`'s `mirrorToSystemVolume` arm now sets
+`lastSeenSystemVolume = main` on `stateQueue`, before the gain-changed guard. Since the
+interceptor branch bases on the decoupling tip, it inherits the fix on rebase; nothing
+to do here beyond confirming it's present.
+
+### 0b. The Mac's own output isn't capped by Main on an unsettable default (decision #8)
+Alec's ruling (2026-07-26): fix this **in this follow-up**, because it shares the same
+`systemOutputVolume == nil` gate as the dead-keys work and needs the same aggregate/HDMI
+hardware to verify.
+
+The gap: `SyncedLocalSink`'s gain deliberately **excludes Main** on the assumption that
+"the Mac's system volume already applies Main to its own output"
+(`SyncedLocalSink.swift` gain doc; `NativeBackend.syncedLocalGain` = `group × device`
+only). That assumption breaks when the default output exposes no settable volume:
+`setMasterGain`'s `mirrorToSystemVolume` arm calls `systemVolume.setVolume(main)`, which
+**silently no-ops** on such a device (every write is behind `isWritable`). So pulling
+Main down attenuates the AirPlay members but leaves the Mac's own output at full — the
+master control silently fails for the Mac on exactly the aggregate the coexistence work
+introduces (and on plain HDMI today).
+
+Fix direction: when `systemOutputVolume == nil` (the same "keys are dead" signal),
+**fold Main into the sink gain** — `syncedLocalGain` becomes `main × group × device` in
+that state, and stays `group × device` when the system volume is settable (so Main isn't
+double-applied). Gate on the same nil-check the interceptor already needs. Test: with a
+`nil`-systemOutputVolume backend, dragging Main must move the `SpySyncedLocalSink` gain;
+with a settable one, it must not (the existing gap-6 test
+`syncedLocalSinkGainCarriesGroupButExcludesMain` pins the settable case). Live-verify on
+the aggregate: Main down actually quiets the Mac, not just the AirPlay speakers.
+
+**Also fold in here (same writability question):** `NativeBackend.setMasterGain`'s
+`lastSeenSystemVolume = main` memo (the `.systemVolumeChanged` emit basis) optimistically
+trusts the mirror write landed. On a **readable-but-unwritable** default output (some USB
+DACs — non-nil `systemOutputVolume`, so NOT caught by the nil-gate above), the write
+no-ops but the memo says `main`, so a later external change *to `main`* is dropped. The
+common settable case is already correct on the decoupling branch. The clean fix needs to
+know whether the write landed, which `SystemOutputVolume.setVolume` (fire-and-forget
+`queue.async`, self-heals its OWN `lastKnownVolume` on failure) doesn't currently report
+— so make it report success (or have the backend memo from a confirmed read), and only
+then update `lastSeenSystemVolume`.
 
 ### 1. The interceptor
 A `CGEventTap` (session or annotated-session tap) that observes systemDefined events,

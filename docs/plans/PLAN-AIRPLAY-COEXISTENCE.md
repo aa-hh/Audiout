@@ -93,3 +93,32 @@ Fresh boot →
 - `AirPlayEngine/docs/ptp-helper-design.md` — §2.2/§2.4 (plist, KeepAlive rationale this plan supersedes), §4 (IPC decision: shm + loopback-UDP stay; the Mach service is a demand-start trigger only, not a new transport), §5.1 (startup order, amended by T4).
 - `scripts/ptp-helper.plist`, `scripts/make-app.sh` — T3/T8 build wiring.
 - Memory: `ptp-helper-daemon-built`, `native-live-test-single-instance` (single-instance port exclusivity now extends to macOS itself), `tap-follows-default-output-device` (T10's governing rule).
+
+---
+
+## Integration gate T-INT results (2026-07-26, commit 93a6d61)
+
+**All checks PASS. Branch is ready for live testing.**
+
+- **Test suites (combined tree):**
+  - AirPlayEngine: 179 tests passed (28 suites)
+  - AudiouterCore: 1529 tests passed (91 suites)
+
+- **App build:** `scripts/make-app.sh` completed successfully.
+
+- **LaunchDaemons plist** (`plutil -lint` and structure):
+  - Validity: PASS
+  - `MachServices` present: YES (`com.audiouter.Audiouter.ptphelper`)
+  - `EnvironmentVariables.AUDIOUTER_PTP_MACH_SERVICE`: present
+  - `KeepAlive`: `{SuccessfulExit: false}` (correct)
+  - `RunAtLoad` key: ABSENT (correct)
+  - `Label`: `com.audiouter.Audiouter.ptphelper` (correct)
+  - No `__BUNDLE_ID__` placeholders: VERIFIED
+
+- **Helper binary linkage** (`otool -L`):
+  - Dependencies: `/usr/lib/libSystem.B.dylib` only (CRITICAL PASS — no non-Apple dylibs)
+
+- **Signing:**
+  - `codesign --verify --strict`: PASS
+  - Identity auto-detected: Developer ID Application: Alexander Henderson Hamilton (TGT8D69RZ4)
+  - Nested verification (ptp-helper, tcc-probe): both valid

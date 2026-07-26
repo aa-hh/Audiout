@@ -1008,7 +1008,18 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         let outputID: AudioObjectID
         let outputUID: String
         do {
-            outputID = try Self.defaultOutputDeviceID()
+            // A1 (spike §3, same fix as CoreAudioSystemTap.createAggregate): if the
+            // default output is our PUBLIC aggregate, an aggregate cannot nest in an
+            // aggregate — resolve THROUGH to the real device it wraps and build the
+            // per-app tap-aggregate on THAT device instead. Identity passthrough for
+            // every non-aggregate default, so per-app topology is unchanged unless
+            // the default is our aggregate. Reuses the pure resolver T2 added rather
+            // than a second copy of the same logic.
+            let rawDefault = try Self.defaultOutputDeviceID()
+            outputID = EffectiveCaptureDevice.resolve(
+                default: rawDefault,
+                uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
             outputUID = try CoreAudioSystemTap.readDeviceUID(outputID)
         } catch {
             throw PerAppCaptureError.deviceLost(reason: String(describing: error))

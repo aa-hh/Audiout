@@ -988,6 +988,34 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// The generalized echo guard (live find, 2026-07-26): the whole-system
+    /// tap's exclusion set must ALWAYS contain THIS process's own audio
+    /// process objects — `LocalPlaybackEngine` renders `.currentDevice` apps
+    /// from this process onto the very device the tap captures, so without the
+    /// self-exclude a "play on this Mac" exception echoed into the AirPlay mix
+    /// (Spotify → Mac speakers audibly replayed on the selected Sonos). The
+    /// enumerator here lists a process at OUR pid alongside an unrelated one;
+    /// only ours must be excluded, with no excluded bundles configured at all.
+    @Test func exclusionAlwaysContainsOwnProcessObjects() {
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let otherProcess = RawAudioProcess(objectID: 901, pid: 4242, bundleID: "com.other.app")
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, otherProcess])))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        coordinator.start()
+
+        #expect(tap.excludedProcessObjectIDs.contains(900),
+                "our own process object must always be excluded from the whole-system tap (echo guard)")
+        #expect(!tap.excludedProcessObjectIDs.contains(901),
+                "an unrelated process must not be swept up by the self-exclude")
+
+        coordinator.stop()
+    }
+
     /// T2: every exclusion resolve emits `captureWS`/`exclusion_resolved` with
     /// each resolved bundle's pids + attribution layer, AND calls out a bundle
     /// that resolved to ZERO processes — the diagnostic gap the 2026-07-26

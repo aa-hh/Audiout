@@ -733,9 +733,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
             result.formUnion(attributed.map(\.process.objectID))
         }
+        // Unconditional SELF-exclude — the echo guard, generalized. Any audio
+        // THIS process emits must never be re-captured into the whole-system
+        // mix: `LocalPlaybackEngine` renders every `.currentDevice` app's
+        // stream from THIS process onto the Mac's own output — the very device
+        // this tap is anchored to — so without this, a "play on this Mac"
+        // exception echoed straight back into the AirPlay mix the moment a
+        // receiver was actually live (found live 2026-07-26: Spotify routed to
+        // the Mac's speakers audibly replayed on the selected Sonos; earlier
+        // sessions never heard it only because either the attribution leak or
+        // a dead PTP clock masked it). The synced-local sink's R2 self-exclude
+        // (`syncedLocalRenderPID` — the same `getpid()`) covered only the
+        // play-everywhere path; this covers every path and makes that union
+        // redundant-but-harmless. Resolved fresh per call, never cached: our
+        // process object exists in the HAL list only while we are actually
+        // rendering, and the process-list membership diff (W1-T7) re-runs this
+        // the moment our render starts, so the tap rebuilds with us excluded.
+        let selfProcesses = processResolver.resolve(pid: getpid())
+        result.formUnion(selfProcesses.map(\.objectID))
         Telemetry.log(.captureWS, "exclusion_resolved", [
             "resolved": resolvedEntries.joined(separator: ";"),
             "zeroBundles": zeroBundles.joined(separator: ","),
+            "self": selfProcesses.map { "\($0.pid)" }.sorted().joined(separator: ","),
         ])
         return result
     }

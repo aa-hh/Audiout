@@ -27,7 +27,7 @@ output. You want a single app that:
 | Sync | **Perfect sync required** | Must use AirPlay 2's synchronized multi-room timing. The ~1–2s buffer is fine now that video is out of scope. |
 | Video | **Dropped — audio only** | Removes the hardest requirement. No low-latency mode needed. |
 | Form factor | **Menu bar + full window** | Quick menu-bar panel; richer window for groups/EQ. |
-| Remote control | **Mac only** (no phone app) | No companion app / network server needed. Simpler. |
+| Remote control | **Mac + iPhone (companion app)** | Bonjour discovery, server-side sync, off by default. |
 | Device types | **AirPlay only** | No Bluetooth/Sonos-native/wired in v1. (Sonos speakers are used *via their AirPlay 2 support*, not the Sonos API.) |
 | Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | ahh may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
 | Extra controls | Per-device **mute/solo**, **master volume**, **EQ/balance** | Mixer-style UI. |
@@ -57,6 +57,13 @@ output. You want a single app that:
 - Sleep timer + fade in/out.
 - Global keyboard shortcuts.
 - Phone remote (you said no for now, but the architecture can leave room).
+
+### Companion control (Mac + iPhone)
+
+Optional iPhone app. Connects via Bonjour (`_audiouter._tcp`) WebSocket to a server on the Mac
+(source of truth). Phone receives full snapshots on connect and change, sends commands back.
+Protocol defined in `AudiouterProtocol` package. Disabled by default (Settings › General).
+See [PLAN-COMPANION-APP.md](docs/plans/PLAN-COMPANION-APP.md).
 
 ---
 

@@ -918,7 +918,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             devicesPlaceholderShown = true
         } else {
             if !locals.isEmpty {
-                panel.addSubsectionHeader("Current Device")
+                // "This Mac", not "Current Device": once the app inserts its own
+                // aggregate ("Audiouter") as the default output, the literal
+                // "current device" is the aggregate — a plumbing artifact the user
+                // shouldn't see. This section names the Mac's own output honestly;
+                // the row under it still shows the real underlying device name
+                // (e.g. "MacBook Pro Speakers", via `currentOutputDeviceName`, which
+                // resolves through the aggregate to the wrapped speakers).
+                panel.addSubsectionHeader("This Mac")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
             if !airplay.isEmpty {

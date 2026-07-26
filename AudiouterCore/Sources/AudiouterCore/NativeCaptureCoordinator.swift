@@ -80,6 +80,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     // MARK: Injected dependencies
 
     private let makeTap: @Sendable () -> SystemAudioTap
+
+    /// Resolves the CURRENT default output device id (a cheap
+    /// `kAudioHardwarePropertyDefaultOutputDevice` read), or `nil` when it can't
+    /// be read. Used by ``recreateTap(cause:)`` to tell a device-IDENTITY change
+    /// (new default != the device the old tap was anchored to) from a same-device
+    /// rate rebuild, which is the gate for make-before-break (audio-leak-on-device-
+    /// switch fix). Injected so the decision is hermetically testable; defaults to
+    /// `{ nil }` (always break-before-make — today's behavior) for tests that don't
+    /// exercise it, and is wired to `CoreAudioSystemTap.defaultOutputDeviceID()` at
+    /// the one production construction site.
+    private let resolveDefaultOutputDeviceID: @Sendable () -> AudioObjectID?
+
     private let sink: PCMSink
     private let makeConverter: @Sendable (TapFormat) -> PCMConverting
     private let muteBehavior: TapMuteBehavior
@@ -399,6 +411,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             },
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
+            // Make-before-break identity gate (audio-leak-on-device-switch fix): a
+            // single default-output-device read. Pre-14.2 has no live capture, so
+            // nil (-> break-before-make) is correct there.
+            resolveDefaultOutputDeviceID: {
+                if #available(macOS 14.2, *) { return try? CoreAudioSystemTap.defaultOutputDeviceID() }
+                return nil
+            },
             processResolver: processResolver,
             muteBehavior: muteBehavior,
             // T7: the same engine, as the workgroup target. Wired here (the one
@@ -422,6 +441,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> SystemAudioTap,
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
+        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID? = { nil },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
         workgroup: AudioIOWorkgroupJoining? = nil,
@@ -429,6 +449,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         installsProcessListListener: Bool = true
     ) {
         self.makeTap = makeTap
+        self.resolveDefaultOutputDeviceID = resolveDefaultOutputDeviceID
         self.sink = sink
         self.makeConverter = makeConverter
         self.processResolver = processResolver
@@ -1102,16 +1123,60 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the ordering survives the hop off this queue.
         if old != nil { workgroup?.leave() }
 
-        // Blocking HAL work OUTSIDE the lock.
-        old?.teardown()
+        // MAKE-BEFORE-BREAK, gated to device-IDENTITY changes (audio-leak-on-device-
+        // switch fix). The whole-system tap is `.mutedWhenTapped`: the mute that
+        // keeps system audio OFF the local speakers is a property of the LIVE tap's
+        // aggregate and engages only once the NEW tap's aggregate auto-starts. Break-
+        // before-make tears the old tap down FIRST, so during the new aggregate's
+        // create the NEW default device is tapped by nobody — unmuted — and system
+        // audio audibly leaks out of it (AirPods drop -> built-in speakers blast).
+        //
+        // Fix: when the default device IDENTITY changed (new default != the device
+        // the old tap was anchored to), build+start the new tap/aggregate — which
+        // mutes the NEW device — BEFORE tearing the old one down. The two aggregates
+        // then only ever sit on two DIFFERENT devices, which the HAL already runs
+        // (4+ concurrent taps normally). This does NOT zero the leak: it removes the
+        // old-tap teardown from the window, shrinking it to just the new aggregate's
+        // `createAndStart` (during which the new device is briefly untapped/unmuted).
+        //
+        // A SAME-device rate-only rebuild KEEPS break-before-make: make-before-break
+        // there would put two aggregates on ONE physical device mid-rate-
+        // renegotiation — a novel/risky HAL config we deliberately avoid (the same-
+        // device-rate leak is a documented lower-priority follow-up). Identity comes
+        // off a fresh default-output-device read; a nil on either side (old tap had
+        // no device, or the read failed) falls back to break-before-make.
+        let newDefaultDeviceID = resolveDefaultOutputDeviceID()
+        let makeBeforeBreak: Bool = {
+            guard let previous = claim.previousDeviceID, let current = newDefaultDeviceID
+            else { return false }
+            return previous != current
+        }()
+
+        // Blocking HAL work OUTSIDE the lock. Break-before-make (same device, or an
+        // unknown identity): tear the old tap down first, exactly as before.
+        if !makeBeforeBreak { old?.teardown() }
         let newTap = makeTap()
-        newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+        // Guardrail: for make-before-break, delivery (`onBuffer`) is wired only AFTER
+        // the old tap is gone (below) so exactly ONE tap ever delivers buffers — no
+        // double-capture / echo to the receivers during the overlap. For break-
+        // before-make the old tap is already gone, so wiring it now is safe/unchanged.
+        if !makeBeforeBreak {
+            newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
+        }
 
         do {
             let format = try newTap.createAndStart(
                 muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
+            // MAKE-BEFORE-BREAK second half: the new aggregate is up and already mutes
+            // the NEW device, so tear the OLD device's tap down only now (leak window
+            // = just the createAndStart above), THEN wire delivery — never while the
+            // old tap is still delivering (the no-double-capture guardrail).
+            if makeBeforeBreak {
+                old?.teardown()
+                newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
+            }
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
@@ -1202,6 +1267,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // is no join to match. The engine thread simply runs without workgroup
             // membership until the next successful tap creation.
             newTap.teardown()   // createAndStart already tears down internally; idempotent.
+            // MAKE-BEFORE-BREAK failure unwind: on this path the old tap is STILL
+            // ALIVE (its teardown was deferred until after a successful create), so
+            // tear it down too — never leave two taps or a dangling one. On the
+            // break-before-make path the old tap was already torn down above; teardown
+            // is idempotent, but this stays guarded to keep that path byte-identical.
+            if makeBeforeBreak { old?.teardown() }
             let mapped: NativeCaptureError = (error as? NativeCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
             queue.sync {

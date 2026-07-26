@@ -117,6 +117,46 @@ public enum BackendEvent: Sendable, Equatable {
     /// responds. Only ``NativeBackend`` emits it.
     case remoteTransport(RemoteTransportCommand)
 
+    /// The generalized silence watchdog (Wave 2, R11) flipped the local-playback
+    /// fallback. `active: true` means: the capture gate WANTED to stream to at
+    /// least one AirPlay device, but none of the desired devices stayed
+    /// `.connected` for the fallback window, so the backend un-gated whole-system
+    /// capture — the Mac itself is now audible — **without clearing the user's
+    /// selection intent**. `active: false` means a desired device reconnected (or
+    /// the intent cleared) and the gate re-engaged: audio has moved back to the
+    /// real device(s) and the Mac is muted again.
+    ///
+    /// This is the *only* signal for the "Speakers unreachable — playing on this
+    /// Mac" popover banner; it is not a `Device` field because it's a whole-app
+    /// condition, not a per-device one (a dead GROUP has zero connected members,
+    /// so no single device could carry it). Only ``NativeBackend`` emits it — it's
+    /// the only backend with a real capture gate; `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case localFallbackActive(Bool)
+
+    /// The "system-AirPlay guard" (Wave 3 W3-T3, PLAN-RELIABILITY.md). `active:
+    /// true` means: this app's whole-system capture tap is actively streaming a
+    /// captured mix to at least one AirPlay device (``NativeBackend``'s capture
+    /// gate is on) **and** the macOS *system* default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice`) is ITSELF AirPlay-class —
+    /// i.e. the user pointed the Mac's own Sound output at an AirPlay receiver
+    /// (Sound menu / System Settings), independently of this app's Selected
+    /// Devices. Both conditions together are the double-path/echo risk: the SAME
+    /// mix would go out over AirPlay twice — once through this app's
+    /// capture-then-stream path, once through the system's own send — so this is
+    /// purely an informational note, never a block: no audio path is altered
+    /// because of it.
+    ///
+    /// `active: false` means either condition ended (streaming stopped, or the
+    /// system default output changed away from AirPlay-class). This is the
+    /// *only* signal for the popover's "double-path audio" note, for the same
+    /// reason ``localFallbackActive(_:)`` is the only signal for its banner: a
+    /// whole-app condition with no home on a single `Device`. Only
+    /// ``NativeBackend`` emits it — it's the only backend with a real capture
+    /// gate and a system-output-transport query; `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case systemDefaultIsAirPlayActive(Bool)
+
     /// A whole-system or per-app AirPlay stream's health, derived from the same
     /// recapture/rebind detection ``NativeBackend`` already runs to self-heal a
     /// tap rebuild (T2's `onDeviceRateRebuild`-driven whole-system reset /
@@ -210,11 +250,19 @@ public protocol OutputBackend: AnyObject {
     /// Also the entry point for the connection state machine: ids newly in the
     /// set move to `.connecting` (verified later to `.connected`); ids leaving
     /// the set drop to `.off` — **unless** they're currently `.failed`, in
-    /// which case that state is sticky and survives the removal (the popover
-    /// uses this exact call to clean up a failed toggle's membership without
-    /// erasing the warning it's showing). Re-adding a `.failed` id is the retry
-    /// path and moves it back to `.connecting`
-    /// (`dev/notes/p1-connection-status-brief.md` §1/§3).
+    /// which case that state is sticky and survives the removal.
+    ///
+    /// Retry (`dev/notes/p1-connection-status-brief.md` §1/§3): re-adding an id
+    /// that had been dropped is one way to retry a `.failed` device — but as of
+    /// R12/W2-T3, `.failed` no longer drops the id from the desired set at all
+    /// (the popover's "Try again" keeps Selected-Devices/group intent through a
+    /// failure), so the *ordinary* retry call now arrives here with the id
+    /// ALREADY present, unchanged. Conforming backends must still treat that as
+    /// a fresh attempt: re-check each requested id's CURRENT `connectionState`
+    /// (not just whether membership changed) and re-kick anything `.off` or
+    /// `.failed` back to `.connecting`. `OwnToneBackend` does this naturally
+    /// (it re-evaluates every id on every call); `NativeBackend`/`MockBackend`
+    /// detect the "already desired, still `.failed`" case explicitly.
     func setOutputSet(_ ids: Set<String>)
 }
 

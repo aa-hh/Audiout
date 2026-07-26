@@ -203,6 +203,7 @@ let package = Package(
             name: "AudiouterApp",
             dependencies: [
                 "AudiouterCore",
+                "AudiouterSharedUI",
                 "AudiouterPopoverUI",
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",

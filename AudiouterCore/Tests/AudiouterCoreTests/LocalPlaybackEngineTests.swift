@@ -16,59 +16,140 @@ import AudioToolbox
 /// what `NativeBackend` fakes in its own tests; this file tests the concrete
 /// type those fakes stand in for), so `addApp`/`start` exercise real Core Audio
 /// against the Mac's built-in output.
+/// Shared by the R13 follow-guard tests (outer suite) and every `RealHardware`
+/// test — file scope so the nested suite and its parent can't drift apart on
+/// what "the test app" and "a real tap format" mean.
+private let bundleID = "com.example.testapp"
+
+/// Real per-app taps are Float32 non-interleaved (planar) stereo — the same
+/// default every `SystemAudioTap`/`CoreAudioProcessTap` reports (see
+/// `NativeCaptureCoordinatorTests.buffer(hostTime:frames:)` and
+/// `PerAppCaptureCoordinator`'s tap description). `AVAudioFormat(standardFormatWithSampleRate:channels:)`
+/// (what `LocalPlaybackEngine.avFormat(from:)` builds the connection format
+/// with) is ALSO deinterleaved Float32 — so this tap format needs no
+/// converter, keeping the test buffer's samples exactly traceable through
+/// `receive(buffer:for:)` into the RMS computation.
+private let tapFormat = TapFormat(
+    sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+
 @Suite struct LocalPlaybackEngineTests {
 
-    // MARK: - Anti-feedback follow guard (transport type)
+    // MARK: - Follow-real-output-with-guard (R13)
     //
-    // Pure/static — no real engine, no hardware — so these run always,
-    // unlike everything in `RealHardware` below.
+    // These drive the decision through an injected fake ``LocalOutputResolving``
+    // — no real Core Audio device is ever applied — so they run always, unlike
+    // everything in `RealHardware` below.
 
-    #if canImport(AudioToolbox)
-
-    /// Real local-hardware transports are FOLLOWED: "Current Device" plays out
-    /// wherever the user is actually listening (built-in, Bluetooth headphones,
-    /// USB, HDMI, Thunderbolt, …), which is the whole point of the bug fix.
-    @Test func followableTransportsAreFollowed() {
-        for transport in [
-            kAudioDeviceTransportTypeBuiltIn,
-            kAudioDeviceTransportTypeBluetooth,
-            kAudioDeviceTransportTypeBluetoothLE,
-            kAudioDeviceTransportTypeUSB,
-            kAudioDeviceTransportTypeHDMI,
-            kAudioDeviceTransportTypeThunderbolt,
-            kAudioDeviceTransportTypeDisplayPort,
-            kAudioDeviceTransportTypePCI,
-            kAudioDeviceTransportTypeFireWire,
-        ] {
-            #expect(LocalPlaybackEngine.isFollowableTransport(transport),
-                    "transport \(transport) is real local hardware — must be followed")
+    /// A fake ``LocalOutputResolving`` so the follow-with-guard decision +
+    /// compare-before-rebuild are assertable without any real Core Audio: the test
+    /// dictates the "default output", the "built-in", and which ids are loop
+    /// risks. `@unchecked Sendable` (mutated across the listener contract) with a
+    /// lock, like the other fakes in this suite.
+    private final class FakeOutputResolver: LocalOutputResolving, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _defaultDevice: UInt32?
+        private let _builtIn: UInt32?
+        private let _loopRiskIDs: Set<UInt32>
+        init(defaultDevice: UInt32?, builtIn: UInt32?, loopRiskIDs: Set<UInt32> = []) {
+            self._defaultDevice = defaultDevice
+            self._builtIn = builtIn
+            self._loopRiskIDs = loopRiskIDs
         }
+        func setDefaultDevice(_ id: UInt32?) { lock.withLock { _defaultDevice = id } }
+        func defaultOutputDevice() -> UInt32? { lock.withLock { _defaultDevice } }
+        func builtInOutputDevice() -> UInt32? { _builtIn }
+        func isLoopRisk(_ device: UInt32) -> Bool { _loopRiskIDs.contains(device) }
     }
 
-    /// The anti-feedback guard: AirPlay and virtual/aggregate defaults are REFUSED
-    /// (local playback stays on the built-in speakers), because this app may be
-    /// streaming the whole-system mix into exactly that device — following it would
-    /// loop local playback back into the capture.
-    @Test func feedbackRiskTransportsAreRefused() {
-        for transport in [
-            kAudioDeviceTransportTypeAirPlay,
-            kAudioDeviceTransportTypeVirtual,
-            kAudioDeviceTransportTypeAggregate,
-            kAudioDeviceTransportTypeAutoAggregate,
-        ] {
-            #expect(!LocalPlaybackEngine.isFollowableTransport(transport),
-                    "transport \(transport) is AirPlay/virtual — must be refused (anti-feedback)")
-        }
+    private let builtInID: UInt32 = 1
+
+    /// (a) Default = Bluetooth headphones (non-AirPlay, non-aggregate) → the engine
+    /// FOLLOWS it. This is the R13 fix: a "Current Device" app must play where the
+    /// user is actually listening, not blast out the built-in speakers.
+    @Test func followsPlainDefaultOutput() {
+        let bt: UInt32 = 42
+        let resolver = FakeOutputResolver(defaultDevice: bt, builtIn: builtInID)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        #expect(engine.resolveTargetDeviceID() == bt,
+                "a plain (BT/USB/wired) default output must be followed")
     }
 
-    /// An unreadable transport (`nil`) is treated conservatively as not-followable,
-    /// so the safe built-in fallback is used rather than risking a feedback loop.
-    @Test func unreadableTransportIsNotFollowed() {
-        #expect(!LocalPlaybackEngine.isFollowableTransport(nil),
-                "an unreadable transport must fall back to the safe built-in target")
+    /// (b) Default = an AirPlay-class device → the engine STAYS on built-in (loop
+    /// guard). Following the AirPlay default would feed the whole-system AirPlay
+    /// path back into playback in a loop.
+    @Test func airPlayDefaultFallsBackToBuiltIn() {
+        let airplay: UInt32 = 99
+        let resolver = FakeOutputResolver(defaultDevice: airplay, builtIn: builtInID, loopRiskIDs: [airplay])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        #expect(engine.resolveTargetDeviceID() == builtInID,
+                "an AirPlay-class default must fall back to built-in (loop guard)")
     }
 
-    #endif
+    /// (c) Default = one of our OWN aggregate devices → the engine STAYS on
+    /// built-in (loop guard).
+    @Test func ownAggregateDefaultFallsBackToBuiltIn() {
+        let ourAggregate: UInt32 = 77
+        let resolver = FakeOutputResolver(defaultDevice: ourAggregate, builtIn: builtInID, loopRiskIDs: [ourAggregate])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        #expect(engine.resolveTargetDeviceID() == builtInID,
+                "one of our own tap aggregates as the default must fall back to built-in (loop guard)")
+    }
+
+    /// When neither the default nor built-in resolves, the target is `nil` (the
+    /// engine keeps `AVAudioEngine`'s own default — best effort).
+    @Test func noResolvableDeviceYieldsNilTarget() {
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        #expect(engine.resolveTargetDeviceID() == nil)
+    }
+
+    /// The loop-guard name classification, tested against the EXACT names the app's
+    /// three aggregate-creation sites build — so the prefix set can't silently
+    /// drift out of sync with them, while ordinary output devices are never
+    /// mistaken for ours.
+    @Test func ownAggregateNamePrefixesMatchRealCreationSiteNames() {
+        let prefixes = LocalPlaybackEngine.ownAggregateNamePrefixes
+        func isOurs(_ name: String) -> Bool { prefixes.contains { name.hasPrefix($0) } }
+        // Exact names from NativeCaptureCoordinator / PerAppCaptureCoordinator /
+        // AudioCapturePermissionProbe:
+        #expect(isOurs("Tap-Audiouter"))
+        #expect(isOurs("PerAppTap-Audiouter-com.example.app"))
+        #expect(isOurs("SetupProbe-Audiouter"))
+        // Ordinary hardware outputs must not be classified as ours:
+        #expect(!isOurs("MacBook Pro Speakers"))
+        #expect(!isOurs("External Headphones"))
+        #expect(!isOurs("Sonos Living Room"))
+    }
+
+    /// (d) The default output changes (BT connects) → the engine re-points exactly
+    /// once; a follow-up notification whose resolved target is UNCHANGED does ZERO
+    /// rebuilds (the compare-before-rebuild loop-breaker).
+    @Test func defaultOutputChangeRepointsOnceThenZeroOnUnchanged() throws {
+        // Start with no resolvable device so the real engine boots on AVAudioEngine's
+        // own default (no fake device id is ever actually applied to hardware).
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        defer { engine.stop() }
+        #expect(engine.test_configuredTargetDevice == nil)
+        #expect(engine.test_repointCount == 0)
+
+        // BT connects: the default output now resolves to a new device.
+        resolver.setDefaultDevice(200)
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        #expect(engine.test_repointCount == 1, "a changed default output must repoint exactly once")
+        #expect(engine.test_configuredTargetDevice == 200)
+
+        // A duplicate/spurious notification resolving to the SAME target: no work.
+        // (Fired twice to be sure the guard is stable, not one-shot.)
+        engine.handleDefaultOutputChange()
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        #expect(engine.test_repointCount == 1,
+                "an unchanged resolved target must do zero rebuilds (compare-before-rebuild)")
+        #expect(engine.test_configuredTargetDevice == 200)
+    }
 
     /// Every test that drives a real `AVAudioEngine` against the Mac's actual
     /// output. The trait IS the gate (`AudioHardwareTestGate`) — do not add
@@ -91,19 +172,6 @@ import AudioToolbox
             var count: Int { lock.withLock { calls.count } }
             var last: (bundleID: String, rms: Float)? { lock.withLock { calls.last } }
         }
-
-        private let bundleID = "com.example.testapp"
-
-        /// Real per-app taps are Float32 non-interleaved (planar) stereo — the same
-        /// default every `SystemAudioTap`/`CoreAudioProcessTap` reports (see
-        /// `NativeCaptureCoordinatorTests.buffer(hostTime:frames:)` and
-        /// `PerAppCaptureCoordinator`'s tap description). `AVAudioFormat(standardFormatWithSampleRate:channels:)`
-        /// (what `LocalPlaybackEngine.avFormat(from:)` builds the connection format
-        /// with) is ALSO deinterleaved Float32 — so this tap format needs no
-        /// converter, keeping the test buffer's samples exactly traceable through
-        /// `receive(buffer:for:)` into the RMS computation.
-        private let tapFormat = TapFormat(
-            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
 
         /// A planar stereo Float32 buffer of `frames` samples per channel, every
         /// sample set to `amplitude` — so the expected RMS is exactly `abs(amplitude)`
@@ -249,6 +317,28 @@ import AudioToolbox
             // Re-adding after removal (idempotent add path) still works.
             try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
             engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+        }
+
+        /// (e) An output config-change event (the "dies through mic" trigger: the mic
+        /// engaging voice-processing mode stops `AVAudioEngine`) must REBUILD the graph
+        /// and keep playing — not die. Proven by a buffer still scheduling + metering
+        /// after the change.
+        @Test func configurationChangeRebuildsInsteadOfDying() throws {
+            let engine = try makeStartedEngine()
+            defer { engine.stop() }
+            let recorder = LevelRecorder()
+            engine.onAppLevel = { recorder.record($0, $1) }
+            engine.setMeteringActive(true)
+
+            // Simulate the AVAudioEngineConfigurationChange the mic (or a device switch)
+            // fires — the engine has stopped itself.
+            engine.test_simulateConfigurationChange()
+
+            // Playback survived: the node is still alive and engineRunning was restored,
+            // so a captured buffer still schedules and meters.
+            engine.receive(buffer: constantBuffer(amplitude: 0.5), for: bundleID)
+            #expect(recorder.count == 1,
+                    "receive() after a config change must still fire — the engine rebuilt, it did not die")
         }
     }
 }

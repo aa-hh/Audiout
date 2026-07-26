@@ -262,6 +262,7 @@ net_connect(const char *addr, unsigned short port, int type, const char *log_ser
   const char *errmsg = NULL;
   int fd = -1;
   int ret;
+  bool set_nonblock;
 
   DPRINTF(E_DBG, L_MISC, "Connecting to '%s' at %s (port %u)\n", log_service_name, addr, port);
 
@@ -276,8 +277,14 @@ net_connect(const char *addr, unsigned short port, int type, const char *log_ser
       return -1;
     }
 
+  // Data sockets (SOCK_DGRAM) are left non-blocking after connect so the
+  // send path can treat EAGAIN/EWOULDBLOCK as a dropped packet instead of
+  // stalling the engine thread; SOCK_STREAM callers (e.g. the AirPlay events
+  // connection) are unaffected and keep the original blocking behavior.
+  set_nonblock = (type == SOCK_DGRAM);
+
   for (ai = servinfo; ai && fd < 0; ai = ai->ai_next)
-    fd = net_connect_addrinfo(ai, NET_CONNECT_TIMEOUT_MS, false, &errmsg);
+    fd = net_connect_addrinfo(ai, NET_CONNECT_TIMEOUT_MS, set_nonblock, &errmsg);
 
   freeaddrinfo(servinfo);
 

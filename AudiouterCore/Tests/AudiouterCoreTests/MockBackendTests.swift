@@ -238,6 +238,36 @@ import Testing
         #expect(retry.last?.isSelected == true)
     }
 
+    /// R12/W2-T3: `GroupController.retryConnection(for:)` no longer clears
+    /// intent before retrying — it re-issues `setOutputSet` with the id
+    /// STILL in the requested set (unlike the test above, which cleans up
+    /// to `[]` before re-adding). `setOutputSet` must still treat that as a
+    /// fresh attempt: it detects "already expected, still `.failed`" and
+    /// re-kicks anyway, rather than silently no-op'ing via the membership
+    /// -delta guard.
+    @Test func retryOfFailedWithUnchangedMembershipStillReconnects() async throws {
+        let failure = ConnectionFailure(cause: .notResponding)
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: ["a": ConnectScript(attempts: [
+                .fail(after: 0.1, failure),
+                .connect(after: 0.1),
+            ])]
+        )
+        _ = try await collectFleetDiscovery(backend)
+        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])       // attempt 1: fails
+        }
+        // No cleanup call in between — "a" is still in the requested set (R12
+        // never dropped it). Re-issuing the SAME set must still retry.
+        let retry = try await collectUpdates(for: "a", count: 2, from: backend) {
+            backend.setOutputSet(["a"])       // attempt 2: connects
+        }
+        #expect(retry.map(\.connectionState) == [.connecting, .connected])
+        #expect(retry.last?.isSelected == true)
+    }
+
     @Test func connectThenDropRecovers() async throws {
         let backend = MockBackend(
             fleet: [Device(id: "a", name: "A", kind: .generic)],

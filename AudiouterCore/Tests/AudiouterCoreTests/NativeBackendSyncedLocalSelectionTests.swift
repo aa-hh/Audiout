@@ -201,6 +201,106 @@ import AirPlayEngine
         #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"])
     }
 
+    // MARK: End-to-end over the GroupController → NativeBackend seam
+    //
+    // The unit tests above stand a closure in for the query. These two wire the
+    // REAL `GroupController` to it exactly as `AppDelegate` does
+    // (`selectedDevicesQuery = isMainOutMember(_:)`) and drive it from a saved
+    // GROUP — the path that was silently dropping the Mac. Still fully hermetic:
+    // the routing brain talks to a recording fake, whose output set is forwarded
+    // into the backend, and the sink is the same spy. No engine, no audio.
+
+    /// A minimal `OutputBackend` for `GroupController` to route against: it
+    /// serves a fixed fleet and forwards each `setOutputSet` onward, which is
+    /// exactly the pair of facts the seam under test is made of.
+    private final class RecordingBackend: OutputBackend, @unchecked Sendable {
+        let devices: [Device]
+        var onSetOutputSet: ((Set<String>) -> Void)?
+        private(set) var lastOutputSet: Set<String> = []
+        private(set) var volumeWrites: [(id: String, volume: Int)] = []
+
+        init(devices: [Device]) { self.devices = devices }
+
+        func start() {}
+        func stop() {}
+        func makeEventStream() -> AsyncStream<BackendEvent> { AsyncStream { _ in } }
+        func setVolume(_ volume: Int, for id: String) { volumeWrites.append((id, volume)) }
+        func setMuted(_ muted: Bool, for id: String) {}
+        func setOutputSet(_ ids: Set<String>) {
+            lastOutputSet = ids
+            onSetOutputSet?(ids)
+        }
+    }
+
+    private func makeRoutingBrain() -> (GroupController, RecordingBackend) {
+        let fleet: [Device] = [
+            Device(id: NativeBackend.localDeviceID, name: "This Mac", kind: .localMac,
+                   supportsAirPlay2: false, volume: 50, isLocalDevice: true),
+            Device(id: "airplay-1", name: "Kitchen Speaker", kind: .sonos, volume: 40),
+        ]
+        let router = RecordingBackend(devices: fleet)
+        let controller = GroupController(backend: router,
+                                         store: GroupStore(directory: scratchDir),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         loadPersisted: false)
+        return (controller, router)
+    }
+
+    /// THE BUG: a saved group that mixes the Mac with an AirPlay speaker must
+    /// play out of BOTH. The Mac never rides in `setOutputSet`'s ids, so its
+    /// membership reaches the backend only through the query — which must read
+    /// the ACTIVE GROUP, not the Selected Devices set.
+    @Test func groupMixingMacWithAirPlayArmsTheSyncedLocalSink() throws {
+        let (controller, router) = makeRoutingBrain()
+        let backend = NativeBackend(engineControl: NoOpEngine(),
+                                    discoverySource: NoOpDiscovery(),
+                                    systemVolume: NoOpSystemVolume())
+        defer { backend.stop() }
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        // Exactly `AppDelegate`'s wiring.
+        backend.selectedDevicesQuery = { [weak controller] in controller?.isMainOutMember($0) ?? false }
+        router.onSetOutputSet = { backend.setOutputSet($0) }
+
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: [NativeBackend.localDeviceID, "airplay-1"],
+                                       memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        waitFor { !sink.calls.isEmpty }
+
+        #expect(router.lastOutputSet == ["airplay-1"],
+                "the Mac is filtered out of the engine output set …")
+        #expect(sink.calls == ["start", "startObserving"],
+                "… and reaches the backend through the query instead, arming the local sink")
+    }
+
+    /// The mirror failure: an AirPlay-ONLY group must NOT arm the sink just
+    /// because the Mac is still sitting in the (untargeted) Selected Devices set
+    /// — that would play the Mac after the user routed the audio away from it.
+    @Test func airPlayOnlyGroupDoesNotArmTheSinkWhileTheMacSitsInSelectedDevices() throws {
+        let (controller, router) = makeRoutingBrain()
+        let backend = NativeBackend(engineControl: NoOpEngine(),
+                                    discoverySource: NoOpDiscovery(),
+                                    systemVolume: NoOpSystemVolume())
+        defer { backend.stop() }
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        backend.selectedDevicesQuery = { [weak controller] in controller?.isMainOutMember($0) ?? false }
+        router.onSetOutputSet = { backend.setOutputSet($0) }
+
+        controller.ensureDefaultSelection()                       // Selected Devices = {the Mac}
+        #expect(controller.isSpeakerSelected(NativeBackend.localDeviceID))
+
+        try controller.saveGroup(Group(id: "g1", name: "Patio",
+                                       memberIDs: ["airplay-1"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        waitFor(timeout: 0.3) { false }
+
+        #expect(router.lastOutputSet == ["airplay-1"])
+        #expect(sink.calls.isEmpty,
+                "an AirPlay-only group must not arm the sink off a stale Selected-Devices Mac")
+    }
+
     /// With no factory wired (mirrors the UI-only smoke path / a test that
     /// doesn't care about this feature), a Mac + AirPlay selection is inert —
     /// no crash, nothing to assert against because there's no sink at all.

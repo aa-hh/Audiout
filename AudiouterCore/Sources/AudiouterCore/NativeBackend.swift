@@ -2414,6 +2414,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     "stream": "0",
                     "gen": "\(gen)",
                     "trigger": "recapture",
+                    "recovery": "flush_first",
                 ])
                 self.emit(.streamHealth(id: deviceID, recovering: true))
                 self.enqueueRebindRecovery(
@@ -2643,19 +2644,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let label = Self.rebindScopeLabel(scope)
         Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
 
-        // F-REANCHOR spike (2026-07-26): a tap rebuild's recovery is a full
-        // removeOutput→addOutput (fresh RTSP/RTP session = the audible Sonos drop
-        // the user hears on every headphone mode-change). Gated behind
-        // AIRPLAY_REBUILD_RECOVERY=flush, try an RTSP FLUSH re-anchor FIRST for
-        // whole-system scope: it keeps the session alive and only re-syncs the
-        // receiver's timeline. If FLUSH throws (or the device wasn't streaming so
-        // it no-op'd without curing the stall), fall through to the proven
-        // teardown+rebuild — so a failed spike can never leave the device silent.
+        // F-REANCHOR (2026-07-26, live-verified): a tap rebuild's recovery used to
+        // be a full removeOutput→addOutput (fresh RTSP/RTP session = the audible
+        // Sonos drop the user hears on every headphone mode-change). For
+        // whole-system scope, try an RTSP FLUSH re-anchor FIRST instead: it keeps
+        // the session alive and only re-syncs the receiver's timeline. If FLUSH
+        // throws (or the device wasn't streaming so it no-op'd without curing the
+        // stall), fall through to the teardown+rebuild below — so a failed flush
+        // can never leave the device silent.
         // razor: whole-system only (that's the reported bug); per-app rebinds keep
-        // the teardown path until the spike proves out. Remove the gate + the
-        // teardown fallback once a live test confirms FLUSH cures the stale
-        // timeline.
-        if case .wholeSystem = scope, Self.rebuildRecoveryMode == .flush {
+        // the teardown path — flush is unproven there.
+        if case .wholeSystem = scope {
             do {
                 try await engine.flushOutput(outputID)
                 Telemetry.log(.airplay, "rebind_recover_flush", [
@@ -2685,13 +2684,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return false
         }
     }
-
-    /// Which recovery a whole-system tap-rebuild issues. `reset` (default) is the
-    /// proven removeOutput→addOutput; `flush` is the F-REANCHOR spike. Read once
-    /// from `AIRPLAY_REBUILD_RECOVERY` so a live A/B is a relaunch, not a rebuild.
-    private enum RebuildRecoveryMode { case reset, flush }
-    private static let rebuildRecoveryMode: RebuildRecoveryMode =
-        ProcessInfo.processInfo.environment["AIRPLAY_REBUILD_RECOVERY"] == "flush" ? .flush : .reset
 
     /// `lastRoutes` resolved for the mixer: unreachable-target `.device` routes
     /// demoted (R5, ``effectiveAppRoutesLocked(_:)``), then any bundle ID currently

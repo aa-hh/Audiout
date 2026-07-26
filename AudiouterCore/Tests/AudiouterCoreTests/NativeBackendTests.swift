@@ -87,6 +87,10 @@ extension SerializedSharedState {
         var addFailures: Set<UInt64> = []
         /// Ids that should THROW on `removeOutput`.
         var removeFailures: Set<UInt64> = []
+        /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
+        /// recovery to fall through to the removeOutput→addOutput teardown, same
+        /// as a real receiver that NACKs or no-ops the FLUSH.
+        var flushFailures: Set<UInt64> = []
 
         /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
         /// but before it returns successfully. Lets a test deterministically inject
@@ -159,6 +163,21 @@ extension SerializedSharedState {
                 self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
             }
         }
+
+        /// Records every FLUSH (F-REANCHOR) attempt (T-A, whole-system rebind
+        /// recovery's new default path). Deliberately NOT routed through `runOp`'s
+        /// artificial `opDelayNanos` latency — the race-window tests apply that
+        /// delay to model the removeOutput→addOutput fallback specifically, and a
+        /// flush that fails does so immediately, same as a real receiver's fast
+        /// NACK.
+        func flushOutput(_ id: OutputID) async throws {
+            lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
+            if lock.withLock({ flushFailures.contains(id.rawValue) }) {
+                throw AirPlayEngineError.sessionFailed
+            }
+        }
+        private var flushed: [OutputID] = []
+        var flushedIDs: [OutputID] { lock.withLock { flushed } }
 
         func boundStreamId(for id: OutputID) async -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
 
@@ -3524,25 +3543,58 @@ extension SerializedSharedState {
 
     /// A device/nominal-rate rebuild (`onDeviceRateRebuild`, fired by the
     /// coordinator's `recreateTap(cause: .deviceOrRateChange)`) resets every
-    /// streaming Selected Device's whole-system (stream-0) session: exactly one
-    /// removeOutput→addOutput per device, on the single-stream `addOutput(_:)` (NOT
-    /// the per-app `addOutput(_:streamId:)`).
-    @Test func wholeSystemDeviceRateRebuildRebindsSelectedDeviceExactlyOnce() async {
+    /// streaming Selected Device's whole-system (stream-0) session — and, as of
+    /// F-REANCHOR going live-verified/default, does so via a FLUSH re-anchor, NOT
+    /// a removeOutput→addOutput teardown: the flush keeps the session alive
+    /// (no fresh RTSP/RTP session, no audible drop), so a device with a healthy
+    /// receiver never sees an extra remove/add pair.
+    @Test func wholeSystemDeviceRateRebuildFlushesInsteadOfTearingDown() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device()
         await startSelectAndStream(backend, engine, discovery, capture, device)
         defer { backend.stop() }
 
+        let removesBefore = engine.removedIDs.filter { $0 == device.outputID }.count
+        let addsBefore = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
+        await pollUntil { engine.flushedIDs.contains(device.outputID) }
+
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recapture must FLUSH the device exactly once")
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesBefore,
+                       "a successful flush must NOT tear down — no removeOutput")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsBefore,
+                       "a successful flush must NOT tear down — no extra addOutput beyond the initial converge")
+    }
+
+    /// The automatic safety fallback: if the FLUSH re-anchor throws (a receiver
+    /// that NACKs or can't apply it), the recovery must fall through to the
+    /// proven removeOutput→addOutput teardown — exactly one remove/add per
+    /// device, on the single-stream `addOutput(_:)` (NOT the per-app
+    /// `addOutput(_:streamId:)`) — so a failed flush can never leave the device
+    /// silent. This is the pre-F-REANCHOR default's exact behavior, now reachable
+    /// only via the fallback path.
+    @Test func wholeSystemDeviceRateRebuildFallsBackToTeardownWhenFlushThrows() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        engine.flushFailures = [device.outputID.rawValue]
         let streamAddsBefore = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
 
         capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
         await pollUntil { engine.removedIDs.contains(device.outputID) }
 
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recovery must attempt the flush first, even though it fails")
         #expect(engine.removedIDs.filter { $0 == device.outputID }.count == 1,
-                       "recapture must removeOutput the device exactly once")
+                       "a thrown flush must fall back to exactly one removeOutput")
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2,
-                       "recapture re-adds via single-stream addOutput: converge(1) + recovery(1)")
+                       "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == streamAddsBefore,
                        "whole-system reset must NOT use the per-app addOutput(_:streamId:)")
     }
@@ -3634,6 +3686,11 @@ extension SerializedSharedState {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
+        // This test exercises the removeOutput→addOutput teardown/backoff path
+        // specifically, so force the FLUSH re-anchor to fail for this device —
+        // every recapture below falls straight through to the fallback.
+        engine.flushFailures = [device.outputID.rawValue]
+
         // Recapture #1: force its addOutput to fail so a 0.3s backoff retry gets
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
@@ -3691,6 +3748,11 @@ extension SerializedSharedState {
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        // This test proves the remove→add teardown race is safe, so force the
+        // FLUSH re-anchor to fail for this device — recovery falls straight
+        // through to the fallback pair the race window below is built around.
+        engine.flushFailures = [device.outputID.rawValue]
 
         // Slow every subsequent engine op so the recovery's remove→add pair has a
         // wide window for a concurrent deselect to try to land inside it.
@@ -3809,6 +3871,10 @@ extension SerializedSharedState {
         await startSelectAndStream(backend, engine, discovery, capture, device)
         let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
+        // This test drives the teardown/backoff path specifically, so force the
+        // FLUSH re-anchor to fail — the recovery falls through to the
+        // removeOutput→addOutput fallback the backoff retry below is about.
+        engine.flushFailures = [device.outputID.rawValue]
         // The receiver refuses the rebind, so recovery attempt 1 fails and schedules
         // a backed-off retry — the state the sleep has to clean up after.
         engine.addFailures = [device.outputID.rawValue]
@@ -3854,6 +3920,9 @@ extension SerializedSharedState {
         await startSelectAndStream(backend, engine, discovery, capture, device)
         let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
+        // Force the FLUSH re-anchor to fail so the recovery falls through to the
+        // removeOutput→addOutput fallback attempt 1 below is about.
+        engine.flushFailures = [device.outputID.rawValue]
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()   // emits recovering:true, then fails attempt 1
         await pollUntil(timeout: 5) {

@@ -34,17 +34,23 @@ func audiouterEmergencyWriteStderr(_ message: String) {
 }
 
 /// The real per-app-capture process resolver the native backend needs: Core
-/// can't import AppKit (`NSRunningApplication`), so the AppKit layer builds it
-/// and supplies it via `makeBackend(resolver:)`. `bundleIDForPID` is the one
-/// AppKit-only step (`AudioProcessResolver`'s own doc comment) — everything
-/// else (enumerating Core Audio process objects, walking parent pids) is pure
-/// Core Audio + Darwin and lives in `AudioProcessResolver` itself. A free
-/// value (not an instance property) so it can be used in `AppDelegate`'s
-/// `backend` property initializer, which runs before `self` exists.
+/// can't import AppKit, so the AppKit layer builds it and supplies it via
+/// `makeBackend(resolver:)`. `bundleIDForPID` (`NSRunningApplication`) and
+/// `bundlePathForBundleID` (`NSWorkspace`) are the two AppKit-only steps of the
+/// resolver's four-layer catch-all attribution (`AudioProcessResolver`'s own doc
+/// comment) — everything else (enumerating Core Audio process objects, walking
+/// parent pids, reading responsible pids and executable paths) is pure Core
+/// Audio + Darwin and lives in `AudioProcessResolver` itself, already wired by
+/// its own defaults. A free value (not an instance property) so it can be used
+/// in `AppDelegate`'s `backend` property initializer, which runs before `self`
+/// exists.
 private let audioProcessResolver = AudioProcessResolver(
     enumerator: CoreAudioProcessEnumerator(),
     bundleIDForPID: { pid in
         NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    },
+    bundlePathForBundleID: { bundleID in
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)?.path
     })
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the

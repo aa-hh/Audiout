@@ -76,7 +76,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   app, and Core Audio reports no bundle id for those children. Shortcutting to
   single-pid resolution misses the real audio source — the routed app becomes
   inaudible and its audio leaks into the system mix. Both coordinators inject
-  `AudioProcessResolver` for this reason.
+  `AudioProcessResolver` for this reason. **Its four attribution layers are an
+  ANY-of union, never first-non-nil-wins:** a helper reporting a bundle id of its
+  OWN (`com.spotify.client.helper`) and reparented to launchd (`ppid == 1`) —
+  proven live 2026-07-26 — defeats both the own-bundle and parent-walk layers, so
+  the `responsibility_get_pid_responsible_for_pid` and bundle-path layers must
+  still be consulted. Collapsing them back to a single "effective bundle id"
+  reopens the exception leak.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -492,7 +498,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
-| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |

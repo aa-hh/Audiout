@@ -18,12 +18,18 @@ import CoreAudio
     private let mainPID: pid_t = 100
     private let childPID: pid_t = 200
 
-    /// Convenience over the pure static entry point.
+    /// Convenience over the pure static entry point. Every new-layer seam
+    /// (responsibility, executable path, bundle path) defaults to "no answer",
+    /// so the pre-existing cases below still exercise exactly the own-bundle and
+    /// parent-walk layers they were written for.
     private func resolve(
         bundleID: String,
         processes: [RawAudioProcess],
         parents: [pid_t: pid_t] = [:],
         bundleIDForPID: [pid_t: String] = [:],
+        responsible: [pid_t: pid_t] = [:],
+        executablePaths: [pid_t: String] = [:],
+        bundlePaths: [String: String] = [:],
         maxParentHops: Int = 5
     ) -> Set<AudioProcess> {
         AudioProcessResolver.resolve(
@@ -31,6 +37,9 @@ import CoreAudio
             processes: processes,
             parentPID: { parents[$0] },
             bundleIDForPID: { bundleIDForPID[$0] },
+            responsiblePID: { responsible[$0] },
+            executablePath: { executablePaths[$0] },
+            bundlePathForBundleID: { bundlePaths[$0] },
             maxParentHops: maxParentHops)
     }
 
@@ -139,6 +148,123 @@ import CoreAudio
             parents: [childPID: 999, 999: mainPID],
             bundleIDForPID: [mainPID: firefox],
             maxParentHops: 1)
+        #expect(resolved.isEmpty)
+    }
+
+    // MARK: - Catch-all attribution (Spotify/Firefox multi-process exception leak)
+
+    private let spotify = "com.spotify.client"
+    private let spotifyHelper = "com.spotify.client.helper"
+
+    // THE live regression, reproduced exactly (2026-07-26, Alec's machine):
+    // pid 953 "Spotify Helper", ppid 1 (macOS reparented it to launchd, so the
+    // parent walk is dead) and reporting a bundle id OF ITS OWN that is not the
+    // target — the two conditions that together let the helper's audio escape
+    // every exception. Its responsible pid (739, Spotify) is the one signal
+    // left. This case fails on the pre-catch-all resolver.
+    @Test func reparentedHelperAttributedViaResponsibility() {
+        let helper: pid_t = 953
+        let spotifyMain: pid_t = 739
+        let processes = [
+            RawAudioProcess(objectID: 1, pid: spotifyMain, bundleID: spotify),
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],                 // reparented to launchd — walk dies
+            responsible: [helper: spotifyMain])
+        #expect(resolved == [
+            AudioProcess(objectID: 1, pid: spotifyMain),
+            AudioProcess(objectID: 2, pid: helper)
+        ])
+    }
+
+    // ANY-of semantics, isolated: the helper's own (different) bundle id must
+    // not short-circuit the match to "no", even when the responsible process
+    // has NO audio process object of its own and is only reachable through the
+    // injected AppKit closure. First-non-nil-wins attribution fails this.
+    @Test func ownBundleIDDoesNotMaskResponsibilityLayer() {
+        let helper: pid_t = 1029
+        let spotifyMain: pid_t = 739
+        let processes = [
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            bundleIDForPID: [spotifyMain: spotify],
+            responsible: [helper: spotifyMain])
+        #expect(resolved == [AudioProcess(objectID: 2, pid: helper)])
+    }
+
+    // A responsible pid that is the process ITSELF (what an ordinary
+    // single-process app reports — live: Music pid 737 → 737) carries no
+    // attribution information and must not match an unrelated target.
+    @Test func selfResponsiblePIDContributesNothing() {
+        let music: pid_t = 737
+        let processes = [
+            RawAudioProcess(objectID: 7, pid: music, bundleID: "com.apple.Music")
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            responsible: [music: music])
+        #expect(resolved.isEmpty)
+    }
+
+    // Layer 3 standing alone: responsibility unavailable (the symbol didn't
+    // resolve, or the OS declined), but the helper's executable lives inside the
+    // target app's bundle — the public-API fallback catches the same class.
+    @Test func helperAttributedViaBundlePathWhenResponsibilityUnavailable() {
+        let helper: pid_t = 953
+        let processes = [
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],
+            executablePaths: [helper: "/Applications/Spotify.app/Contents/Frameworks/"
+                              + "Spotify Helper.app/Contents/MacOS/Spotify Helper"],
+            bundlePaths: [spotify: "/Applications/Spotify.app"])
+        #expect(resolved == [AudioProcess(objectID: 2, pid: helper)])
+    }
+
+    // The path layer compares whole path COMPONENTS: a second copy of the app
+    // ("Spotify.app 2", a routine Finder/download leftover) shares a naive
+    // string prefix with the target bundle but is a different app, and must not
+    // be attributed to it.
+    @Test func bundlePathPrefixIsComponentSafe() {
+        let strangerPID: pid_t = 1500
+        let processes = [
+            RawAudioProcess(objectID: 3, pid: strangerPID, bundleID: nil)
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            executablePaths: [strangerPID: "/Applications/Spotify.app 2/Contents/MacOS/Spotify"],
+            bundlePaths: [spotify: "/Applications/Spotify.app"])
+        #expect(resolved.isEmpty)
+    }
+
+    // No false positives: an unrelated process that fails every one of the four
+    // layers (own id differs, responsible pid is a stranger, executable lives
+    // elsewhere, parent chain unrelated) stays out of the set.
+    @Test func unrelatedProcessMatchesNoLayer() {
+        let stranger: pid_t = 2000
+        let strangerParent: pid_t = 2001
+        let processes = [
+            RawAudioProcess(objectID: 8, pid: stranger, bundleID: "com.apple.WindowServer")
+        ]
+        let resolved = resolve(
+            bundleID: spotify,
+            processes: processes,
+            parents: [stranger: strangerParent],
+            bundleIDForPID: [strangerParent: "com.apple.loginwindow"],
+            responsible: [stranger: strangerParent],
+            executablePaths: [stranger: "/System/Library/PrivateFrameworks/x.framework/WindowServer"],
+            bundlePaths: [spotify: "/Applications/Spotify.app"])
         #expect(resolved.isEmpty)
     }
 }

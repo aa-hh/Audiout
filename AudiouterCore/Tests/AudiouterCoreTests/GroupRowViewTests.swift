@@ -12,6 +12,14 @@ import AppKit
 /// plain `NSView` doesn't get AXPress wired to an action the way `NSButton`
 /// does. Built directly, like `PopoverIconTests`'s group-row cases — the row
 /// has no host dependency.
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
 @Suite struct GroupRowViewTests {
 
     private final class RecordingDelegate: GroupRowView.Delegate {

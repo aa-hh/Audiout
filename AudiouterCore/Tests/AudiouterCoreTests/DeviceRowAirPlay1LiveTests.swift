@@ -9,6 +9,14 @@ import AudiouterCore
 /// accessibility label with no "not yet supported" wording. `supportsAirPlay2`
 /// is purely informational now (NativeBackend/T7 drives AP1 through the same
 /// shared engine as AP2); `DeviceRowView` never reads it at all.
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
 @Suite struct DeviceRowAirPlay1LiveTests {
 
     private func makeAP1Device(isSelected: Bool = false) -> Device {

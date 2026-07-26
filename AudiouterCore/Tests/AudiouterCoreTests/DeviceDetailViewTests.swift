@@ -14,6 +14,14 @@ import AppKit
 /// separately in `MixerWindowControllerTests`; these cases construct the
 /// controller directly and drive it through its `test_*` hooks, since a
 /// headless run can't synthesize the real hover/click gestures.
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
 @Suite struct DeviceDetailViewTests {
 
     private func tempDirectory() -> URL {

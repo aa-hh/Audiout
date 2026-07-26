@@ -138,8 +138,35 @@ import CAirPlayEngine
         tracker.record(samples: 352, sampleRate: 0)
         #expect(tracker.snapshot().writeCount == 0)
     }
+}
 
-    // MARK: - AirPlayEngine.write(pcm:pts:) end-to-end
+// MARK: - AirPlayEngine.write(pcm:pts:) end-to-end
+//
+// Split out of `WriteCadenceTests` above and nested into
+// `SerializedEngineState` because these two — unlike the pure
+// `WriteCadenceTracker` cases — build a real `AirPlayEngine` and call
+// `enterHeadlessTestMode()`, which overwrites THREE process-wide `static
+// shared` hook targets (`CompletionRegistry.shared`, `StateStreamHub.shared`,
+// `RemoteEventHub.shared` — each `install()` re-points the C hook at the new
+// engine's hub) plus the shared `shims/outputs.c` registry. Under XCTest's
+// one-process-per-test-METHOD model only ever one engine existed at a time;
+// under swift-testing's in-process concurrency a second engine entering
+// headless mode mid-test steals the hooks from whichever engine
+// `StateStreamTests` / `RemoteEventStreamTests` / `AirPlayEngineAPITests` /
+// `E1StabilityTests` / `MultiStreamWriteRoutingTests` /
+// `StartBufferAndLatencyProbeTests` is driving — those tests then simply never
+// see their events and time out. Every other `enterHeadlessTestMode()` caller
+// in this target already nests here; this file was the one that did not.
+// (These two also stall on `Task.sleep` and assert tight cadence bounds, so
+// serialising them removes a second, independent source of flake.)
+//
+// The pure tracker suite above deliberately stays OUT of the serialized parent
+// — it touches nothing global, and over-adding costs real wall-clock since
+// everything under the parent runs strictly one at a time. Same split as
+// `AirPlayEngineScaffoldTests` / `AirPlayEngineScaffoldLinkTests`.
+extension SerializedEngineState {
+
+@Suite struct WriteCadenceEngineWritePathTests {
 
     /// The hot `write` path actually feeds the tracker: a paced/underfed
     /// synthetic feed through the real public API reflects a deficit via
@@ -189,3 +216,5 @@ import CAirPlayEngine
         #expect(snapshot.overrunSeconds < 0.15)
     }
 }
+
+} // extension SerializedEngineState

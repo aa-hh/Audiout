@@ -10,6 +10,33 @@ import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
 
+// Nested into `SerializedEngineState` because — despite the "cheap, pure,
+// no-session" framing above — most of these tests read AND WRITE
+// process-global C state, which XCTest's one-process-per-test-METHOD model
+// made safe by accident and swift-testing's in-process concurrency does not:
+//
+//  - `cfg` / `libhash`: `configDefaults` asserts `timing_port == 0`,
+//    `control_port == 0` and `ipv6 == 0` while its own siblings
+//    `configSettersMutateDefaults` (sets 6001/6002 + a new libhash) and
+//    `ipv6ShimDefaultIsOffAndSetterRoundTrips` (sets ipv6 true) are mutating
+//    exactly those keys. Concurrently these three fail each other outright,
+//    and the engine-starting suites in this package read the same `cfg` at
+//    `airplay_init`.
+//  - SIGPIPE disposition: `engineMaskSigpipeSetsIgnoreDisposition` resets it
+//    to `SIG_DFL` at both ends of its body while
+//    `engineMaskSigpipeIsIdempotent` asserts it is `SIG_IGN` — a direct
+//    two-test race on a process-wide signal handler.
+//  - `conffile_unknown_key_assert` / `conffile_unknown_key_count`:
+//    before/after counter deltas, and a window where the debug abort is
+//    disabled process-wide.
+//  - `engine_crypto_init()`: libgcrypt's one-time init — the very global
+//    whose race crashed the whole test process from
+//    `MultiStreamMasterSessionTests` during this migration, which is why that
+//    suite already lives under this parent. Serializing against it here is
+//    the point, not a coincidence.
+//  - `event_set_log_callback(nil)`: libevent's process-global log callback.
+extension SerializedEngineState {
+
 @Suite struct ShimUnitTests {
 
     // MARK: - keyval (the DNS-SD TXT parser interface)
@@ -361,3 +388,5 @@ import CAirPlayEngine
         #expect(firstFrameByte == 0x20, "unexpected ALAC element header — channel layout / frame shape changed")
     }
 }
+
+} // extension SerializedEngineState

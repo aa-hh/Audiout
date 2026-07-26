@@ -3916,6 +3916,26 @@ extension SerializedSharedState {
         }
         func teardown() {}
         func fireDeviceChange() { onDefaultDeviceChanged?() }
+
+        /// True once `PerAppCaptureCoordinator` has installed its device-change
+        /// hook on this tap (`PerAppCaptureCoordinator.swift:355`/`:433`).
+        ///
+        /// **Every test must wait for this before calling
+        /// `fireDeviceChange()`.** `fireDeviceChange()` is
+        /// `onDefaultDeviceChanged?()` — a SILENT no-op while the hook is still
+        /// nil, so a too-early call produces no recapture, no session reset, no
+        /// rebind and no telemetry, and every downstream assertion then fails
+        /// with an empty collection rather than pointing at the real cause.
+        ///
+        /// The coordinator installs the hook on its own async start path, which
+        /// is NOT the same path as `engine.streamAddCalls` gaining the device —
+        /// the precondition these tests used to poll on. Under XCTest, where
+        /// each test method owned a whole process, the hook was always in place
+        /// by then; under swift-testing's in-process concurrency it sometimes
+        /// is not. Measured on this branch before the wait was added: the three
+        /// tests below failed in 4 of 10 full-suite runs and 7 of 10 runs of
+        /// `--filter 'NativeBackendTests|OwnToneBackendTests'`.
+        var isArmed: Bool { onDefaultDeviceChanged != nil }
     }
 
     /// T4 fix: `resetAirPlaySessionForRoutedApp`'s bounded rebind recovery
@@ -3944,6 +3964,14 @@ extension SerializedSharedState {
         // Every addOutput for this device fails until we flip it back off —
         // simulating a receiver that's rejecting the rebind at first.
         engine.addFailures = [device.outputID.rawValue]
+
+        // The per-app tap's device-change hook is installed on the
+        // coordinator's own async start path, which is NOT the path the
+        // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
+        // `fireDeviceChange()` is a silent no-op until it exists (see
+        // `RebindTriggerTap.isArmed`).
+        await pollUntil(timeout: 5) { tap.isArmed }
+        #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
 
         // A tap rebuild with no death in between is a "recapture" — this drives
         // resetAirPlaySessionForRoutedApp -> enqueueRebindRecovery(attempt: 1).
@@ -3994,6 +4022,15 @@ extension SerializedSharedState {
         // Every addOutput for this device fails, PERMANENTLY — the receiver is
         // genuinely gone.
         engine.addFailures = [device.outputID.rawValue]
+
+        // The per-app tap's device-change hook is installed on the
+        // coordinator's own async start path, which is NOT the path the
+        // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
+        // `fireDeviceChange()` is a silent no-op until it exists (see
+        // `RebindTriggerTap.isArmed`).
+        await pollUntil(timeout: 5) { tap.isArmed }
+        #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
+
         tap.fireDeviceChange()
 
         // Both bounded attempts (2) get recorded (and fail).
@@ -4113,6 +4150,14 @@ extension SerializedSharedState {
         // an incrementing attempt number to assert on below.
         engine.opDelayNanos = 200_000_000
         engine.addFailures = [device.outputID.rawValue]
+
+        // The per-app tap's device-change hook is installed on the
+        // coordinator's own async start path, which is NOT the path the
+        // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
+        // `fireDeviceChange()` is a silent no-op until it exists (see
+        // `RebindTriggerTap.isArmed`).
+        await pollUntil(timeout: 5) { tap.isArmed }
+        #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
 
         // Two recaptures, back-to-back, no `await` in between.
         tap.fireDeviceChange()

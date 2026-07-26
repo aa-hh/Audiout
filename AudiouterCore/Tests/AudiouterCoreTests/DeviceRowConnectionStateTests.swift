@@ -10,6 +10,14 @@ import AudiouterCore
 /// checkbox, the routing sublabel composed from `selected` + `routedAppNames`,
 /// and that a repeated `apply` cleanly re-derives the badge rather than
 /// leaving a stale state.
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
 @Suite struct DeviceRowConnectionStateTests {
 
     private func makeDevice(connectionState: ConnectionState = .off) -> Device {

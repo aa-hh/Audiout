@@ -359,8 +359,20 @@ import Testing
         _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
 
         backend.setVolume(150, for: "111")
-        // Give the async PUT a moment.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Poll for the PUT rather than sleeping a fixed beat and hoping. The
+        // old `try? await Task.sleep(nanoseconds: 300_000_000)` was written when
+        // XCTest gave this test method its own process; under swift-testing's
+        // in-process concurrency 300 ms is simply not enough often enough — it
+        // failed with `sentVolume` still -1 (i.e. the PUT had not reached the
+        // stub at all) in 5 of 10 full-suite runs and 5 of 10 runs of just this
+        // file plus NativeBackendTests. This returns as soon as the PUT lands,
+        // so the generous ceiling only costs wall-clock in the failure case,
+        // and -1 (the sentinel) still surfaces as a real failure at the end.
+        var deadline = 400   // 400 x 10 ms = 4 s
+        while sentVolume.get() == -1 && deadline > 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            deadline -= 1
+        }
         #expect(sentVolume.get() == 100, "the backend must clamp to 100 before PUT — OwnTone 400s on out-of-range")
     }
 

@@ -30,24 +30,17 @@ import Testing
 import Foundation
 import PTPHelperTestSupport
 
-/// Serialized parent for every suite that drives `libairptp`'s **process
-/// globals** — `airptp_event_port` / `airptp_general_port` /
-/// `airptp_shm_name`, written by `ptp_test_ports_override()`,
-/// `ptp_test_shm_name_override()` and (less obviously) by
-/// `airptp_daemon_find()`, which copies the found daemon's ports into the
-/// port globals.
-///
-/// `SerializedEngineStateSuite.swift` predicted this file: it exists for
-/// `shims/outputs.c`'s device registry and explicitly records that a *second*
-/// PTP test "will need its OWN serialized parent for the `libairptp` globals
-/// rather than piggybacking on this one — the two registries are unrelated".
-/// This is that parent. `.serialized` on each suite independently would not
-/// do: that only orders tests *within* a suite, and the collision that
-/// matters is between the two files (this suite's `find()` rewriting the port
-/// globals out from under `PTPHelperIPCTests`' `peer_add`, and vice versa).
-///
-/// Do NOT repeat `.serialized` on a child suite — it inherits from here.
-@Suite(.serialized) struct SerializedPTPGlobals {}
+// Nests under `SerializedLibairptpState` (SerializedLibairptpStateSuite.swift),
+// the shared `.serialized` parent for everything that drives `libairptp`'s
+// process globals — `airptp_event_port` / `airptp_general_port` /
+// `airptp_shm_name`, written by `ptp_test_ports_override()`,
+// `ptp_test_shm_name_override()` and (less obviously) by
+// `airptp_daemon_find()`, which copies the found daemon's ports into the port
+// globals. `.serialized` on this suite alone would NOT do: that only orders
+// tests *within* a suite, and the collision that matters is between files —
+// this suite's `find()` rewriting the port globals out from under
+// `PTPHelperIPCTests`' `peer_add`, and vice versa. Do NOT repeat
+// `.serialized` below; it inherits from the parent.
 
 /// High test-only ports, as in `PTPHelperIPCTests.swift`. NEVER 319/320.
 private let ptpLifecycleEventPort: UInt16 = 30319
@@ -56,7 +49,7 @@ private let ptpLifecycleGeneralPort: UInt16 = 30320
 /// Test-only shm name — never the production "/airptp_shm" (see the header).
 private let ptpLifecycleShmName = "/airptp_shm_lifecycle_test"
 
-extension SerializedPTPGlobals {
+extension SerializedLibairptpState {
 
 @Suite(.enabled(
     if: PortBindGate.canBindTestPorts,
@@ -146,7 +139,7 @@ final class PTPHelperLifecycleTests {
     }
 }
 
-} // extension SerializedPTPGlobals
+} // extension SerializedLibairptpState
 
 // MARK: - Locating the built helper
 
@@ -159,7 +152,7 @@ private let ptpHelperBinaryURL: URL? = {
     let env = ProcessInfo.processInfo.environment["AUDIOUTER_PTP_HELPER_BINARY"]
     if let env, !env.isEmpty { return URL(fileURLWithPath: env) }
 
-    let candidate = Bundle(for: SerializedPTPGlobals.PTPHelperLifecycleTests.self)
+    let candidate = Bundle(for: SerializedLibairptpState.PTPHelperLifecycleTests.self)
         .bundleURL
         .deletingLastPathComponent()
         .appendingPathComponent("ptp-helper")

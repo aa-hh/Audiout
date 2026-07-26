@@ -45,7 +45,7 @@
 // `shims/outputs.c`'s device registry. That second PTP suite has now arrived
 // (`PTPHelperLifecycleTests.swift`), so as `SerializedEngineStateSuite.swift`
 // anticipated, this file nests under the libairptp globals' OWN serialized
-// parent, `SerializedPTPGlobals` (declared in that file) — not the unrelated
+// parent, `SerializedLibairptpState` (declared in that file) — not the unrelated
 // outputs-registry lock. Do NOT add `.serialized` here; it inherits.
 
 import Testing
@@ -96,7 +96,7 @@ enum PortBindGate {
     }()
 }
 
-extension SerializedPTPGlobals {
+extension SerializedLibairptpState {
 
 @Suite(.enabled(
     if: PortBindGate.canBindTestPorts,
@@ -215,4 +215,4 @@ final class PTPHelperIPCTests {
     }
 }
 
-} // extension SerializedPTPGlobals
+} // extension SerializedLibairptpState

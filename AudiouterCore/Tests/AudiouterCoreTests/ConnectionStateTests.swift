@@ -1,7 +1,7 @@
-import XCTest
+import Testing
 @testable import AudiouterCore
 
-final class ConnectionStateTests: XCTestCase {
+@Suite struct ConnectionStateTests {
 
     private let allCauses: [ConnectionFailure.Cause] = [
         .notResponding, .vanished, .refusedOrBusy, .authRequired,
@@ -10,35 +10,35 @@ final class ConnectionStateTests: XCTestCase {
 
     // MARK: Copy table
 
-    func testEveryCauseHasNonEmptyHeadlineAndSuggestion() {
+    @Test func everyCauseHasNonEmptyHeadlineAndSuggestion() {
         for cause in allCauses {
             let failure = ConnectionFailure(cause: cause)
-            XCTAssertFalse(failure.headline.isEmpty, "\(cause) headline")
-            XCTAssertFalse(failure.suggestion.isEmpty, "\(cause) suggestion")
+            #expect(!failure.headline.isEmpty, "\(cause) headline")
+            #expect(!failure.suggestion.isEmpty, "\(cause) suggestion")
         }
     }
 
-    func testHeadlinesAreSentenceCaseWithNoTerminalPeriod() {
+    @Test func headlinesAreSentenceCaseWithNoTerminalPeriod() {
         for cause in allCauses {
             let headline = ConnectionFailure(cause: cause).headline
             let first = headline.first!
-            XCTAssertTrue(first.isUppercase, "\(cause) headline should start uppercase: \(headline)")
-            XCTAssertFalse(headline.hasSuffix("."), "\(cause) headline should not end with a period: \(headline)")
+            #expect(first.isUppercase, "\(cause) headline should start uppercase: \(headline)")
+            #expect(!headline.hasSuffix("."), "\(cause) headline should not end with a period: \(headline)")
         }
     }
 
-    func testSuggestionsAreSentenceCaseAndEndWithPeriod() {
+    @Test func suggestionsAreSentenceCaseAndEndWithPeriod() {
         for cause in allCauses {
             let suggestion = ConnectionFailure(cause: cause).suggestion
             let first = suggestion.first!
-            XCTAssertTrue(first.isUppercase, "\(cause) suggestion should start uppercase: \(suggestion)")
-            XCTAssertTrue(suggestion.hasSuffix("."), "\(cause) suggestion should end with a period: \(suggestion)")
+            #expect(first.isUppercase, "\(cause) suggestion should start uppercase: \(suggestion)")
+            #expect(suggestion.hasSuffix("."), "\(cause) suggestion should end with a period: \(suggestion)")
         }
     }
 
     // MARK: Verbatim copy (guards against accidental rewording of approved copy)
 
-    func testVerbatimCopyTable() {
+    @Test func verbatimCopyTable() {
         let expected: [ConnectionFailure.Cause: (headline: String, suggestion: String)] = [
             .notResponding: (
                 "Didn't respond",
@@ -71,71 +71,71 @@ final class ConnectionStateTests: XCTestCase {
         ]
         for (cause, copy) in expected {
             let failure = ConnectionFailure(cause: cause)
-            XCTAssertEqual(failure.headline, copy.headline, "\(cause) headline")
-            XCTAssertEqual(failure.suggestion, copy.suggestion, "\(cause) suggestion")
+            #expect(failure.headline == copy.headline, "\(cause) headline")
+            #expect(failure.suggestion == copy.suggestion, "\(cause) suggestion")
         }
     }
 
     // MARK: Equatable behavior
 
-    func testConnectionFailureEqualityIsSensitiveToDetail() {
+    @Test func connectionFailureEqualityIsSensitiveToDetail() {
         let noDetail = ConnectionFailure(cause: .timedOut)
         let withDetail = ConnectionFailure(cause: .timedOut, detail: "engine log line")
         let sameDetail = ConnectionFailure(cause: .timedOut, detail: "engine log line")
-        XCTAssertNotEqual(noDetail, withDetail)
-        XCTAssertEqual(withDetail, sameDetail)
+        #expect(noDetail != withDetail)
+        #expect(withDetail == sameDetail)
     }
 
-    func testConnectionFailureEqualityIsSensitiveToCause() {
+    @Test func connectionFailureEqualityIsSensitiveToCause() {
         let a = ConnectionFailure(cause: .vanished, detail: "same")
         let b = ConnectionFailure(cause: .notResponding, detail: "same")
-        XCTAssertNotEqual(a, b)
+        #expect(a != b)
     }
 
-    func testConnectionStateEqualityComparesAssociatedFailure() {
-        XCTAssertEqual(ConnectionState.off, .off)
-        XCTAssertEqual(ConnectionState.connecting, .connecting)
-        XCTAssertNotEqual(ConnectionState.connecting, .connected)
-        XCTAssertEqual(
-            ConnectionState.failed(ConnectionFailure(cause: .unknown)),
+    @Test func connectionStateEqualityComparesAssociatedFailure() {
+        #expect(ConnectionState.off == .off)
+        #expect(ConnectionState.connecting == .connecting)
+        #expect(ConnectionState.connecting != .connected)
+        #expect(
+            ConnectionState.failed(ConnectionFailure(cause: .unknown)) ==
             .failed(ConnectionFailure(cause: .unknown))
         )
-        XCTAssertNotEqual(
-            ConnectionState.failed(ConnectionFailure(cause: .unknown)),
+        #expect(
+            ConnectionState.failed(ConnectionFailure(cause: .unknown)) !=
             .failed(ConnectionFailure(cause: .unknown, detail: "extra"))
         )
-        XCTAssertNotEqual(
-            ConnectionState.failed(ConnectionFailure(cause: .vanished)),
+        #expect(
+            ConnectionState.failed(ConnectionFailure(cause: .vanished)) !=
             .failed(ConnectionFailure(cause: .timedOut))
         )
     }
 
     // MARK: Device integration
 
-    func testDeviceDefaultsToOff() {
+    @Test func deviceDefaultsToOff() {
         let device = Device(id: "a", name: "A", kind: .generic)
-        XCTAssertEqual(device.connectionState, .off)
+        #expect(device.connectionState == .off)
     }
 
-    func testDeviceEqualityIsSensitiveToConnectionState() {
+    @Test func deviceEqualityIsSensitiveToConnectionState() {
         let base = Device(id: "a", name: "A", kind: .generic)
         var connecting = base
         connecting.connectionState = .connecting
-        XCTAssertNotEqual(base, connecting)
+        #expect(base != connecting)
 
         var failedA = base
         failedA.connectionState = .failed(ConnectionFailure(cause: .vanished))
         var failedB = base
         failedB.connectionState = .failed(ConnectionFailure(cause: .timedOut))
-        XCTAssertNotEqual(failedA, failedB)
+        #expect(failedA != failedB)
 
         var failedC = base
         failedC.connectionState = .failed(ConnectionFailure(cause: .vanished))
-        XCTAssertEqual(failedA, failedC)
+        #expect(failedA == failedC)
     }
 
-    func testDeviceExplicitConnectionStateInit() {
+    @Test func deviceExplicitConnectionStateInit() {
         let device = Device(id: "a", name: "A", kind: .generic, connectionState: .reconnecting)
-        XCTAssertEqual(device.connectionState, .reconnecting)
+        #expect(device.connectionState == .reconnecting)
     }
 }

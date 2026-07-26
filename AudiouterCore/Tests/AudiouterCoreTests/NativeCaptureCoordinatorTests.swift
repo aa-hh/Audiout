@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 #if canImport(CoreAudio)
@@ -19,7 +20,13 @@ import AudioToolbox
 /// converted → forwarded → device-change → stop → error surfaced. Plus a focused
 /// pts-clock-domain test that would have caught the mHostTime-vs-CLOCK_MONOTONIC
 /// bug (finding 2).
-final class NativeCaptureCoordinatorTests: XCTestCase {
+///
+/// Nested inside `SerializedSharedState` (cookbook §18): `testStartEmitsCaptureWSTransitionTelemetry`
+/// installs `Telemetry`'s process-global test sink, which would otherwise race
+/// every other suite doing the same under swift-testing's concurrent-in-one-
+/// process model.
+extension SerializedSharedState {
+    @Suite struct NativeCaptureCoordinatorTests {
 
     // MARK: Doubles
 
@@ -190,7 +197,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
     // MARK: - Full lifecycle: create → convert+forward → device-change → stop.
 
-    func testCreateBuffersConvertForwardDeviceChangeStop() {
+    @Test func createBuffersConvertForwardDeviceChangeStop() {
         let tap = FakeTap()
         let sink = SpySink()
         let converter = FakeConverter()
@@ -198,34 +205,34 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         // 1) create
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
-        XCTAssertEqual(tap.creates, 1)
+        #expect(coordinator.state == .capturing(tap.format))
+        #expect(tap.creates == 1)
 
         // 2) buffers with ADVANCING mHostTime are converted and forwarded, pts intact.
         tap.pushBuffer(buffer(hostTime: 1_000_000_000))
         tap.pushBuffer(buffer(hostTime: 2_000_000_000))
         waitFor { sink.forwarded.count == 2 }
-        XCTAssertEqual(sink.forwarded.count, 2, "each converted buffer is forwarded to the sink")
-        XCTAssertEqual(converter.converts, 2)
+        #expect(sink.forwarded.count == 2, "each converted buffer is forwarded to the sink")
+        #expect(converter.converts == 2)
         // The pts the coordinator forwards is the buffer's own capture-clock pts.
-        XCTAssertEqual(sink.forwarded[0].pts.tv_sec, 1)
-        XCTAssertEqual(sink.forwarded[1].pts.tv_sec, 2)
-        XCTAssertGreaterThan(
-            timespecToNanos(sink.forwarded[1].pts), timespecToNanos(sink.forwarded[0].pts),
+        #expect(sink.forwarded[0].pts.tv_sec == 1)
+        #expect(sink.forwarded[1].pts.tv_sec == 2)
+        #expect(
+            timespecToNanos(sink.forwarded[1].pts) > timespecToNanos(sink.forwarded[0].pts),
             "pts must advance with the capture clock")
 
         // 3) default-output-device change recreates the tap against the new format.
         tap.format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         tap.fireDeviceChange()
         waitFor { self.stateIsCapturing(coordinator, sampleRate: 44100) }
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the old tap is torn down on device change")
-        XCTAssertEqual(tap.creates, 2, "a fresh tap is created for the new device")
+        #expect(coordinator.state == .capturing(tap.format))
+        #expect(tap.teardowns >= 1, "the old tap is torn down on device change")
+        #expect(tap.creates == 2, "a fresh tap is created for the new device")
 
         // 4) stop tears the tap down and returns to idle.
         coordinator.stop()
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 2)
+        #expect(coordinator.state == .idle)
+        #expect(tap.teardowns >= 2)
     }
 
     // MARK: - onDeviceRateRebuild fires only for a device/rate rebuild, never an
@@ -241,7 +248,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// already-fast connect. `recreateTap(cause: .exclusionChange)` must stay silent;
     /// only `recreateTap(cause: .deviceOrRateChange)` (the device-change/nominal-rate
     /// listener path) may fire `onDeviceRateRebuild`.
-    func testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes() {
+    @Test func exclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
         let lock = NSLock()
@@ -250,28 +257,28 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.creates, 1, "first capture — no rebuild yet")
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
-                       "the initial start must NOT fire onDeviceRateRebuild")
+        #expect(tap.creates == 1, "first capture — no rebuild yet")
+        #expect(lock.withLock { deviceRateRebuilds } == 0,
+                "the initial start must NOT fire onDeviceRateRebuild")
 
         // Exclusion-set change (models the synced-local sink attach on connect / an
         // app-route change): the tap rebuilds, but the tapped device and its clock
         // are unchanged, so NO session reset.
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
         waitFor { tap.creates >= 2 }
-        XCTAssertEqual(coordinator.state, .capturing(tap.format), "the exclusion rebuild lands in .capturing")
+        #expect(coordinator.state == .capturing(tap.format), "the exclusion rebuild lands in .capturing")
         // Give any erroneous callback a chance to fire before asserting it didn't.
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
-                       "an exclusion-set rebuild must NOT fire onDeviceRateRebuild — no AirPlay session reset")
+        #expect(lock.withLock { deviceRateRebuilds } == 0,
+                "an exclusion-set rebuild must NOT fire onDeviceRateRebuild — no AirPlay session reset")
 
         // A genuine device/nominal-rate change (the default-device / sample-rate
         // listener path) DOES fire it — the dropout the reset was built for.
         tap.fireDeviceChange()
         waitFor { lock.withLock { deviceRateRebuilds } == 1 }
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
-                       "a device/nominal-rate rebuild MUST fire onDeviceRateRebuild exactly once")
-        XCTAssertGreaterThanOrEqual(tap.creates, 3, "the device-change rebuild created a fresh tap")
+        #expect(lock.withLock { deviceRateRebuilds } == 1,
+                "a device/nominal-rate rebuild MUST fire onDeviceRateRebuild exactly once")
+        #expect(tap.creates >= 3, "the device-change rebuild created a fresh tap")
     }
 
     /// The completeness gap in the surgical reset trigger: an exclusion-cause rebuild
@@ -287,7 +294,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     ///
     /// Modelled by moving the fake's device id from INSIDE `createAndStart` — exactly
     /// the un-listened window — during a rebuild triggered by an exclusion change.
-    func testExclusionRebuildThatReAnchorsOntoADifferentDeviceStillResets() {
+    @Test func exclusionRebuildThatReAnchorsOntoADifferentDeviceStillResets() {
         let tap = FakeTap()
         tap.setTappedDeviceID(AudioObjectID(71))     // built-in, say
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
@@ -297,7 +304,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0, "the initial start never resets")
+        #expect(lock.withLock { deviceRateRebuilds } == 0, "the initial start never resets")
 
         // The default output device moves while neither tap holds a listener: the
         // rebuild's own createAndStart is that window.
@@ -306,11 +313,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         waitFor { tap.creates >= 2 }
         waitFor { lock.withLock { deviceRateRebuilds } == 1 }
 
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
-                       "an exclusion-cause rebuild that came up on a DIFFERENT device must still reset the "
-                       + "whole-system AirPlay session — the receivers are anchored to the old device's clock, "
-                       + "and no cause-based trigger can see this because the device moved while nothing was "
-                       + "listening")
+        #expect(lock.withLock { deviceRateRebuilds } == 1,
+                Comment(rawValue: "an exclusion-cause rebuild that came up on a DIFFERENT device must still reset the "
+                    + "whole-system AirPlay session — the receivers are anchored to the old device's clock, "
+                    + "and no cause-based trigger can see this because the device moved while nothing was "
+                    + "listening"))
     }
 
     /// The other half of the same guarantee, and the regression guard for the fix
@@ -320,7 +327,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// real like-for-like compare rather than the `nil`-abstains default doing the
     /// work (which is all `testExclusionChangeRebuildDoesNotFireDeviceRateRebuildButDeviceChangeDoes`
     /// can prove).
-    func testExclusionRebuildOnTheSameDeviceStillDoesNotReset() {
+    @Test func exclusionRebuildOnTheSameDeviceStillDoesNotReset() {
         let tap = FakeTap()
         tap.setTappedDeviceID(AudioObjectID(71))
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
@@ -335,15 +342,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         waitFor { tap.creates >= 2 }
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))   // let a wrong reset arrive
 
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 0,
-                       "a like-for-like exclusion rebuild must NOT reset — that spurious per-connect RTP "
-                       + "re-establish is the \"connects fast, then a long silence\" bug")
+        #expect(lock.withLock { deviceRateRebuilds } == 0,
+                Comment(rawValue: "a like-for-like exclusion rebuild must NOT reset — that spurious per-connect RTP "
+                    + "re-establish is the \"connects fast, then a long silence\" bug"))
     }
 
     /// A rate renegotiation that slips through the same un-listened window (the tap
     /// comes back up at 48 kHz where it was at 44.1) must reset too — the documented
     /// dropout cause, arriving without a device-change notification to announce it.
-    func testExclusionRebuildThatComesUpAtADifferentRateStillResets() {
+    @Test func exclusionRebuildThatComesUpAtADifferentRateStillResets() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
         let lock = NSLock()
@@ -361,14 +368,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         waitFor { tap.creates >= 2 }
         waitFor { lock.withLock { deviceRateRebuilds } == 1 }
 
-        XCTAssertEqual(lock.withLock { deviceRateRebuilds }, 1,
-                       "a rebuild that came up at a different nominal rate must reset the session, whatever "
-                       + "the rebuild was nominally for")
+        #expect(lock.withLock { deviceRateRebuilds } == 1,
+                Comment(rawValue: "a rebuild that came up at a different nominal rate must reset the session, whatever "
+                    + "the rebuild was nominally for"))
     }
 
     // MARK: - A dropped (nil) conversion is not forwarded.
 
-    func testDroppedConversionIsNotForwarded() {
+    @Test func droppedConversionIsNotForwarded() {
         let tap = FakeTap()
         let sink = SpySink()
         let converter = FakeConverter()
@@ -379,22 +386,22 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.pushBuffer(buffer(hostTime: 1_000_000_000))
         // Give the delivery a beat; nothing should be forwarded.
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        XCTAssertTrue(sink.forwarded.isEmpty, "a nil conversion must be dropped, not forwarded")
+        #expect(sink.forwarded.isEmpty, "a nil conversion must be dropped, not forwarded")
         coordinator.stop()
     }
 
     // MARK: - Tap-creation failure surfaces as .failed AND tears the tap down.
 
-    func testTapCreationFailureSurfacesErrorAndTearsDown() {
+    @Test func tapCreationFailureSurfacesErrorAndTearsDown() {
         let tap = FakeTap()
         tap.startError = .tapCreationFailed(reason: "denied")
         let sink = SpySink()
         let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
 
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .failed(.tapCreationFailed(reason: "denied")))
+        #expect(coordinator.state == .failed(.tapCreationFailed(reason: "denied")))
         // Finding 3: a failed createAndStart must not leak the tap — teardown is called.
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "a failed start must tear the tap down (no leak)")
+        #expect(tap.teardowns >= 1, "a failed start must tear the tap down (no leak)")
     }
 
     // MARK: - UnavailableSystemTap (macOS < 14.2) surfaces .osUnsupported, not
@@ -402,23 +409,23 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     // a version-gate failure.
 
     #if canImport(AudioToolbox)
-    func testUnavailableSystemTapSurfacesOSUnsupported() {
+    @Test func unavailableSystemTapSurfacesOSUnsupported() {
         let tap = UnavailableSystemTap()
-        XCTAssertThrowsError(try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedProcessObjectIDs: [])) { error in
-            XCTAssertEqual(error as? NativeCaptureError, .osUnsupported(minimum: "14.2"))
+        #expect(throws: NativeCaptureError.osUnsupported(minimum: "14.2")) {
+            try tap.createAndStart(muteBehavior: .mutedWhenTapped, excludedProcessObjectIDs: [])
         }
     }
 
-    func testOSUnsupportedUserMessageHasNoPermissionAdvice() {
+    @Test func osUnsupportedUserMessageHasNoPermissionAdvice() {
         let message = NativeCaptureError.osUnsupported(minimum: "14.2").userMessage
-        XCTAssertTrue(message.contains("14.2"), "message should state the version requirement")
-        XCTAssertFalse(message.localizedCaseInsensitiveContains("permission"),
-            "an OS-version failure is not fixable by granting permission")
-        XCTAssertFalse(message.localizedCaseInsensitiveContains("System Settings"),
-            "an OS-version failure should not send the user to the TCC panel")
+        #expect(message.contains("14.2"), "message should state the version requirement")
+        #expect(!message.localizedCaseInsensitiveContains("permission"),
+                "an OS-version failure is not fixable by granting permission")
+        #expect(!message.localizedCaseInsensitiveContains("System Settings"),
+                "an OS-version failure should not send the user to the TCC panel")
     }
 
-    func testUnavailableSystemTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
+    @Test func unavailableSystemTapDrivenThroughCoordinatorSurfacesOSUnsupported() {
         // Route the real UnavailableSystemTap through the coordinator's start
         // sequence (not just a scripted FakeTap) so the case flows end-to-end.
         let sink = SpySink()
@@ -429,7 +436,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             muteBehavior: .mutedWhenTapped
         )
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .failed(.osUnsupported(minimum: "14.2")))
+        #expect(coordinator.state == .failed(.osUnsupported(minimum: "14.2")))
     }
     #endif
 
@@ -439,7 +446,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// collapses to, and the value that makes the converter's resample ratio
     /// infinite / its AVAudioFrameCount conversion trap) must be rejected into
     /// `.failed`, not committed to `.capturing`.
-    func testZeroSampleRateFormatLandsInFailed() {
+    @Test func zeroSampleRateFormatLandsInFailed() {
         let tap = FakeTap()
         tap.format = TapFormat(sampleRate: 0, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         let sink = SpySink()
@@ -447,40 +454,41 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         guard case .failed(.formatReadFailed) = coordinator.state else {
-            return XCTFail("a zero/NaN sample-rate format must land in .failed(.formatReadFailed), got \(coordinator.state)")
+            Issue.record("a zero/NaN sample-rate format must land in .failed(.formatReadFailed), got \(coordinator.state)")
+            return
         }
         // The invalid-format tap must not leak — it is torn down.
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "an invalid-format start must tear the tap down (no leak)")
+        #expect(tap.teardowns >= 1, "an invalid-format start must tear the tap down (no leak)")
     }
 
     // MARK: - Device-change recreation failure surfaces as .failed.
 
-    func testDeviceChangeRecreationFailureSurfacesError() {
+    @Test func deviceChangeRecreationFailureSurfacesError() {
         let tap = FakeTap()
         let sink = SpySink()
         let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
 
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+        #expect(coordinator.state == .capturing(tap.format))
 
         // Next createAndStart (the recreation) fails.
         tap.startError = .deviceLost(reason: "gone")
         tap.fireDeviceChange()
         waitFor { if case .failed = coordinator.state { return true } else { return false } }
-        XCTAssertEqual(coordinator.state, .failed(.deviceLost(reason: "gone")))
+        #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
     }
 
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
     // (.creatingTap) must be coalesced (pendingDeviceChange) and replayed once the rebuild
     // lands in .capturing, not dropped. Whole-system port of PerAppCaptureCoordinator's fix.
 
-    func testDeviceChangeDuringRebuildIsCoalescedAndReplayed() {
+    @Test func deviceChangeDuringRebuildIsCoalescedAndReplayed() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
 
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.creates, 1)
+        #expect(tap.creates == 1)
 
         // Arm the hook: the SECOND createAndStart (the rebuild triggered by the
         // first fireDeviceChange below) fires a SECOND device-change notification
@@ -499,13 +507,12 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         // stop at 2 once the rebuild lands in .capturing. A THIRD create proves
         // the coalesced notification was replayed after the rebuild completed.
         waitFor { tap.creates >= 3 }
-        XCTAssertGreaterThanOrEqual(
-            tap.creates, 3,
-            "a device-change notification arriving mid-rebuild (.creatingTap) must be "
-            + "coalesced and replayed once the rebuild lands in .capturing, not dropped")
+        #expect(
+            tap.creates >= 3,
+            "a device-change notification arriving mid-rebuild (.creatingTap) must be coalesced and replayed once the rebuild lands in .capturing, not dropped")
 
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+        #expect(coordinator.state == .capturing(tap.format))
 
         coordinator.stop()
     }
@@ -534,7 +541,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// tears the stale tap down and creates a fresh one against the new format —
     /// with NO identity/device-change API involved, mirroring the real bug where
     /// only the rate changed.
-    func testNominalSampleRateNotificationTriggersTapRecreate() {
+    @Test func nominalSampleRateNotificationTriggersTapRecreate() {
         let tap = FakeTap()
         let sink = SpySink()
         let converter = FakeConverter()
@@ -542,8 +549,8 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.teardowns, 0)
+        #expect(tap.creates == 1)
+        #expect(tap.teardowns == 0)
 
         // Simulate the device's nominal rate flipping (e.g. 44.1 -> 48kHz) with the
         // device UID unchanged — the fake models this as just a format change, since
@@ -552,10 +559,10 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.fireDeviceChange()   // the nominal-sample-rate listener's real callback path
 
         waitFor { self.stateIsCapturing(coordinator, sampleRate: 48000) }
-        XCTAssertEqual(coordinator.state, .capturing(tap.format),
-                       "a nominal-rate renegotiation must rebuild the tap against the new format")
-        XCTAssertEqual(tap.creates, 2, "recreateTap must create a fresh tap")
-        XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "the stale (silent-PCM) tap must be torn down first")
+        #expect(coordinator.state == .capturing(tap.format),
+                "a nominal-rate renegotiation must rebuild the tap against the new format")
+        #expect(tap.creates == 2, "recreateTap must create a fresh tap")
+        #expect(tap.teardowns >= 1, "the stale (silent-PCM) tap must be torn down first")
 
         coordinator.stop()
     }
@@ -566,13 +573,13 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// (already covered generically by
     /// `testDeviceChangeDuringRebuildIsCoalescedAndReplayed`) rides this exact same
     /// seam, so a rate bounce is never dropped or thrashed into a stuck state.
-    func testRapidNominalSampleRateBounceDrivesSequentialRebuilds() {
+    @Test func rapidNominalSampleRateBounceDrivesSequentialRebuilds() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
 
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.creates, 1)
+        #expect(tap.creates == 1)
 
         tap.format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         tap.fireDeviceChange()   // 44.1 -> 48
@@ -582,8 +589,8 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.fireDeviceChange()   // 48 -> 44.1, back again
         waitFor { self.stateIsCapturing(coordinator, sampleRate: 44100) }
 
-        XCTAssertEqual(tap.creates, 3, "each rate flip must drive its own rebuild — no bounce dropped")
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+        #expect(tap.creates == 3, "each rate flip must drive its own rebuild — no bounce dropped")
+        #expect(coordinator.state == .capturing(tap.format))
 
         coordinator.stop()
     }
@@ -593,27 +600,27 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
     /// Changing the routed-apps set recreates the capturing tap with the
     /// correctly updated exclusion object-id list.
-    func testUpdateRoutingRecreatesTapWithUpdatedExclusionObjectIDs() {
+    @Test func updateRoutingRecreatesTapWithUpdatedExclusionObjectIDs() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
             processResolver: singleProcessResolver(["com.app.a": 111]))
 
         coordinator.start()
-        XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "no routes yet — nothing excluded")
+        #expect(tap.creates == 1)
+        #expect(tap.excludedProcessObjectIDs == [], "no routes yet — nothing excluded")
 
         let routes = [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))]
         coordinator.updateRouting(appRoutes: routes, excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.creates, 2, "a route change while capturing recreates the tap")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the newly-routed app's process object is excluded from the system mix")
+        #expect(tap.creates == 2, "a route change while capturing recreates the tap")
+        #expect(tap.excludedProcessObjectIDs == [111], "the newly-routed app's process object is excluded from the system mix")
         coordinator.stop()
     }
 
     /// An app flipped from `.device(id:)` back to `.currentDevice` is REMOVED
     /// from the exclusion list — it re-enters the system mix.
-    func testAppFlippedBackToCurrentDeviceReentersSystemMix() {
+    @Test func appFlippedBackToCurrentDeviceReentersSystemMix() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -623,7 +630,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
         let createsAfterRoute = tap.creates
 
         // The route flips back to .currentDevice — "no redirect."
@@ -631,8 +638,8 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .currentDevice)],
             excludedBundleIDs: [])
 
-        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "the tap is recreated again on the flip back")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [], "an app back on .currentDevice must re-enter the system mix")
+        #expect(tap.creates > createsAfterRoute, "the tap is recreated again on the flip back")
+        #expect(tap.excludedProcessObjectIDs == [], "an app back on .currentDevice must re-enter the system mix")
         coordinator.stop()
     }
 
@@ -641,7 +648,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// exclusion list (so it can never double-send: once to its own
     /// destination via per-app capture, and again via this whole-system
     /// mixdown).
-    func testDeviceRoutedAppProcessNeverLeaksIntoSystemMix() {
+    @Test func deviceRoutedAppProcessNeverLeaksIntoSystemMix() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -655,15 +662,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertTrue(tap.excludedProcessObjectIDs.contains(111), "the .device-routed app's process must be excluded (no double-send)")
-        XCTAssertFalse(tap.excludedProcessObjectIDs.contains(222), ".currentDevice apps stay in the system mix")
+        #expect(tap.excludedProcessObjectIDs.contains(111), "the .device-routed app's process must be excluded (no double-send)")
+        #expect(!tap.excludedProcessObjectIDs.contains(222), ".currentDevice apps stay in the system mix")
         coordinator.stop()
     }
 
     /// `.noRedirect` (the new default/unset state) is exclusion-equivalent to
     /// `.currentDevice`: neither is ever excluded from the system-wide tap. An
     /// app left "unset" must not be accidentally dropped from the system mix.
-    func testNoRedirectAppStaysInSystemMixJustLikeCurrentDevice() {
+    @Test func noRedirectAppStaysInSystemMixJustLikeCurrentDevice() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -678,15 +685,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111],
-                       "only the .device-routed app is excluded; both local states (.currentDevice AND "
-                       + ".noRedirect) stay in the system mix identically")
+        #expect(tap.excludedProcessObjectIDs == [111],
+                "only the .device-routed app is excluded; both local states (.currentDevice AND .noRedirect) stay in the system mix identically")
         coordinator.stop()
     }
 
     /// The existing user-excluded-apps list (Settings › Audio) still works
     /// and composes correctly (UNION) with route-based exclusion.
-    func testUserExcludedAppsComposeWithRouteBasedExclusion() {
+    @Test func userExcludedAppsComposeWithRouteBasedExclusion() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -695,19 +701,19 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.start()
         // Only a user-excluded app, no routes yet.
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [333])
+        #expect(tap.excludedProcessObjectIDs == [333])
 
         // Add a routed app on top — the union must include BOTH.
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: ["com.app.c"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 333], "route-based and user-excluded exclusions compose (union)")
+        #expect(tap.excludedProcessObjectIDs == [111, 333], "route-based and user-excluded exclusions compose (union)")
         coordinator.stop()
     }
 
     /// Calling `updateRouting` with an unchanged union is a no-op — it must
     /// not recreate the tap on every unrelated tick.
-    func testUpdateRoutingIsNoOpWhenUnionUnchanged() {
+    @Test func updateRoutingIsNoOpWhenUnionUnchanged() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -721,13 +727,13 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         // Same union again (route list re-passed verbatim, as a caller might
         // do on an unrelated tick) — must NOT recreate.
         coordinator.updateRouting(appRoutes: route, excludedBundleIDs: [])
-        XCTAssertEqual(tap.creates, createsAfterFirstUpdate, "an unchanged exclusion union must not recreate the tap")
+        #expect(tap.creates == createsAfterFirstUpdate, "an unchanged exclusion union must not recreate the tap")
         coordinator.stop()
     }
 
     /// `updateRouting` called while NOT capturing doesn't touch any tap, but
     /// the computed exclusion set is applied on the NEXT `start()`.
-    func testUpdateRoutingWhileIdleAppliesOnNextStart() {
+    @Test func updateRoutingWhileIdleAppliesOnNextStart() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
@@ -737,11 +743,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.creates, 0)
+        #expect(tap.creates == 0)
 
         coordinator.start()
-        XCTAssertEqual(tap.creates, 1)
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111], "the previously-computed exclusion set is applied on start()")
+        #expect(tap.creates == 1)
+        #expect(tap.excludedProcessObjectIDs == [111], "the previously-computed exclusion set is applied on start()")
         coordinator.stop()
     }
 
@@ -751,7 +757,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// only the main process (the old single-pid behavior) named the wrong
     /// process and left the real audio leaking into the system mix alongside
     /// wherever it was redirected to.
-    func testMultiProcessBundleExclusionUnionsAllProcessObjects() {
+    @Test func multiProcessBundleExclusionUnionsAllProcessObjects() {
         let tap = FakeTap()
         let mainPID: pid_t = 100
         let childPID: pid_t = 200
@@ -769,16 +775,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             appRoutes: [AppRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2],
-            "both the silent main process AND the audio-emitting child must be excluded — "
-            + "excluding only the main process is exactly the leak this primitive exists to fix")
+        #expect(tap.excludedProcessObjectIDs == [1, 2],
+            "both the silent main process AND the audio-emitting child must be excluded — excluding only the main process is exactly the leak this primitive exists to fix")
         coordinator.stop()
     }
 
     /// The multi-process union composes correctly across MULTIPLE excluded
     /// bundle ids: each bundle's full process set contributes to the union,
     /// with no cross-bundle bleed.
-    func testMultiProcessUnionAcrossMultipleExcludedBundles() {
+    @Test func multiProcessUnionAcrossMultipleExcludedBundles() {
         let tap = FakeTap()
         let processResolver = AudioProcessResolver(enumerator: FakeProcessEnumerator(
             processes: [
@@ -798,24 +803,24 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             ],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [1, 2, 3],
+        #expect(tap.excludedProcessObjectIDs == [1, 2, 3],
             "the union spans every excluded bundle's full process set")
         coordinator.stop()
     }
 
     // MARK: - Idempotency: start() while capturing is a no-op; stop() from idle is a no-op.
 
-    func testStartIsIdempotentAndStopFromIdleIsNoOp() {
+    @Test func startIsIdempotentAndStopFromIdleIsNoOp() {
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
 
         coordinator.stop()  // idle → no-op
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertEqual(tap.creates, 0)
+        #expect(coordinator.state == .idle)
+        #expect(tap.creates == 0)
 
         coordinator.start()
         coordinator.start()  // already capturing → no second tap
-        XCTAssertEqual(tap.creates, 1)
+        #expect(tap.creates == 1)
         coordinator.stop()
     }
 
@@ -828,7 +833,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// accumulated sleep and made every sync packet advertise a position receding
     /// into the past (Sonos green-never-white, no audio).
     @available(macOS 14.2, *)
-    func testHostTimeMapsOntoClockMonotonic() {
+    @Test func hostTimeMapsOntoClockMonotonic() {
         // Convert "now" (mach_absolute_time) and compare against a CLOCK_MONOTONIC
         // reading taken at the same instant. On a box that has ever slept, a raw
         // mach-time conversion would be off by the total sleep (millions of
@@ -843,14 +848,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let ptsNanos = timespecToNanos(pts)
         let monoNanos = timespecToNanos(mono)
         let deltaNanos = abs(Int64(ptsNanos) - Int64(monoNanos))
-        XCTAssertLessThan(deltaNanos, 1_000_000_000,
+        #expect(deltaNanos < 1_000_000_000,
             "pts must be on the CLOCK_MONOTONIC timescale (within 1s of it), not raw mach-absolute time")
     }
 
     /// The conversion is monotonic and linear in the host time: two host times a
     /// known delta apart map to pts the same delta apart.
     @available(macOS 14.2, *)
-    func testHostTimeConversionPreservesDeltas() {
+    @Test func hostTimeConversionPreservesDeltas() {
         let base = mach_absolute_time()
         var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
         // Add 500ms worth of mach ticks.
@@ -858,7 +863,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let a = CoreAudioSystemTap.timespec(fromHostTime: base)
         let b = CoreAudioSystemTap.timespec(fromHostTime: base &+ halfSecondTicks)
         let delta = Int64(timespecToNanos(b)) - Int64(timespecToNanos(a))
-        XCTAssertEqual(Double(delta), 500_000_000, accuracy: 2_000_000,
+        #expect(abs(Double(delta) - 500_000_000) <= 2_000_000,
             "a 500ms host-time delta must map to ~500ms of pts")
     }
     #endif
@@ -871,11 +876,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// detected: `machNanos + offset` now trails "now" by 5s, well past the
     /// ~1s threshold, so a caller must resample.
     @available(macOS 14.2, *)
-    func testShouldResampleDetectsSleepDrift() {
+    @Test func shouldResampleDetectsSleepDrift() {
         let machNanos: UInt64 = 100_000_000_000          // 100s of mach time
         let offsetAtTapStart: Int64 = 0                   // clocks agreed at start
         let monotonicNowAfterFiveSecondSleep: UInt64 = 105_000_000_000
-        XCTAssertTrue(CoreAudioSystemTap.shouldResample(
+        #expect(CoreAudioSystemTap.shouldResample(
             machNanos: machNanos,
             offset: offsetAtTapStart,
             monotonicNowNanos: monotonicNowAfterFiveSecondSleep))
@@ -884,11 +889,11 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// No sleep, no drift: an offset that still agrees with "now" to well under
     /// 1s must NOT trigger a resample on every single buffer.
     @available(macOS 14.2, *)
-    func testShouldResampleToleratesNoDrift() {
+    @Test func shouldResampleToleratesNoDrift() {
         let machNanos: UInt64 = 100_000_000_000
         let offset: Int64 = 0
         let monotonicNow: UInt64 = 100_050_000_000        // 50ms of normal scheduling jitter
-        XCTAssertFalse(CoreAudioSystemTap.shouldResample(
+        #expect(!CoreAudioSystemTap.shouldResample(
             machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNow))
     }
 
@@ -896,15 +901,15 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// slept before the offset was even sampled) must be handled correctly in
     /// signed space, not wrap or crash.
     @available(macOS 14.2, *)
-    func testShouldResampleHandlesNegativeOffset() {
+    @Test func shouldResampleHandlesNegativeOffset() {
         let machNanos: UInt64 = 50_000_000_000
         let offset: Int64 = -10_000_000_000               // monotonic trails mach by 10s
         let monotonicNowAgreeing: UInt64 = 40_000_000_000  // 50s + (-10s) = 40s: agrees
-        XCTAssertFalse(CoreAudioSystemTap.shouldResample(
+        #expect(!CoreAudioSystemTap.shouldResample(
             machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNowAgreeing))
 
         let monotonicNowDrifted: UInt64 = 46_000_000_000   // now 6s off from the 40s prediction
-        XCTAssertTrue(CoreAudioSystemTap.shouldResample(
+        #expect(CoreAudioSystemTap.shouldResample(
             machNanos: machNanos, offset: offset, monotonicNowNanos: monotonicNowDrifted))
     }
 
@@ -912,16 +917,16 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// offset must land on the expected wall-clock seconds/nanos, including the
     /// zero-clamp for a pathological negative result.
     @available(macOS 14.2, *)
-    func testTimespecMachNanosOffsetRoundTrip() {
+    @Test func timespecMachNanosOffsetRoundTrip() {
         let ts = CoreAudioSystemTap.timespec(machNanos: 2_500_000_000, offset: 500_000_000)
         // 2.5s + 0.5s = 3.0s exactly.
-        XCTAssertEqual(ts.tv_sec, 3)
-        XCTAssertEqual(ts.tv_nsec, 0)
+        #expect(ts.tv_sec == 3)
+        #expect(ts.tv_nsec == 0)
 
         let clamped = CoreAudioSystemTap.timespec(machNanos: 1_000_000_000, offset: -5_000_000_000)
         // Would be -4s; must clamp to zero rather than go negative.
-        XCTAssertEqual(clamped.tv_sec, 0)
-        XCTAssertEqual(clamped.tv_nsec, 0)
+        #expect(clamped.tv_sec == 0)
+        #expect(clamped.tv_nsec == 0)
     }
     #endif
 
@@ -947,20 +952,21 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     ///
     /// Uses `Telemetry._installTestSink` — the lightweight, no-disk seam —
     /// rather than `_resetForTesting`; never touches a real directory.
-    /// Cleaned up via `addTeardownBlock` (runs even if an assertion above
-    /// fails) so the sink can never leak forward into whatever test runs next
-    /// in this same process (`swift test --parallel` runs one class's
-    /// methods serially in one process — AGENTS.md / TelemetryTests.swift).
-    func testStartEmitsCaptureWSTransitionTelemetry() {
+    /// Cleaned up via `defer` (runs even if an assertion above fails, since a
+    /// failed `#expect` does not unwind) so the sink can never leak forward
+    /// into whatever test runs next in this same process. This suite is
+    /// nested inside `SerializedSharedState`, so no other suite touching the
+    /// same process-global sink can run concurrently with this test either.
+    @Test func startEmitsCaptureWSTransitionTelemetry() {
         let capturedLines = TelemetryLineBox()
         Telemetry._installTestSink { capturedLines.append($0) }
-        addTeardownBlock { Telemetry._installTestSink(nil) }
+        defer { Telemetry._installTestSink(nil) }
 
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
 
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+        #expect(coordinator.state == .capturing(tap.format))
 
         // `_installTestSink(nil)` is a synchronous barrier on Telemetry's
         // writer queue (mirrors TelemetryTests' own `drain()`) — guarantees
@@ -972,14 +978,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
                 && $0.contains("\"from\":\"idle\"") && $0.contains("\"to\":\"creatingTap\"")
         }
-        XCTAssertNotNil(idleToCreating, "expected an idle -> creatingTap captureWS/transition line, got: \(lines)")
+        #expect(idleToCreating != nil, "expected an idle -> creatingTap captureWS/transition line, got: \(lines)")
 
         let creatingToCapturing = lines.first {
             $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"transition\"")
                 && $0.contains("\"from\":\"creatingTap\"") && $0.contains("\"to\":\"capturing\"")
         }
-        XCTAssertNotNil(creatingToCapturing, "expected a creatingTap -> capturing captureWS/transition line, got: \(lines)")
-        XCTAssertTrue(
+        #expect(creatingToCapturing != nil, "expected a creatingTap -> capturing captureWS/transition line, got: \(lines)")
+        #expect(
             creatingToCapturing?.contains("\"format\":\"\(tap.format.sampleRate)/\(tap.format.channels)\"") ?? false,
             "the capturing transition must carry the tap format, got: \(creatingToCapturing ?? "nil")")
 
@@ -988,12 +994,12 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
     // MARK: - RMS metering (pure).
 
-    func testRMSOfS16LE() {
-        XCTAssertEqual(NativeCaptureCoordinator.rmsOfS16LE(Data()), 0)
+    @Test func rmsOfS16LE() {
+        #expect(NativeCaptureCoordinator.rmsOfS16LE(Data()) == 0)
         // A constant full-scale signal → RMS ~1.0.
         var full = Data()
         for _ in 0..<64 { withUnsafeBytes(of: Int16(32767).littleEndian) { full.append(contentsOf: $0) } }
-        XCTAssertEqual(NativeCaptureCoordinator.rmsOfS16LE(full), 1.0, accuracy: 0.01)
+        #expect(abs(NativeCaptureCoordinator.rmsOfS16LE(full) - 1.0) <= 0.01)
     }
 
     // MARK: - Aggregate-rate reconciliation (converter input-rate correctness).
@@ -1019,64 +1025,64 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// aggregate's 48000 so the converter is built on the real delivered rate — NOT
     /// the stale pre-aggregate 44100 that pitched playback UP ~8.8% (48000/44100).
     @available(macOS 14.2, *)
-    func testReconciledFormatCorrectsStalePreAggregateRate() {
+    @Test func reconciledFormatCorrectsStalePreAggregateRate() {
         let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
         let reconciled = CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000)
-        XCTAssertEqual(reconciled.sampleRate, 48000,
+        #expect(reconciled.sampleRate == 48000,
             "the converter's input rate must follow the aggregate's real delivered rate, not the pre-aggregate tap read")
         // Every rate-INDEPENDENT field is preserved (drift compensation only resamples).
-        XCTAssertEqual(reconciled.channels, 2)
-        XCTAssertEqual(reconciled.bitsPerSample, 32)
-        XCTAssertTrue(reconciled.isFloat)
-        XCTAssertFalse(reconciled.isInterleaved)
+        #expect(reconciled.channels == 2)
+        #expect(reconciled.bitsPerSample == 32)
+        #expect(reconciled.isFloat)
+        #expect(!reconciled.isInterleaved)
     }
 
     /// The reverse divergence (declared 48000, aggregate 44100) is corrected too —
     /// the fix is symmetric: it always snaps to the aggregate's real rate.
     @available(macOS 14.2, *)
-    func testReconciledFormatCorrectsEitherDirection() {
+    @Test func reconciledFormatCorrectsEitherDirection() {
         let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 44100).sampleRate, 44100)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 44100).sampleRate == 44100)
     }
 
     /// When the pre-aggregate read already matches the aggregate (the common case),
     /// the format is returned UNCHANGED — no needless rewrite.
     @available(macOS 14.2, *)
-    func testReconciledFormatUnchangedWhenRatesMatch() {
+    @Test func reconciledFormatUnchangedWhenRatesMatch() {
         let declared = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000), declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 48000) == declared)
     }
 
     /// An unreadable / degenerate aggregate rate must NOT clobber the format — we
     /// keep the pre-aggregate read (no regression vs. the prior behaviour).
     @available(macOS 14.2, *)
-    func testReconciledFormatIgnoresUnreadableAggregateRate() {
+    @Test func reconciledFormatIgnoresUnreadableAggregateRate() {
         let declared = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: nil), declared)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 0), declared)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: -48000), declared)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .nan), declared)
-        XCTAssertEqual(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .infinity), declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: nil) == declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: 0) == declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: -48000) == declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .nan) == declared)
+        #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .infinity) == declared)
     }
 
     /// Compare-before-rebuild loop-breaker: a nominal-rate notification that
     /// re-announces the SAME rate the converter already runs at must NOT rebuild.
     @available(macOS 14.2, *)
-    func testShouldRebuildForNominalRateSkipsNoOpNotification() {
-        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000, currentEffectiveRate: 48000),
+    @Test func shouldRebuildForNominalRateSkipsNoOpNotification() {
+        #expect(!CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000, currentEffectiveRate: 48000),
             "a set-to-same-value notification must be a no-op — no teardown+rebuild churn")
-        XCTAssertFalse(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000.4, currentEffectiveRate: 48000),
+        #expect(!CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 48000.4, currentEffectiveRate: 48000),
             "sub-Hz jitter that rounds to the same integer rate is still a no-op")
     }
 
     /// A genuinely different notified rate DOES rebuild; an unreadable rate falls
     /// back to the safe rebuild (can't prove it's a no-op).
     @available(macOS 14.2, *)
-    func testShouldRebuildForNominalRateRebuildsOnRealChangeOrUnreadable() {
-        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 44100, currentEffectiveRate: 48000))
-        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: nil, currentEffectiveRate: 48000))
-        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 0, currentEffectiveRate: 48000))
-        XCTAssertTrue(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: .nan, currentEffectiveRate: 48000))
+    @Test func shouldRebuildForNominalRateRebuildsOnRealChangeOrUnreadable() {
+        #expect(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 44100, currentEffectiveRate: 48000))
+        #expect(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: nil, currentEffectiveRate: 48000))
+        #expect(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: 0, currentEffectiveRate: 48000))
+        #expect(CoreAudioSystemTap.shouldRebuildForNominalRate(notifiedRate: .nan, currentEffectiveRate: 48000))
     }
 
     /// Mechanism proof with the REAL `AVFormatConverter`: the declared input rate is
@@ -1092,7 +1098,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// buffers stay under the quantum and the sum converges on the steady-state
     /// rate ratio (per-call priming latency washes out over the run).
     @available(macOS 14.2, *)
-    func testConverterOutputLengthScalesWithDeclaredInputRate() {
+    @Test func converterOutputLengthScalesWithDeclaredInputRate() {
         let framesPerBuffer = 2048
         let iterations = 32
         let planar = Self.planarFloat32Stereo(frameCount: framesPerBuffer)
@@ -1107,12 +1113,12 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
             if let out = at44100.convertToAirPlayPCM(buffer) { frames44 += out.count / 4 }
             if let out = at48000.convertToAirPlayPCM(buffer) { frames48 += out.count / 4 }
         }
-        XCTAssertGreaterThan(frames44, 0)
-        XCTAssertGreaterThan(frames48, 0)
-        XCTAssertLessThan(frames48, frames44,
+        #expect(frames44 > 0)
+        #expect(frames48 > 0)
+        #expect(frames48 < frames44,
             "a higher declared input rate yields fewer 44100 output frames — the exact pitch lever this fix corrects")
         let ratio = Double(frames48) / Double(frames44)
-        XCTAssertEqual(ratio, 44100.0 / 48000.0, accuracy: 0.01,
+        #expect(abs(ratio - 44100.0 / 48000.0) <= 0.01,
             "total output length must scale by the declared-rate ratio (44100/48000), confirming rate == pitch")
     }
     #endif
@@ -1154,7 +1160,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// bundle ID). The bundle-ID union `updateRouting` tracks is unchanged, so its
     /// own no-op guard would never recreate the tap — `refreshExcludedProcessSet`
     /// bypasses it and picks up the fresh process so it can't leak back in.
-    func testRefreshExcludedProcessSetPicksUpRelaunchedExcludedAppProcess() {
+    @Test func refreshExcludedProcessSetPicksUpRelaunchedExcludedAppProcess() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
         let coordinator = makeCoordinator(
@@ -1163,21 +1169,21 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
         let createsAfterExclude = tap.creates
 
         enumerator.set([rawProcess(456, "com.app.excluded")]) // relaunch: fresh pid
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
 
-        XCTAssertGreaterThan(tap.creates, createsAfterExclude, "relaunch must recreate the tap")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [456], "the relaunched app's fresh process is excluded, not the stale one")
+        #expect(tap.creates > createsAfterExclude, "relaunch must recreate the tap")
+        #expect(tap.excludedProcessObjectIDs == [456], "the relaunched app's fresh process is excluded, not the stale one")
         coordinator.stop()
     }
 
     /// A ROUTED (`.device`) app relaunches — its fresh process must be excluded
     /// from the system mix too, or it doubles: once via its target route, once via
     /// the whole-system mixdown.
-    func testRefreshExcludedProcessSetPicksUpRelaunchedRoutedAppProcess() {
+    @Test func refreshExcludedProcessSetPicksUpRelaunchedRoutedAppProcess() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.routed")])
         let coordinator = makeCoordinator(
@@ -1188,20 +1194,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.updateRouting(
             appRoutes: [AppRoute(bundleID: "com.app.routed", displayName: "Routed", destination: .device(id: "speaker-1"))],
             excludedBundleIDs: [])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
         let createsAfterRoute = tap.creates
 
         enumerator.set([rawProcess(777, "com.app.routed")])
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.routed")
 
-        XCTAssertGreaterThan(tap.creates, createsAfterRoute, "relaunch must recreate the tap")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [777], "the relaunched routed app's fresh process is excluded — no doubling")
+        #expect(tap.creates > createsAfterRoute, "relaunch must recreate the tap")
+        #expect(tap.excludedProcessObjectIDs == [777], "the relaunched routed app's fresh process is excluded — no doubling")
         coordinator.stop()
     }
 
     /// A bundle ID that ISN'T currently excluded/routed-away triggers no rebuild —
     /// cheap to call on every app launch.
-    func testRefreshExcludedProcessSetIsNoOpForUnrelatedBundleID() {
+    @Test func refreshExcludedProcessSetIsNoOpForUnrelatedBundleID() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.a")])
         let coordinator = makeCoordinator(
@@ -1215,13 +1221,13 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         let createsAfterRoute = tap.creates
 
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.unrelated")
-        XCTAssertEqual(tap.creates, createsAfterRoute, "an unrelated bundle ID must not recreate the tap")
+        #expect(tap.creates == createsAfterRoute, "an unrelated bundle ID must not recreate the tap")
         coordinator.stop()
     }
 
     /// Calling `refreshExcludedProcessSet` while not capturing must not create a
     /// tap — the fresh process is picked up on the next real `start()`.
-    func testRefreshExcludedProcessSetWhileIdleIsNoOp() {
+    @Test func refreshExcludedProcessSetWhileIdleIsNoOp() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
         let coordinator = makeCoordinator(
@@ -1230,7 +1236,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, 0, "no tap exists yet — refresh must not create one")
+        #expect(tap.creates == 0, "no tap exists yet — refresh must not create one")
     }
 
     /// THE storm-prevention property (W1-T7 Fix 1): `refreshExcludedProcessSet` is
@@ -1239,7 +1245,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// unconditional recreate drove N whole-system rebuilds on an UNCHANGED excluded
     /// set — the amplified coreaudiod storm. A refresh whose resolved object set is
     /// unchanged must do ZERO Core Audio work however many fire.
-    func testRefreshOnUnchangedExclusionSetTriggersZeroRebuilds() {
+    @Test func refreshOnUnchangedExclusionSetTriggersZeroRebuilds() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
         let coordinator = makeCoordinator(
@@ -1248,20 +1254,20 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
         let createsAfterExclude = tap.creates
 
         for _ in 0..<8 {
             coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
         }
-        XCTAssertEqual(tap.creates, createsAfterExclude,
-                       "an unchanged excluded set must do ZERO rebuilds however many refreshes fire")
+        #expect(tap.creates == createsAfterExclude,
+                "an unchanged excluded set must do ZERO rebuilds however many refreshes fire")
         coordinator.stop()
     }
 
     /// A genuine process change rebuilds EXACTLY ONCE; a second refresh on the
     /// settled set is a no-op.
-    func testRefreshOnGenuineProcessChangeRebuildsExactlyOnce() {
+    @Test func refreshOnGenuineProcessChangeRebuildsExactlyOnce() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
         let coordinator = makeCoordinator(
@@ -1274,17 +1280,17 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         enumerator.set([rawProcess(456, "com.app.excluded")])
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine process change rebuilds exactly once")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [456])
+        #expect(tap.creates == createsAfterExclude + 1, "a genuine process change rebuilds exactly once")
+        #expect(tap.excludedProcessObjectIDs == [456])
 
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled set must not rebuild again")
+        #expect(tap.creates == createsAfterExclude + 1, "the settled set must not rebuild again")
         coordinator.stop()
     }
 
     /// A FAILED rebuild must not leave a baseline that suppresses the next real
     /// change — the baseline advances ONLY on a successful `.capturing` commit.
-    func testFailedRebuildDoesNotSuppressNextRealExclusionChange() {
+    @Test func failedRebuildDoesNotSuppressNextRealExclusionChange() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.excluded")])
         let coordinator = makeCoordinator(
@@ -1293,7 +1299,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.excluded"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
 
         // The relaunch's rebuild fails (createAndStart throws) → `.failed`.
         tap.startError = .deviceLost(reason: "gone")
@@ -1306,16 +1312,16 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         tap.startError = nil
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [456], "recovery excludes the current process")
+        #expect(tap.excludedProcessObjectIDs == [456], "recovery excludes the current process")
         let createsAfterRecover = tap.creates
 
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterRecover, "settled set after recovery must not rebuild")
+        #expect(tap.creates == createsAfterRecover, "settled set after recovery must not rebuild")
 
         enumerator.set([rawProcess(789, "com.app.excluded")])
         coordinator.refreshExcludedProcessSet(forRelaunchedBundleID: "com.app.excluded")
-        XCTAssertEqual(tap.creates, createsAfterRecover + 1, "a real change after a prior failure still rebuilds once")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [789])
+        #expect(tap.creates == createsAfterRecover + 1, "a real change after a prior failure still rebuilds once")
+        #expect(tap.excludedProcessObjectIDs == [789])
         coordinator.stop()
     }
 
@@ -1327,7 +1333,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
     /// audio stops leaking into the whole-system mix. (On the object-based resolver
     /// this also covers Fix 2: a process only appears once it is audible — a
     /// silent→audible transition is exactly a membership change here.)
-    func testExcludedAppSpawningChildMidSessionIsAddedToExclusionExactlyOnce() {
+    @Test func excludedAppSpawningChildMidSessionIsAddedToExclusionExactlyOnce() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
         let coordinator = makeCoordinator(
@@ -1336,7 +1342,7 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111])
+        #expect(tap.excludedProcessObjectIDs == [111])
         let createsAfterExclude = tap.creates
 
         // A new tab starts playing: a fresh audio child appears under the SAME
@@ -1344,18 +1350,18 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser")])
         coordinator.handleMembershipChange()
 
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "a genuine membership change recreates the tap exactly once")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 222], "the newly-spawned audio child is now excluded")
+        #expect(tap.creates == createsAfterExclude + 1, "a genuine membership change recreates the tap exactly once")
+        #expect(tap.excludedProcessObjectIDs == [111, 222], "the newly-spawned audio child is now excluded")
 
         coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the settled set must not trigger a second rebuild")
+        #expect(tap.creates == createsAfterExclude + 1, "the settled set must not trigger a second rebuild")
         coordinator.stop()
     }
 
     /// The regression-prevention property: an unchanged excluded object set — a
     /// duplicate notification, or churn in an UNRELATED app — triggers ZERO
     /// rebuilds (the CPU-storm loop-breaker).
-    func testUnchangedExclusionMembershipTriggersZeroRebuilds() {
+    @Test func unchangedExclusionMembershipTriggersZeroRebuilds() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([
             rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser"),
@@ -1372,12 +1378,12 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         enumerator.set([rawProcess(222, "com.app.browser"), rawProcess(111, "com.app.browser")]) // reorder = same set
         coordinator.handleMembershipChange()
 
-        XCTAssertEqual(tap.creates, createsAfterExclude, "no rebuild for an unchanged (or reordered) exclusion set")
+        #expect(tap.creates == createsAfterExclude, "no rebuild for an unchanged (or reordered) exclusion set")
         coordinator.stop()
     }
 
     /// A membership diff that lands while idle (no tap) does nothing.
-    func testMembershipDiffWhileIdleIsNoOp() {
+    @Test func membershipDiffWhileIdleIsNoOp() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
         let coordinator = makeCoordinator(
@@ -1387,14 +1393,14 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.browser"])
         enumerator.set([rawProcess(111, "com.app.browser"), rawProcess(222, "com.app.browser")])
         coordinator.handleMembershipChange()
-        XCTAssertEqual(tap.creates, 0, "no tap exists yet — a membership diff must not create one")
+        #expect(tap.creates == 0, "no tap exists yet — a membership diff must not create one")
     }
 
     /// Rapid spawn/kill/spawn churn within the debounce window coalesces to a
     /// single settled diff — one rebuild against the FINAL set, not one per
     /// notification. Driven through the real debounced `handleProcessListChanged`
     /// entry point with a short injected interval.
-    func testRapidExclusionChurnWithinDebounceWindowCoalescesToOneRebuild() {
+    @Test func rapidExclusionChurnWithinDebounceWindowCoalescesToOneRebuild() {
         let tap = FakeTap()
         let enumerator = MutableProcessEnumerator([rawProcess(111, "com.app.browser")])
         let coordinator = makeCoordinator(
@@ -1414,9 +1420,10 @@ final class NativeCaptureCoordinatorTests: XCTestCase {
         waitFor { tap.creates >= createsAfterExclude + 1 }
         RunLoop.current.run(until: Date().addingTimeInterval(0.2)) // let any extra (erroneous) rebuilds appear
 
-        XCTAssertEqual(tap.creates, createsAfterExclude + 1, "the burst must coalesce to a single settled rebuild")
-        XCTAssertEqual(tap.excludedProcessObjectIDs, [111, 333], "the coalesced diff applies the SETTLED exclusion set")
+        #expect(tap.creates == createsAfterExclude + 1, "the burst must coalesce to a single settled rebuild")
+        #expect(tap.excludedProcessObjectIDs == [111, 333], "the coalesced diff applies the SETTLED exclusion set")
         coordinator.stop()
+    }
     }
 }
 

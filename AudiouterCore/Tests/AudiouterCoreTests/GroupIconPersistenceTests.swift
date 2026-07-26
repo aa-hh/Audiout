@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// `Group.iconSymbolName` persistence through `GroupStore` — a phase-2
@@ -8,45 +9,42 @@ import XCTest
 /// `AppRouteStoreTests`'s forward-compat style, but here the interesting case
 /// is *backward* compat: a pre-phase-2 file on disk simply has no
 /// `iconSymbolName` key at all, and must decode as `nil` rather than fail.
-final class GroupIconPersistenceTests: XCTestCase {
+@Suite final class GroupIconPersistenceTests {
 
-    private var directory: URL!
+    private let directory: URL
 
-    override func setUp() {
-        super.setUp()
+    init() {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudiouterTests-\(UUID().uuidString)", isDirectory: true)
     }
 
-    override func tearDown() {
+    deinit {
         try? FileManager.default.removeItem(at: directory)
-        directory = nil
-        super.tearDown()
     }
 
-    func testRoundTripPreservesIconSymbolNameWhenSet() throws {
+    @Test func roundTripPreservesIconSymbolNameWhenSet() throws {
         let store = GroupStore(directory: directory)
         let group = Group(id: "g1", name: "Whole house", memberIDs: ["a", "b"], memberVolumes: ["a": 50, "b": 60],
                            iconSymbolName: "house.fill")
         try store.save([group])
 
         let reloaded = try GroupStore(directory: directory).load()
-        XCTAssertEqual(reloaded, [group])
-        XCTAssertEqual(reloaded.first?.iconSymbolName, "house.fill")
+        #expect(reloaded == [group])
+        #expect(reloaded.first?.iconSymbolName == "house.fill")
     }
 
-    func testRoundTripPreservesNilIconSymbolName() throws {
+    @Test func roundTripPreservesNilIconSymbolName() throws {
         let store = GroupStore(directory: directory)
         let group = Group(id: "g1", name: "Downstairs", memberIDs: ["a"], memberVolumes: ["a": 50])
-        XCTAssertNil(group.iconSymbolName)
+        #expect(group.iconSymbolName == nil)
         try store.save([group])
 
         let reloaded = try GroupStore(directory: directory).load()
-        XCTAssertEqual(reloaded, [group])
-        XCTAssertNil(reloaded.first?.iconSymbolName)
+        #expect(reloaded == [group])
+        #expect(reloaded.first?.iconSymbolName == nil)
     }
 
-    func testDecodingPrePhase2JSONWithNoIconSymbolNameKeyYieldsNil() throws {
+    @Test func decodingPrePhase2JSONWithNoIconSymbolNameKeyYieldsNil() throws {
         // Hand-written envelope in the exact shape a phase-1 build would have
         // written — no `iconSymbolName` key present anywhere in the group
         // object, not even as `null`.
@@ -67,10 +65,10 @@ final class GroupIconPersistenceTests: XCTestCase {
         try Data(prePhase2.utf8).write(to: directory.appendingPathComponent("groups.json"))
 
         let groups = try GroupStore(directory: directory).load()
-        XCTAssertEqual(groups.count, 1)
-        XCTAssertEqual(groups.first?.id, "g1")
-        XCTAssertEqual(groups.first?.name, "Whole house")
-        XCTAssertEqual(groups.first?.memberIDs, ["a", "b"])
-        XCTAssertNil(groups.first?.iconSymbolName, "a missing key must decode as nil, not fail or default to a symbol")
+        #expect(groups.count == 1)
+        #expect(groups.first?.id == "g1")
+        #expect(groups.first?.name == "Whole house")
+        #expect(groups.first?.memberIDs == ["a", "b"])
+        #expect(groups.first?.iconSymbolName == nil, "a missing key must decode as nil, not fail or default to a symbol")
     }
 }

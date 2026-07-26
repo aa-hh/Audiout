@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// `SetupModel` is the AppKit-free brain of the first-run flow. All three system
@@ -8,8 +9,14 @@ import XCTest
 /// injected, so these run hermetically — no Core Audio, no real prompt. They pin
 /// the status transitions, the `onChange` notifications, persistence of
 /// completion, the launch gate, and the System Settings deep-link URLs.
-@MainActor
-final class SetupModelTests: XCTestCase {
+///
+/// Nested inside `SerializedSharedState` (cookbook §18): several tests here
+/// install `Telemetry`'s process-global test sink, which would otherwise race
+/// every other suite doing the same under swift-testing's concurrent-in-one-
+/// process model.
+extension SerializedSharedState {
+    @MainActor
+    @Suite final class SetupModelTests {
 
     // MARK: Fakes
 
@@ -69,21 +76,17 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Helpers
 
-    private var suiteName: String!
+    private var suiteName: String
     private var defaults: UserDefaults!
 
-    override func setUp() {
-        super.setUp()
-        suiteName = "AudioControlSetupTests.\(name).\(ObjectIdentifier(self).hashValue)"
+    init() {
+        suiteName = "AudioControlSetupTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    override func tearDown() {
+    deinit {
         defaults.removePersistentDomain(forName: suiteName)
-        defaults = nil
-        suiteName = nil
-        super.tearDown()
     }
 
     private func makeModel(audio: PermissionStatus,
@@ -103,16 +106,16 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Initial state
 
-    func testInitialStatusesAreUnknown() {
+    @Test func initialStatusesAreUnknown() {
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertEqual(model.audioStatus, .unknown)
-        XCTAssertEqual(model.localNetworkStatus, .unknown)
-        XCTAssertEqual(model.remoteControlStatus, .unknown)
-        XCTAssertFalseModelProbing(model)
+        #expect(model.audioStatus == .unknown)
+        #expect(model.localNetworkStatus == .unknown)
+        #expect(model.remoteControlStatus == .unknown)
+        expectModelIsNotProbing(model)
     }
 
-    private func XCTAssertFalseModelProbing(_ model: SetupModel) {
-        XCTAssertFalse(model.isProbingAudio)
+    private func expectModelIsNotProbing(_ model: SetupModel) {
+        #expect(!model.isProbingAudio)
     }
 
     // MARK: Local Network — ungated OS (macOS < 15, no privacy gate exists)
@@ -130,25 +133,25 @@ final class SetupModelTests: XCTestCase {
                    localNetworkGated: false)
     }
 
-    func testUngatedLocalNetworkStartsGrantedAndNeverProbes() async {
+    @Test func ungatedLocalNetworkStartsGrantedAndNeverProbes() async {
         let net = SpyLocalNetwork()
         net.reachable = false   // even a "not reachable" probe must be irrelevant
         let model = makeUngatedModel(localNetwork: net)
 
         // Starts satisfied — there's no gate on this OS to grant.
-        XCTAssertEqual(model.localNetworkStatus, .granted)
+        #expect(model.localNetworkStatus == .granted)
 
         // "Allow…" is a no-op: stays granted, and never touches the network.
         await model.primeLocalNetwork()
-        XCTAssertEqual(model.localNetworkStatus, .granted)
-        XCTAssertEqual(net.probeCount, 0, "ungated OS must not run a Bonjour browse")
+        #expect(model.localNetworkStatus == .granted)
+        #expect(net.probeCount == 0, "ungated OS must not run a Bonjour browse")
 
         // Never a required-but-missing permission → no dead-end row.
-        XCTAssertFalse(model.requiredPermissionsNotGranted().contains(.localNetwork))
-        XCTAssertFalse(model.unmetRequiredPermissions().contains(.localNetwork))
+        #expect(!model.requiredPermissionsNotGranted().contains(.localNetwork))
+        #expect(!model.unmetRequiredPermissions().contains(.localNetwork))
     }
 
-    func testUngatedLocalNetworkSurvivesRefreshAndAudit() async {
+    @Test func ungatedLocalNetworkSurvivesRefreshAndAudit() async {
         let net = SpyLocalNetwork()
         net.reachable = false
         let model = makeUngatedModel(localNetwork: net)
@@ -156,35 +159,35 @@ final class SetupModelTests: XCTestCase {
         await model.refreshStatuses()
         _ = await model.auditRequiredPermissions()
 
-        XCTAssertEqual(model.localNetworkStatus, .granted,
+        #expect(model.localNetworkStatus == .granted,
                        "must not be downgraded on an OS without the gate")
-        XCTAssertEqual(net.probeCount, 0, "refresh/audit must not browse on an ungated OS")
+        #expect(net.probeCount == 0, "refresh/audit must not browse on an ungated OS")
     }
 
     // MARK: Audio probe transitions
 
-    func testAudioProbeGranted() async {
+    @Test func audioProbeGranted() async {
         let (model, _, _, counter) = makeModel(audio: .granted)
         await model.requestAudioCapture()
-        XCTAssertEqual(model.audioStatus, .granted)
-        XCTAssertFalse(model.isProbingAudio)
+        #expect(model.audioStatus == .granted)
+        #expect(!model.isProbingAudio)
         // Two notifications: one entering the probe (progress), one on result.
-        XCTAssertEqual(counter.count, 2)
+        #expect(counter.count == 2)
     }
 
-    func testAudioProbeDenied() async {
+    @Test func audioProbeDenied() async {
         let (model, _, _, _) = makeModel(audio: .denied)
         await model.requestAudioCapture()
-        XCTAssertEqual(model.audioStatus, .denied)
+        #expect(model.audioStatus == .denied)
     }
 
-    func testAudioProbeUnsupported() async {
+    @Test func audioProbeUnsupported() async {
         let (model, _, _, _) = makeModel(audio: .unsupported)
         await model.requestAudioCapture()
-        XCTAssertEqual(model.audioStatus, .unsupported)
+        #expect(model.audioStatus == .unsupported)
     }
 
-    func testAudioProbeCanBeRetriedAfterCompletion() async {
+    @Test func audioProbeCanBeRetriedAfterCompletion() async {
         // A denied first pass followed by a granted retry (user granted in the
         // gap) must land on the retry's result — the flow is re-runnable.
         let denyThenAllow = FlippingAudioProbe(sequence: [.denied, .granted])
@@ -194,9 +197,9 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()
-        XCTAssertEqual(model.audioStatus, .denied)
+        #expect(model.audioStatus == .denied)
         await model.requestAudioCapture()
-        XCTAssertEqual(model.audioStatus, .granted)
+        #expect(model.audioStatus == .granted)
     }
 
     /// Returns each element of `sequence` on successive calls (last repeats).
@@ -215,63 +218,63 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Local network (functional check — no status API)
 
-    func testPrimeLocalNetworkUnreachableStaysRequested() async {
+    @Test func primeLocalNetworkUnreachableStaysRequested() async {
         let (model, spy, _, _) = makeModel(audio: .granted)
         spy.reachable = false
         await model.primeLocalNetwork()
-        XCTAssertEqual(spy.probeCount, 1)
-        XCTAssertEqual(model.localNetworkStatus, .requested,
+        #expect(spy.probeCount == 1)
+        #expect(model.localNetworkStatus == .requested,
                        "browse got nowhere ⇒ asked-but-unproven")
     }
 
-    func testPrimeLocalNetworkReachableBecomesGranted() async {
+    @Test func primeLocalNetworkReachableBecomesGranted() async {
         // The case ahh hit: it's actually working, so we must NOT lie with a
         // sticky "Requested" — a browse that reaches the network proves the grant.
         let (model, spy, _, _) = makeModel(audio: .granted)
         spy.reachable = true
         await model.primeLocalNetwork()
-        XCTAssertEqual(model.localNetworkStatus, .granted)
+        #expect(model.localNetworkStatus == .granted)
     }
 
     // MARK: Remote control (Accessibility — real, silent status API)
 
-    func testPrimeRemoteControlReadsRealTrustState() {
+    @Test func primeRemoteControlReadsRealTrustState() {
         let (model, _, spy, _) = makeModel(audio: .granted)
         spy.trusted = true
         model.primeRemoteControl()
-        XCTAssertEqual(spy.primeCount, 1)
-        XCTAssertEqual(model.remoteControlStatus, .granted,
+        #expect(spy.primeCount == 1)
+        #expect(model.remoteControlStatus == .granted,
                        "already trusted ⇒ granted, not a sticky requested")
     }
 
-    func testPrimeRemoteControlUntrustedStaysRequested() {
+    @Test func primeRemoteControlUntrustedStaysRequested() {
         let (model, _, spy, _) = makeModel(audio: .granted)
         spy.trusted = false
         model.primeRemoteControl()
-        XCTAssertEqual(model.remoteControlStatus, .requested)
+        #expect(model.remoteControlStatus == .requested)
     }
 
     // MARK: PTP helper daemon (T6 — SMAppService registration + approval)
 
-    func testInitialPTPHelperStatusIsNotRegistered() {
+    @Test func initialPTPHelperStatusIsNotRegistered() {
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
+        #expect(model.ptpHelperStatus == .notRegistered)
     }
 
-    func testRegisterPTPHelperCallsRegisterAndAdoptsRequiresApproval() {
+    @Test func registerPTPHelperCallsRegisterAndAdoptsRequiresApproval() {
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .requiresApproval
         let (model, _, _, counter) = makeModel(audio: .granted, ptpHelper: ptpHelper)
 
         model.registerPTPHelper()
 
-        XCTAssertEqual(ptpHelper.registerCount, 1)
-        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval,
+        #expect(ptpHelper.registerCount == 1)
+        #expect(model.ptpHelperStatus == .requiresApproval,
                        "requiresApproval → the explainer + Open Login Items… button")
-        XCTAssertEqual(counter.count, 1)
+        #expect(counter.count == 1)
     }
 
-    func testRegisterPTPHelperCanReachEnabledDirectly() {
+    @Test func registerPTPHelperCanReachEnabledDirectly() {
         // Covers the injected-fake path for "enabled → available": a fake that
         // reports already-approved right after register() (as a real daemon
         // would on a signed build once the user had already approved it once).
@@ -281,10 +284,10 @@ final class SetupModelTests: XCTestCase {
 
         model.registerPTPHelper()
 
-        XCTAssertEqual(model.ptpHelperStatus, .enabled)
+        #expect(model.ptpHelperStatus == .enabled)
     }
 
-    func testRegisterPTPHelperFailureLogsAndReadsRealStatus() {
+    @Test func registerPTPHelperFailureLogsAndReadsRealStatus() {
         // A throwing register() (e.g. a loose dev binary) must not crash or lie —
         // it still reads back whatever `.status` really is afterward.
         struct Boom: Error {}
@@ -295,80 +298,80 @@ final class SetupModelTests: XCTestCase {
 
         model.registerPTPHelper()
 
-        XCTAssertEqual(ptpHelper.registerCount, 1)
-        XCTAssertEqual(model.ptpHelperStatus, .notFound)
+        #expect(ptpHelper.registerCount == 1)
+        #expect(model.ptpHelperStatus == .notFound)
     }
 
-    func testOpenPTPHelperLoginItemsDelegatesToTheSeam() {
+    @Test func openPTPHelperLoginItemsDelegatesToTheSeam() {
         let ptpHelper = FakePTPHelper()
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         model.openPTPHelperLoginItems()
-        XCTAssertEqual(ptpHelper.openSettingsCount, 1)
+        #expect(ptpHelper.openSettingsCount == 1)
     }
 
-    func testRefreshPTPHelperStatusPicksUpApprovalWithoutReregistering() {
+    @Test func refreshPTPHelperStatusPicksUpApprovalWithoutReregistering() {
         // The poll while `.requiresApproval` waits for the user to flip Login
         // Items — it must re-read `.status`, never call `register()` again.
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .requiresApproval
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         model.registerPTPHelper()
-        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval)
+        #expect(model.ptpHelperStatus == .requiresApproval)
 
         ptpHelper.status = .enabled   // user approved it in Login Items
         model.refreshPTPHelperStatus()
 
-        XCTAssertEqual(model.ptpHelperStatus, .enabled, "enabled → available")
-        XCTAssertEqual(ptpHelper.registerCount, 1, "poll never re-registers")
+        #expect(model.ptpHelperStatus == .enabled, "enabled → available")
+        #expect(ptpHelper.registerCount == 1, "poll never re-registers")
     }
 
-    func testRefreshPTPHelperStatusIsQuietWhenUnchanged() {
+    @Test func refreshPTPHelperStatusIsQuietWhenUnchanged() {
         let ptpHelper = FakePTPHelper()
         let (model, _, _, counter) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         counter.count = 0
         model.refreshPTPHelperStatus()
-        XCTAssertEqual(counter.count, 0, "no transition ⇒ no onChange noise")
+        #expect(counter.count == 0, "no transition ⇒ no onChange noise")
     }
 
-    func testRefreshStatusesSilentlyRereadsPTPHelperStatus() async {
+    @Test func refreshStatusesSilentlyRereadsPTPHelperStatus() async {
         // `refreshStatuses()` (window-focus path) must ALSO pick up the PTP
         // helper's live status, without touching `register()`.
         let ptpHelper = FakePTPHelper()
         ptpHelper.status = .requiresApproval
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         await model.refreshStatuses()
-        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval)
+        #expect(model.ptpHelperStatus == .requiresApproval)
 
         ptpHelper.status = .enabled
         await model.refreshStatuses()
-        XCTAssertEqual(model.ptpHelperStatus, .enabled)
-        XCTAssertEqual(ptpHelper.registerCount, 0, "refreshStatuses never registers")
+        #expect(model.ptpHelperStatus == .enabled)
+        #expect(ptpHelper.registerCount == 0, "refreshStatuses never registers")
     }
 
     // MARK: Live status refresh (reflect reality on window focus)
 
-    func testRefreshUpgradesRemoteControlWhenGrantedInSettings() async {
+    @Test func refreshUpgradesRemoteControlWhenGrantedInSettings() async {
         // User was untrusted, went to System Settings, toggled it on, came back.
         let (model, _, remote, _) = makeModel(audio: .unknown)
         remote.trusted = false
         model.primeRemoteControl()
-        XCTAssertEqual(model.remoteControlStatus, .requested)
+        #expect(model.remoteControlStatus == .requested)
         remote.trusted = true                 // flipped it on in Settings
         await model.refreshStatuses()
-        XCTAssertEqual(model.remoteControlStatus, .granted)
+        #expect(model.remoteControlStatus == .granted)
     }
 
-    func testRefreshDowngradesRemoteControlWhenRevoked() async {
+    @Test func refreshDowngradesRemoteControlWhenRevoked() async {
         let (model, _, remote, _) = makeModel(audio: .unknown)
         remote.trusted = true
         await model.refreshStatuses()
-        XCTAssertEqual(model.remoteControlStatus, .granted)
+        #expect(model.remoteControlStatus == .granted)
         remote.trusted = false                // revoked in Settings
         await model.refreshStatuses()
-        XCTAssertEqual(model.remoteControlStatus, .requested)
+        #expect(model.remoteControlStatus == .requested)
     }
 
-    func testRefreshNeverPromptsUntouchedRows() async {
+    @Test func refreshNeverPromptsUntouchedRows() async {
         // A refresh on a fresh screen (all unknown) must not probe audio or the
         // network — probing either would spring a system prompt the user hasn't
         // engaged. Only the silent Accessibility read runs.
@@ -379,11 +382,11 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.refreshStatuses()
-        XCTAssertEqual(audio.probeCount, 0, "audio not re-probed while unknown")
-        XCTAssertEqual(net.probeCount, 0, "network not browsed while unknown")
+        #expect(audio.probeCount == 0, "audio not re-probed while unknown")
+        #expect(net.probeCount == 0, "network not browsed while unknown")
     }
 
-    func testRefreshStatusesReadsAudioSilentlyNeverTheAudibleTone() async {
+    @Test func refreshStatusesReadsAudioSilentlyNeverTheAudibleTone() async {
         // ONBOARD-TONE regression: `refreshStatuses()` is what
         // `OnboardingWindowController.appDidBecomeActive` calls on EVERY plain
         // app reactivation while onboarding is still open (e.g. Cmd+Tab away
@@ -398,16 +401,16 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()   // the one legitimate audible call
-        XCTAssertEqual(model.audioStatus, .denied)
-        XCTAssertEqual(audio.probeCallCount, 1)
+        #expect(model.audioStatus == .denied)
+        #expect(audio.probeCallCount == 1)
 
         await model.refreshStatuses()       // simulated plain app reactivation
-        XCTAssertEqual(model.audioStatus, .granted, "picks up a grant made in Settings via the silent read")
-        XCTAssertEqual(audio.silentCallCount, 1)
-        XCTAssertEqual(audio.probeCallCount, 1, "reactivation must not replay the audible tone probe")
+        #expect(model.audioStatus == .granted, "picks up a grant made in Settings via the silent read")
+        #expect(audio.silentCallCount == 1)
+        #expect(audio.probeCallCount == 1, "reactivation must not replay the audible tone probe")
     }
 
-    func testRefreshStatusesLeavesAudioUnchangedWhenSilentReadIsNil() async {
+    @Test func refreshStatusesLeavesAudioUnchangedWhenSilentReadIsNil() async {
         // A fake that hasn't implemented the silent seam (default `nil`, e.g.
         // `CannedAudioProbe`) must not fall back to the audible probe on an
         // engaged (`.denied`) row — it just leaves the cached status
@@ -419,26 +422,26 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()   // → .denied, engages the row
-        XCTAssertEqual(model.audioStatus, .denied)
-        XCTAssertEqual(audio.probeCallCount, 1)
+        #expect(model.audioStatus == .denied)
+        #expect(audio.probeCallCount == 1)
 
         await model.refreshStatuses()
-        XCTAssertEqual(model.audioStatus, .denied, "unchanged — nil silent read must not clobber the cached status")
-        XCTAssertEqual(audio.probeCallCount, 1, "still never falls back to the audible probe")
+        #expect(model.audioStatus == .denied, "unchanged — nil silent read must not clobber the cached status")
+        #expect(audio.probeCallCount == 1, "still never falls back to the audible probe")
     }
 
-    func testRefreshReprobesAlreadyAskedNetwork() async {
+    @Test func refreshReprobesAlreadyAskedNetwork() async {
         // Once the network row has been engaged, a refresh re-checks it — catching
         // the case where the browse first got nowhere (requested) but the network
         // is reachable on the next look (e.g. the user just answered the prompt).
         let (model, net, _, _) = makeModel(audio: .granted)
         net.reachable = false
         await model.primeLocalNetwork()          // → requested
-        XCTAssertEqual(model.localNetworkStatus, .requested)
+        #expect(model.localNetworkStatus == .requested)
         net.reachable = true                      // reachable now
         await model.refreshStatuses()
-        XCTAssertEqual(model.localNetworkStatus, .granted)
-        XCTAssertGreaterThanOrEqual(net.probeCount, 2)
+        #expect(model.localNetworkStatus == .granted)
+        #expect(net.probeCount >= 2)
     }
 
     /// Audio probe that counts how many times it was asked (to prove refresh does
@@ -454,62 +457,62 @@ final class SetupModelTests: XCTestCase {
 
     // MARK: Completion + persistence
 
-    func testCompletePersistsFlag() {
+    @Test func completePersistsFlag() {
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertFalse(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(!AppSettings(defaults: defaults).hasCompletedSetup)
         model.complete()
-        XCTAssertTrue(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(AppSettings(defaults: defaults).hasCompletedSetup)
     }
 
-    func testCompleteDoesNotRequireGrants() {
+    @Test func completeDoesNotRequireGrants() {
         // Setup is guidance, not a gate: completing while a permission is still
         // denied/unknown still persists completion (the app runs and re-prompts
         // lazily).
         let (model, _, _, _) = makeModel(audio: .denied)
         model.complete()
-        XCTAssertTrue(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(AppSettings(defaults: defaults).hasCompletedSetup)
     }
 
     // MARK: Launch gate
 
-    func testShouldPresentOnlyForNativeAndOnlyUntilCompleted() {
+    @Test func shouldPresentOnlyForNativeAndOnlyUntilCompleted() {
         let settings = AppSettings(defaults: defaults)
         let env: [String: String] = [:]   // no override — exercise the default gate
 
         // Native + not completed → present.
-        XCTAssertTrue(SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .native, environment: env))
+        #expect(SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .native, environment: env))
 
         // Non-native backends never present, regardless of completion — they
         // don't tap in-process or discover under the app's own identity.
-        XCTAssertFalse(SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .mock, environment: env))
-        XCTAssertFalse(SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .ownTone, environment: env))
+        #expect(!SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .mock, environment: env))
+        #expect(!SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .ownTone, environment: env))
 
         // Once completed, even native stops presenting.
         settings.hasCompletedSetup = true
-        XCTAssertFalse(SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .native, environment: env))
+        #expect(!SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .native, environment: env))
     }
 
-    func testAirplaySetupEnvOverridesTheGate() {
+    @Test func airplaySetupEnvOverridesTheGate() {
         let settings = AppSettings(defaults: defaults)
         settings.hasCompletedSetup = true   // default gate would say "hide"
 
         // skip → never present (the testing default), even native + not completed.
-        let fresh = AppSettings(defaults: UserDefaults(suiteName: "\(suiteName!).fresh")!)
+        let fresh = AppSettings(defaults: UserDefaults(suiteName: "\(suiteName).fresh")!)
         for skip in ["skip", "off", "never", "0"] {
-            XCTAssertFalse(SetupModel.shouldPresentOnLaunch(
+            #expect(!SetupModel.shouldPresentOnLaunch(
                 settings: fresh, backendKind: .native,
                 environment: [SetupPresentation.environmentVariableName: skip]), "\(skip) should hide")
         }
 
         // force → always present, ignoring completed AND non-native backend.
         for show in ["force", "always", "1"] {
-            XCTAssertTrue(SetupModel.shouldPresentOnLaunch(
+            #expect(SetupModel.shouldPresentOnLaunch(
                 settings: settings, backendKind: .mock,
                 environment: [SetupPresentation.environmentVariableName: show]), "\(show) should force-show")
         }
 
         // Unrecognized value → auto (falls through to the default gate).
-        XCTAssertFalse(SetupModel.shouldPresentOnLaunch(
+        #expect(!SetupModel.shouldPresentOnLaunch(
             settings: settings, backendKind: .native,
             environment: [SetupPresentation.environmentVariableName: "banana"]),
             "unrecognized value falls back to the default gate (completed ⇒ hide)")
@@ -544,67 +547,67 @@ final class SetupModelTests: XCTestCase {
         }
     }
 
-    func testUnmetRequiredPermissionsEmptyWhenAllSatisfied() async {
+    @Test func unmetRequiredPermissionsEmptyWhenAllSatisfied() async {
         let ptpHelper = FakePTPHelper()
         ptpHelper.status = .enabled
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         await model.requestAudioCapture()          // → .granted
-        XCTAssertEqual(model.audioStatus, .granted)
-        XCTAssertEqual(model.unmetRequiredPermissions(), [])
+        #expect(model.audioStatus == .granted)
+        #expect(model.unmetRequiredPermissions() == [])
     }
 
-    func testUnmetRequiredPermissionsFlagsDeniedAudio() async {
+    @Test func unmetRequiredPermissionsFlagsDeniedAudio() async {
         let (model, _, _, _) = makeModel(audio: .denied)
         await model.requestAudioCapture()           // → .denied
-        XCTAssertEqual(model.unmetRequiredPermissions(), [.audioCapture])
+        #expect(model.unmetRequiredPermissions() == [.audioCapture])
     }
 
-    func testUnmetRequiredPermissionsFlagsRequestedLocalNetwork() async {
+    @Test func unmetRequiredPermissionsFlagsRequestedLocalNetwork() async {
         let (model, net, _, _) = makeModel(audio: .granted)
         net.reachable = false
         await model.primeLocalNetwork()             // → .requested
-        XCTAssertEqual(model.unmetRequiredPermissions(), [.localNetwork])
+        #expect(model.unmetRequiredPermissions() == [.localNetwork])
     }
 
-    func testUnmetRequiredPermissionsNeverFlagsUnengagedLocalNetwork() {
+    @Test func unmetRequiredPermissionsNeverFlagsUnengagedLocalNetwork() {
         // `.unknown` (never asked) must NOT count as unmet — only a proven
         // "asked but unproven" (`.requested`) does.
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertEqual(model.localNetworkStatus, .unknown)
-        XCTAssertEqual(model.unmetRequiredPermissions(), [])
+        #expect(model.localNetworkStatus == .unknown)
+        #expect(model.unmetRequiredPermissions() == [])
     }
 
-    func testUnmetRequiredPermissionsFlagsRequiresApprovalPTPHelper() {
+    @Test func unmetRequiredPermissionsFlagsRequiresApprovalPTPHelper() {
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .requiresApproval
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         model.registerPTPHelper()
-        XCTAssertEqual(model.unmetRequiredPermissions(), [.ptpHelper])
+        #expect(model.unmetRequiredPermissions() == [.ptpHelper])
     }
 
-    func testUnmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper() {
+    @Test func unmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper() {
         // Pre-registration is handled by the app's launch-time registration
         // attempt, not a permission-lost nag.
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
-        XCTAssertEqual(model.unmetRequiredPermissions(), [])
+        #expect(model.ptpHelperStatus == .notRegistered)
+        #expect(model.unmetRequiredPermissions() == [])
     }
 
-    func testUnmetRequiredPermissionsNeverIncludesRevokedRemoteControl() async {
+    @Test func unmetRequiredPermissionsNeverIncludesRevokedRemoteControl() async {
         // Remote Control is an ENHANCEMENT, deliberately excluded from
         // "required" (2026-07-21 product decision) — even a revoked one
         // (granted → requested) must never show up here.
         let (model, _, remote, _) = makeModel(audio: .granted)
         remote.trusted = true
         model.primeRemoteControl()
-        XCTAssertEqual(model.remoteControlStatus, .granted)
+        #expect(model.remoteControlStatus == .granted)
         remote.trusted = false
         await model.refreshStatuses()
-        XCTAssertEqual(model.remoteControlStatus, .requested, "revoked, as a sanity check on the setup")
-        XCTAssertEqual(model.unmetRequiredPermissions(), [], "Remote Control is never 'required'")
+        #expect(model.remoteControlStatus == .requested, "revoked, as a sanity check on the setup")
+        #expect(model.unmetRequiredPermissions() == [], "Remote Control is never 'required'")
     }
 
-    func testUnmetRequiredPermissionsCanReportAllThree() async {
+    @Test func unmetRequiredPermissionsCanReportAllThree() async {
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .notFound
         let (model, net, _, _) = makeModel(audio: .denied, ptpHelper: ptpHelper)
@@ -612,7 +615,7 @@ final class SetupModelTests: XCTestCase {
         net.reachable = false
         await model.primeLocalNetwork()              // → .requested
         model.registerPTPHelper()                     // → .notFound
-        XCTAssertEqual(Set(model.unmetRequiredPermissions()),
+        #expect(Set(model.unmetRequiredPermissions()) ==
                        Set([.audioCapture, .localNetwork, .ptpHelper]))
     }
 
@@ -625,16 +628,16 @@ final class SetupModelTests: XCTestCase {
     /// *regression* and deliberately never flags `.unknown`/`.notRegistered`),
     /// `requiredPermissionsNotGranted()` must flag all three here, since
     /// nothing was ever actually granted.
-    func testRequiredPermissionsNotGrantedFlagsAllThreeOnAFreshModel() {
+    @Test func requiredPermissionsNotGrantedFlagsAllThreeOnAFreshModel() {
         let (model, _, _, _) = makeModel(audio: .granted)   // audioProbe would say granted, but never asked
-        XCTAssertEqual(model.audioStatus, .unknown)
-        XCTAssertEqual(model.localNetworkStatus, .unknown)
-        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
-        XCTAssertEqual(Set(model.requiredPermissionsNotGranted()),
+        #expect(model.audioStatus == .unknown)
+        #expect(model.localNetworkStatus == .unknown)
+        #expect(model.ptpHelperStatus == .notRegistered)
+        #expect(Set(model.requiredPermissionsNotGranted()) ==
                        Set([.audioCapture, .localNetwork, .ptpHelper]))
     }
 
-    func testRequiredPermissionsNotGrantedEmptyWhenAllThreeAreActuallyGranted() async {
+    @Test func requiredPermissionsNotGrantedEmptyWhenAllThreeAreActuallyGranted() async {
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .enabled
         let (model, net, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
@@ -642,42 +645,42 @@ final class SetupModelTests: XCTestCase {
         net.reachable = true
         await model.primeLocalNetwork()     // → .granted
         model.registerPTPHelper()           // → .enabled (mirrors viewDidLoad's real call)
-        XCTAssertEqual(model.requiredPermissionsNotGranted(), [])
+        #expect(model.requiredPermissionsNotGranted() == [])
     }
 
-    func testRequiredPermissionsNotGrantedExcludesUnsupportedAudio() async {
+    @Test func requiredPermissionsNotGrantedExcludesUnsupportedAudio() async {
         // `.unsupported` (pre-14.2 OS) can't be fixed by granting anything, so
         // it must not be nagged about — unlike `.unknown`/`.denied`.
         let (model, _, _, _) = makeModel(audio: .unsupported)
         await model.requestAudioCapture()   // → .unsupported
-        XCTAssertFalse(model.requiredPermissionsNotGranted().contains(.audioCapture))
+        #expect(!model.requiredPermissionsNotGranted().contains(.audioCapture))
     }
 
-    func testRequiredPermissionsNotGrantedIncludesNotRegisteredPTPHelper() {
+    @Test func requiredPermissionsNotGrantedIncludesNotRegisteredPTPHelper() {
         // Contrast with `unmetRequiredPermissions()`, which deliberately
         // excludes `.notRegistered` (see
-        // `testUnmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper`) —
+        // `unmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper`) —
         // that method only cares about a REGRESSION after setup completed.
         // This one cares whether Done is about to finish with the helper
         // never actually enabled, so `.notRegistered` counts.
         let (model, _, _, _) = makeModel(audio: .granted)
-        XCTAssertEqual(model.ptpHelperStatus, .notRegistered)
-        XCTAssertTrue(model.requiredPermissionsNotGranted().contains(.ptpHelper))
+        #expect(model.ptpHelperStatus == .notRegistered)
+        #expect(model.requiredPermissionsNotGranted().contains(.ptpHelper))
     }
 
-    func testRequiredPermissionsNotGrantedIgnoresRemoteControl() {
+    @Test func requiredPermissionsNotGrantedIgnoresRemoteControl() {
         // Remote Control isn't in `RequiredPermission` at all (enhancement,
         // not a requirement), so it can never appear here regardless of state.
         let (model, _, remote, _) = makeModel(audio: .granted)
         remote.trusted = false
         model.primeRemoteControl()
-        XCTAssertEqual(model.remoteControlStatus, .requested)
-        XCTAssertEqual(Set(model.requiredPermissionsNotGranted()),
+        #expect(model.remoteControlStatus == .requested)
+        #expect(Set(model.requiredPermissionsNotGranted()) ==
                        Set([.audioCapture, .localNetwork, .ptpHelper]),
                        "Remote Control status never influences this list")
     }
 
-    func testAuditRequiredPermissionsUsesSilentAudioReadAndFlagsRevocation() async {
+    @Test func auditRequiredPermissionsUsesSilentAudioReadAndFlagsRevocation() async {
         // The model starts out never-probed (audioStatus == .unknown); the
         // silent read is what discovers the revocation without firing the tone.
         let silentAudio = SilentAudioProbe(silentResult: .denied)
@@ -688,12 +691,12 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: ptpHelper,
                                settings: AppSettings(defaults: defaults))
         let unmet = await model.auditRequiredPermissions()
-        XCTAssertEqual(silentAudio.silentCallCount, 1)
-        XCTAssertEqual(model.audioStatus, .denied)
-        XCTAssertEqual(unmet, [.audioCapture])
+        #expect(silentAudio.silentCallCount == 1)
+        #expect(model.audioStatus == .denied)
+        #expect(unmet == [.audioCapture])
     }
 
-    func testAuditRequiredPermissionsLeavesAudioUnchangedWhenSilentReadIsNil() async {
+    @Test func auditRequiredPermissionsLeavesAudioUnchangedWhenSilentReadIsNil() async {
         // A fake that hasn't implemented the silent seam (the default, `nil`)
         // must not clobber a previously-observed real status.
         let silentAudio = SilentAudioProbe(silentResult: nil)
@@ -703,12 +706,12 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()   // seeds a real .granted via the (canned) probe path
-        XCTAssertEqual(model.audioStatus, .granted)
+        #expect(model.audioStatus == .granted)
         _ = await model.auditRequiredPermissions()
-        XCTAssertEqual(model.audioStatus, .granted, "nil silent read must not overwrite the cached status")
+        #expect(model.audioStatus == .granted, "nil silent read must not overwrite the cached status")
     }
 
-    func testAuditRequiredPermissionsReprobesEngagedLocalNetworkOnly() async {
+    @Test func auditRequiredPermissionsReprobesEngagedLocalNetworkOnly() async {
         let silentAudio = SilentAudioProbe(silentResult: .granted)
         let net = SpyLocalNetwork()
         let model = SetupModel(audioProbe: silentAudio,
@@ -718,20 +721,20 @@ final class SetupModelTests: XCTestCase {
                                settings: AppSettings(defaults: defaults))
         // Untouched (.unknown) — audit must not browse (would spring a prompt).
         _ = await model.auditRequiredPermissions()
-        XCTAssertEqual(net.probeCount, 0)
+        #expect(net.probeCount == 0)
 
         // Now engage it, then revoke it — the audit re-probes because it's no
         // longer `.unknown`.
         net.reachable = true
         await model.primeLocalNetwork()
-        XCTAssertEqual(model.localNetworkStatus, .granted)
+        #expect(model.localNetworkStatus == .granted)
         net.reachable = false
         let unmet = await model.auditRequiredPermissions()
-        XCTAssertEqual(model.localNetworkStatus, .requested)
-        XCTAssertTrue(unmet.contains(.localNetwork))
+        #expect(model.localNetworkStatus == .requested)
+        #expect(unmet.contains(.localNetwork))
     }
 
-    func testAuditRequiredPermissionsSilentlyRereadsPTPHelperStatus() async {
+    @Test func auditRequiredPermissionsSilentlyRereadsPTPHelperStatus() async {
         let ptpHelper = FakePTPHelper()
         ptpHelper.status = .requiresApproval
         let model = SetupModel(audioProbe: SilentAudioProbe(silentResult: .granted),
@@ -740,12 +743,12 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: ptpHelper,
                                settings: AppSettings(defaults: defaults))
         let unmet = await model.auditRequiredPermissions()
-        XCTAssertEqual(model.ptpHelperStatus, .requiresApproval)
-        XCTAssertEqual(ptpHelper.registerCount, 0, "audit never registers")
-        XCTAssertTrue(unmet.contains(.ptpHelper))
+        #expect(model.ptpHelperStatus == .requiresApproval)
+        #expect(ptpHelper.registerCount == 0, "audit never registers")
+        #expect(unmet.contains(.ptpHelper))
     }
 
-    func testAuditRequiredPermissionsFiresOnChangeOnlyWhenSomethingChanged() async {
+    @Test func auditRequiredPermissionsFiresOnChangeOnlyWhenSomethingChanged() async {
         let ptpHelper = FakePTPHelper()
         let model = SetupModel(audioProbe: SilentAudioProbe(silentResult: nil),
                                localNetwork: SpyLocalNetwork(),
@@ -755,7 +758,7 @@ final class SetupModelTests: XCTestCase {
         let counter = ChangeCounter()
         model.onChange = { counter.count += 1 }
         _ = await model.auditRequiredPermissions()
-        XCTAssertEqual(counter.count, 0, "nothing changed (nil silent read, unengaged network, unchanged PTP) ⇒ silent")
+        #expect(counter.count == 0, "nothing changed (nil silent read, unengaged network, unchanged PTP) ⇒ silent")
     }
 
     // MARK: Telemetry (T5) — permission reported-vs-actual divergence
@@ -783,7 +786,7 @@ final class SetupModelTests: XCTestCase {
     /// actually catches a granted→revoked flip. This asserts the emitted
     /// `permission`/`reported_vs_actual` line makes that divergence legible
     /// on its own, without needing to also read the source to interpret it.
-    func testAuditRequiredPermissionsLogsReportedVsActualDivergence() async throws {
+    @Test func auditRequiredPermissionsLogsReportedVsActualDivergence() async throws {
         let silentAudio = SilentAudioProbe(probeResult: .granted, silentResult: .denied)
         let model = SetupModel(audioProbe: silentAudio,
                                localNetwork: SpyLocalNetwork(),
@@ -791,30 +794,30 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()   // → .granted: the "reported"/UI-visible status
-        XCTAssertEqual(model.audioStatus, .granted)
+        #expect(model.audioStatus == .granted)
 
         let capture = TelemetryLineCapture()
         Telemetry._installTestSink { capture.append($0) }
         _ = await model.auditRequiredPermissions()
         Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
 
-        XCTAssertEqual(model.audioStatus, .denied,
+        #expect(model.audioStatus == .denied,
                        "the silent read must win — this is the actual regression, not just the log")
 
-        let line = try XCTUnwrap(
+        let line = try #require(
             capture.snapshot().first { $0.contains("\"evt\":\"reported_vs_actual\"") },
             "expected a permission/reported_vs_actual line")
-        XCTAssertTrue(line.contains("\"cat\":\"permission\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"site\":\"SetupModel.auditRequiredPermissions\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"reported\":\"granted\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"silent\":\"denied\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"diverged\":\"true\""), "line: \(line)")
+        #expect(line.contains("\"cat\":\"permission\""), "line: \(line)")
+        #expect(line.contains("\"site\":\"SetupModel.auditRequiredPermissions\""), "line: \(line)")
+        #expect(line.contains("\"reported\":\"granted\""), "line: \(line)")
+        #expect(line.contains("\"silent\":\"denied\""), "line: \(line)")
+        #expect(line.contains("\"diverged\":\"true\""), "line: \(line)")
     }
 
     /// The companion case: reported and silent AGREE (both `.granted`). This
     /// guards the `diverged` field itself — without it, a hard-coded
     /// `"diverged":"true"` would pass the divergence test above too.
-    func testAuditRequiredPermissionsLogsNonDivergenceWhenStatusesAgree() async throws {
+    @Test func auditRequiredPermissionsLogsNonDivergenceWhenStatusesAgree() async throws {
         let silentAudio = SilentAudioProbe(probeResult: .granted, silentResult: .granted)
         let model = SetupModel(audioProbe: silentAudio,
                                localNetwork: SpyLocalNetwork(),
@@ -822,37 +825,38 @@ final class SetupModelTests: XCTestCase {
                                ptpHelper: FakePTPHelper(),
                                settings: AppSettings(defaults: defaults))
         await model.requestAudioCapture()   // → .granted
-        XCTAssertEqual(model.audioStatus, .granted)
+        #expect(model.audioStatus == .granted)
 
         let capture = TelemetryLineCapture()
         Telemetry._installTestSink { capture.append($0) }
         _ = await model.auditRequiredPermissions()
         Telemetry._installTestSink(nil)
 
-        XCTAssertEqual(model.audioStatus, .granted, "no divergence ⇒ no change")
+        #expect(model.audioStatus == .granted, "no divergence ⇒ no change")
 
-        let line = try XCTUnwrap(
+        let line = try #require(
             capture.snapshot().first { $0.contains("\"evt\":\"reported_vs_actual\"") },
             "expected a permission/reported_vs_actual line even when statuses agree")
-        XCTAssertTrue(line.contains("\"reported\":\"granted\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"silent\":\"granted\""), "line: \(line)")
-        XCTAssertTrue(line.contains("\"diverged\":\"false\""), "line: \(line)")
+        #expect(line.contains("\"reported\":\"granted\""), "line: \(line)")
+        #expect(line.contains("\"silent\":\"granted\""), "line: \(line)")
+        #expect(line.contains("\"diverged\":\"false\""), "line: \(line)")
     }
 
     // MARK: System Settings deep links
 
-    func testSystemSettingsPaneURLs() {
-        XCTAssertEqual(
-            SystemSettingsPane.screenAndSystemAudioRecording.url.absoluteString,
+    @Test func systemSettingsPaneURLs() {
+        #expect(
+            SystemSettingsPane.screenAndSystemAudioRecording.url.absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-        XCTAssertEqual(
-            SystemSettingsPane.localNetwork.url.absoluteString,
+        #expect(
+            SystemSettingsPane.localNetwork.url.absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
-        XCTAssertEqual(
-            SystemSettingsPane.accessibility.url.absoluteString,
+        #expect(
+            SystemSettingsPane.accessibility.url.absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        XCTAssertEqual(
-            SystemSettingsPane.privacyRoot.absoluteString,
+        #expect(
+            SystemSettingsPane.privacyRoot.absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security")
+    }
     }
 }

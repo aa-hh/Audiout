@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
 
@@ -9,7 +10,7 @@ import XCTest
 /// on rebuild. (The app layer additionally prunes the persisted route; this
 /// covers the popover's own defensive filtering.)
 @MainActor
-final class PopoverExcludedAppsTests: XCTestCase {
+@Suite struct PopoverExcludedAppsTests {
 
     private func tempRouting() -> AppRoutingController {
         let dir = FileManager.default.temporaryDirectory
@@ -17,7 +18,7 @@ final class PopoverExcludedAppsTests: XCTestCase {
         return AppRoutingController(store: AppRouteStore(directory: dir))
     }
 
-    func testExcludedAppIsSkippedInRowsAndPicker() {
+    @Test func excludedAppIsSkippedInRowsAndPicker() {
         let routing = tempRouting()
         routing.addRoute(bundleID: "com.example.music", displayName: "Music")
         routing.addRoute(bundleID: "com.example.safari", displayName: "Safari")
@@ -31,21 +32,21 @@ final class PopoverExcludedAppsTests: XCTestCase {
         popover.test_simulateOpen()
 
         // Rows: the excluded routed app (Music) is skipped; Safari remains.
-        XCTAssertNil(popover.test_appRow(for: "com.example.music"))
-        XCTAssertNotNil(popover.test_appRow(for: "com.example.safari"))
-        XCTAssertEqual(popover.test_appRowCount, 1)
+        #expect(popover.test_appRow(for: "com.example.music") == nil)
+        #expect(popover.test_appRow(for: "com.example.safari") != nil)
+        #expect(popover.test_appRowCount == 1)
 
         // Picker: Music/Safari are already routed, Podcasts is excluded → nothing
         // left to offer.
-        XCTAssertTrue(popover.test_availableAppsForPicker().isEmpty)
+        #expect(popover.test_availableAppsForPicker().isEmpty)
     }
 
-    func testNothingExcludedLeavesRowsIntact() {
+    @Test func nothingExcludedLeavesRowsIntact() {
         let routing = tempRouting()
         routing.addRoute(bundleID: "com.example.music", displayName: "Music")
         let popover = PopoverController(appRouting: routing, runningAppsProvider: { [] })
         popover.test_simulateOpen()
-        XCTAssertNotNil(popover.test_appRow(for: "com.example.music"))
-        XCTAssertEqual(popover.test_appRowCount, 1)
+        #expect(popover.test_appRow(for: "com.example.music") != nil)
+        #expect(popover.test_appRowCount == 1)
     }
 }

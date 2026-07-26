@@ -8,16 +8,25 @@ import XCTest
 /// WHY THIS EXISTS: `swift test --parallel` runs each test **method** in its
 /// own process, concurrently (corrected 2026-07-25 — verified by watching live
 /// `ps` output: distinct methods of the SAME class run as distinct concurrent
-/// processes; see `docs/notes/test-parallel-spawn-measurement.md`). Processes
-/// don't share memory, so in-process `static` counters are safe — but they DO
-/// share anything that lives outside the process: `UserDefaults.standard` (one
-/// on-disk plist for the whole app domain) and a fixed filesystem path (a bare
+/// processes; see `docs/notes/test-parallel-spawn-measurement.md`). Under
+/// XCTest, processes didn't share memory, so in-process `static` counters,
+/// process-global C variables and installed-once hooks were safe **by
+/// accident** — but even then the parallel processes DID share anything living
+/// outside the process: `UserDefaults.standard` (one on-disk plist for the
+/// whole app domain) and a fixed filesystem path (a bare
 /// `FileManager.default.temporaryDirectory` + a shared filename). Two suites
 /// that write the same defaults key or the same temp file race each other and
 /// flake intermittently — which is exactly how the window-frame suite failed
-/// when `--parallel` was first switched on. Under swift-testing the same
-/// hazard exists *within* one process, since tests there run concurrently by
-/// default.
+/// when `--parallel` was first switched on.
+///
+/// **That accidental in-memory safety is GONE under swift-testing**, which runs
+/// tests concurrently *inside one process*: the out-of-process hazards above
+/// still apply (this file's job), and on top of them any `static var`,
+/// file-scope global, process-wide singleton or C global is now genuinely
+/// shared between concurrently-running tests. This file does **not** solve
+/// that half — `SerializedSharedStateSuite.swift` does, and a suite touching
+/// such state must nest into `SerializedSharedState` regardless of whether it
+/// also inherits `IsolatedSuite`.
 ///
 /// This file holds three things:
 ///

@@ -1,192 +1,186 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// `AppSettings` is the scalar half of the persistence split — a thin typed
 /// wrapper over `UserDefaults`. These assert the defaults, the round-trip, and
 /// forward-compat (an unknown stored value falls back, doesn't trap). A
 /// throwaway suite keeps the tests off `.standard`.
-final class AppSettingsTests: XCTestCase {
+@Suite struct AppSettingsTests {
 
-    private var suiteName: String!
-    private var defaults: UserDefaults!
+    private let suiteName: String
+    private let defaults: UserDefaults
 
-    override func setUp() {
-        super.setUp()
-        suiteName = "AudiouterTests.\(name).\(ObjectIdentifier(self).hashValue)"
-        defaults = UserDefaults(suiteName: suiteName)
+    init() {
+        let hash = ObjectIdentifier(AppSettingsTests.self).hashValue
+        suiteName = "AudiouterTests.\(UUID().uuidString).\(hash)"
+        defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
-        defaults = nil
-        suiteName = nil
-        super.tearDown()
-    }
-
-    func testDefaultsWhenUnset() {
+    @Test func defaultsWhenUnset() {
         let settings = AppSettings(defaults: defaults)
-        XCTAssertEqual(settings.theme, .system)
-        XCTAssertEqual(settings.density, .comfortable)
+        #expect(settings.theme == .system)
+        #expect(settings.density == .comfortable)
     }
 
-    func testThemeRoundTrips() {
+    @Test func themeRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         settings.theme = .dark
-        XCTAssertEqual(settings.theme, .dark)
+        #expect(settings.theme == .dark)
         // A fresh value over the same store reads the persisted value.
-        XCTAssertEqual(AppSettings(defaults: defaults).theme, .dark)
+        #expect(AppSettings(defaults: defaults).theme == .dark)
     }
 
-    func testDensityRoundTrips() {
+    @Test func densityRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         settings.density = .compact
-        XCTAssertEqual(settings.density, .compact)
-        XCTAssertEqual(AppSettings(defaults: defaults).density, .compact)
+        #expect(settings.density == .compact)
+        #expect(AppSettings(defaults: defaults).density == .compact)
     }
 
-    func testUnknownStoredValueFallsBack() {
+    @Test func unknownStoredValueFallsBack() {
         defaults.set("chartreuse", forKey: "appearance.theme")
-        XCTAssertEqual(AppSettings(defaults: defaults).theme, .system)
+        #expect(AppSettings(defaults: defaults).theme == .system)
     }
 
     // MARK: Audio buffer (PLAN-LATENCY-SETTING.md)
 
-    func testStartBufferDefaultsWhenUnset() {
-        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+    @Test func startBufferDefaultsWhenUnset() {
+        #expect(AppSettings(defaults: defaults).startBufferMs ==
                        AppSettings.defaultStartBufferMs)
     }
 
-    func testStartBufferRoundTripsEveryOfferedOption() {
+    @Test func startBufferRoundTripsEveryOfferedOption() {
         let settings = AppSettings(defaults: defaults)
         for option in AppSettings.startBufferOptionsMs {
             settings.startBufferMs = option
-            XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs, option)
+            #expect(AppSettings(defaults: defaults).startBufferMs == option)
         }
     }
 
-    func testStartBufferUnofferedStoredValueFallsBack() {
+    @Test func startBufferUnofferedStoredValueFallsBack() {
         // A value the UI never offers (e.g. written by a newer build with a
         // different option list, or hand-edited defaults) resolves to the
         // default rather than leaking into the popup.
         defaults.set(750, forKey: "audio.startBufferMs")
-        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+        #expect(AppSettings(defaults: defaults).startBufferMs ==
                        AppSettings.defaultStartBufferMs)
         defaults.set(-40, forKey: "audio.startBufferMs")
-        XCTAssertEqual(AppSettings(defaults: defaults).startBufferMs,
+        #expect(AppSettings(defaults: defaults).startBufferMs ==
                        AppSettings.defaultStartBufferMs)
     }
 
-    func testStartBufferOptionListInvariants() {
+    @Test func startBufferOptionListInvariants() {
         // The default must be offered, the floor is the first option, and the
         // whole list must sit inside the engine shim's accepted 300...5000.
-        XCTAssertTrue(AppSettings.startBufferOptionsMs.contains(AppSettings.defaultStartBufferMs))
-        XCTAssertEqual(AppSettings.startBufferOptionsMs, AppSettings.startBufferOptionsMs.sorted())
-        XCTAssertTrue(AppSettings.startBufferOptionsMs.allSatisfy { (300...5000).contains($0) })
+        #expect(AppSettings.startBufferOptionsMs.contains(AppSettings.defaultStartBufferMs))
+        #expect(AppSettings.startBufferOptionsMs == AppSettings.startBufferOptionsMs.sorted())
+        #expect(AppSettings.startBufferOptionsMs.allSatisfy { (300...5000).contains($0) })
     }
 
     // MARK: First-run setup (SetupModel)
 
-    func testHasCompletedSetupDefaultsFalse() {
+    @Test func hasCompletedSetupDefaultsFalse() {
         // A fresh install must show setup once, so the unset default is false.
-        XCTAssertFalse(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(!AppSettings(defaults: defaults).hasCompletedSetup)
     }
 
-    func testHasCompletedSetupRoundTrips() {
+    @Test func hasCompletedSetupRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         settings.hasCompletedSetup = true
-        XCTAssertTrue(settings.hasCompletedSetup)
-        XCTAssertTrue(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(settings.hasCompletedSetup)
+        #expect(AppSettings(defaults: defaults).hasCompletedSetup)
     }
 
     // MARK: Wake restore (B6b)
 
-    func testWakeRestoreDefaultsToTwoMinutesWhenUnset() {
+    @Test func wakeRestoreDefaultsToTwoMinutesWhenUnset() {
         // Unset must resolve to the default (2), NOT 0 — 0 is a valid "Never" that
         // `UserDefaults.integer` also returns for a missing key.
-        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+        #expect(AppSettings(defaults: defaults).wakeRestoreMinutes ==
                        AppSettings.defaultWakeRestoreMinutes)
-        XCTAssertEqual(AppSettings.defaultWakeRestoreMinutes, 2)
+        #expect(AppSettings.defaultWakeRestoreMinutes == 2)
     }
 
-    func testWakeRestoreRoundTripsEveryOfferedOption() {
+    @Test func wakeRestoreRoundTripsEveryOfferedOption() {
         let settings = AppSettings(defaults: defaults)
         for option in AppSettings.wakeRestoreMinuteOptions {
             settings.wakeRestoreMinutes = option
-            XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes, option)
+            #expect(AppSettings(defaults: defaults).wakeRestoreMinutes == option)
         }
     }
 
-    func testWakeRestoreNeverIsDistinctFromUnset() {
+    @Test func wakeRestoreNeverIsDistinctFromUnset() {
         // Explicitly choosing Never (0) must PERSIST as 0, not be re-defaulted to 2.
         let settings = AppSettings(defaults: defaults)
         settings.wakeRestoreMinutes = 0
-        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes, 0)
+        #expect(AppSettings(defaults: defaults).wakeRestoreMinutes == 0)
     }
 
-    func testWakeRestoreUnofferedStoredValueFallsBack() {
+    @Test func wakeRestoreUnofferedStoredValueFallsBack() {
         defaults.set(3, forKey: "audio.wakeRestoreMinutes")
-        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+        #expect(AppSettings(defaults: defaults).wakeRestoreMinutes ==
                        AppSettings.defaultWakeRestoreMinutes)
         defaults.set(-5, forKey: "audio.wakeRestoreMinutes")
-        XCTAssertEqual(AppSettings(defaults: defaults).wakeRestoreMinutes,
+        #expect(AppSettings(defaults: defaults).wakeRestoreMinutes ==
                        AppSettings.defaultWakeRestoreMinutes)
     }
 
-    func testWakeRestoreOptionListInvariants() {
+    @Test func wakeRestoreOptionListInvariants() {
         // The default must be offered, options ascend, and Never (0) is offered.
-        XCTAssertTrue(AppSettings.wakeRestoreMinuteOptions.contains(AppSettings.defaultWakeRestoreMinutes))
-        XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions, AppSettings.wakeRestoreMinuteOptions.sorted())
-        XCTAssertEqual(AppSettings.wakeRestoreMinuteOptions.first, 0)
+        #expect(AppSettings.wakeRestoreMinuteOptions.contains(AppSettings.defaultWakeRestoreMinutes))
+        #expect(AppSettings.wakeRestoreMinuteOptions == AppSettings.wakeRestoreMinuteOptions.sorted())
+        #expect(AppSettings.wakeRestoreMinuteOptions.first == 0)
     }
 
     // MARK: Sync offset (T-OFFSET-UI)
 
-    func testSyncOffsetDefaultsToZeroWhenUnset() {
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.defaultSyncOffsetMs)
-        XCTAssertEqual(AppSettings.defaultSyncOffsetMs, 0)
+    @Test func syncOffsetDefaultsToZeroWhenUnset() {
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.defaultSyncOffsetMs)
+        #expect(AppSettings.defaultSyncOffsetMs == 0)
     }
 
-    func testSyncOffsetRoundTripsPositiveAndNegative() {
+    @Test func syncOffsetRoundTripsPositiveAndNegative() {
         let settings = AppSettings(defaults: defaults)
         settings.syncOffsetMs = 120
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, 120)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == 120)
 
         settings.syncOffsetMs = -75
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, -75)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == -75)
     }
 
-    func testSyncOffsetExplicitZeroIsDistinctFromUnsetButReadsTheSame() {
+    @Test func syncOffsetExplicitZeroIsDistinctFromUnsetButReadsTheSame() {
         // Explicitly choosing 0 must persist and read back as 0 (same value as
         // unset, but exercised via the write path this time).
         let settings = AppSettings(defaults: defaults)
         settings.syncOffsetMs = 0
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, 0)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == 0)
     }
 
-    func testSyncOffsetClampsToBounds() {
+    @Test func syncOffsetClampsToBounds() {
         let settings = AppSettings(defaults: defaults)
         settings.syncOffsetMs = 10_000
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.maxSyncOffsetMs)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.maxSyncOffsetMs)
 
         settings.syncOffsetMs = -10_000
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.minSyncOffsetMs)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.minSyncOffsetMs)
     }
 
-    func testSyncOffsetOutOfRangeStoredValueFallsBackToClamp() {
+    @Test func syncOffsetOutOfRangeStoredValueFallsBackToClamp() {
         // A value outside the offered range (a newer/older build, or hand-edited
         // defaults) resolves to the clamped bound rather than leaking through.
         defaults.set(9_999, forKey: "audio.syncOffsetMs")
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.maxSyncOffsetMs)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.maxSyncOffsetMs)
         defaults.set(-9_999, forKey: "audio.syncOffsetMs")
-        XCTAssertEqual(AppSettings(defaults: defaults).syncOffsetMs, AppSettings.minSyncOffsetMs)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.minSyncOffsetMs)
     }
 
-    func testSyncOffsetBoundsStraddleZero() {
-        XCTAssertLessThan(AppSettings.minSyncOffsetMs, 0)
-        XCTAssertGreaterThan(AppSettings.maxSyncOffsetMs, 0)
-        XCTAssertTrue((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
+    @Test func syncOffsetBoundsStraddleZero() {
+        #expect(AppSettings.minSyncOffsetMs < 0)
+        #expect(AppSettings.maxSyncOffsetMs > 0)
+        #expect((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
     }
 }

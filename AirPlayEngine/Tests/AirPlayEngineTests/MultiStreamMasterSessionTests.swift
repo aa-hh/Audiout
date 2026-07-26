@@ -13,12 +13,37 @@
 // engine thread, no sockets. They drive the REAL master_session_make via the
 // test-only accessors in shims/engine_bridge.h (airplay_test_master_session_*),
 // so they exercise the production keying rather than a reimplementation.
+//
+// This suite's tests reset/read the process-global master session list
+// (`airplay_test_master_sessions_reset()` / `airplay_test_master_session_count()`),
+// a different global than `shims/outputs.c`'s device registry that
+// `SerializedEngineState` exists for (see `SerializedEngineStateSuite.swift`
+// §22) — but it nests under `SerializedEngineState` anyway, for a different
+// reason than that suite's own doc comment describes: T16 (2026-07-26)
+// verified that `airplay_test_master_session_make` here, run concurrently
+// against EITHER `raop_test_master_session_make`
+// (`RaopMultiStreamMasterSessionTests.swift`) or the same
+// `airplay_test_master_session_make` call from `MultiStreamWriteRoutingTests`
+// (which is mandated to sit under `SerializedEngineState` — it also touches
+// the outputs.c registry), crashes with `fatal error in libgcrypt ...
+// gcry_randomize: called in non-operational state`. All three master/session
+// constructors apparently share a single non-reentrant crypto-init path one
+// level down the vendored C, regardless of which higher-level global (device
+// registry vs. session list) each test otherwise cares about. A SEPARATE
+// serialized parent for just the two master-session files was tried first
+// and still crashed, because it could still run concurrently against
+// `MultiStreamWriteRoutingTests`'s `SerializedEngineState`. Putting all three
+// under the one lock that `MultiStreamWriteRoutingTests` already required is
+// the only arrangement that removed the race in repeated runs. Do not repeat
+// `.serialized` here — it inherits from `SerializedEngineState`.
 
-import XCTest
+import Testing
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class MultiStreamMasterSessionTests: XCTestCase {
+extension SerializedEngineState {
+
+@Suite struct MultiStreamMasterSessionTests {
 
     /// The single quality every AirPlay 2 device is wired to (airplay.c forces
     /// 44100/16/2). Both streams in these tests use it, so stream_id is the ONLY
@@ -27,68 +52,64 @@ final class MultiStreamMasterSessionTests: XCTestCase {
         media_quality(sample_rate: 44100, bits_per_sample: 16, channels: 2, bit_rate: 0)
     }
 
-    override func setUp() {
-        super.setUp()
+    init() {
         // No sessions are attached in these tests, so the reset frees any master
         // sessions a prior case created (process-global list).
         airplay_test_master_sessions_reset()
     }
 
-    override func tearDown() {
-        airplay_test_master_sessions_reset()
-        super.tearDown()
-    }
-
     // MARK: - Two stream_ids => two DIFFERENT master sessions (the core property).
 
-    func testDistinctStreamIdsGetDistinctMasterSessions() {
+    @Test func distinctStreamIdsGetDistinctMasterSessions() {
         var q = defaultQuality()
 
         let a = airplay_test_master_session_make(1, &q, false)
         let b = airplay_test_master_session_make(2, &q, false)
 
-        XCTAssertNotNil(a, "master session for stream 1 must be created")
-        XCTAssertNotNil(b, "master session for stream 2 must be created")
+        #expect(a != nil, "master session for stream 1 must be created")
+        #expect(b != nil, "master session for stream 2 must be created")
 
         // Same quality, same use_ptp — yet different pointers, because stream_id differs.
-        XCTAssertNotEqual(a, b,
+        #expect(a != b,
             "distinct stream_ids at the same quality MUST NOT share a master session")
 
         // Two live master sessions now exist (pre-change there would be exactly one).
-        XCTAssertEqual(airplay_test_master_session_count(), 2)
+        #expect(airplay_test_master_session_count() == 2)
 
         // Each master session carries the stream_id it was made for.
-        XCTAssertEqual(airplay_test_master_session_stream_id(a), 1)
-        XCTAssertEqual(airplay_test_master_session_stream_id(b), 2)
+        #expect(airplay_test_master_session_stream_id(a) == 1)
+        #expect(airplay_test_master_session_stream_id(b) == 2)
     }
 
     // MARK: - Same stream_id + same quality => the SAME master session is reused.
     // This is the dedup path that keeps "N speakers, one stream" cheap (one encoder).
 
-    func testSameStreamIdReusesMasterSession() {
+    @Test func sameStreamIdReusesMasterSession() {
         var q = defaultQuality()
 
         let first = airplay_test_master_session_make(7, &q, false)
         let again = airplay_test_master_session_make(7, &q, false)
 
-        XCTAssertNotNil(first)
-        XCTAssertEqual(first, again,
+        #expect(first != nil)
+        #expect(first == again,
             "same (stream_id, quality, use_ptp) must reuse the existing master session")
-        XCTAssertEqual(airplay_test_master_session_count(), 1,
+        #expect(airplay_test_master_session_count() == 1,
             "reuse must not allocate a second master session")
     }
 
     // MARK: - stream_id 0 is the legacy single-stream default (Phase-1 path intact).
 
-    func testStreamIdZeroIsTheLegacyDefault() {
+    @Test func streamIdZeroIsTheLegacyDefault() {
         var q = defaultQuality()
 
         let s0a = airplay_test_master_session_make(0, &q, false)
         let s0b = airplay_test_master_session_make(0, &q, false)
 
-        XCTAssertNotNil(s0a)
-        XCTAssertEqual(s0a, s0b, "stream_id 0 dedups exactly as before the change")
-        XCTAssertEqual(airplay_test_master_session_stream_id(s0a), 0)
-        XCTAssertEqual(airplay_test_master_session_count(), 1)
+        #expect(s0a != nil)
+        #expect(s0a == s0b, "stream_id 0 dedups exactly as before the change")
+        #expect(airplay_test_master_session_stream_id(s0a) == 0)
+        #expect(airplay_test_master_session_count() == 1)
     }
+}
+
 }

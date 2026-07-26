@@ -303,6 +303,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// default `AUDIOUTER_PTP_BIND_RETRY_SECS`.
     private static let ptpActivationTimeout: TimeInterval = 10
 
+    /// Frees UDP 319/320 before a connect by moving the Mac's own default
+    /// output off an AirPlay receiver (T5). **`nil` = inert**, and that is the
+    /// default deliberately: this is the one component in the backend that
+    /// writes a system-wide setting a human is currently using, so it is opted
+    /// IN by the composition root (`makeBackend`) rather than opted out by
+    /// every test — the same shape `syncedLocalSinkFactory` uses, for the same
+    /// "must not touch the real machine from a test" reason.
+    private let defaultOutputSwitcher: DefaultOutputSwitcher?
+
     /// The colon-hex `Device.id` ⟷ ``OutputID`` lookup, populated from discovery.
     /// Kept so `setOutputSet`/`setVolume` can translate the UI's string ids to the
     /// engine handle without reparsing (and without ever reformatting the id).
@@ -845,6 +854,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// in. It flows to BOTH the per-app capture coordinator (owned here) and the
     /// whole-system `NativeCaptureCoordinator` (wired by `makeBackend`, which
     /// uses the same resolver).
+    ///
+    /// This is also where the T5 takeover switch-away is opted in: the real
+    /// (HAL-writing) ``DefaultOutputSwitcher`` exists ONLY on this shipping
+    /// path, never on the designated initializer's default — see
+    /// ``defaultOutputSwitcher``.
     public convenience init(
         engine: AirPlayEngine,
         discovery: NativeDiscovery = NativeDiscovery(),
@@ -853,7 +867,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
-            processResolver: processResolver)
+            processResolver: processResolver,
+            defaultOutputSwitcher: DefaultOutputSwitcher())
     }
 
     /// Injectable designated initializer (internal — tests pass a spy engine and an
@@ -903,8 +918,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryMaxBackoff: TimeInterval = 10.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass
+        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
+        defaultOutputSwitcher: DefaultOutputSwitcher? = nil
     ) {
+        self.defaultOutputSwitcher = defaultOutputSwitcher
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
         // so this queue only needs to time the delay — a plain serial queue is fine.
@@ -3174,6 +3191,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if let descriptor = self.descriptorToFeed(id: id) {
                         try await engine.updateDiscovery(descriptor)
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
+                    }
+
+                    // T5 (PLAN-AIRPLAY-COEXISTENCE.md): if the Mac's OWN default
+                    // output is an AirPlay receiver, macOS is holding UDP
+                    // 319/320 and will neither share them nor signal a yield
+                    // (both measured — see the plan's "Known asymmetry"). It
+                    // DOES release them ~1-3 s after its default output is
+                    // switched away (G1), so moving the default output to the
+                    // built-in speakers IS the takeover, and it must happen
+                    // BEFORE T4's bounded wait below — that wait is what races
+                    // macOS's teardown while the helper retries the bind. The
+                    // click is the consent (locked decision 2): no dialog.
+                    // Inert unless the composition root opted in.
+                    if let defaultOutputSwitcher {
+                        let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
+                        if takeover != .notAirPlay {
+                            Telemetry.log(.airplay, "takeover_switch_away", [
+                                "device": id, "outcome": "\(takeover)",
+                            ])
+                        }
                     }
 
                     // T4 (PLAN-AIRPLAY-COEXISTENCE.md): wake the on-demand PTP

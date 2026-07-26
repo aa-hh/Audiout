@@ -19,7 +19,7 @@ Problem being fixed: Audiouter's root PTP helper binds UDP 319/320 at boot (`Run
 
 ## Wave 0 — gates (both cheap, both before any Wave-2/3 code)
 
-- **G1 — live port probe (Alec + agent, ~5 min).** Boot out our daemon (`sudo launchctl bootout system/com.audiouter.Audiouter.ptphelper`), connect a Sonos via the **system** dropdown, watch `netstat`/`lsof` on 319/320. Answers: (a) does macOS actually bind 319/320 during a system-dropdown session; (b) after switching default output away from the AirPlay device, how fast are the ports released — instant, seconds, or only on Control Center disconnect. **Decides T5's mechanism and timeout, and R1's fallback wording.** Also confirms Direction A: with our daemon out, the system dropdown works (root-cause proof).
+- **G1 — live port probe. DONE 2026-07-26, best-case results.** With our daemon booted out, the system dropdown connected (root cause confirmed: it was us). macOS binds 319/320 (v4+v6, wildcard, exclusive — same shape as ours) **at session start only**, holds them while playing, and **releases them ~1–3 s after the default output is switched away** — no Control Center disconnect needed. Timeline: 07:45:03 connect→bound; 07:45:39 switch-away; 07:45:42 free. **Consequences:** T5's switch-away mechanism is sufficient on its own; expected takeover latency ~2–4 s click-to-audio; the 10 s helper retry has wide margin; R1 downgraded — T6's fallback message is belt-and-braces, not a primary path.
 - **G2 — virtual-device spike (~half day).** Minimal "Audiouter" AudioServerPlugIn: installs under Developer ID + notarization, appears in Sound output list, can be set default programmatically, our process-tap capture path reads from it (house rule "tap follows default output" unchanged — the default *is* the virtual device), uninstalls cleanly, survives `coreaudiod` restart. **Decides Wave 3 build vs. fallback (menu-bar-only visibility).**
 
 ## Wave 1 — on-demand helper lifecycle (Direction A: system dropdown works whenever we're idle)
@@ -53,7 +53,7 @@ Fresh boot →
 
 ## Risks
 
-- **R1 — macOS may not free the ports on default-output switch alone** (keeps the session warm until Control Center disconnect). G1 measures; fallback = T6's guided message. Worst case, takeover is "switch + a few seconds," not instant.
+- **R1 — RESOLVED by G1 (2026-07-26):** default-output switch-away alone frees the ports in ~1–3 s. T6's guided message stays as a timeout backstop only (third-party PTP holders, R6, can still trigger it).
 - **R2 — root-component lifecycle change.** Plist changes to an approved `SMAppService` daemon can behave differently under re-registration; ad-hoc builds can't test it at all (Developer ID only). Budget a dedicated live pass.
 - **R3 — driver-class component is new surface.** Signing/notarization/install of a HAL plugin has its own failure modes; that's exactly what G2 de-risks before any Wave-3 build.
 - **R4 — idle-exit vs. warm-signal.** The helper exiting between sessions means first-connect gains helper-spawn + bind latency (~sub-second expected). If warm-signal work assumes a standing clock, reconcile there (measure in Wave 4, don't pre-optimize).

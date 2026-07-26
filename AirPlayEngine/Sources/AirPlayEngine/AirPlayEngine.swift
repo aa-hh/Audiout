@@ -123,6 +123,26 @@ extension SystemRandomNumberGenerator {
     }
 }
 
+/// What ``AirPlayEngine/addOutput(_:streamId:)`` actually did — the distinction
+/// the pre-2026-07-26 API could not express, because an already-live device took
+/// a SILENT idempotent no-op that was indistinguishable from a real bind
+/// (architecture review 2026-07-26, defect B).
+///
+/// A caller that needs the device on a specific stream must check this:
+/// `.alreadyBound(streamId:)` with a stream other than the one requested means
+/// the C session did NOT move, and PCM written to the requested stream will never
+/// reach this device. ``AirPlayEngine/rebindOutput(_:toStreamId:)`` is the fix.
+public enum OutputBindResult: Sendable, Equatable {
+    /// `device_start` was issued; the device is bound to the requested stream.
+    case bound
+    /// The device already had a live session, so `device_start` was NOT re-issued
+    /// and the binding did not move. The payload is the stream the live session is
+    /// actually on — equal to the requested one for an honest re-add (a converge
+    /// re-adding an unchanged device), DIFFERENT when the caller's assumption is
+    /// wrong.
+    case alreadyBound(streamId: UInt32)
+}
+
 /// The Swift-facing AirPlay 2 audio sender engine.
 ///
 /// Lifecycle: `init(config:)` -> `start()` (creates the engine thread, wires the
@@ -765,11 +785,68 @@ public actor AirPlayEngine {
     /// land before `session_make` runs, same ordering constraint `setVolume`
     /// has for `device->volume`. Devices already streaming/connected take the
     /// existing idempotency no-op path (below) and do NOT get re-bound to a
-    /// new `streamId` — the session already exists; moving a live device to a
-    /// different stream requires `removeOutput` then `addOutput(_:streamId:)`
-    /// again (rebinding a live session is out of scope here; T6's job if
-    /// needed).
-    public func addOutput(_ id: OutputID, streamId: UInt32) async throws {
+    /// new `streamId` — the session already exists. THAT NO-OP IS NOW VISIBLE:
+    /// the return value is ``OutputBindResult/alreadyBound(streamId:)`` carrying
+    /// the stream the live session is actually on, so a caller can tell "I bound
+    /// it where I asked" from "the session never moved" instead of bookkeeping a
+    /// bind that didn't happen (architecture review 2026-07-26, defect B — audio
+    /// written to a stream the device never joined shows as routed and is
+    /// inaudible). To actually MOVE a live device, use
+    /// ``rebindOutput(_:toStreamId:)``.
+    ///
+    /// Deliberately still non-throwing on the already-bound path: existing
+    /// callers (a `setOutputSet` converge that re-adds an unchanged device) must
+    /// keep seeing success, so this is additive — the caller opts in to the new
+    /// information by reading the result.
+    @discardableResult
+    public func addOutput(_ id: OutputID, streamId: UInt32) async throws -> OutputBindResult {
+        try await bind(id, streamId: streamId, serialize: true)
+    }
+
+    /// Which stream `id`'s LIVE session is currently bound to, or `nil` if the
+    /// device has no live session (nothing is bound, so `addOutput` would bind
+    /// fresh). Reads the vendored C `device->stream_id` alongside `device->state`
+    /// in one engine-thread hop — same authority the idempotency guards use, not
+    /// the async-reconciled `knownOutputs` cache.
+    ///
+    /// This is the "which stream owns this device" query defect B says the engine
+    /// lacked. Pair it with ``rebindOutput(_:toStreamId:)``:
+    /// `if await engine.boundStreamId(for: id) != want { try await engine.rebindOutput(id, toStreamId: want) }`.
+    public func boundStreamId(for id: OutputID) async -> UInt32? {
+        guard knownOutputs[id] != nil, let live = await liveBinding(id) else { return nil }
+        switch live.state {
+        case .streaming, .connected: return live.streamId
+        default: return nil
+        }
+    }
+
+    /// Move `id`'s binding to `streamId`: stop the live session, then re-add it
+    /// bound to the new stream. This is the primitive that makes a stream change
+    /// on a LIVE device actually take effect — `addOutput` alone cannot, because
+    /// `session_make` reads `device->stream_id` once, at session-creation time.
+    ///
+    /// SERIALIZATION: acquires the SAME per-`OutputID` `opsInFlight` gate every
+    /// other output op uses, and holds it across BOTH halves — so no concurrent
+    /// `addOutput`/`removeOutput` on this device can slip between the stop and the
+    /// re-add and leave the device bound to a third stream (defect B's two racing
+    /// locking disciplines). No second serialization mechanism is introduced: the
+    /// inner stop/add run with `serialize: false` precisely because this call
+    /// already owns the slot (`acquireOp` is not re-entrant).
+    ///
+    /// Throws exactly what `removeOutput`/`addOutput` throw. A device with no live
+    /// session is not an error — the stop half no-ops and the add half binds fresh.
+    public func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        await acquireOp(id)
+        defer { releaseOp(id) }
+
+        try await unbind(id, serialize: false)
+        _ = try await bind(id, streamId: streamId, serialize: false)
+    }
+
+    private func bind(_ id: OutputID, streamId: UInt32, serialize: Bool) async throws -> OutputBindResult {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
@@ -789,12 +866,17 @@ public actor AirPlayEngine {
         // the C device's own `state` on the engine thread closes that race: a
         // failed/stopped session correctly falls through and re-issues
         // device_start to re-establish the RTSP SETUP.
-        let liveState = await liveDeviceState(id)
+        let live = await liveBinding(id)
+        let liveState = live?.state ?? knownOutputs[id] ?? .stopped
         switch liveState {
         case .streaming, .connected:
             // Keep the cache honest for callers that inspect it.
             knownOutputs[id] = liveState
-            return
+            // If the C device itself has gone (live == nil, cache says live) we
+            // cannot read its real binding; report the requested stream rather
+            // than invent one — the caller's next `boundStreamId` read is
+            // authoritative either way.
+            return .alreadyBound(streamId: live?.streamId ?? streamId)
         default: break
         }
 
@@ -802,7 +884,7 @@ public actor AirPlayEngine {
         // device->stream_id at session-creation time; see the doc comment above).
         await applyStreamIdOnDevice(id: id, streamId: streamId)
 
-        let terminal = try await startOp(id: id) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
             // Dispatch by the device's backend (output_airplay OR output_raop)
             // so a RAOP-typed device runs raop_device_start, not the AP2 sender.
             return outputs_device_start(device, cbId)
@@ -810,7 +892,7 @@ public actor AirPlayEngine {
 
         knownOutputs[id] = terminal
         switch terminal {
-        case .streaming, .connected: return
+        case .streaming, .connected: return .bound
         case .passwordRequired:      throw AirPlayEngineError.passwordRequired
         case .failed, .stopped:      throw AirPlayEngineError.sessionFailed
         case .startup:               throw AirPlayEngineError.sessionFailed
@@ -821,6 +903,10 @@ public actor AirPlayEngine {
     /// await the completion. The device stays registered (re-addable) unless the
     /// dispatcher drops it. Primitive for `NativeBackend.removeOutput`.
     public func removeOutput(_ id: OutputID) async throws {
+        try await unbind(id, serialize: true)
+    }
+
+    private func unbind(_ id: OutputID, serialize: Bool) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
@@ -837,7 +923,7 @@ public actor AirPlayEngine {
         let liveState = await liveDeviceState(id)
         if liveState == .stopped { knownOutputs[id] = .stopped; return }
 
-        let terminal = try await startOp(id: id) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
             // TOCTOU guard: a receiver-side RTSP drop can free the session and
             // NULL device->session (shims/outputs.c outputs_device_session_remove)
             // between the liveState check above and this closure running on the
@@ -970,6 +1056,22 @@ public actor AirPlayEngine {
     /// async reconcile lag on `knownOutputs`. Runs on the engine thread (or inline
     /// in headless test mode). Returns the last cached state if the C device has
     /// gone (e.g. deregistered), so a caller still gets a sensible value.
+    /// The LIVE `(state, stream_id)` pair of the vendored C `output_device` for
+    /// `id`, read in ONE engine-thread hop (or inline in headless test mode).
+    /// `nil` iff the C device is gone (deregistered) or there is no engine thread
+    /// to read on — a caller that needs a fallback supplies its own from
+    /// `knownOutputs`. Same authority as ``liveDeviceState(_:)``, which it does
+    /// not replace (`removeOutput` needs only the state).
+    private func liveBinding(_ id: OutputID) async -> (state: OutputState, streamId: UInt32)? {
+        let read: () -> (state: OutputState, streamId: UInt32)? = {
+            guard let device = outputs_device_get(id.rawValue) else { return nil }
+            return (OutputState(device.pointee.state), device.pointee.stream_id)
+        }
+        if issueOverride != nil { return read() }
+        if let t = engineThreadHolder.current { return (try? await t.run(read)) ?? nil }
+        return nil
+    }
+
     private func liveDeviceState(_ id: OutputID) async -> OutputState {
         let read: () -> OutputState? = {
             guard let device = outputs_device_get(id.rawValue) else { return nil }
@@ -1314,15 +1416,20 @@ public actor AirPlayEngine {
     /// the armed callback_id and calls the backend, returning N (the promised
     /// callback count). If N <= 0 no completion is promised and we resolve
     /// immediately (no hang). Bridges to async via CompletionRegistry.
+    ///
+    /// `serialize: false` means the CALLER already holds this id's `opsInFlight`
+    /// slot and is composing several ops under it (`rebindOutput`'s stop+re-add);
+    /// acquiring again here would deadlock, since `acquireOp` is not re-entrant.
     private func startOp(
         id: OutputID,
+        serialize: Bool = true,
         issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32
     ) async throws -> OutputState {
         // B5.1: serialize ops per OutputID — a second op on the same id awaits the
         // first, so two overlapping ops can never clobber each other's completion
         // waiter (the C dispatcher's "one pending callback per device" contract).
-        await acquireOp(id)
-        defer { releaseOp(id) }
+        if serialize { await acquireOp(id) }
+        defer { if serialize { releaseOp(id) } }
 
         // In headless test mode the backend call is replaced by issueOverride and
         // the work runs inline (no engine thread / libevent). Everything else —

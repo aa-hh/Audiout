@@ -32,7 +32,11 @@ concurrency contract changes, update this AGENTS.md in the same change.
   call (`Thread.start()` on an already-started thread aborts).
 - **Per-`OutputID` op serialization.** `opsInFlight`/`opWaiters` in
   `AirPlayEngine` ensure a second `addOutput`/`removeOutput`/`setVolume` on the
-  same id awaits the first rather than racing — belt-and-suspenders with
+  same id awaits the first rather than racing. `acquireOp` is NOT re-entrant, so
+  a composite op that must be atomic across several backend calls
+  (`rebindOutput` = stop + re-add) acquires the slot ITSELF and passes
+  `serialize: false` down to `startOp` — there is exactly one serialization
+  mechanism here, never a second one — belt-and-suspenders with
   `CompletionRegistry.arm`'s own refusal to overwrite an already-armed
   `callbackId` (`arm` returns `false` rather than clobber, see B5.3 in that
   file).
@@ -114,6 +118,7 @@ and `Sources/ptp-helper/` are sibling targets documented in the package-root
 |---|---|---|
 | `AirPlayEngine` (actor) | AirPlayEngine.swift | Public session API: lifecycle, discovery feed, add/remove/volume, PCM write, state/remote streams. |
 | `EngineConfig` | AirPlayEngine.swift | Config applied to `conffile` at `start()`; owns `startBufferMs`/`presentationDelayMs` derivation. |
+| `OutputBindResult` | AirPlayEngine.swift | `addOutput(_:streamId:)`'s outcome: `.bound` vs `.alreadyBound(streamId:)` — makes the already-live idempotent no-op visible to the caller instead of silent (architecture review 2026-07-26, defect B). |
 | `EngineThread` | EngineThread.swift | Owns the one `event_base` + OS thread; sole path (`run`/`enqueue`) onto the vendored cluster. |
 | `EngineThreadHolder` | EngineThread.swift | Nonisolated, lock-guarded slot holding the *current* `EngineThread` (swapped per `start()`). |
 | `CompletionRegistry` | CompletionRegistry.swift | Bridges the C `outputs_engine_completion` callback to `async`/`await`, one-shot per `callbackId`, with a 12s timeout backstop. |

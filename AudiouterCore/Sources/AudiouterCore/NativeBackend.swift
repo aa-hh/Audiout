@@ -493,6 +493,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// to avoid.
     private var bufferReAdding: Set<String> = []
 
+    /// Ids whose next add-success should take the CONFIGURED CONNECT DEFAULT rather
+    /// than the level the device was already streaming at (F-REBIND). Armed by
+    /// `setOutputSet` on the user's off→on edge — the one place a connect is
+    /// USER-intended — and consumed by ``connectVolumeSeed(_:outputID:)``.
+    ///
+    /// Everything else that re-issues an `addOutput` for a device the user never
+    /// turned off leaves it unarmed. The case this exists for: a Bluetooth headset
+    /// connecting makes macOS fire a burst of default-output-device changes, each
+    /// rebuilding the whole-system tap, each firing a session rebind
+    /// (`resetAirPlaySessionForWholeSystem` → removeOutput → addOutput). The engine's
+    /// `.stopped` drops the id from `added`, so the following `.connected` reads
+    /// `wasAdded == false` and looks exactly like a fresh connect — which used to
+    /// slam a Sonos the user had set to 80% back to the 35% connect default, once per
+    /// notification. Intent is the honest discriminator here: `added`/`known` can't
+    /// tell the two apart (every discovered device already carries a volume — the
+    /// `Device` default is 50), and a window flag keyed on the recovery chain's
+    /// lifetime would race the state-stream events that arrive after it clears.
+    ///
+    /// One-shot token, so neither failure direction can hurt: a missed arm means a
+    /// user connect keeps the last level (audible, just not the default), and a
+    /// missed consume means the next rebind reseeds (today's behavior). Nothing here
+    /// can produce silence — the seed always pushes a level either way. Note this is
+    /// the INVERSE of the `volumeSeeded: Set` the seed's doc warns about: that one
+    /// suppressed a seed while set and had to be hand-cleared at every teardown,
+    /// whereas this one is consumed on use and only ever selects WHICH level is
+    /// pushed.
+    private var userConnectSeed: Set<String> = []
+
     private var stateStreamTask: Task<Void, Never>?
 
     /// Drains the engine's remote-control stream (speaker transport keys). Same
@@ -1614,6 +1642,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // alongside the "connect_addoutput_*" timestamps in
                     // convergeDevice below.
                     if wantOn {
+                        // F-REBIND: the USER asked for this connect, so whichever
+                        // add-success site wins the race seeds the configured connect
+                        // default. Deliberately only here, not in `convergeToTarget`
+                        // (which flaps `desiredOn` for `applyStartBuffer`'s internal
+                        // re-add) — see `userConnectSeed`.
+                        self.userConnectSeed.insert(id)
                         Telemetry.log(.airplay, "connect_requested", ["device": id])
                     }
                 }
@@ -3340,8 +3374,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // connect first (the dispatcher mirrors the completion onto
                         // the state stream), but whichever site runs first flips
                         // `added` under `stateQueue` and the second sees `wasAdded ==
-                        // true` and skips — so exactly one push per connect. See
-                        // `connectVolumeSeed`.
+                        // true` and skips — so exactly one push per connect. Whether
+                        // that push is the connect default or the level the device was
+                        // already streaming at is `connectVolumeSeed`'s call, off
+                        // `userConnectSeed` (F-REBIND). See `connectVolumeSeed`.
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
@@ -4417,6 +4453,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // Suppressed during an `applyStartBuffer` re-add so a buffer change
                 // whose good-state event races this branch can't reset the level —
                 // see `connectVolumeSeed`.
+                //
+                // F-REBIND: this is the branch a session rebind lands on. The rebind's
+                // `removeOutput` makes the engine report `.stopped` (dropping `added`),
+                // so its `addOutput` arrives here reading `!wasAdded` — indistinguishable
+                // from a fresh connect. `connectVolumeSeed` tells them apart by intent
+                // (`userConnectSeed`) and keeps the in-session level for the rebind.
                 if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
@@ -4845,10 +4887,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
-    /// Seed a just-(re)connected engine output's starting volume from the
-    /// configured connect-volume default. Pushes the level to the engine and
-    /// returns the value to display on the model, or `nil` when the seed is
-    /// suppressed (leave the model volume untouched). On `stateQueue`.
+    /// Seed a just-(re)connected engine output's starting volume — from the
+    /// configured connect-volume default on a connect the user asked for, or from the
+    /// level the device was already streaming at on one it didn't (F-REBIND, see
+    /// ``userConnectSeed``). Pushes the level to the engine and returns the value to
+    /// display on the model, or `nil` when the seed is suppressed (leave the model
+    /// volume untouched). On `stateQueue`.
     ///
     /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
     /// The engine's per-output volume field is zero-initialized and is only ever set
@@ -4859,9 +4903,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// push a real starting volume; this is that push, called from BOTH add-success
     /// sites (`convergeDevice` and `applyEngineState`).
     ///
-    /// Source of the level (G1-N1): ``connectVolumeProvider`` — the user's
-    /// configured connect volume (``AppSettings/connectVolume``, default 35%), NOT
-    /// the Mac's current system level. An earlier design inherited the system level,
+    /// Source of the level (G1-N1) for a USER-intended connect: ``connectVolumeProvider``
+    /// — the user's configured connect volume (``AppSettings/connectVolume``, default
+    /// 35%), NOT the Mac's current system level. An earlier design inherited the system level,
     /// but Mac speakers often run loud, so connecting a real AirPlay speaker could
     /// BLAST the user on first connect. A fixed moderate default is predictable and
     /// safe. The value is clamped to ``AppSettings/minConnectVolume``… so the seed
@@ -4897,16 +4941,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// there is no second set that can be stuck-set while `added` is clear, so every
     /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
     ///
-    /// The seed reads ``connectVolumeProvider`` (a `UserDefaults`-backed
-    /// `AppSettings` read — cheap, non-blocking, unlike the old system-volume HAL
-    /// read) and clamps it to ``AppSettings/minConnectVolume``…
-    /// ``AppSettings/maxConnectVolume``. The clamp is the load-bearing safety net:
-    /// even if the setting or an injected test provider returns 0 or something out
-    /// of range, the value that reaches the wire is always audible — 0/silent is
-    /// unreachable.
+    /// On a connect the USER asked for, the seed reads ``connectVolumeProvider``
+    /// (a `UserDefaults`-backed `AppSettings` read — cheap, non-blocking, unlike
+    /// the old system-volume HAL read) and clamps it to
+    /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume``. That
+    /// clamp is the load-bearing safety net for the DEFAULT: even if the setting
+    /// or an injected test provider returns 0 or something out of range, the
+    /// default that reaches the wire is always audible.
+    ///
+    /// The clamp does NOT bound the F-REBIND preserve branch: a level the user
+    /// dialled in themselves is theirs to keep, INCLUDING a deliberate 0 (an
+    /// unmuted device the user set to silence stays silent across a rebind —
+    /// re-blasting it to the default on a Bluetooth-connect glitch would be the
+    /// worse surprise). So 0/silent IS reachable via preserve — but only when the
+    /// user chose it, never as an accidental −30 dB trap: the trap is a *re-made
+    /// session sitting at engine 0 because nobody set a level*, and both branches
+    /// here always set one.
     private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
         guard !bufferReAdding.contains(id) else { return nil }
-        let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
+        // F-REBIND: the connect default belongs to a connect the USER asked for. An
+        // add nobody asked for — the session rebind a tap rebuild fires when macOS
+        // changes the default output device — keeps the level the device was already
+        // streaming at. Either way a level IS pushed: the re-made session sits at
+        // engine volume 0 = the −30 dB trap no matter what re-made it, so returning
+        // early here would trade a reset volume for a silent device.
+        //
+        // `known[id].volume` reads 0 while muted (the stash shim, `setMuted`), so the
+        // in-session level comes from `stashedVolume` first — the same read
+        // `restoreEffectiveVolume` and `applyStartBuffer` use. A preserved level is
+        // NOT re-clamped to the connect range: that clamp bounds the DEFAULT, and a
+        // level the user dialled in themselves is theirs to keep.
+        let isUserConnect = userConnectSeed.remove(id) != nil
+        let seed: Int
+        if !isUserConnect, let inSession = stashedVolume[id] ?? known[id]?.volume {
+            seed = inSession
+        } else {
+            seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
+        }
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
             stashedVolume[id] = seed

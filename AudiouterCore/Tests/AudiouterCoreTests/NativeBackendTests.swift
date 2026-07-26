@@ -1590,11 +1590,18 @@ extension SerializedSharedState {
     /// exercises `applyEngineState`'s `.connected`/`.streaming` add-success
     /// branch directly (via `engine.pushState`), never going through
     /// `convergeDevice`'s add path, to prove the OTHER seed call site also fires.
-    /// The device had a distinct in-session level (75) before it dropped; if the
-    /// auto-recovery seed were (wrongly) suppressed like the buffer carve-out,
-    /// the model/engine would still read 75 after the reconnect instead of the
-    /// connect default (35).
-    @Test func autoRecoveryReconnectReseedsEngineVolume() async {
+    ///
+    /// F-REBIND (2026-07-26) reversed what value that site seeds on an add the
+    /// user did NOT ask for. An out-of-band auto-recovery reconnect is exactly
+    /// that — the engine drove it itself, `userConnectSeed` is unarmed — so the
+    /// seed now PRESERVES the level the device was already streaming at (75)
+    /// rather than slamming it to the connect default (35). Same code path a
+    /// Bluetooth-connect session rebind lands on, and preserve is right for both:
+    /// re-asserting the user's last level on a glitch they never initiated beats a
+    /// surprise jump to a fixed default. The site still FIRES (the point this test
+    /// guards) — `connectVolumeSeed` unconditionally pushes to the engine, so the
+    /// −30 dB trap stays closed; only WHICH level it pushes changed.
+    @Test func autoRecoveryReconnectPreservesInSessionVolume() async {
         let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -1622,10 +1629,10 @@ extension SerializedSharedState {
         engine.pushState(device.outputID, .connected)
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
 
-        #expect(backend.devices.first { $0.id == device.id }?.volume == 35,
-                       "an auto-recovery reconnect must reseed from the connect default (35), not preserve the pre-drop in-session level (75)")
-        #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 } ?? false,
-                      "the auto-recovery reconnect must push the connect default to the engine, not skip the seed")
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 75,
+                       "an auto-recovery reconnect (userConnectSeed unarmed) must PRESERVE the pre-drop in-session level (75), not reseed to the connect default")
+        #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.75) < 0.001 } ?? false,
+                      "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
     /// Regression (live Sonos Move test, 2026-07-17): the vendored C dispatcher

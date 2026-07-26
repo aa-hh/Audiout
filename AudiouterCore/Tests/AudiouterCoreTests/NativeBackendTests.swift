@@ -255,6 +255,20 @@ extension SerializedSharedState {
         func stop() { stopCount += 1 }
     }
 
+    /// A ``PTPHelperActivating`` that reports ready immediately, never touching
+    /// a real Mach service or `SMAppService` (T4). Every backend this file
+    /// constructs gets this by default (via `makeBackend`): the production
+    /// default (`PTPHelperActivator`) reads the REAL `SMAppService` status,
+    /// which is `.notFound` outside a proper app bundle — every connect in
+    /// this file would otherwise hard-fail before `engine.addOutput`, and each
+    /// of the hundreds of `setOutputSet` calls across this suite would pay a
+    /// real system XPC round-trip. Tests that specifically want to exercise
+    /// the PTP gate (`.needsApproval`/`.timingPortsUnavailable`) construct
+    /// their own fake and pass it explicitly.
+    private struct AlwaysReadyPTPHelperActivator: PTPHelperActivating {
+        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
+    }
+
     /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
     /// through the REAL ``NativeDiscovery`` production pipeline (identity →
     /// `descriptor(from:)` → `buildDevice`), so the end-to-end AP1 test exercises
@@ -402,6 +416,7 @@ extension SerializedSharedState {
     /// explicitly to get a handle on it.
     private func makeBackend(
         systemVolume: SystemVolumeControlling = FakeSystemVolume(),
+        ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
@@ -416,7 +431,8 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: systemVolume, connectVolume: connectVolume, processResolver: processResolver,
+            systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
+            connectVolume: connectVolume, processResolver: processResolver,
             injectedPerAppCapture: injectedPerAppCapture,
             injectedMeteringCapture: injectedMeteringCapture,
             captureRetryDelay: captureRetryDelay,
@@ -3313,6 +3329,7 @@ extension SerializedSharedState {
         let capture = FakeCapture()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
@@ -3371,6 +3388,7 @@ extension SerializedSharedState {
         let capture = FakeCapture()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
@@ -3421,6 +3439,7 @@ extension SerializedSharedState {
         let capture = FakeCapture()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
@@ -3487,6 +3506,7 @@ extension SerializedSharedState {
         // with the retry still pending and the `converging` slot still held.
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
@@ -3532,6 +3552,7 @@ extension SerializedSharedState {
         let capture = FakeCapture()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
@@ -4316,7 +4337,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
+            systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
         defer { backend.stop() }
@@ -4354,7 +4375,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
+            systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
         defer { backend.stop() }
@@ -4388,7 +4409,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
+            systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
         defer { backend.stop() }
@@ -4446,6 +4467,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
             // A generous 0.3s delay (well past the 5ms poll granularity and the
             // sub-millisecond de-route call below) so the de-route deterministically
@@ -4517,6 +4539,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
@@ -4592,6 +4615,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
@@ -4663,7 +4687,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
+            systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
@@ -4722,7 +4746,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
+            systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
@@ -4816,6 +4840,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
         defer { backend.stop() }
@@ -6652,6 +6677,7 @@ extension SerializedSharedState {
         let discovery = FakeDiscovery()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
         let capture = FakeCapture()

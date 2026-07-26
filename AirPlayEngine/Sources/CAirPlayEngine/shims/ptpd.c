@@ -110,6 +110,28 @@ ptpd_slave_remove(uint32_t slave_id)
   airptp_peer_remove(slave_id, ptpd_hdl);
 }
 
+// T4 (PLAN-AIRPLAY-COEXISTENCE.md; ptp-helper-design.md §5.1/§5.2): a
+// connect-time readiness check for the app side to poll while it waits for
+// the on-demand helper it just woke over the Mach service. Deliberately its
+// OWN local handle, never the module-global ptpd_hdl: ptpd_find_or_bind()
+// would overwrite that global (and log "Using host's ptp daemon" every
+// call), which this probe must not do — it only answers "is a shared daemon
+// up right now", it does not adopt one. airptp_daemon_find() already
+// validates the version and the 15s heartbeat, so a successful find IS the
+// readiness signal; airptp_end() on a find()'d (non-daemon) handle just
+// frees the local struct, touching no shared state (see airptp_end()).
+int
+ptpd_daemon_probe(void)
+{
+  struct airptp_handle *hdl = airptp_daemon_find();
+
+  if (!hdl)
+    return -1;
+
+  airptp_end(hdl);
+  return 0;
+}
+
 // Thread: main (normal privileges in the shipped find-only path; root only
 // under the AUDIOUTER_PTP_INPROC_BIND dev fallback below)
 //

@@ -103,10 +103,13 @@ flowchart LR
 
 ## Folder Map
 
-This target has no subfolders — all four files sit directly in
-`Sources/AirPlayEngine/`. `Sources/CAirPlayEngine/`, `Sources/engine-probe/`,
-and `Sources/ptp-helper/` are sibling targets documented in the package-root
-`../../AGENTS.md`.
+This target has no subfolders — all five files sit directly in
+`Sources/AirPlayEngine/` (the fifth, `PTPClockProbe.swift`, is a one-function
+wrapper over the shim's connect-time `ptpd_daemon_probe()` — the seam
+`AudiouterCore`'s PTP-helper activation polls, kept package-boundary-thin
+rather than folded into `AirPlayEngine.swift`). `Sources/CAirPlayEngine/`,
+`Sources/engine-probe/`, and `Sources/ptp-helper/` are sibling targets
+documented in the package-root `../../AGENTS.md`.
 
 ## Key Types
 
@@ -121,12 +124,13 @@ and `Sources/ptp-helper/` are sibling targets documented in the package-root
 | `RemoteEventHub` | AirPlayEngine.swift (~1435) | Multicasts `RemoteEvent` (speaker-originated transport/volume) from the vendored reverse-event thread. |
 | `WriteCadenceTracker` / `WriteLatencyProbe` | AirPlayEngine.swift (~1537, ~1671) | Diagnostic-only hot-path instrumentation; never gate a write. |
 | `OutputID`, `DeviceDescriptor`, `OutputState`, `RemoteEvent`, `AirPlayEngineError`, `PCMFormat` | AirPlayTypes.swift | Public, OwnTone-free value types at the FFI boundary. |
+| `PTPClockProbe` | PTPClockProbe.swift | One-function connect-time readiness check (`ptpd_daemon_probe()`) for `AudiouterCore`'s PTP-helper activation to poll. |
 
 ## External Dependencies
 
 | Dependency | Used for |
 |---|---|
-| `CAirPlayEngine` (sibling C target) | All vendored AirPlay 2/RAOP sender + PTP-client calls; imported by all four files here. |
+| `CAirPlayEngine` (sibling C target) | All vendored AirPlay 2/RAOP sender + PTP-client calls; imported by all five files here. |
 | `os` (Logger) | Structured logging (`ptp-clock`, `completion`, `engine-thread` subsystems/categories). |
 | Foundation (`Thread`, `DispatchSource`, `NSLock`) | `EngineThread`'s OS thread + timers; `CompletionRegistry`'s lock and timeout timers. |
 

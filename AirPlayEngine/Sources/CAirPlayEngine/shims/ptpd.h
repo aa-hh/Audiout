@@ -60,6 +60,15 @@ ptpd_slave_add(uint32_t *slave_id, const char *addr);
 void
 ptpd_slave_remove(uint32_t slave_id);
 
+// T4 (PLAN-AIRPLAY-COEXISTENCE.md): connect-time readiness probe — "is a
+// shared airptpd daemon up and its heartbeat fresh RIGHT NOW?" Returns 0 if
+// so, -1 otherwise. Uses its own local airptp_daemon_find()/airptp_end()
+// pair, NEVER the module-global ptpd_hdl ptpd_find_or_bind() maintains —
+// safe to call repeatedly (e.g. while polling for the on-demand helper to
+// come up) with no side effect on the real session lookup.
+int
+ptpd_daemon_probe(void);
+
 // Looks for a shared airptpd daemon. If not found, binds privileged ports 319
 // and 320, so must be called before the server drops privileges.
 int

@@ -133,9 +133,11 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 /// feedback loop.
 ///
 /// ## Re-resolve on default-output changes (BT connect/disconnect)
-/// A HAL listener on `kAudioHardwarePropertyDefaultOutputDevice`
-/// (``handleDefaultOutputChange()``) re-resolves the target whenever the default
-/// output switches (headphones connect/disconnect). It applies the same
+/// A subscription on the process-wide ``DefaultOutputDeviceMonitor`` — the same
+/// shared owner of `kAudioHardwarePropertyDefaultOutputDevice` both capture taps
+/// subscribe to (architecture review 2026-07-26, defect D) — drives
+/// ``handleDefaultOutputChange()``, which re-resolves the target whenever the
+/// default output switches (headphones connect/disconnect). It applies the same
 /// compare-before-rebuild discipline the capture coordinator uses for its
 /// `(deviceID, nominalRate)` key: an unchanged resolved target does ZERO work —
 /// no repoint, no graph rebuild — so a spurious/duplicate notification can't
@@ -269,15 +271,27 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// Audio (L5 orphan-node regression). Production code never sets it.
     public var test_startOverride: (() throws -> Void)?
 
-    /// Serial queue the `kAudioHardwarePropertyDefaultOutputDevice` listener block
-    /// fires on (off the HAL's own thread), mirroring
-    /// ``NativeCaptureCoordinator``'s `listenerQueue`.
-    private let listenerQueue = DispatchQueue(label: "com.airplaycontroller.localplayback.listener")
-    /// The default-output-change listener block (removed in deinit). Non-nil only
-    /// when the real HAL listener is installed (the production init) — the
-    /// injected-resolver test init drives ``handleDefaultOutputChange()`` directly
-    /// and installs no HAL listener.
-    private var defaultOutputListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Subscription handle on the process-wide ``DefaultOutputDeviceMonitor``
+    /// (architecture review 2026-07-26, defect D — one owning component per
+    /// shared resource, instead of this engine installing its own separate HAL
+    /// listener alongside the two capture taps' listeners on the same system
+    /// object). Non-nil only when the real subscription is installed (the
+    /// production init, macOS 14.2+) — the injected-resolver test init drives
+    /// ``handleDefaultOutputChange()`` directly and never subscribes.
+    private var monitorToken: DefaultOutputDeviceMonitor.SubscriptionToken?
+    /// This engine only reacts to a default-output DEVICE change (see
+    /// ``handleDefaultOutputChange()``'s own identity-based compare-before-rebuild
+    /// guard on `configuredTargetDevice`) — a same-device nominal-rate
+    /// renegotiation is irrelevant here because `AVAudioEngine` resamples
+    /// internally regardless of hardware rate. The shared monitor still evaluates
+    /// a rate divergence per subscriber, so this tracks the last rate the monitor
+    /// reported (updated only in `onChange`, both callbacks run serially on the
+    /// monitor's own queue) purely to keep that half of the guard quiet — without
+    /// it, every rate renegotiation on an unchanged device would needlessly wake
+    /// this subscriber (its own guard would then no-op it, but that defeats the
+    /// monitor's storm-quieting purpose). Never read/written off the monitor's
+    /// queue.
+    private var lastKnownDefaultRate = 0
 
     /// Fired synchronously from ``receive(buffer:for:)`` with one app's raw
     /// captured RMS level (0.0...1.0), while metering is active. PRE-VOLUME by
@@ -866,15 +880,16 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         #endif
     }
 
-    /// React to a `kAudioHardwarePropertyDefaultOutputDevice` change (BT connects/
-    /// disconnects, the user picks a different output). Re-resolves the
+    /// React to a default-output-device change (BT connects/disconnects, the user
+    /// picks a different output) — delivered via the shared
+    /// ``DefaultOutputDeviceMonitor`` in production. Re-resolves the
     /// follow-with-guard target and repoints the engine — but ONLY if the resolved
     /// target actually changed. This is the compare-before-rebuild loop-breaker
-    /// (mirrors ``NativeCaptureCoordinator/handleNominalSampleRateChanged(deviceID:rate:)``'s
-    /// `(deviceID, nominalRate)` key): an unchanged target — a duplicate/spurious
-    /// notification, or a switch between two devices that both resolve to the same
-    /// guarded built-in — does ZERO graph work. Internal so tests drive it directly
-    /// (no HAL listener needed).
+    /// (mirrors the two capture taps' own `(deviceID, nominalRate)`-keyed guards,
+    /// evaluated by the shared monitor per subscriber): an unchanged target — a
+    /// duplicate/spurious notification, or a switch between two devices that both
+    /// resolve to the same guarded built-in — does ZERO graph work. Internal so
+    /// tests drive it directly (no subscription needed).
     func handleDefaultOutputChange() {
         let newTarget = resolveTargetDeviceID()
         let (changed, running): (Bool, Bool) = stateLock.withLock {
@@ -914,36 +929,45 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         reestablishGraphOnGraphQueue(snapshot)
     }
 
-    // MARK: Default-output HAL listener
+    // MARK: Default-output monitor subscription
 
-    /// Install the live `kAudioHardwarePropertyDefaultOutputDevice` listener that
-    /// drives ``handleDefaultOutputChange()``. Production only — the injected
-    /// (test) init leaves it off and calls the handler directly.
+    /// Subscribe to the process-wide ``SharedDefaultOutputMonitor`` that drives
+    /// ``handleDefaultOutputChange()``. Production only (macOS 14.2+) — the
+    /// injected (test) init leaves it off and calls the handler directly. Below
+    /// 14.2 this is a no-op (matches the rest of the native capture path, which
+    /// has no supported implementation below 14.2 either — see
+    /// ``NativeCaptureCoordinator``).
     private func installDefaultOutputListener() {
         #if canImport(AudioToolbox)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleDefaultOutputChange()
-        }
-        self.defaultOutputListenerBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
+        guard #available(macOS 14.2, *) else { return }
+        let monitor = SharedDefaultOutputMonitor.instance
+        monitor.start()
+        lastKnownDefaultRate = monitor.current.nominalRate.map { Int($0.rounded()) } ?? 0
+        monitorToken = monitor.subscribe(
+            label: "localPlayback",
+            tracked: { [weak self] in
+                guard let self else {
+                    return DefaultOutputDeviceMonitor.Tracked(
+                        deviceID: AudioObjectID(kAudioObjectUnknown), rate: 0)
+                }
+                let rawDefault = self.outputResolver.defaultOutputDevice()
+                    .map { AudioObjectID($0) } ?? AudioObjectID(kAudioObjectUnknown)
+                return DefaultOutputDeviceMonitor.Tracked(
+                    deviceID: rawDefault, rate: self.lastKnownDefaultRate)
+            },
+            onChange: { [weak self] snapshot in
+                guard let self else { return }
+                self.lastKnownDefaultRate = snapshot.nominalRate.map { Int($0.rounded()) } ?? 0
+                self.handleDefaultOutputChange()
+            })
         #endif
     }
 
     private func removeDefaultOutputListener() {
         #if canImport(AudioToolbox)
-        guard let block = defaultOutputListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
-        defaultOutputListenerBlock = nil
+        guard #available(macOS 14.2, *), let token = monitorToken else { return }
+        SharedDefaultOutputMonitor.instance.unsubscribe(token)
+        monitorToken = nil
         #endif
     }
 

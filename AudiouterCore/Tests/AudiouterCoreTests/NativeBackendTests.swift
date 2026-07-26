@@ -87,6 +87,16 @@ extension SerializedSharedState {
         var addFailures: Set<UInt64> = []
         /// Ids that should THROW on `removeOutput`.
         var removeFailures: Set<UInt64> = []
+        /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
+        /// recovery to fall through to the removeOutput→addOutput teardown, same
+        /// as a real receiver that NACKs the FLUSH.
+        var flushFailures: Set<UInt64> = []
+        /// Ids whose `flushOutput` should return `false` WITHOUT throwing — models
+        /// the vendored flush's silent NO-OP (device in the set but not STREAMING /
+        /// session gone). The recovery must treat this like a failure and fall
+        /// through to teardown; before the discriminator fix a no-op was mistaken
+        /// for success and the teardown was skipped (silent-forever regression).
+        var flushNoOps: Set<UInt64> = []
 
         /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
         /// but before it returns successfully. Lets a test deterministically inject
@@ -128,24 +138,88 @@ extension SerializedSharedState {
         func removeDiscovery(_ descriptor: DeviceDescriptor) async {
             lock.withLock { discoveryRemoved.append(descriptor.name) }
         }
+        /// Which stream each device's LIVE session is actually on — the spy's model
+        /// of the vendored C `device->stream_id` (T7). This is what makes the
+        /// architecture review's defect B reproducible offline: `addOutput` on a
+        /// device that ALREADY has a live session is a silent idempotent no-op in
+        /// the real engine and does NOT move its binding, so the spy must refuse to
+        /// move it too. Only `rebindOutput` (stop + re-add) actually moves a live
+        /// session. Written only on op SUCCESS.
+        private var liveStreams: [UInt64: UInt32] = [:]
+        /// The stream `id`'s live session is on, or `nil` if it has none.
+        func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+        /// Every `rebindOutput` the backend issued, in order (T7).
+        private(set) var rebinds: [(OutputID, UInt32)] = []
+        var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
+
         func addOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
                 let hook = self.lock.withLock { self.onAddOutputBody }
                 hook?(id)
                 if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                // Engine idempotency: an already-live session is NOT re-bound.
+                self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
             }
         }
         func removeOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
                 if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
+            }
+        }
+
+        /// Records every FLUSH (F-REANCHOR) attempt (T-A, whole-system rebind
+        /// recovery's new default path). Deliberately NOT routed through `runOp`'s
+        /// artificial `opDelayNanos` latency — the race-window tests apply that
+        /// delay to model the removeOutput→addOutput fallback specifically, and a
+        /// flush that fails does so immediately, same as a real receiver's fast
+        /// NACK.
+        func flushOutput(_ id: OutputID) async throws -> Bool {
+            lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
+            if lock.withLock({ flushFailures.contains(id.rawValue) }) {
+                throw AirPlayEngineError.sessionFailed
+            }
+            // Silent no-op (returns false, no throw) — the vendored flush's
+            // not-STREAMING / NULL-session path. The caller must fall back to teardown.
+            if lock.withLock({ flushNoOps.contains(id.rawValue) }) { return false }
+            return true
+        }
+        private var flushed: [OutputID] = []
+        var flushedIDs: [OutputID] { lock.withLock { flushed } }
+
+        func boundStreamId(for id: OutputID) async -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+
+        /// Stop + re-add as ONE op — the only way a LIVE session's stream moves.
+        /// Records BOTH halves into the same arrays/`opLog` the separate
+        /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
+        /// a rebind's observable ops keeps holding.
+        func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+            try await runOp(id) {
+                self.lock.withLock {
+                    self.rebinds.append((id, streamId))
+                    self.removed.append(id)
+                    self.opLog.append("remove:\(id.rawValue)")
+                    self.liveStreams.removeValue(forKey: id.rawValue)
+                }
+                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                self.lock.withLock {
+                    if streamId == 0 {
+                        self.added.append(id)
+                        self.opLog.append("add:\(id.rawValue)")
+                    } else {
+                        self.streamAdds.append((id, streamId))
+                        self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                    }
+                    self.liveStreams[id.rawValue] = streamId
+                }
             }
         }
 
         /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
         /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
-        private(set) var streamAdds: [(OutputID, UInt32)] = []
+        private var streamAdds: [(OutputID, UInt32)] = []
         func addOutput(_ id: OutputID, streamId: UInt32) async throws {
             try await runOp(id) {
                 self.lock.withLock {
@@ -153,6 +227,11 @@ extension SerializedSharedState {
                     self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
                 }
                 if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                // Engine idempotency: an already-live session is NOT re-bound to
+                // `streamId` — that silent no-op is exactly defect B.
+                self.lock.withLock {
+                    if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = streamId }
+                }
             }
         }
 
@@ -168,6 +247,17 @@ extension SerializedSharedState {
                 rawWrites.append((streamId, pcm))
             }
         }
+
+        /// What `writeCadenceSnapshot()` reports next (T-ENG-CADENCE-1 test
+        /// seam) — this spy has no real per-write cadence tracker underneath
+        /// it, so a test dials in whatever the "engine" currently reports.
+        /// Defaults to an all-zero (healthy) snapshot, matching
+        /// `EngineControlling`'s own protocol-extension default.
+        private var cadenceSnapshotToReturn = WriteCadenceSnapshot()
+        func scriptCadenceSnapshot(_ snapshot: WriteCadenceSnapshot) {
+            lock.withLock { cadenceSnapshotToReturn = snapshot }
+        }
+        func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
 
         /// Run a device op, tracking concurrent-in-flight-per-device (to catch
         /// overlapping ops) and applying the artificial latency.
@@ -202,6 +292,13 @@ extension SerializedSharedState {
         }
         /// Push a synthetic out-of-band transition through the state stream.
         func pushState(_ id: OutputID, _ state: OutputState) {
+            // Mirror the real `boundStreamId`, which only reports a binding for a
+            // `.streaming`/`.connected` session: a device the engine just reported
+            // dead has no live binding to move, so a later add must bind fresh.
+            switch state {
+            case .streaming, .connected: break
+            default: lock.withLock { _ = liveStreams.removeValue(forKey: id.rawValue) }
+            }
             let c = lock.withLock { continuation }
             c?.yield((id, state))
         }
@@ -1877,11 +1974,18 @@ extension SerializedSharedState {
     /// exercises `applyEngineState`'s `.connected`/`.streaming` add-success
     /// branch directly (via `engine.pushState`), never going through
     /// `convergeDevice`'s add path, to prove the OTHER seed call site also fires.
-    /// The device had a distinct in-session level (75) before it dropped; if the
-    /// auto-recovery seed were (wrongly) suppressed like the buffer carve-out,
-    /// the model/engine would still read 75 after the reconnect instead of the
-    /// connect default (35).
-    @Test func autoRecoveryReconnectReseedsEngineVolume() async {
+    ///
+    /// F-REBIND (2026-07-26) reversed what value that site seeds on an add the
+    /// user did NOT ask for. An out-of-band auto-recovery reconnect is exactly
+    /// that — the engine drove it itself, `userConnectSeed` is unarmed — so the
+    /// seed now PRESERVES the level the device was already streaming at (75)
+    /// rather than slamming it to the connect default (35). Same code path a
+    /// Bluetooth-connect session rebind lands on, and preserve is right for both:
+    /// re-asserting the user's last level on a glitch they never initiated beats a
+    /// surprise jump to a fixed default. The site still FIRES (the point this test
+    /// guards) — `connectVolumeSeed` unconditionally pushes to the engine, so the
+    /// −30 dB trap stays closed; only WHICH level it pushes changed.
+    @Test func autoRecoveryReconnectPreservesInSessionVolume() async {
         let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
@@ -1909,10 +2013,10 @@ extension SerializedSharedState {
         engine.pushState(device.outputID, .connected)
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
 
-        #expect(backend.devices.first { $0.id == device.id }?.volume == 35,
-                       "an auto-recovery reconnect must reseed from the connect default (35), not preserve the pre-drop in-session level (75)")
-        #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 } ?? false,
-                      "the auto-recovery reconnect must push the connect default to the engine, not skip the seed")
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 75,
+                       "an auto-recovery reconnect (userConnectSeed unarmed) must PRESERVE the pre-drop in-session level (75), not reseed to the connect default")
+        #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.75) < 0.001 } ?? false,
+                      "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
@@ -3278,6 +3382,247 @@ extension SerializedSharedState {
         #expect(capture.startCount == startsBefore, "a retry must never restart the whole-system tap once capture is no longer desired — it would mute the Mac with the audio going nowhere")
     }
 
+    // MARK: Scheduling snapshot poll re-arm (T2, send_sched dead-code fix —
+    // whole-system-dropout investigation, docs/plans/
+    // PLAN-WHOLE-SYSTEM-AUDIO-DROPOUT-JUDDER-INVESTIGATION.md)
+    //
+    // `pollSchedulingSnapshot()` used to be armed exactly ONCE, at `start()`,
+    // before any device is ever selected (`captureRunning` is always false
+    // there) — so `send_sched` telemetry had never fired once, on any
+    // machine, in this app's history. The fix re-arms/cancels the poll from
+    // `reconcileCaptureGate()` itself, on the SAME `captureRunning` edges the
+    // gate already decides every selection change on. These tests prove the
+    // three properties the fix must have: it arms on the false->true edge
+    // (and that arm has an observable effect — `send_sched` actually logs);
+    // it's cancelled on the true->false edge, both via a plain deselect (the
+    // new code, in `reconcileCaptureGate`'s `else` branch) and via `stop()`
+    // (pre-existing code, re-asserted as a regression guard now that arming
+    // actually happens); and re-deciding "still true" never re-arms.
+
+    /// Selecting a device (the gate's false->true edge) must re-arm the poll —
+    /// and the poll's own immediate synchronous call (inside
+    /// `startSchedulingSnapshotPolling()`) must actually log `send_sched`,
+    /// proving this isn't just bookkeeping with no observable effect.
+    @Test func wholeSystemCaptureStartArmsSchedulingPollAndLogsSendSched() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // At launch (no device selected yet), `captureRunning` is false, so
+        // the poll must NOT be armed — the exact dead shape the investigation
+        // found; still correct after the fix, since it's the RE-arm on later
+        // selection that was missing, not this launch-time no-op.
+        #expect(!backend.test_hasPendingSchedulingPoll(), "the poll must not arm before any device is ever selected")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Scheduling Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+        #expect(backend.test_hasPendingSchedulingPoll(), "selecting a device (captureRunning false->true) must re-arm the scheduling poll")
+
+        func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
+        await pollUntil { !sendSchedLines().isEmpty }
+        #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
+    }
+
+    /// A plain deselect (the gate's true->false edge via `setOutputSet([])`,
+    /// NOT `stop()`) must ALSO cancel the poll — this exercises the actual NEW
+    /// code added to `reconcileCaptureGate()`'s `else` branch.
+    @Test func wholeSystemCaptureDeselectCancelsSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A3", name: "Deselect Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+
+        backend.setOutputSet([])
+        await pollUntil { capture.ops.last == "stop" }
+        #expect(!backend.test_hasPendingSchedulingPoll(), "deselecting (captureRunning true->false via reconcileCaptureGate, not stop()) must cancel the scheduling poll")
+    }
+
+    /// `stop()` (full backend teardown) must also cancel the poll —
+    /// pre-existing behavior (the cancel already lived in `stop()`), re-
+    /// asserted as a regression guard now that arming actually happens.
+    @Test func wholeSystemCaptureStopCancelsSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A2", name: "Stop Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+
+        backend.stop()
+        await pollUntil { !backend.test_hasPendingSchedulingPoll() }
+        #expect(!backend.test_hasPendingSchedulingPoll(), "stop() must cancel the scheduling poll's pending work item")
+    }
+
+    /// Selecting a SECOND device while already capturing (captureRunning
+    /// stays true->true) must NOT re-arm the poll a second time —
+    /// `reconcileCaptureGate`'s own `want != captureRunning` guard must
+    /// short-circuit before reaching the new arm/cancel code, so at most one
+    /// immediate `send_sched` line lands per capture-start episode, not one
+    /// per device added while already streaming (which would double the log
+    /// rate every time a second speaker joins an already-playing session).
+    @Test func wholeSystemCaptureSelectingSecondDeviceDoesNotDoubleArmSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let deviceA = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "First Poll Speaker")
+        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Second Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceA.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceA)) }
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceB)) }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        func sendSchedCount() -> Int { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") }.count }
+
+        backend.setOutputSet([deviceA.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { sendSchedCount() == 1 }
+
+        // Adding a second already-streaming device: captureRunning stays
+        // true->true, so `reconcileCaptureGate`'s own guard must return before
+        // ever reaching the arm/cancel code — no second immediate poll.
+        backend.setOutputSet([deviceA.id, deviceB.id])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(sendSchedCount() == 1, "selecting an additional device while already capturing must not re-arm (double-log) the scheduling poll")
+    }
+
+    // MARK: Write-cadence drift sampling (T-ENG-CADENCE-1, whole-system-
+    // dropout investigation) — `AirPlayEngine.writeCadenceSnapshot()` was
+    // previously referenced nowhere in `AudiouterCore`. `sampleWriteCadenceIfDue()`
+    // wires it in on the per-app mixer's write path (`onMixedBuffer`), same
+    // throttled/delta-gated shape as the sibling `sampleWriteBacklogIfDue()`.
+
+    /// The delta-gate's core property: an unchanging (healthy) cadence
+    /// snapshot must never log `write_cadence_drift`, no matter how much real
+    /// per-buffer traffic flows through the sampler's trigger — this is NOT
+    /// "we never got around to sampling", it holds whether or not the
+    /// sample interval was crossed, since an unchanged snapshot reads equal to
+    /// the zero-initialized last-reported baseline either way. Then, scripting
+    /// the engine to report genuine degradation and pushing enough buffers to
+    /// cross the sample interval proves the sampler is actually wired up and
+    /// CAN log when there is something worth logging.
+    @Test func writeCadenceDriftStaysSilentWhileHealthyThenLogsOnDegradation() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.cadence"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A6", name: "Cadence Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.cadence", name: "Cadence App", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.cadence") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.cadence") else {
+            Issue.record("the routed app's per-app tap must have registered")
+            return
+        }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        func driftLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") } }
+
+        // Healthy (the spy's zeroed default `writeCadenceSnapshot()`): must
+        // stay silent under real per-buffer traffic through the full pipeline.
+        for i in 0..<10 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(driftLines().isEmpty, "an unchanging (healthy) cadence snapshot must never log write_cadence_drift")
+
+        // Script real degradation, then push well past the sample interval
+        // (`backlogSampleInterval`, reused by design). Each push is a
+        // single-contributor-stream buffer, which `AppRouteMixer.handleBuffer`
+        // passes straight through as exactly ONE `onMixedBuffer` emission (no
+        // hold-window accumulation on that path), so N pushes reliably cross
+        // an N-buffer sampling threshold.
+        engine.scriptCadenceSnapshot(WriteCadenceSnapshot(
+            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 0.05))
+        for i in 10..<520 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+
+        await pollUntil(timeout: 5) { !driftLines().isEmpty }
+        #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
+        #expect(driftLines().allSatisfy { $0.contains("\"path\":\"perApp\"") },
+                      "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
+    }
+
+    /// The whole-system (stream 0) mirror of the test above, at the ACTUAL
+    /// production `EngineSink` (not `SpyEngine` — `EngineSink.init(engine:)`
+    /// takes the concrete `AirPlayEngine`, not the `EngineControlling` seam,
+    /// so this is the one place a real engine instance is the only way to
+    /// exercise this code at all). `AirPlayEngine.init(config:)` is
+    /// documented side-effect-free ("the engine thread is created lazily in
+    /// start(), not here"), and every `write` is a no-op while `startedFlag`
+    /// is false (never set, since `start()` is never called) — so this is
+    /// still a hermetic, no-hardware test: it proves `EngineSink`'s new
+    /// cadence sampler (mirroring `sampleWriteCadenceIfDue()` byte-for-byte)
+    /// runs across real per-buffer traffic without crashing and never
+    /// spuriously logs — the delta-gate half of the mirror. It can't
+    /// exercise the "logs on real degradation" half the way the per-app test
+    /// does above, because that needs the engine's OWN wall-clock-driven
+    /// counters to move, and this spy has no way to script the concrete
+    /// `AirPlayEngine` the way `SpyEngine.scriptCadenceSnapshot` scripts the
+    /// seam — the same reason `write_backlog_drop`'s whole-system sampler
+    /// (9965bd9) has never had a dedicated unit test either. The "fires on
+    /// degradation" arithmetic itself is proven above; this test's job is
+    /// only to prove THIS call site's wiring doesn't crash and respects the
+    /// same gate.
+    @Test func engineSinkWriteCadenceStaysSilentWithRealUnstartedEngine() {
+        let engine = AirPlayEngine()
+        let sink = EngineSink(engine: engine)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        for i in 0..<520 {
+            let pcm = Data(repeating: 0xAA, count: 4 * 200)
+            sink.write(pcm: pcm, pts: timespec(tv_sec: i, tv_nsec: 0))
+        }
+
+        let driftLines = box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") }
+        #expect(driftLines.isEmpty, "a never-started engine's cadence counters never move, so EngineSink must never log write_cadence_drift for it")
+    }
+
     // MARK: Sleep/wake (B6b)
 
     /// Discover an AP2 device, select it, and wait until it's streaming (`added`).
@@ -3601,27 +3946,88 @@ extension SerializedSharedState {
 
     /// A device/nominal-rate rebuild (`onDeviceRateRebuild`, fired by the
     /// coordinator's `recreateTap(cause: .deviceOrRateChange)`) resets every
-    /// streaming Selected Device's whole-system (stream-0) session: exactly one
-    /// removeOutput→addOutput per device, on the single-stream `addOutput(_:)` (NOT
-    /// the per-app `addOutput(_:streamId:)`).
-    @Test func wholeSystemDeviceRateRebuildRebindsSelectedDeviceExactlyOnce() async {
+    /// streaming Selected Device's whole-system (stream-0) session — and, as of
+    /// F-REANCHOR going live-verified/default, does so via a FLUSH re-anchor, NOT
+    /// a removeOutput→addOutput teardown: the flush keeps the session alive
+    /// (no fresh RTSP/RTP session, no audible drop), so a device with a healthy
+    /// receiver never sees an extra remove/add pair.
+    @Test func wholeSystemDeviceRateRebuildFlushesInsteadOfTearingDown() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device()
         await startSelectAndStream(backend, engine, discovery, capture, device)
         defer { backend.stop() }
 
+        let removesBefore = engine.removedIDs.filter { $0 == device.outputID }.count
+        let addsBefore = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
+        await pollUntil { engine.flushedIDs.contains(device.outputID) }
+
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recapture must FLUSH the device exactly once")
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesBefore,
+                       "a successful flush must NOT tear down — no removeOutput")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsBefore,
+                       "a successful flush must NOT tear down — no extra addOutput beyond the initial converge")
+    }
+
+    /// The automatic safety fallback: if the FLUSH re-anchor throws (a receiver
+    /// that NACKs or can't apply it), the recovery must fall through to the
+    /// proven removeOutput→addOutput teardown — exactly one remove/add per
+    /// device, on the single-stream `addOutput(_:)` (NOT the per-app
+    /// `addOutput(_:streamId:)`) — so a failed flush can never leave the device
+    /// silent. This is the pre-F-REANCHOR default's exact behavior, now reachable
+    /// only via the fallback path.
+    @Test func wholeSystemDeviceRateRebuildFallsBackToTeardownWhenFlushThrows() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        engine.flushFailures = [device.outputID.rawValue]
         let streamAddsBefore = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
 
         capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
         await pollUntil { engine.removedIDs.contains(device.outputID) }
 
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recovery must attempt the flush first, even though it fails")
         #expect(engine.removedIDs.filter { $0 == device.outputID }.count == 1,
-                       "recapture must removeOutput the device exactly once")
+                       "a thrown flush must fall back to exactly one removeOutput")
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2,
-                       "recapture re-adds via single-stream addOutput: converge(1) + recovery(1)")
+                       "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == streamAddsBefore,
                        "whole-system reset must NOT use the per-app addOutput(_:streamId:)")
+    }
+
+    /// REGRESSION (adversarial review, 2026-07-26): a FLUSH that silently NO-OPs —
+    /// the vendored `airplay_device_flush` returns 0 because the session isn't
+    /// STREAMING (a device swept into the whole-system reset loop while momentarily
+    /// not streaming, or one whose session just dropped) — returns `false`, NOT a
+    /// throw. Before the discriminator fix, `performRebindRecovery` treated any
+    /// non-throw as success and SKIPPED the teardown, leaving that device silent
+    /// forever. The recovery must treat a no-op exactly like a failure: fall through
+    /// to the removeOutput→addOutput teardown that actually re-establishes the session.
+    @Test func wholeSystemDeviceRateRebuildFallsBackToTeardownWhenFlushNoOps() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        engine.flushNoOps = [device.outputID.rawValue]   // flush returns false, no throw
+
+        capture.fireDeviceRateRebuild()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recovery must attempt the flush first")
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == 1,
+                       "a NO-OP flush must fall back to exactly one removeOutput — NOT be mistaken for success")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2,
+                       "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
     }
 
     /// T8: the signal-only `.streamHealth` echo of the same recapture/rebind
@@ -3712,6 +4118,11 @@ extension SerializedSharedState {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
+        // This test exercises the removeOutput→addOutput teardown/backoff path
+        // specifically, so force the FLUSH re-anchor to fail for this device —
+        // every recapture below falls straight through to the fallback.
+        engine.flushFailures = [device.outputID.rawValue]
+
         // Recapture #1: force its addOutput to fail so a 0.3s backoff retry gets
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
@@ -3770,6 +4181,11 @@ extension SerializedSharedState {
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        // This test proves the remove→add teardown race is safe, so force the
+        // FLUSH re-anchor to fail for this device — recovery falls straight
+        // through to the fallback pair the race window below is built around.
+        engine.flushFailures = [device.outputID.rawValue]
 
         // Slow every subsequent engine op so the recovery's remove→add pair has a
         // wide window for a concurrent deselect to try to land inside it.
@@ -3890,6 +4306,10 @@ extension SerializedSharedState {
         await startSelectAndStream(backend, engine, discovery, capture, device)
         let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
+        // This test drives the teardown/backoff path specifically, so force the
+        // FLUSH re-anchor to fail — the recovery falls through to the
+        // removeOutput→addOutput fallback the backoff retry below is about.
+        engine.flushFailures = [device.outputID.rawValue]
         // The receiver refuses the rebind, so recovery attempt 1 fails and schedules
         // a backed-off retry — the state the sleep has to clean up after.
         engine.addFailures = [device.outputID.rawValue]
@@ -3936,6 +4356,9 @@ extension SerializedSharedState {
         await startSelectAndStream(backend, engine, discovery, capture, device)
         let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
+        // Force the FLUSH re-anchor to fail so the recovery falls through to the
+        // removeOutput→addOutput fallback attempt 1 below is about.
+        engine.flushFailures = [device.outputID.rawValue]
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()   // emits recovering:true, then fails attempt 1
         await pollUntil(timeout: 5) {
@@ -4001,6 +4424,79 @@ extension SerializedSharedState {
         #expect(binds.count == 1, "device should be bound exactly once")
         #expect(binds.first?.1 ?? 0 >= 1,
                                     "per-app stream id must be >= 1 (0 is the legacy whole-system path)")
+    }
+
+    // MARK: T7 — scope transitions across the converging/bindTail seam
+    //
+    // The two tests below are the whole point of T7 (architecture review defect
+    // B). `converging` serializes the whole-system path (stream 0) and `bindTail`
+    // serializes the per-app path (stream >= 1); neither knows the other exists,
+    // and the engine answers a mismatched-stream `addOutput` on an already-live
+    // session with a SILENT no-op. So a device changing SCOPE used to keep
+    // streaming its old stream while Swift bookkeeping recorded the new one —
+    // shown as routed, audibly dead. `SpyEngine.liveStream(of:)` models that
+    // no-op faithfully, so each test genuinely fails without the
+    // `boundStreamId` + `rebindOutput` arbitration.
+
+    /// WHOLE-SYSTEM -> PER-APP, same device: a Selected Device (live on stream 0)
+    /// that becomes a per-app redirect target must end up with its ENGINE session
+    /// on the per-app stream — not merely with `streamBindings` claiming so.
+    @Test func deviceMovingFromWholeSystemToPerAppRebindsTheLiveSession() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Whole-system first: the device is streaming the system mix on stream 0.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "precondition: the device must be live on the whole-system stream")
+
+        // Now redirect an app to the SAME device.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        let live = engine.liveStream(of: device.outputID)
+        #expect(live != nil && live! >= 1,
+                """
+                the engine session must actually MOVE to the per-app stream — \
+                a silent addOutput no-op leaves it on \(live.map(String.init) ?? "nil") \
+                while the app's audio is written to a stream the device never joined
+                """)
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID },
+                "the move must go through the engine's serialized rebindOutput, not a cross-FIFO remove+add pair")
+    }
+
+    /// PER-APP -> WHOLE-SYSTEM, same device: a redirect target (live on stream N)
+    /// that is then selected for the whole system must end up with its ENGINE
+    /// session on stream 0, which is where the whole-system mix is written.
+    @Test func deviceMovingFromPerAppToWholeSystemRebindsTheLiveSession() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Per-app first: the device carries one app's redirect on a stream >= 1.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "precondition: the device must be live on a per-app stream")
+
+        // Now select the SAME device for the whole system.
+        backend.setOutputSet([device.id])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                """
+                the engine session must actually MOVE to stream 0 — a silent \
+                addOutput no-op leaves the device on its per-app stream while the \
+                whole-system mix goes to stream 0 and is never heard
+                """)
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the move must go through the engine's serialized rebindOutput")
     }
 
     /// T4b defensive guard: a per-app route that targets an AirPlay-1-only

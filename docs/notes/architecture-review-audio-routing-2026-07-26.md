@@ -1,8 +1,66 @@
 # Architecture review — audio-routing / capture subsystem
 
 **Date:** 2026-07-26
-**Status:** Review complete. Verdict issued. Implementation plan NOT yet written (deliberately deferred — see [Blocked on](#blocked-on-in-flight-branches)).
+**Status:** Review complete. Re-evaluated against post-merge `main` later the same day — see
+[Re-evaluation](#re-evaluation--2026-07-26-against-post-merge-main). The former blocker is gone (both in-flight
+branches merged); the implementation plan is now unblocked but NOT yet written.
 **Scope reviewed:** Core Audio capture + local playback + permissions + the `NativeBackend` ↔ `AirPlayEngine` binding seam.
+
+---
+
+## Re-evaluation — 2026-07-26, against post-merge main
+
+The original review was written before the reliability-audit and memory-leak branches landed. Both have since
+**merged to main** (reliability audit Waves 1–7 via `5d0d54f`; memory-leak waves via `b46402e`), and the merged work
+partially acted on this review — `NativeBackend` carries comments literally labelled "Finding 1" and "Finding 2".
+Every claim below was re-verified against current `main`; line numbers in the original body are stale (the files
+grew: `NativeBackend` 5353 lines, `NativeCaptureCoordinator` 2564, `PerAppCaptureCoordinator` 1332), but the
+findings were re-checked by content, not line number. Per-defect status:
+
+**A — STANDS, evidence strengthened (still L).** No shared lifecycle owner was created. The predicted "same fix
+written twice" happened again: *both* coordinators now carry their own nominal-sample-rate listener plus a
+`(deviceID, rate)` loop-breaker, independently. `PerAppCaptureCoordinator` still lacks the NaN/±inf/≤0 ASBD
+`validate(_:)` guard `NativeCaptureCoordinator` has. Silver lining: both files now contain the same proven,
+live-shaped pattern, so unification is extraction of working code, not new design.
+
+**B — ROUGHLY HALF-FIXED on main (M → S).** Landed: the whole-system rebind recovery now claims the *same*
+`converging` slot as `convergeDevice` (the "Finding 1" fix — one serialization domain per device for engine ops);
+rebind-recovery generation/pending bookkeeping is shared across per-app and whole-system scopes
+(`RebindScope`, one recovery chain per device); and the T7 invariant keeps app-route targets *out* of the
+whole-system output set — a device is either stream-0 or per-app, never both — which structurally prevents the
+original failure mode 1 in steady state. The engine also now consults live C device state in
+`addOutput`/`removeOutput` and serializes per-output ops (`opsInFlight`). **Remains:** the engine's silent
+idempotent no-op when `addOutput(_:streamId:)` hits an already-live session — explicitly documented in
+`AirPlayEngine.addOutput(_:streamId:)` as out of scope ("T6's job if needed") — plus the lack of a per-stream
+unbind/query primitive, and the scope-*transition* window (a device moving between whole-system and per-app roles)
+still crosses the `converging`/`bindTail` seam. The remaining piece is precisely the engine change the original
+review warned not to skip.
+
+**C — CORE FINDING UNCHANGED (still S).** `runProbe()` still short-circuits: a TCC read of `.granted` returns
+immediately and skips `functionalGrantProbe()` — the behavioural check is still bypassed in exactly the
+cdhash-stale-grant scenario it was built for. Periphery improved: permission reads are centralized through
+`SystemAudioCaptureTCC` (private `TCCAccessPreflight`, correct 14.4+ `kTCCServiceAudioCapture` bucket), the
+duplicated `CGPreflightScreenCaptureAccess` call sites are gone (only `TCCBucketDiagnostic` keeps one, as a
+diagnostic), and T5 telemetry now logs *which* method produced every verdict. But the signal count **grew**
+(`PermissionStateObserver`, `TCCBucketDiagnostic`, `TCCProbeRunner`, the `tcc-probe` helper) — better instrumented,
+not more unified. `AppRelauncher.relaunch()` still has no caller.
+
+**D — STRUCTURALLY UNCHANGED, acute harm patched (still M, urgency lowered).** Still no owner of the device
+sample rate; there are now *three* independent reactors (both coordinators + `LocalPlaybackEngine`, each with its
+own loop-breaker). But the full reactive repair chain landed: rate change → tap rebuild → **RTP session reset**,
+for both scopes (`resetAirPlaySessionForWholeSystem`, `resetAirPlaySessionForRoutedApp`). That is the root-cause
+fix for R10 and the Mac+AirPlay mixed-selection dropout — pending live verification. Note this is exactly the
+"add more listeners" direction the What-not-to-do section warned against; it fixed the shipping bugs, and it is
+why D's consolidation case still holds. Its urgency drops from "live bug" to "future-proofing before
+multi-Bluetooth adds a fourth consumer."
+
+**Verdict and order unchanged:** targeted refactor; A + D together, then B's remainder, then C. Revised sizing:
+one L (A), one M (D), two S (B-remainder, C). The work is now consolidation of working-but-triplicated code
+rather than bug-fixing.
+
+**New sequencing caveat:** much of the just-merged machinery (rate-reset chain, rebind recovery, Firefox routing)
+still awaits Alec's live verification. Consolidating A + D would churn exactly that code and invalidate the pending
+live checks — run the owed live-test sessions first, or accept re-running them after consolidation.
 
 ---
 
@@ -169,6 +227,9 @@ Audio integration against thin, under-documented Apple APIs. It is not evidence 
 
 ## Recommended fixes
 
+> **Sizing superseded** — see [Re-evaluation](#re-evaluation--2026-07-26-against-post-merge-main): B shrank to S
+> (its Swift-side half landed on main), D's urgency dropped (acute bugs patched reactively). Order unchanged.
+
 | # | Fix | Size | Rationale |
 |---|---|---|---|
 | A | Unify the two capture coordinators behind one shared lifecycle owner | **L** | Largest, most safety-critical files; changes the tap-rebuild trigger surface, so most of the calendar cost is live-audio testing, not typing |
@@ -200,15 +261,24 @@ Both unbuilt features make this worse if the foundation is left alone:
 - **Multi-Bluetooth** (`docs/plans/PLAN-UNIVERSAL-SYNC.md`) explicitly proposes a **third** parallel routing path
   (`BTSyncedSink`) alongside the AirPlay-engine and local paths, independently touching the same unowned
   device-rate/clock surface — and contains no remediation of its own. Two things that drift apart become three.
-- **Synced local + AirPlay** is built on the architecture whose mixed-selection dropout (same root cause as A/D) is
-  not yet fixed.
+- **Synced local + AirPlay** is built on the architecture whose mixed-selection dropout (same root cause as A/D)
+  was not yet fixed at review time. *(Re-evaluation: the root-cause fix — rate listener + tap rebuild + RTP session
+  reset — has since landed on `main`, pending live verification; the synced-local branch still needs `main` merged
+  in to pick it up.)*
 
 The debt is not merely coexisting with the roadmap; the roadmap multiplies it. Each fix area gains one more
 independent consumer if the features land first.
 
 ---
 
-## Blocked on: in-flight branches
+## Blocked on: in-flight branches — RESOLVED
+
+> **Resolved 2026-07-26:** both branches merged to `main` (reliability audit Waves 1–7 via `5d0d54f`; memory-leak
+> work via `b46402e`). Steps 1–2 of "When unblocked" were performed as part of the
+> [re-evaluation](#re-evaluation--2026-07-26-against-post-merge-main) — the two branches' loop-breaker work did not
+> conflict (the guards landed per-coordinator, mirrored, exactly as fix A expects to absorb). Step 3 — writing
+> `docs/plans/PLAN-AUDIO-ROUTING-CONSOLIDATION.md` — is the open next step, sequenced after the owed live-test
+> sessions. The original text is kept below for the record.
 
 The implementation plan was deliberately **not** written yet. Two branches carry unmerged work that changes the
 starting state:
@@ -243,3 +313,78 @@ merged.
 
 Standing project rules apply to the eventual execution: work in a dedicated worktree (not the live `main` checkout),
 staff-level review before it reaches Alec, and no merge without his explicit go-ahead.
+
+---
+
+## Correction — 2026-07-26 (later), against the executed implementation branch
+
+`claude/audio-routing-consolidation-92be71` (roadmap item 007) executed the plan this review called for. Several
+things differed from even the re-evaluated predictions above; this section documents what actually happened,
+per defect, plus one unrelated bug found along the way.
+
+**A — landed as a PARTIAL consolidation, not the full unification originally envisioned.** T4
+(`AudiouterCore/Sources/AudiouterCore/TapRebuildLifecycle.swift`) extracted only the parts of the two coordinators'
+rebuild machinery that were provably identical: `TapRebuildCoalescer` (the STABILITY(C6) pending-rebuild flag) and
+`TapReanchor` (the `rateMoved`/`deviceMoved` re-anchor compare). The claim/teardown/commit choreography itself —
+what the original review's line-number citations were pointing at — stays two bodies in
+`NativeCaptureCoordinator.swift` and `PerAppCaptureCoordinator.swift`, now cross-referenced by doc comments instead
+of merged. The commit message enumerates why per-step: different state stores (one `_state` enum vs. a dictionary of
+reference-type slots), different claim payloads, a per-app mid-rebuild process re-resolve with no whole-system
+counterpart, opposite orphan-teardown placement, and the whole-system-only audio I/O workgroup leave/join — a shared
+template would have been pure control flow injected as closures, judged harder to audit than the two direct bodies.
+Also, by the time of implementation the review's literal file/line structure was stale (both files had grown further
+and moved), and the actual sample-rate/loop-breaker duplication turned out to be *less* than the re-evaluation
+implied in one respect: once T1 (`DefaultOutputDeviceMonitor`) landed, both taps' compare-before-rebuild decisions
+route through the same `TapRebuildDecision` helper the monitor already used, so that specific piece of "written
+twice" collapsed into one shared piece as a side effect of fixing D, ahead of A being finished. A is still open work:
+the two rebuild bodies remain separately written.
+
+**B — closed for the scope-transition failure mode; two residual risks left explicitly open, not silently dropped.**
+T6 added `OutputBindResult` (`AirPlayEngine/Sources/AirPlayEngine/AirPlayEngine.swift`), `boundStreamId(for:)`, and
+`rebindOutput(_:toStreamId:)` to `AirPlayEngine`, replacing the silent idempotent no-op the review flagged with a
+queryable result and a real move operation. T7 routed both `NativeBackend` paths through one call site,
+`bindOutput(_:toStream:)`, which asks the engine which stream a device is really on and moves it if it differs from
+the wanted stream — closing the "device changes scope (Selected Device ↔ per-app redirect target) and keeps
+streaming its old stream while Swift bookkeeping shows the new one" failure mode. Two things T7's commit message
+calls out as deliberately NOT fixed here, carried forward as open items:
+- Scope exclusivity (a device is either stream-0 or per-app, never both) is still enforced only in
+  `GroupController`, not in `NativeBackend` itself.
+- Cross-FIFO ordering between `converging` and `bindTail` is arbitrated *within* a single transition (via the
+  engine's per-`OutputID` `opsInFlight` slot) but ordering *between* the two FIFOs across an in-flight transition —
+  i.e. a second transition starting on the other FIFO while the first is still in flight — is still unarbitrated.
+
+**C — fixed via code-identity gating, not by removing the short-circuit.** The re-evaluation's core finding stood:
+`runProbe()` skipped `functionalGrantProbe()` whenever a fast TCC read already said `.granted`, exactly the
+cdhash-stale-grant case the audible tone probe exists to catch. The fix (`ed502dd`) does not remove that fast path —
+removing it would mean an audible probe tone on every single permission check, not just the ones that need it.
+Instead `CoreAudioTonePermissionProbe` gates the fast path on the CURRENT binary's code identity
+(`kSecCodeInfoUnique`) matching the fingerprint that last proved the grant out loud
+(`shouldRunFunctionalProbe(tccStatus:storedIdentity:currentIdentity:)`); `SystemAudioCaptureTCC` gained
+`provenCodeIdentity()`/`recordProvenCodeIdentity(_:)` to store that fingerprint. No stored fingerprint, or a
+mismatch (e.g. after a rebuild), re-runs the audible functional probe.
+
+**D — consolidated behind `DefaultOutputDeviceMonitor`, watcher-only, as decided.** T1 added
+`DefaultOutputDeviceMonitor.swift`: exactly one `kAudioHardwarePropertyDefaultOutputDevice` listener and one
+`kAudioDevicePropertyNominalSampleRate` listener for the whole process, fanning out to subscribers, each evaluated
+against its own tracked device/rate via the shared `TapRebuildDecision` helper. It is a pure watcher — reads and
+listener add/remove only, never `AudioObjectSetPropertyData` — consistent with the JUCE `AudioDeviceManager`
+external baseline the original review cited (one broadcaster owns device state; no pinning or restoring of hardware
+config). T2 migrated both `CoreAudioSystemTap` and `CoreAudioProcessTap` onto it; T5 migrated
+`LocalPlaybackEngine` onto the same shared instance (`SharedDefaultOutputMonitor.instance`). All three of the
+review's independent reactors now share one listener pair; the reactive repair chain (rate change → tap rebuild →
+RTP session reset) the re-evaluation described is unchanged, just fed by one owner instead of three.
+
+**New open finding, not fixed in this branch:** while porting the whole-system tap's guard pattern into the per-app
+coordinator (T3), it surfaced that per-app taps still have no equivalent of the whole-system tap's `deviceMoved`
+dropout-prevention identity compare (`NativeCaptureCoordinator.swift`, via `TapReanchor.deviceMoved`) —
+`PerAppCaptureCoordinator` reacts to rate divergence (T3) but not to the same device-identity-changed check. Flagged
+as a candidate follow-up; not fixed here.
+
+**Unrelated bug found and fixed along the way (T-DIAG):** investigating this subsystem for the consolidation work
+surfaced a telemetry misattribution bug, not one of the four lettered defects. Two live `PerAppCaptureCoordinator`
+instances exist over the same bundle IDs (`NativeBackend.perAppCapture` for routing, `NativeBackend.meteringCapture`
+for metering-only), and both emitted `capturePA` transitions with nothing distinguishing which instance spoke —
+read together, the interleaved streams described an impossible sequence (a `capturing -> stopping` transition with
+no preceding `-> capturing`). Fixed by stamping each transition with the coordinator's existing `name` field as
+`coordinator`. Full resolution and per-hypothesis verdict recorded in
+`docs/plans/PLAN-LIVE-TEST-HANDOFF-2026-07-25.md`.

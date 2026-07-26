@@ -1,49 +1,50 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
-final class BackendKindResolutionTests: XCTestCase {
+@Suite struct BackendKindResolutionTests {
 
-    func testDefaultsToNativeWithNoExplicitArgOrEnv() {
+    @Test func defaultsToNativeWithNoExplicitArgOrEnv() {
         // Mock is opt-in only: a plain launch (no arg, no env) must resolve to
         // the real backend, never fabricated demo speakers.
-        XCTAssertEqual(BackendKind.resolved(explicit: nil, environment: [:]), .native)
+        #expect(BackendKind.resolved(explicit: nil, environment: [:]) == .native)
     }
 
-    func testMockRequiresExplicitEnv() {
-        XCTAssertEqual(BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "mock"]), .mock)
+    @Test func mockRequiresExplicitEnv() {
+        #expect(BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "mock"]) == .mock)
     }
 
-    func testExplicitArgBeatsEnv() {
+    @Test func explicitArgBeatsEnv() {
         let resolved = BackendKind.resolved(
             explicit: .ownTone,
             environment: ["AIRPLAY_BACKEND": "mock"]
         )
-        XCTAssertEqual(resolved, .ownTone, "an explicit argument should win over the env var")
+        #expect(resolved == .ownTone, "an explicit argument should win over the env var")
     }
 
-    func testEnvVarSelectsOwnTone() {
+    @Test func envVarSelectsOwnTone() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "owntone"])
-        XCTAssertEqual(resolved, .ownTone)
+        #expect(resolved == .ownTone)
     }
 
-    func testEnvVarIsCaseInsensitive() {
+    @Test func envVarIsCaseInsensitive() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "OwnTone"])
-        XCTAssertEqual(resolved, .ownTone)
+        #expect(resolved == .ownTone)
     }
 
-    func testUnknownEnvValueFallsBackToNative() {
+    @Test func unknownEnvValueFallsBackToNative() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "sonos"])
-        XCTAssertEqual(resolved, .native, "an unrecognized value should fall back to the native default, not crash or silently mock")
+        #expect(resolved == .native, "an unrecognized value should fall back to the native default, not crash or silently mock")
     }
 
-    func testEnvVarSelectsNative() {
+    @Test func envVarSelectsNative() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "native"])
-        XCTAssertEqual(resolved, .native)
+        #expect(resolved == .native)
     }
 
-    func testEnvVarForNativeIsCaseInsensitive() {
+    @Test func envVarForNativeIsCaseInsensitive() {
         let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "Native"])
-        XCTAssertEqual(resolved, .native)
+        #expect(resolved == .native)
     }
 
     // MARK: - AIRPLAY_START_BUFFER_MS resolution (env → setting → default)
@@ -58,39 +59,39 @@ final class BackendKindResolutionTests: XCTestCase {
         return settings
     }
 
-    func testStartBufferDefaultsWithNoEnvAndNoSetting() {
-        XCTAssertEqual(nativeStartBufferMs(environment: [:], settings: throwawaySettings()),
+    @Test func startBufferDefaultsWithNoEnvAndNoSetting() {
+        #expect(nativeStartBufferMs(environment: [:], settings: throwawaySettings()) ==
                        AppSettings.defaultStartBufferMs)
     }
 
-    func testStartBufferUsesPersistedSettingWithNoEnv() {
-        XCTAssertEqual(
-            nativeStartBufferMs(environment: [:], settings: throwawaySettings(startBufferMs: 2250)),
+    @Test func startBufferUsesPersistedSettingWithNoEnv() {
+        #expect(
+            nativeStartBufferMs(environment: [:], settings: throwawaySettings(startBufferMs: 2250)) ==
             2250)
     }
 
-    func testStartBufferEnvBeatsSetting() {
+    @Test func startBufferEnvBeatsSetting() {
         // The env var is a deliberate per-launch dev override — it wins even
         // over an explicit user setting, and may take values the UI doesn't
         // offer (e.g. 500 for the gated floor sweep).
-        XCTAssertEqual(
+        #expect(
             nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": "500"],
-                                settings: throwawaySettings(startBufferMs: 2250)),
+                                settings: throwawaySettings(startBufferMs: 2250)) ==
             500)
-        XCTAssertEqual(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": "500"]), 500)
+        #expect(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": "500"]) == 500)
     }
 
-    func testStartBufferInvalidEnvFallsThroughToSetting() {
+    @Test func startBufferInvalidEnvFallsThroughToSetting() {
         // Out of range or non-numeric behaves like UNSET (one stderr warning):
         // the persisted setting still applies — same dev-knob-not-config
         // policy as AIRPLAY_BACKEND's unknown-value fallback.
         for bad in ["250", "60000", "fast", ""] {
-            XCTAssertEqual(
+            #expect(
                 nativeStartBufferMs(environment: ["AIRPLAY_START_BUFFER_MS": bad],
-                                    settings: throwawaySettings(startBufferMs: 1500)),
+                                    settings: throwawaySettings(startBufferMs: 1500)) ==
                 1500, "env \"\(bad)\" should be ignored")
-            XCTAssertNil(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": bad]))
+            #expect(nativeStartBufferEnvOverrideMs(environment: ["AIRPLAY_START_BUFFER_MS": bad]) == nil)
         }
-        XCTAssertNil(nativeStartBufferEnvOverrideMs(environment: [:]))
+        #expect(nativeStartBufferEnvOverrideMs(environment: [:]) == nil)
     }
 }

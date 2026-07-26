@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSettingsUI
@@ -11,7 +12,7 @@ import AppKit
 /// job; here we assert the pane's contract: section presence, the option labels
 /// (Never / N minute(s)), the initial selection, and that a pick applies through.
 @MainActor
-final class AudioSettingsWakeRestoreTests: XCTestCase {
+@Suite struct AudioSettingsWakeRestoreTests {
 
     private final class ApplyRecorder { var applied: [Int] = [] }
 
@@ -31,37 +32,37 @@ final class AudioSettingsWakeRestoreTests: XCTestCase {
             excluded: makeExcluded(), runningAppsProvider: { [] }, wakeRestore: model)
     }
 
-    func testNoModelMeansNoWakeRestoreSection() {
+    @Test func noModelMeansNoWakeRestoreSection() {
         let pane = AudioSettingsViewController(excluded: makeExcluded(), runningAppsProvider: { [] })
-        XCTAssertFalse(pane.test_hasWakeRestoreSection)
+        #expect(!pane.test_hasWakeRestoreSection)
     }
 
-    func testOptionLabels() {
+    @Test func optionLabels() {
         let pane = makePane(recorder: ApplyRecorder())
-        XCTAssertTrue(pane.test_hasWakeRestoreSection)
-        XCTAssertEqual(pane.test_wakeRestoreOptionTitles,
+        #expect(pane.test_hasWakeRestoreSection)
+        #expect(pane.test_wakeRestoreOptionTitles ==
                        ["Never", "1 minute", "2 minutes", "5 minutes", "10 minutes"])
     }
 
-    func testInitialSelectionReflectsModel() {
+    @Test func initialSelectionReflectsModel() {
         let pane = makePane(recorder: ApplyRecorder(), initialMinutes: 5)
-        XCTAssertEqual(pane.test_wakeRestoreSelectedTitle, "5 minutes")
+        #expect(pane.test_wakeRestoreSelectedTitle == "5 minutes")
     }
 
-    func testDefaultInitialSelectionIsTwoMinutes() {
+    @Test func defaultInitialSelectionIsTwoMinutes() {
         let pane = makePane(recorder: ApplyRecorder())
-        XCTAssertEqual(pane.test_wakeRestoreSelectedTitle, "2 minutes")
+        #expect(pane.test_wakeRestoreSelectedTitle == "2 minutes")
     }
 
-    func testPickingAppliesImmediately() {
+    @Test func pickingAppliesImmediately() {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
 
         pane.test_selectWakeRestore(minutes: 10)
-        XCTAssertEqual(recorder.applied, [10])
+        #expect(recorder.applied == [10])
 
         // Never (0) applies too — a distinct, meaningful choice.
         pane.test_selectWakeRestore(minutes: 0)
-        XCTAssertEqual(recorder.applied, [10, 0])
+        #expect(recorder.applied == [10, 0])
     }
 }

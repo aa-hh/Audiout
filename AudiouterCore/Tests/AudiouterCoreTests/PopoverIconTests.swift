@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
@@ -20,7 +21,7 @@ import AppKit
 /// exposes a `test_iconSymbolName` hook (out of scope — this task touches only
 /// this file).
 @MainActor
-final class PopoverIconTests: XCTestCase {
+@Suite struct PopoverIconTests {
 
     // MARK: Harness
 
@@ -51,18 +52,24 @@ final class PopoverIconTests: XCTestCase {
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
         let stream = backend.makeEventStream()
-        let expectation = expectation(description: "fleet discovered")
         let box = PopoverIconTestCountBox()
-        let task = Task {
-            for await event in stream {
-                if case .deviceAdded = event, await box.increment() >= count {
-                    expectation.fulfill(); break
+        try await confirmation("fleet discovered") { received in
+            let task = Task {
+                for await event in stream {
+                    if case .deviceAdded = event, await box.increment() >= count {
+                        received(); break
+                    }
                 }
             }
+            defer { task.cancel() }
+            backend.start()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { _ = await task.value }
+                group.addTask { try await Task.sleep(for: .seconds(2)) }
+                try await group.next()
+                group.cancelAll()
+            }
         }
-        backend.start()
-        await fulfillment(of: [expectation], timeout: 2)
-        task.cancel()
     }
 
     private func tempDirectory() -> URL {
@@ -111,23 +118,23 @@ final class PopoverIconTests: XCTestCase {
     /// With a `DeviceIconController` injected and an override set for a
     /// device, the popover's device row renders the override symbol, not the
     /// `Device.Kind` default.
-    func testDeviceRowRendersInjectedOverride() async throws {
+    @Test func deviceRowRendersInjectedOverride() async throws {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
         iconController.setSymbolName("airpods", for: "office")
         let (popover, _, backend) = try await makePopover(deviceIconController: iconController)
 
-        let device = try XCTUnwrap(backend.devices.first { $0.id == "office" })
-        XCTAssertNotEqual(device.kind.symbolName, "airpods",
-                          "sanity: the override differs from the device's own default")
+        let device = try #require(backend.devices.first { $0.id == "office" })
+        #expect(device.kind.symbolName != "airpods",
+                "sanity: the override differs from the device's own default")
 
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        let imageView = try XCTUnwrap(findImageView(in: row))
-        XCTAssertTrue(imagesEqual(imageView.image, expectedDeviceIcon(symbolName: "airpods", deviceName: device.name)),
-                      "the row renders the injected override symbol, not the kind default")
-        XCTAssertFalse(imagesEqual(imageView.image,
-                                   expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
-                       "the row is no longer showing the kind default once an override is set")
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        let imageView = try #require(findImageView(in: row))
+        #expect(imagesEqual(imageView.image, expectedDeviceIcon(symbolName: "airpods", deviceName: device.name)),
+                "the row renders the injected override symbol, not the kind default")
+        #expect(!imagesEqual(imageView.image,
+                             expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
+                "the row is no longer showing the kind default once an override is set")
     }
 
     // MARK: Device row — no controller
@@ -135,31 +142,31 @@ final class PopoverIconTests: XCTestCase {
     /// Without a `DeviceIconController` injected (`nil`, the default), device
     /// rows behave exactly as before: the `Device.Kind` default renders,
     /// unaffected by there being no override source at all.
-    func testDeviceRowWithNoControllerRendersKindDefault() async throws {
+    @Test func deviceRowWithNoControllerRendersKindDefault() async throws {
         let (popover, _, backend) = try await makePopover(deviceIconController: nil)
 
-        let device = try XCTUnwrap(backend.devices.first { $0.id == "office" })
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        let imageView = try XCTUnwrap(findImageView(in: row))
-        XCTAssertTrue(imagesEqual(imageView.image,
-                                  expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
-                      "with no controller injected, the row falls back to the kind default unchanged")
+        let device = try #require(backend.devices.first { $0.id == "office" })
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        let imageView = try #require(findImageView(in: row))
+        #expect(imagesEqual(imageView.image,
+                            expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
+                "with no controller injected, the row falls back to the kind default unchanged")
     }
 
     /// A `DeviceIconController` with no override set for a particular device
     /// still renders that device's kind default — the controller only changes
     /// rendering for ids it actually has an override for.
-    func testDeviceRowWithControllerButNoOverrideRendersKindDefault() async throws {
+    @Test func deviceRowWithControllerButNoOverrideRendersKindDefault() async throws {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
         let (popover, _, backend) = try await makePopover(deviceIconController: iconController)
 
-        let device = try XCTUnwrap(backend.devices.first { $0.id == "office" })
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        let imageView = try XCTUnwrap(findImageView(in: row))
-        XCTAssertTrue(imagesEqual(imageView.image,
-                                  expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
-                      "a controller with no override for this device still shows its kind default")
+        let device = try #require(backend.devices.first { $0.id == "office" })
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        let imageView = try #require(findImageView(in: row))
+        #expect(imagesEqual(imageView.image,
+                            expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
+                "a controller with no override for this device still shows its kind default")
     }
 
     // MARK: Group row
@@ -167,38 +174,38 @@ final class PopoverIconTests: XCTestCase {
     /// `GroupRowView` (mounted for the mixer window, built here directly per
     /// `AudiouterPopoverUI/AGENTS.md`'s map) shows the group's own
     /// `iconSymbolName` when one is set.
-    func testGroupRowRendersGroupIconSymbolNameWhenSet() {
+    @Test func groupRowRendersGroupIconSymbolNameWhenSet() {
         let group = Group(name: "Whole House", memberIDs: ["office", "homepod-bed"],
                           memberVolumes: ["office": 40, "homepod-bed": 60],
                           iconSymbolName: "house.fill")
         let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
 
         let imageView = findImageView(in: row)
-        XCTAssertNotNil(imageView, "the group row mounts an icon image view")
-        XCTAssertTrue(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: "house.fill")),
-                      "the group row renders its own iconSymbolName")
+        #expect(imageView != nil, "the group row mounts an icon image view")
+        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: "house.fill")),
+                "the group row renders its own iconSymbolName")
     }
 
     /// A group with no `iconSymbolName` (or an unrecognized/stale one) falls
     /// back to `Group.defaultIconSymbolName` — the same render-time staleness
     /// handling every other icon surface uses.
-    func testGroupRowRendersDefaultIconWhenUnset() {
+    @Test func groupRowRendersDefaultIconWhenUnset() {
         let group = Group(name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40])
         let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
 
         let imageView = findImageView(in: row)
-        XCTAssertTrue(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
-                      "no iconSymbolName ⇒ the group row falls back to the documented default")
+        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
+                "no iconSymbolName ⇒ the group row falls back to the documented default")
     }
 
-    func testGroupRowRendersDefaultIconWhenStale() {
+    @Test func groupRowRendersDefaultIconWhenStale() {
         let group = Group(name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40],
                           iconSymbolName: "definitely.not.a.real.symbol.zzz")
         let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
 
         let imageView = findImageView(in: row)
-        XCTAssertTrue(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
-                      "an unresolvable saved name falls back to the default, same as a nil override")
+        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
+                "an unresolvable saved name falls back to the default, same as a nil override")
     }
 
     // MARK: onChange-driven refresh
@@ -207,42 +214,42 @@ final class PopoverIconTests: XCTestCase {
     /// popover is already built fires `onChange`, which the popover chains to
     /// `refreshDeviceRows()` — the mounted row picks up the new symbol without
     /// a manual `rebuild()`/reopen.
-    func testOnChangeRefreshPicksUpNewOverride() async throws {
+    @Test func onChangeRefreshPicksUpNewOverride() async throws {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
         let (popover, _, backend) = try await makePopover(deviceIconController: iconController)
 
-        let device = try XCTUnwrap(backend.devices.first { $0.id == "office" })
-        let row = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        let imageView = try XCTUnwrap(findImageView(in: row))
-        XCTAssertTrue(imagesEqual(imageView.image,
-                                  expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
-                      "starts on the kind default (no override yet)")
+        let device = try #require(backend.devices.first { $0.id == "office" })
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        let imageView = try #require(findImageView(in: row))
+        #expect(imagesEqual(imageView.image,
+                            expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
+                "starts on the kind default (no override yet)")
 
         iconController.setSymbolName("homepod.2.fill", for: "office")
 
-        XCTAssertTrue(imagesEqual(imageView.image,
-                                  expectedDeviceIcon(symbolName: "homepod.2.fill", deviceName: device.name)),
-                      "onChange refreshed the already-mounted row's icon in place, no rebuild call needed")
+        #expect(imagesEqual(imageView.image,
+                            expectedDeviceIcon(symbolName: "homepod.2.fill", deviceName: device.name)),
+                "onChange refreshed the already-mounted row's icon in place, no rebuild call needed")
     }
 
     /// The refresh is per-device: setting an override for a DIFFERENT id must
     /// not disturb `office`'s row, which stays on its kind default.
-    func testOnChangeRefreshOnlyTouchesTheChangedDevice() async throws {
+    @Test func onChangeRefreshOnlyTouchesTheChangedDevice() async throws {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
         let (popover, _, backend) = try await makePopover(deviceIconController: iconController)
 
-        let officeDevice = try XCTUnwrap(backend.devices.first { $0.id == "office" })
-        let officeRow = try XCTUnwrap(popover.test_deviceRow(for: "office"))
-        let officeImageView = try XCTUnwrap(findImageView(in: officeRow))
+        let officeDevice = try #require(backend.devices.first { $0.id == "office" })
+        let officeRow = try #require(popover.test_deviceRow(for: "office"))
+        let officeImageView = try #require(findImageView(in: officeRow))
 
         iconController.setSymbolName("airpodspro", for: "homepod-bed")
 
-        XCTAssertTrue(imagesEqual(officeImageView.image,
-                                  expectedDeviceIcon(symbolName: officeDevice.kind.symbolName,
-                                                     deviceName: officeDevice.name)),
-                      "an override on a different device doesn't affect office's row")
+        #expect(imagesEqual(officeImageView.image,
+                            expectedDeviceIcon(symbolName: officeDevice.kind.symbolName,
+                                               deviceName: officeDevice.name)),
+                "an override on a different device doesn't affect office's row")
     }
 }
 

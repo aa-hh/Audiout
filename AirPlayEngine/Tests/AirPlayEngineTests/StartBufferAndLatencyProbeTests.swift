@@ -3,12 +3,22 @@
 // probe. Cheap, pure, no-session tests in the ShimUnitTests mold — no sockets,
 // no libevent loop, no receiver.
 
-import XCTest
+import Testing
 import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class StartBufferAndLatencyProbeTests: XCTestCase {
+// `outputs_set_buffer_duration_ms`/`outputs_buffer_duration_ms_get()` is
+// process-global `shims/outputs.c` state (see this file's own doc comments
+// below) — under swift-testing's in-process concurrency, tests in this file
+// that set/restore it race against each other AND against
+// `AirPlayEngineScaffoldTests.cClusterLinks`, which reads it. Nesting into
+// the shared `SerializedEngineState` parent (same one T15/T16/RemoteEventStreamTests
+// use) gives true mutual exclusion; independent per-file `.serialized` would
+// not, since it only orders tests *within* one suite.
+extension SerializedEngineState {
+
+@Suite struct StartBufferAndLatencyProbeTests {
 
     // MARK: - outputs shim: settable start buffer
 
@@ -20,58 +30,58 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
         body()
     }
 
-    func testStartBufferDefaultsToOwnToneParity() {
-        XCTAssertEqual(outputs_buffer_duration_ms_get(), 2250)
-        XCTAssertEqual(UInt64(OUTPUTS_START_BUFFER_MS_DEFAULT), outputs_buffer_duration_ms_get())
+    @Test func startBufferDefaultsToOwnToneParity() {
+        #expect(outputs_buffer_duration_ms_get() == 2250)
+        #expect(UInt64(OUTPUTS_START_BUFFER_MS_DEFAULT) == outputs_buffer_duration_ms_get())
     }
 
-    func testStartBufferSetterRoundTrips() {
+    @Test func startBufferSetterRoundTrips() {
         withRestoredStartBuffer {
             outputs_set_buffer_duration_ms(1000)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), 1000)
+            #expect(outputs_buffer_duration_ms_get() == 1000)
             outputs_set_buffer_duration_ms(300)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), 300)
+            #expect(outputs_buffer_duration_ms_get() == 300)
         }
     }
 
-    func testStartBufferClampsOutOfRangeValues() {
+    @Test func startBufferClampsOutOfRangeValues() {
         withRestoredStartBuffer {
             // Below the floor (airplay.c rejects sessions at <= 250 ms): clamped
             // up to a playable value, never passed through.
             outputs_set_buffer_duration_ms(0)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), UInt64(OUTPUTS_START_BUFFER_MS_MIN))
+            #expect(outputs_buffer_duration_ms_get() == UInt64(OUTPUTS_START_BUFFER_MS_MIN))
             outputs_set_buffer_duration_ms(250)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), UInt64(OUTPUTS_START_BUFFER_MS_MIN))
+            #expect(outputs_buffer_duration_ms_get() == UInt64(OUTPUTS_START_BUFFER_MS_MIN))
             // Above the ceiling: clamped down.
             outputs_set_buffer_duration_ms(60_000)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), UInt64(OUTPUTS_START_BUFFER_MS_MAX))
+            #expect(outputs_buffer_duration_ms_get() == UInt64(OUTPUTS_START_BUFFER_MS_MAX))
         }
     }
 
-    func testEngineConfigDefaultMatchesOwnTone() {
-        XCTAssertEqual(EngineConfig().startBufferMs, 2250)
+    @Test func engineConfigDefaultMatchesOwnTone() {
+        #expect(EngineConfig().startBufferMs == 2250)
     }
 
     /// T-ENGINE-DELAY: `presentationDelayMs` must derive from `startBufferMs`
     /// the SAME way the vendored sender derives `output_buffer_samples`
     /// (`airplay.c:1229`) — `startBufferMs − AIRPLAY_AUDIO_LATENCY_MS` (250,
     /// `airplay.c:94`) — never a hardcoded duplicate of the 250 ms constant.
-    func testEngineConfigPresentationDelayMatchesConfiguredBuffer() {
-        XCTAssertEqual(EngineConfig.airplayAudioLatencyMs, 250)
-        XCTAssertEqual(EngineConfig().presentationDelayMs, 2250 - 250)
+    @Test func engineConfigPresentationDelayMatchesConfiguredBuffer() {
+        #expect(EngineConfig.airplayAudioLatencyMs == 250)
+        #expect(EngineConfig().presentationDelayMs == 2250 - 250)
 
         let custom = EngineConfig(startBufferMs: 1000)
-        XCTAssertEqual(custom.presentationDelayMs, 1000 - 250)
+        #expect(custom.presentationDelayMs == 1000 - 250)
     }
 
     /// `setStartBufferMs` reaches the C shim (headless mode applies inline, no
     /// engine thread) — the primitive `NativeBackend.applyStartBuffer` builds on.
-    func testSetStartBufferMsReachesShim() async {
+    @Test func setStartBufferMsReachesShim() async {
         await withRestoredStartBufferAsync {
             let engine = AirPlayEngine(config: EngineConfig(startBufferMs: 1000))
             await engine.enterHeadlessTestMode()
             await engine.setStartBufferMs(1500)
-            XCTAssertEqual(outputs_buffer_duration_ms_get(), 1500)
+            #expect(outputs_buffer_duration_ms_get() == 1500)
         }
     }
 
@@ -79,15 +89,15 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
     /// buffer (`setStartBufferMs`), not just the original `config` snapshot —
     /// this is the value a future local-output sink should read so it stays
     /// in lockstep with whatever the sender is actually using.
-    func testCurrentPresentationDelayTracksLiveStartBuffer() async {
+    @Test func currentPresentationDelayTracksLiveStartBuffer() async {
         await withRestoredStartBufferAsync {
             let engine = AirPlayEngine(config: EngineConfig(startBufferMs: 1000))
             let initial = await engine.currentPresentationDelayMs()
-            XCTAssertEqual(initial, 1000 - EngineConfig.airplayAudioLatencyMs)
+            #expect(initial == 1000 - EngineConfig.airplayAudioLatencyMs)
 
             await engine.setStartBufferMs(1500)
             let updated = await engine.currentPresentationDelayMs()
-            XCTAssertEqual(updated, 1500 - EngineConfig.airplayAudioLatencyMs)
+            #expect(updated == 1500 - EngineConfig.airplayAudioLatencyMs)
         }
     }
 
@@ -98,19 +108,19 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
 
     // MARK: - WriteLatencyProbe (pts→now age)
 
-    func testDisabledProbeRecordsNothing() {
+    @Test func disabledProbeRecordsNothing() {
         let probe = WriteLatencyProbe(startBufferMs: 2250, enabled: false)
         var now = timespec()
         clock_gettime(CLOCK_MONOTONIC, &now)
         probe.record(pts: now)
 
         let snapshot = probe.snapshot()
-        XCTAssertFalse(snapshot.isEnabled)
-        XCTAssertEqual(snapshot.writeCount, 0)
-        XCTAssertEqual(snapshot.averagePtsAgeMs, 0)
+        #expect(!snapshot.isEnabled)
+        #expect(snapshot.writeCount == 0)
+        #expect(snapshot.averagePtsAgeMs == 0)
     }
 
-    func testEnabledProbeMeasuresPtsAge() {
+    @Test func enabledProbeMeasuresPtsAge() {
         let probe = WriteLatencyProbe(startBufferMs: 2250, enabled: true, logInterval: 3600)
 
         // A pts stamped 50 ms in the past on the pts's own clock domain.
@@ -122,16 +132,16 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
         probe.record(pts: pts)
 
         let snapshot = probe.snapshot()
-        XCTAssertTrue(snapshot.isEnabled)
-        XCTAssertEqual(snapshot.writeCount, 1)
+        #expect(snapshot.isEnabled)
+        #expect(snapshot.writeCount == 1)
         // ≥ the stamped 50 ms; the upper bound is generous (scheduling noise on
         // a loaded CI box) but still catches unit errors (5 s, 50 s, …).
-        XCTAssertGreaterThanOrEqual(snapshot.averagePtsAgeMs, 49.0)
-        XCTAssertLessThan(snapshot.averagePtsAgeMs, 1000.0)
-        XCTAssertEqual(snapshot.minPtsAgeMs, snapshot.maxPtsAgeMs)
+        #expect(snapshot.averagePtsAgeMs >= 49.0)
+        #expect(snapshot.averagePtsAgeMs < 1000.0)
+        #expect(snapshot.minPtsAgeMs == snapshot.maxPtsAgeMs)
     }
 
-    func testProbeAccumulatesMinMax() {
+    @Test func probeAccumulatesMinMax() {
         let probe = WriteLatencyProbe(startBufferMs: 1000, enabled: true, logInterval: 3600)
         var now = timespec()
         clock_gettime(CLOCK_MONOTONIC, &now)
@@ -144,8 +154,10 @@ final class StartBufferAndLatencyProbeTests: XCTestCase {
         }
 
         let snapshot = probe.snapshot()
-        XCTAssertEqual(snapshot.writeCount, 3)
-        XCTAssertGreaterThanOrEqual(snapshot.maxPtsAgeMs, 89.0)
-        XCTAssertLessThan(snapshot.minPtsAgeMs, snapshot.maxPtsAgeMs)
+        #expect(snapshot.writeCount == 3)
+        #expect(snapshot.maxPtsAgeMs >= 89.0)
+        #expect(snapshot.minPtsAgeMs < snapshot.maxPtsAgeMs)
     }
 }
+
+} // extension SerializedEngineState

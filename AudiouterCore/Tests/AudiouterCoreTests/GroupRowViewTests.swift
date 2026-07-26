@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
@@ -12,7 +12,15 @@ import AppKit
 /// plain `NSView` doesn't get AXPress wired to an action the way `NSButton`
 /// does. Built directly, like `PopoverIconTests`'s group-row cases — the row
 /// has no host dependency.
-final class GroupRowViewTests: XCTestCase {
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
+@Suite struct GroupRowViewTests {
 
     private final class RecordingDelegate: GroupRowView.Delegate {
         var toggledGroupID: String?
@@ -40,32 +48,32 @@ final class GroupRowViewTests: XCTestCase {
 
     /// The bug this task fixes: pressing the row via VoiceOver used to do
     /// nothing at all despite the row announcing itself as a button.
-    func testAccessibilityPerformPressTogglesExpansionLikeARealClick() {
+    @Test func accessibilityPerformPressTogglesExpansionLikeARealClick() {
         let (row, delegate) = makeRow()
 
         let handled = row.test_accessibilityPerformPress()
 
-        XCTAssertTrue(handled, "accessibilityPerformPress must report it handled the press")
-        XCTAssertEqual(delegate.toggledGroupID, "group-1")
-        XCTAssertEqual(delegate.toggleCount, 1)
+        #expect(handled, "accessibilityPerformPress must report it handled the press")
+        #expect(delegate.toggledGroupID == "group-1")
+        #expect(delegate.toggleCount == 1)
     }
 
     /// AXPress and a real pointer click must reach the exact same delegate
     /// call — a VoiceOver user and a mouse user get equivalent behavior.
-    func testAccessibilityPerformPressAndMouseDownFireTheSameDelegateCall() {
+    @Test func accessibilityPerformPressAndMouseDownFireTheSameDelegateCall() {
         let (row, delegate) = makeRow()
 
         row.mouseDown(with: syntheticMouseDownEvent())
-        XCTAssertEqual(delegate.toggleCount, 1)
+        #expect(delegate.toggleCount == 1)
 
         row.test_accessibilityPerformPress()
-        XCTAssertEqual(delegate.toggleCount, 2)
-        XCTAssertEqual(delegate.toggledGroupID, "group-1")
+        #expect(delegate.toggleCount == 2)
+        #expect(delegate.toggledGroupID == "group-1")
     }
 
-    func testAccessibilityRoleIsButton() {
+    @Test func accessibilityRoleIsButton() {
         let (row, _) = makeRow()
-        XCTAssertEqual(row.accessibilityRole(), .button)
+        #expect(row.accessibilityRole() == .button)
     }
 
     /// A minimal synthetic left-mouse-down event — `GroupRowView.mouseDown`

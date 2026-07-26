@@ -16,12 +16,30 @@
 // test-only accessors in shims/engine_bridge.h (raop_test_master_session_* /
 // raop_test_write_one), so they exercise the production keying and fan-out, not a
 // reimplementation.
+//
+// This suite's tests reset/read the process-global RAOP master session list
+// (`raop_test_master_sessions_reset()` / `raop_test_master_session_count()`),
+// a distinct global from both `shims/outputs.c`'s device registry (see
+// `SerializedEngineStateSuite.swift` §22) and the AirPlay-2 master session
+// list in `MultiStreamMasterSessionTests.swift`. It nests under
+// `SerializedEngineState` anyway: T16 (2026-07-26) verified that
+// `raop_test_master_session_make` here crashes when run concurrently against
+// either `airplay_test_master_session_make`
+// (`MultiStreamMasterSessionTests.swift`, `MultiStreamWriteRoutingTests.swift`)
+// with `fatal error in libgcrypt ... gcry_randomize: called in
+// non-operational state` — a shared non-reentrant crypto-init path below the
+// otherwise-unrelated globals. See `MultiStreamMasterSessionTests.swift`'s
+// header comment for the full explanation, including why a separate,
+// narrower serialized parent was tried first and still crashed. Do not
+// repeat `.serialized` here — it inherits from `SerializedEngineState`.
 
-import XCTest
+import Testing
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class RaopMultiStreamMasterSessionTests: XCTestCase {
+extension SerializedEngineState {
+
+@Suite struct RaopMultiStreamMasterSessionTests {
 
     /// The single quality every RAOP device is wired to (44100/16/2). Both streams
     /// in these tests use it, so stream_id is the ONLY thing that can distinguish
@@ -30,64 +48,58 @@ final class RaopMultiStreamMasterSessionTests: XCTestCase {
         media_quality(sample_rate: 44100, bits_per_sample: 16, channels: 2, bit_rate: 0)
     }
 
-    override func setUp() {
-        super.setUp()
+    init() {
         raop_test_master_sessions_reset()
-    }
-
-    override func tearDown() {
-        raop_test_master_sessions_reset()
-        super.tearDown()
     }
 
     // MARK: - Two stream_ids => two DIFFERENT master sessions (the core property).
 
-    func testDistinctStreamIdsGetDistinctMasterSessions() {
+    @Test func distinctStreamIdsGetDistinctMasterSessions() {
         var q = defaultQuality()
 
         let a = raop_test_master_session_make(1, &q, false)
         let b = raop_test_master_session_make(2, &q, false)
 
-        XCTAssertNotNil(a, "master session for stream 1 must be created")
-        XCTAssertNotNil(b, "master session for stream 2 must be created")
+        #expect(a != nil, "master session for stream 1 must be created")
+        #expect(b != nil, "master session for stream 2 must be created")
 
         // Same quality, same encrypt — yet different pointers, because stream_id differs.
-        XCTAssertNotEqual(a, b,
+        #expect(a != b,
             "distinct stream_ids at the same quality MUST NOT share a master session")
 
-        XCTAssertEqual(raop_test_master_session_count(), 2)
+        #expect(raop_test_master_session_count() == 2)
 
-        XCTAssertEqual(raop_test_master_session_stream_id(a), 1)
-        XCTAssertEqual(raop_test_master_session_stream_id(b), 2)
+        #expect(raop_test_master_session_stream_id(a) == 1)
+        #expect(raop_test_master_session_stream_id(b) == 2)
     }
 
     // MARK: - Same stream_id + same quality => the SAME master session is reused.
 
-    func testSameStreamIdReusesMasterSession() {
+    @Test func sameStreamIdReusesMasterSession() {
         var q = defaultQuality()
 
         let first = raop_test_master_session_make(7, &q, false)
         let again = raop_test_master_session_make(7, &q, false)
 
-        XCTAssertNotNil(first)
-        XCTAssertEqual(first, again,
+        #expect(first != nil)
+        #expect(first == again,
             "same (stream_id, quality, encrypt) must reuse the existing master session")
-        XCTAssertEqual(raop_test_master_session_count(), 1,
+        #expect(raop_test_master_session_count() == 1,
             "reuse must not allocate a second master session")
     }
 
     // MARK: - stream_id 0 is the legacy single-stream default (pre-change path intact).
 
-    func testStreamIdZeroIsTheLegacyDefault() {
+    @Test func streamIdZeroIsTheLegacyDefault() {
         var q = defaultQuality()
 
         let s0a = raop_test_master_session_make(0, &q, false)
         let s0b = raop_test_master_session_make(0, &q, false)
 
-        XCTAssertNotNil(s0a)
-        XCTAssertEqual(s0a, s0b, "stream_id 0 dedups exactly as before the change")
-        XCTAssertEqual(raop_test_master_session_stream_id(s0a), 0)
-        XCTAssertEqual(raop_test_master_session_count(), 1)
+        #expect(s0a != nil)
+        #expect(s0a == s0b, "stream_id 0 dedups exactly as before the change")
+        #expect(raop_test_master_session_stream_id(s0a) == 0)
+        #expect(raop_test_master_session_count() == 1)
     }
 
     // MARK: - The critical cross-talk guard: raop_write's fan-out routes a PCM
@@ -95,16 +107,16 @@ final class RaopMultiStreamMasterSessionTests: XCTestCase {
     // stream_id=1 must NEVER grow a stream_id=0 session's input buffer, and vice
     // versa. This is the correctness-critical line the whole fix turns on.
 
-    func testWriteRoutesOnlyToMatchingStreamId() {
+    @Test func writeRoutesOnlyToMatchingStreamId() {
         var q = defaultQuality()
 
         // Two master sessions, same quality, distinct streams.
         let s0 = raop_test_master_session_make(0, &q, false)
         let s1 = raop_test_master_session_make(1, &q, false)
-        XCTAssertNotNil(s0)
-        XCTAssertNotNil(s1)
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s0), 0)
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s1), 0)
+        #expect(s0 != nil)
+        #expect(s1 != nil)
+        #expect(raop_test_master_session_input_buffer_samples(s0) == 0)
+        #expect(raop_test_master_session_input_buffer_samples(s1) == 0)
 
         // A small PCM blob smaller than one packet's rawbuf, so it stays parked in
         // the input buffer (not drained into RTP packets) and we can read the count.
@@ -117,9 +129,9 @@ final class RaopMultiStreamMasterSessionTests: XCTestCase {
             raop_test_write_one(0, &q, raw.baseAddress, raw.count, frames, 1)
         }
 
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s0), frames,
+        #expect(raop_test_master_session_input_buffer_samples(s0) == frames,
             "a stream_id=0 write must land in the stream_id=0 master session")
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s1), 0,
+        #expect(raop_test_master_session_input_buffer_samples(s1) == 0,
             "a stream_id=0 write must NOT grow the stream_id=1 master session (no cross-talk)")
 
         // Now feed ONLY stream 1.
@@ -127,9 +139,11 @@ final class RaopMultiStreamMasterSessionTests: XCTestCase {
             raop_test_write_one(1, &q, raw.baseAddress, raw.count, frames, 2)
         }
 
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s1), frames,
+        #expect(raop_test_master_session_input_buffer_samples(s1) == frames,
             "a stream_id=1 write must land in the stream_id=1 master session")
-        XCTAssertEqual(raop_test_master_session_input_buffer_samples(s0), frames,
+        #expect(raop_test_master_session_input_buffer_samples(s0) == frames,
             "the stream_id=0 session's buffer must be unchanged by a stream_id=1 write")
     }
+}
+
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
@@ -12,18 +12,18 @@ import AudiouterSharedUI
 /// width — the same kind of coverage `PopoverControllerTests` gives the rest
 /// of the popover UI.
 @MainActor
-final class ConnectionDiagnosisViewTests: XCTestCase {
+@Suite struct ConnectionDiagnosisViewTests {
 
     // MARK: Copy rendering per cause
 
-    func testHeadlineAndSuggestionMatchFailureCopy() {
+    @Test func headlineAndSuggestionMatchFailureCopy() {
         let failure = ConnectionFailure(cause: .notResponding)
         let view = ConnectionDiagnosisView(failure: failure, deviceName: "Living Room")
-        XCTAssertEqual(view.test_headlineText, failure.headline)
-        XCTAssertEqual(view.test_suggestionText, failure.suggestion)
+        #expect(view.test_headlineText == failure.headline)
+        #expect(view.test_suggestionText == failure.suggestion)
     }
 
-    func testAllCausesRenderTheirOwnCopy() {
+    @Test func allCausesRenderTheirOwnCopy() {
         let causes: [ConnectionFailure.Cause] = [
             .notResponding, .vanished, .refusedOrBusy, .authRequired,
             .droppedMidStream, .timedOut, .unknown,
@@ -31,55 +31,55 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         for cause in causes {
             let failure = ConnectionFailure(cause: cause)
             let view = ConnectionDiagnosisView(failure: failure, deviceName: "Kitchen")
-            XCTAssertEqual(view.test_headlineText, failure.headline, "headline for \(cause)")
-            XCTAssertEqual(view.test_suggestionText, failure.suggestion, "suggestion for \(cause)")
+            #expect(view.test_headlineText == failure.headline, "headline for \(cause)")
+            #expect(view.test_suggestionText == failure.suggestion, "suggestion for \(cause)")
         }
     }
 
-    func testApplyUpdatesRenderedCopyAndDeviceName() {
+    @Test func applyUpdatesRenderedCopyAndDeviceName() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .timedOut), deviceName: "Office")
         let replaced = ConnectionFailure(cause: .refusedOrBusy, detail: "403 from speaker")
         view.apply(failure: replaced, deviceName: "Office")
-        XCTAssertEqual(view.test_headlineText, "Connection refused")
-        XCTAssertEqual(view.test_suggestionText, replaced.suggestion)
-        XCTAssertTrue(view.test_copyDetailsEnabled)
+        #expect(view.test_headlineText == "Connection refused")
+        #expect(view.test_suggestionText == replaced.suggestion)
+        #expect(view.test_copyDetailsEnabled)
     }
 
     // MARK: Button enablement — Copy details iff failure.detail != nil
 
-    func testCopyDetailsDisabledWhenNoDetail() {
+    @Test func copyDetailsDisabledWhenNoDetail() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .vanished, detail: nil), deviceName: "Bedroom")
-        XCTAssertFalse(view.test_copyDetailsEnabled)
+        #expect(!view.test_copyDetailsEnabled)
     }
 
-    func testCopyDetailsEnabledWhenDetailPresent() {
+    @Test func copyDetailsEnabledWhenDetailPresent() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .vanished, detail: "No response from Bedroom"),
             deviceName: "Bedroom")
-        XCTAssertTrue(view.test_copyDetailsEnabled)
+        #expect(view.test_copyDetailsEnabled)
     }
 
-    func testCopyDetailsEnablementFollowsReappliedFailure() {
+    @Test func copyDetailsEnablementFollowsReappliedFailure() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .unknown, detail: "some evidence"), deviceName: "Den")
-        XCTAssertTrue(view.test_copyDetailsEnabled)
+        #expect(view.test_copyDetailsEnabled)
         view.apply(failure: ConnectionFailure(cause: .unknown, detail: nil), deviceName: "Den")
-        XCTAssertFalse(view.test_copyDetailsEnabled)
+        #expect(!view.test_copyDetailsEnabled)
     }
 
     // MARK: Closure firing — host owns the pasteboard write
 
-    func testTapRetryFiresOnRetry() {
+    @Test func tapRetryFiresOnRetry() {
         let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .timedOut), deviceName: "Patio")
         var fired = false
         view.onRetry = { fired = true }
         view.test_tapRetry()
-        XCTAssertTrue(fired)
+        #expect(fired)
     }
 
-    func testTapCopyDetailsFiresOnCopyDetailsWithoutTouchingPasteboard() {
+    @Test func tapCopyDetailsFiresOnCopyDetailsWithoutTouchingPasteboard() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .droppedMidStream, detail: "dropped at 12:00"),
             deviceName: "Garage")
@@ -87,12 +87,12 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         view.onCopyDetails = { fired = true }
         let before = NSPasteboard.general.changeCount
         view.test_tapCopyDetails()
-        XCTAssertTrue(fired)
+        #expect(fired)
         // The view itself never writes the pasteboard (host's job, brief §7.3).
-        XCTAssertEqual(NSPasteboard.general.changeCount, before)
+        #expect(NSPasteboard.general.changeCount == before)
     }
 
-    func testTapCopyDetailsFiresEvenWhenDisabled() {
+    @Test func tapCopyDetailsFiresEvenWhenDisabled() {
         // Programmatic invocation (e.g. via a future keyboard path) should still
         // call through; `isEnabled` only gates real mouse/AX clicks.
         let view = ConnectionDiagnosisView(
@@ -100,25 +100,25 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         var fired = false
         view.onCopyDetails = { fired = true }
         view.test_tapCopyDetails()
-        XCTAssertTrue(fired)
+        #expect(fired)
     }
 
-    func testTapDismissFiresOnDismissExactlyOnce() {
+    @Test func tapDismissFiresOnDismissExactlyOnce() {
         let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .timedOut), deviceName: "Porch")
         var fireCount = 0
         view.onDismiss = { fireCount += 1 }
         view.test_tapDismiss()
-        XCTAssertEqual(fireCount, 1)
+        #expect(fireCount == 1)
     }
 
-    func testHasDismissButton() {
+    @Test func hasDismissButton() {
         let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .vanished), deviceName: "Yard")
-        XCTAssertTrue(view.test_hasDismissButton)
+        #expect(view.test_hasDismissButton)
     }
 
     // MARK: Appearance adaptivity — the tint is a static CGColor on the layer
 
-    func testBackgroundTintReResolvesOnAppearanceChange() {
+    @Test func backgroundTintReResolvesOnAppearanceChange() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .notResponding), deviceName: "Hall")
 
@@ -129,8 +129,8 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
 
         // The warm tokens resolve to different concrete values per appearance;
         // a tint captured once at build time would be identical across the switch.
-        XCTAssertNotEqual(light?.components, dark?.components,
-                          "the failure tint must re-resolve on a live light/dark switch")
+        #expect(light?.components != dark?.components,
+                "the failure tint must re-resolve on a live light/dark switch")
 
         // And the re-resolved color is exactly the spec §5.6 treatment — the
         // `panel` seat washed with the failure-exclusive red at ~12% — under
@@ -140,21 +140,21 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
             let seat = Tokens.Color.panel
             expected = (seat.blended(withFraction: 0.12, of: Tokens.Color.failure) ?? seat).cgColor
         }
-        XCTAssertEqual(dark?.components, expected?.components)
+        #expect(dark?.components == expected?.components)
     }
 
     // MARK: Sizing sanity at popover width
 
-    func testSelfSizesToNonZeroHeightAtPopoverWidth() {
+    @Test func selfSizesToNonZeroHeightAtPopoverWidth() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .refusedOrBusy), deviceName: "Living Room")
         view.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
         view.layoutSubtreeIfNeeded()
         let fittingHeight = view.fittingSize.height
-        XCTAssertGreaterThan(fittingHeight, 0)
+        #expect(fittingHeight > 0)
     }
 
-    func testLongSuggestionWrapsIntoTallerHeightThanShortOne() {
+    @Test func longSuggestionWrapsIntoTallerHeightThanShortOne() {
         let short = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .authRequired), deviceName: "Loft")
         short.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
@@ -168,10 +168,10 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         // `.notResponding`'s suggestion is the longest copy in the table; a
         // narrower fixed-width row should force it to wrap across more lines
         // than the (shorter) `.authRequired` copy, i.e. a taller fitting height.
-        XCTAssertGreaterThan(long.fittingSize.height, short.fittingSize.height)
+        #expect(long.fittingSize.height > short.fittingSize.height)
     }
 
-    func testNarrowerWidthWrapsToTallerHeight() {
+    @Test func narrowerWidthWrapsToTallerHeight() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .notResponding), deviceName: "Study")
         view.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
@@ -182,6 +182,6 @@ final class ConnectionDiagnosisViewTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         let narrowHeight = view.fittingSize.height
 
-        XCTAssertGreaterThanOrEqual(narrowHeight, wideHeight)
+        #expect(narrowHeight >= wideHeight)
     }
 }

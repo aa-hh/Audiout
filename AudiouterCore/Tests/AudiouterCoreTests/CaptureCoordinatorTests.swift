@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// Hermetic unit tests for `CaptureCoordinator`'s state machine. **Never** spawns
@@ -8,7 +9,7 @@ import XCTest
 ///
 /// Grounded in `dev/notes/0f-pipe-brief.md` (config-follows-tap, explicit
 /// clear→add→play, suspend-to-pause/zombie) and `p1-owntone-api-brief.md`.
-final class CaptureCoordinatorTests: XCTestCase {
+@Suite struct CaptureCoordinatorTests {
 
     // MARK: Fakes
 
@@ -116,29 +117,29 @@ final class CaptureCoordinatorTests: XCTestCase {
             if predicate(coordinator.state) { return }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTFail("timed out waiting for state (last: \(coordinator.state)) \(message)")
+        Issue.record("timed out waiting for state (last: \(coordinator.state)) \(message)")
     }
 
     // MARK: Rate parse (pure, isolated)
 
-    func testParsePipeSampleRatePrimaryLine() {
+    @Test func parsePipeSampleRatePrimaryLine() {
         let line = "audiocap: OwnTone does NOT autodetect rate — set library { pipe_sample_rate = 44100 } in owntone.conf and restart, or playback is pitch-shifted (config-follows-tap)."
-        XCTAssertEqual(CaptureCoordinator.parsePipeSampleRate(from: line), 44100)
+        #expect(CaptureCoordinator.parsePipeSampleRate(from: line) == 44100)
     }
 
-    func testParsePipeSampleRateSecondaryLine() {
+    @Test func parsePipeSampleRateSecondaryLine() {
         let line = "audiocap: PIPE MODE — writing S16LE interleaved (2ch) at 48000 Hz to the FIFO."
-        XCTAssertEqual(CaptureCoordinator.parsePipeSampleRate(from: line), 48000)
+        #expect(CaptureCoordinator.parsePipeSampleRate(from: line) == 48000)
     }
 
-    func testParsePipeSampleRateIgnoresUnrelatedLines() {
-        XCTAssertNil(CaptureCoordinator.parsePipeSampleRate(from: "audiocap: tap created. Observed tap format:"))
-        XCTAssertNil(CaptureCoordinator.parsePipeSampleRate(from: "audiocap: IOProc callbacks=42 inputBytesSeen=1000"))
+    @Test func parsePipeSampleRateIgnoresUnrelatedLines() {
+        #expect(CaptureCoordinator.parsePipeSampleRate(from: "audiocap: tap created. Observed tap format:") == nil)
+        #expect(CaptureCoordinator.parsePipeSampleRate(from: "audiocap: IOProc callbacks=42 inputBytesSeen=1000") == nil)
     }
 
     // MARK: Happy path — start → FIFO → spawn → rate → play sequence
 
-    func testStartCreatesFIFOSpawnsCaptureAndDrivesExplicitPlaySequence() async {
+    @Test func startCreatesFIFOSpawnsCaptureAndDrivesExplicitPlaySequence() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -148,9 +149,9 @@ final class CaptureCoordinatorTests: XCTestCase {
 
         // Advances to waitingForRate once FIFO created + health-checked + spawned.
         await waitForState(coordinator) { $0 == .waitingForRate }
-        XCTAssertTrue(fifo.created, "FIFO must be created")
-        XCTAssertTrue(process.started, "capture subprocess must be spawned")
-        XCTAssertEqual(process.lastFifoPath, fifo.fifoPath, "capture writes to the FIFO in the library dir")
+        #expect(fifo.created, "FIFO must be created")
+        #expect(process.started, "capture subprocess must be spawned")
+        #expect(process.lastFifoPath == fifo.fifoPath, "capture writes to the FIFO in the library dir")
 
         // audiocap prints its rate → matches config → explicit playback runs.
         process.emitStderr("audiocap: OwnTone does NOT autodetect rate — set library { pipe_sample_rate = 44100 } in owntone.conf and restart.")
@@ -162,14 +163,14 @@ final class CaptureCoordinatorTests: XCTestCase {
         let clearIdx = calls.firstIndex(of: "clear")
         let addIdx = calls.firstIndex(of: "add:library:track:2")
         let playIdx = calls.firstIndex(of: "play")
-        XCTAssertNotNil(clearIdx); XCTAssertNotNil(addIdx); XCTAssertNotNil(playIdx)
-        XCTAssertTrue(clearIdx! < addIdx! && addIdx! < playIdx!, "must be clear → add → play, got \(calls)")
-        XCTAssertTrue(calls.contains("health"), "must health-check OwnTone first (Q7 connect-only)")
+        #expect(clearIdx != nil); #expect(addIdx != nil); #expect(playIdx != nil)
+        #expect(clearIdx! < addIdx! && addIdx! < playIdx!, "must be clear → add → play, got \(calls)")
+        #expect(calls.contains("health"), "must health-check OwnTone first (Q7 connect-only)")
     }
 
     // MARK: Config-follows-tap — rate mismatch refuses
 
-    func testRateMismatchRefusesAndTearsDownWithoutPlaying() async {
+    @Test func rateMismatchRefusesAndTearsDownWithoutPlaying() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -186,15 +187,15 @@ final class CaptureCoordinatorTests: XCTestCase {
             return false
         }
         // Never started playback — refusing, not silently pitch-shifting.
-        XCTAssertFalse(playback.callList().contains("play"), "must NOT play on a rate mismatch")
+        #expect(!playback.callList().contains("play"), "must NOT play on a rate mismatch")
         // And it stopped the capture child.
         await waitForState(coordinator, timeout: 1) { _ in process.stopped } // stop() called on the child
-        XCTAssertTrue(process.stopped, "capture must be stopped on a rate mismatch")
+        #expect(process.stopped, "capture must be stopped on a rate mismatch")
     }
 
     // MARK: Pipe not scanned yet → rescan + retry (brief §2)
 
-    func testPipeTrackNotFoundTriggersRescanRetryThenSucceeds() async {
+    @Test func pipeTrackNotFoundTriggersRescanRetryThenSucceeds() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -207,13 +208,13 @@ final class CaptureCoordinatorTests: XCTestCase {
 
         await waitForState(coordinator) { if case .running = $0 { return true } else { return false } }
         let calls = playback.callList()
-        XCTAssertTrue(calls.contains("update"), "a not-yet-scanned pipe must trigger updateLibrary()")
-        XCTAssertGreaterThanOrEqual(calls.filter { $0 == "find" }.count, 3, "must retry the search after rescan")
+        #expect(calls.contains("update"), "a not-yet-scanned pipe must trigger updateLibrary()")
+        #expect(calls.filter { $0 == "find" }.count >= 3, "must retry the search after rescan")
     }
 
     // MARK: OwnTone unreachable at start (Q7 connect-only)
 
-    func testOwnToneUnreachableAtStartFailsWithoutSpawningCapture() async {
+    @Test func ownToneUnreachableAtStartFailsWithoutSpawningCapture() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -222,12 +223,12 @@ final class CaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         await waitForState(coordinator) { $0 == .failed(.ownToneUnreachable) }
-        XCTAssertFalse(process.started, "must not spawn capture if OwnTone is unreachable")
+        #expect(!process.started, "must not spawn capture if OwnTone is unreachable")
     }
 
     // MARK: Crash → auto-restart within budget
 
-    func testCaptureCrashAutoRestartsWithinBudget() async {
+    @Test func captureCrashAutoRestartsWithinBudget() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -245,7 +246,7 @@ final class CaptureCoordinatorTests: XCTestCase {
 
     // MARK: Crash over budget → surfaced (not looping)
 
-    func testCaptureCrashOverBudgetSurfacesError() async {
+    @Test func captureCrashOverBudgetSurfacesError() async {
         let fifo = FakeFIFOManager()
         let playback = FakePlaybackController()
         // The builder returns the same fake instance on each re-spawn, so we can
@@ -266,7 +267,7 @@ final class CaptureCoordinatorTests: XCTestCase {
 
     // MARK: Nonzero exit (TCC/permission failure) → surfaced, not restarted
 
-    func testCaptureNonzeroExitSurfacesAsError() async {
+    @Test func captureNonzeroExitSurfacesAsError() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -284,7 +285,7 @@ final class CaptureCoordinatorTests: XCTestCase {
 
     // MARK: stop() → teardown (SIGINT child + player/stop + FIFO cleanup)
 
-    func testStopTearsDownChildPlayerAndFIFO() async {
+    @Test func stopTearsDownChildPlayerAndFIFO() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -297,14 +298,14 @@ final class CaptureCoordinatorTests: XCTestCase {
 
         coordinator.stop()
         await waitForState(coordinator) { $0 == .idle }
-        XCTAssertTrue(process.stopped, "stop() must SIGINT the capture child")
-        XCTAssertTrue(playback.callList().contains("stop"), "stop() must send player/stop (0f teardown)")
-        XCTAssertTrue(fifo.cleaned, "stop() must clean up the FIFO")
+        #expect(process.stopped, "stop() must SIGINT the capture child")
+        #expect(playback.callList().contains("stop"), "stop() must send player/stop (0f teardown)")
+        #expect(fifo.cleaned, "stop() must clean up the FIFO")
     }
 
     // MARK: Idempotence
 
-    func testStartIsIdempotent() async {
+    @Test func startIsIdempotent() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -314,22 +315,22 @@ final class CaptureCoordinatorTests: XCTestCase {
         coordinator.start()  // second call must no-op
         await waitForState(coordinator) { $0 == .waitingForRate }
         // Only one spawn / one health-check despite two start()s.
-        XCTAssertEqual(playback.callList().filter { $0 == "health" }.count, 1, "start() must be idempotent")
+        #expect(playback.callList().filter { $0 == "health" }.count == 1, "start() must be idempotent")
     }
 
-    func testStopFromIdleIsNoOp() {
+    @Test func stopFromIdleIsNoOp() {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
         let coordinator = makeCoordinator(fifo: fifo, process: process, playback: playback)
         coordinator.stop()  // from idle
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertFalse(process.stopped)
+        #expect(coordinator.state == .idle)
+        #expect(!process.stopped)
     }
 
     // MARK: replayPlayback — the replayHook body (zombie recovery play half)
 
-    func testReplayPlaybackReRunsExplicitSequenceWhenRunning() async {
+    @Test func replayPlaybackReRunsExplicitSequenceWhenRunning() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -344,22 +345,22 @@ final class CaptureCoordinatorTests: XCTestCase {
         let before = playback.callList().filter { $0 == "play" }.count
         await coordinator.replayPlayback()
         let after = playback.callList().filter { $0 == "play" }.count
-        XCTAssertEqual(after, before + 1, "replayPlayback must re-run clear→add→play")
+        #expect(after == before + 1, "replayPlayback must re-run clear→add→play")
     }
 
-    func testReplayPlaybackIsNoOpWhenNotRunning() async {
+    @Test func replayPlaybackIsNoOpWhenNotRunning() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
         let coordinator = makeCoordinator(fifo: fifo, process: process, playback: playback)
         // Never started → not running.
         await coordinator.replayPlayback()
-        XCTAssertTrue(playback.callList().isEmpty, "replay must no-op when not running")
+        #expect(playback.callList().isEmpty, "replay must no-op when not running")
     }
 
     // MARK: Feedback-loop guard — excludePIDs threaded to the subprocess
 
-    func testExcludePIDsPassedToCaptureProcess() async {
+    @Test func excludePIDsPassedToCaptureProcess() async {
         let fifo = FakeFIFOManager()
         let process = FakeCaptureProcess()
         let playback = FakePlaybackController()
@@ -367,6 +368,6 @@ final class CaptureCoordinatorTests: XCTestCase {
 
         coordinator.start()
         await waitForState(coordinator) { $0 == .waitingForRate }
-        XCTAssertEqual(process.lastExclude, [4242], "shairport pid must be excluded (feedback-loop guard)")
+        #expect(process.lastExclude == [4242], "shairport pid must be excluded (feedback-loop guard)")
     }
 }

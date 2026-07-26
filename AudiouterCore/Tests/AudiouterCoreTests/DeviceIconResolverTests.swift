@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
 
@@ -9,20 +10,17 @@ import XCTest
 /// split, but both halves live here since `DeviceIconStoreTests` already owns
 /// the raw persistence file and this file owns the resolution semantics that
 /// sit on top of it.
-final class DeviceIconResolverTests: XCTestCase {
+@Suite final class DeviceIconResolverTests {
 
-    private var directory: URL!
+    private let directory: URL
 
-    override func setUp() {
-        super.setUp()
+    init() {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudiouterTests-\(UUID().uuidString)", isDirectory: true)
     }
 
-    override func tearDown() {
+    deinit {
         try? FileManager.default.removeItem(at: directory)
-        directory = nil
-        super.tearDown()
     }
 
     private func makeDevice(id: String = "office", kind: Device.Kind = .sonos) -> Device {
@@ -31,49 +29,49 @@ final class DeviceIconResolverTests: XCTestCase {
 
     // MARK: DeviceIcon.isValid / resolve
 
-    func testIsValidTrueForKnownCuratedSymbol() {
-        XCTAssertTrue(DeviceIcon.isValid("speaker.wave.2.fill"))
+    @Test func isValidTrueForKnownCuratedSymbol() {
+        #expect(DeviceIcon.isValid("speaker.wave.2.fill"))
     }
 
-    func testIsValidFalseForUnknownSymbol() {
-        XCTAssertFalse(DeviceIcon.isValid("definitely.not.a.symbol.zzz"))
+    @Test func isValidFalseForUnknownSymbol() {
+        #expect(!DeviceIcon.isValid("definitely.not.a.symbol.zzz"))
     }
 
-    func testResolveReturnsDefaultForNilOverride() {
-        XCTAssertEqual(DeviceIcon.resolve(nil, default: "hifispeaker.fill"), "hifispeaker.fill")
+    @Test func resolveReturnsDefaultForNilOverride() {
+        #expect(DeviceIcon.resolve(nil, default: "hifispeaker.fill") == "hifispeaker.fill")
     }
 
-    func testResolveReturnsDefaultForInvalidOverride() {
-        XCTAssertEqual(DeviceIcon.resolve("definitely.not.a.symbol.zzz", default: "hifispeaker.fill"), "hifispeaker.fill")
+    @Test func resolveReturnsDefaultForInvalidOverride() {
+        #expect(DeviceIcon.resolve("definitely.not.a.symbol.zzz", default: "hifispeaker.fill") == "hifispeaker.fill")
     }
 
-    func testResolveReturnsOverrideWhenValid() {
-        XCTAssertEqual(DeviceIcon.resolve("airpods", default: "hifispeaker.fill"), "airpods")
+    @Test func resolveReturnsOverrideWhenValid() {
+        #expect(DeviceIcon.resolve("airpods", default: "hifispeaker.fill") == "airpods")
     }
 
     // MARK: DeviceIconController
 
-    func testSymbolNameForDeviceWithNoOverrideIsKindDefault() {
+    @Test func symbolNameForDeviceWithNoOverrideIsKindDefault() {
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
         let device = makeDevice(kind: .homePod)
-        XCTAssertEqual(controller.symbolName(for: device), Device.Kind.homePod.symbolName)
+        #expect(controller.symbolName(for: device) == Device.Kind.homePod.symbolName)
     }
 
-    func testSetSymbolNamePersistsAndResolves() {
+    @Test func setSymbolNamePersistsAndResolves() {
         let store = DeviceIconStore(directory: directory)
         let controller = DeviceIconController(store: store, loadPersisted: false)
         let device = makeDevice()
 
         controller.setSymbolName("airpods", for: device.id)
-        XCTAssertEqual(controller.symbolName(for: device), "airpods")
-        XCTAssertEqual(controller.overrides[device.id], "airpods")
+        #expect(controller.symbolName(for: device) == "airpods")
+        #expect(controller.overrides[device.id] == "airpods")
 
         // A fresh controller over the same store sees the persisted override.
         let reloaded = DeviceIconController(store: store)
-        XCTAssertEqual(reloaded.symbolName(for: device), "airpods")
+        #expect(reloaded.symbolName(for: device) == "airpods")
     }
 
-    func testSetSymbolNameWithInvalidNameIsANoOp() {
+    @Test func setSymbolNameWithInvalidNameIsANoOp() throws {
         let store = DeviceIconStore(directory: directory)
         let controller = DeviceIconController(store: store, loadPersisted: false)
         var changeFired = false
@@ -81,58 +79,58 @@ final class DeviceIconResolverTests: XCTestCase {
 
         controller.setSymbolName("definitely.not.a.symbol.zzz", for: "office")
 
-        XCTAssertNil(controller.overrides["office"])
-        XCTAssertFalse(changeFired, "an invalid symbol name must not persist or notify")
-        XCTAssertNil(try store.load(), "nothing should have been written to disk")
+        #expect(controller.overrides["office"] == nil)
+        #expect(!changeFired, "an invalid symbol name must not persist or notify")
+        #expect(try store.load() == nil, "nothing should have been written to disk")
     }
 
-    func testResetIconClearsOverride() {
+    @Test func resetIconClearsOverride() {
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
         let device = makeDevice(kind: .sonos)
         controller.setSymbolName("airpods", for: device.id)
-        XCTAssertEqual(controller.symbolName(for: device), "airpods")
+        #expect(controller.symbolName(for: device) == "airpods")
 
         controller.resetIcon(for: device.id)
-        XCTAssertNil(controller.overrides[device.id])
-        XCTAssertEqual(controller.symbolName(for: device), Device.Kind.sonos.symbolName)
+        #expect(controller.overrides[device.id] == nil)
+        #expect(controller.symbolName(for: device) == Device.Kind.sonos.symbolName)
     }
 
-    func testResetIconWithNoOverrideIsANoOp() {
+    @Test func resetIconWithNoOverrideIsANoOp() {
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
         var changeFired = false
         controller.onChange = { changeFired = true }
 
         controller.resetIcon(for: "office")
 
-        XCTAssertFalse(changeFired, "resetting a device with no override must not notify")
+        #expect(!changeFired, "resetting a device with no override must not notify")
     }
 
-    func testOnChangeFiresOnSetAndReset() {
+    @Test func onChangeFiresOnSetAndReset() {
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
         var changeCount = 0
         controller.onChange = { changeCount += 1 }
 
         controller.setSymbolName("airpods", for: "office")
-        XCTAssertEqual(changeCount, 1)
+        #expect(changeCount == 1)
 
         controller.resetIcon(for: "office")
-        XCTAssertEqual(changeCount, 2)
+        #expect(changeCount == 2)
     }
 
-    func testSettingSameSymbolNameTwiceOnlyFiresOnChangeOnce() {
+    @Test func settingSameSymbolNameTwiceOnlyFiresOnChangeOnce() {
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
         var changeCount = 0
         controller.onChange = { changeCount += 1 }
 
         controller.setSymbolName("airpods", for: "office")
         controller.setSymbolName("airpods", for: "office")
-        XCTAssertEqual(changeCount, 1, "setting the same value again is a no-op")
+        #expect(changeCount == 1, "setting the same value again is a no-op")
     }
 
-    func testMissingFileLoadsAsEmptyOverrides() {
+    @Test func missingFileLoadsAsEmptyOverrides() {
         // The store itself returns nil for a missing file; the controller is
         // the layer that turns that into an empty override map.
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory))
-        XCTAssertTrue(controller.overrides.isEmpty)
+        #expect(controller.overrides.isEmpty)
     }
 }

@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 import AirPlayEngine
 
@@ -28,7 +29,7 @@ import AVFoundation
 /// pid directly — this fake models that one level too, via a scripted
 /// pid → `AudioObjectID` resolver, so the self-exclude assertions exercise the
 /// SAME resolution path production code does.
-final class SyncedLocalFanoutTests: IsolatedTestCase {
+@Suite final class SyncedLocalFanoutTests: IsolatedSuite {
 
     // MARK: Doubles
 
@@ -189,7 +190,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
     // MARK: - Goertzel: no feedback loop when the sink's process is self-excluded.
 
     #if canImport(AVFoundation)
-    func test_selfExclude_tapDoesNotRecaptureSinkTone_goertzel() throws {
+    @Test func selfExclude_tapDoesNotRecaptureSinkTone_goertzel() throws {
         let tap = FeedbackFakeTap()
         tap.setProcesses([sinkRenderPID: sinkFreq, otherAppPID: otherFreq])
         let engineSink = SpyPCMSink()
@@ -209,7 +210,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         waitForCapturing(coordinator)
 
         // The whole-system tap was created excluding the sink's render process (R2).
-        XCTAssertTrue(tap.excludes(pid: sinkRenderPID),
+        #expect(tap.excludes(pid: sinkRenderPID),
                       "the sink's render process must be excluded from the whole-system tap")
 
         // Deliver the mix the tap would actually capture (non-excluded processes
@@ -221,7 +222,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
                            pts: timespec(tv_sec: i, tv_nsec: 0))
         }
         waitFor { engineSink.forwarded.count == buffers }
-        XCTAssertEqual(engineSink.forwarded.count, buffers)
+        #expect(engineSink.forwarded.count == buffers)
 
         let captured = concat(engineSink.forwarded.map { $0.pcm })
         let feedbackPower = goertzelPowerS16LE(captured, freq: sinkFreq)
@@ -229,18 +230,18 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
 
         // The ordinary app's tone DID reach the engine — the pipeline is alive and
         // the detector works (this is what makes the near-zero below meaningful).
-        XCTAssertGreaterThan(controlPower, 1e-3,
+        #expect(controlPower > 1e-3,
                              "the tap must still capture ordinary (non-excluded) app audio")
         // The sink's OWN output did NOT — no feedback loop. Orders of magnitude
         // below the captured control tone.
-        XCTAssertLessThan(feedbackPower, controlPower / 1_000.0,
+        #expect(feedbackPower < controlPower / 1_000.0,
                           "the sink's delayed output must not be re-captured as an echo")
     }
 
     /// Negative control proving the Goertzel detector (and the fake tap) really do
     /// surface the sink's tone when it is NOT excluded — so the test above's
     /// near-zero is the self-exclude working, not a dead pipeline.
-    func test_withoutSelfExclude_sinkToneFeedsBack_provingDetector() throws {
+    @Test func withoutSelfExclude_sinkToneFeedsBack_provingDetector() throws {
         let tap = FeedbackFakeTap()
         tap.setProcesses([sinkRenderPID: sinkFreq, otherAppPID: otherFreq])
         let engineSink = SpyPCMSink()
@@ -255,7 +256,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         // No sink attached → no self-exclude → the sink's process stays in the mix.
         coordinator.start()
         waitForCapturing(coordinator)
-        XCTAssertFalse(tap.excludes(pid: sinkRenderPID))
+        #expect(!tap.excludes(pid: sinkRenderPID))
 
         let frames = 4_096
         let buffers = 8
@@ -269,14 +270,14 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         let feedbackPower = goertzelPowerS16LE(captured, freq: sinkFreq)
         // WITHOUT the exclude, the 440 Hz tone is plainly present — the loop the
         // self-exclude prevents.
-        XCTAssertGreaterThan(feedbackPower, 1e-3,
+        #expect(feedbackPower > 1e-3,
                              "without the self-exclude the sink's tone re-enters capture (the loop)")
     }
     #endif
 
     // MARK: - Fan-out wiring (gated like metering).
 
-    func test_fanOut_deliversToSink_onlyWhenAttached() {
+    @Test func fanOut_deliversToSink_onlyWhenAttached() {
         let tap = FeedbackFakeTap()
         let engineSink = SpyPCMSink()
         let localSink = SpySyncedSink()
@@ -294,7 +295,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         // still is.
         tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
         waitFor { engineSink.forwarded.count == 1 }
-        XCTAssertEqual(localSink.enqueued.count, 0, "no fan-out while the sink is detached")
+        #expect(localSink.enqueued.count == 0, "no fan-out while the sink is detached")
 
         // Attach → subsequent buffers fan out to the sink with the same pts.
         coordinator.setSyncedLocalSink(localSink, renderProcessPID: sinkRenderPID)
@@ -302,25 +303,25 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         waitFor { localSink.enqueued.count == 1 }
 
         let call = localSink.enqueued[0]
-        XCTAssertEqual(call.frameCount, 4, "16-byte S16LE stereo payload = 4 frames")
-        XCTAssertEqual(call.pts.tv_sec, 2, "fan-out carries the capture pts unchanged")
+        #expect(call.frameCount == 4, "16-byte S16LE stereo payload = 4 frames")
+        #expect(call.pts.tv_sec == 2, "fan-out carries the capture pts unchanged")
         // The fixed payload widens 1…8 (Int16) → Float32 / 32768.
         let expected = (1...8).map { Float($0) / 32768.0 }
-        XCTAssertEqual(call.frames.count, expected.count)
+        #expect(call.frames.count == expected.count)
         for (got, want) in zip(call.frames, expected) {
-            XCTAssertEqual(got, want, accuracy: 1e-6)
+            #expect(abs(got - want) <= 1e-6)
         }
 
         // Detach → fan-out stops again.
         coordinator.setSyncedLocalSink(nil, renderProcessPID: nil)
         tap.deliverMix(frames: 4, phaseStart: 8, pts: timespec(tv_sec: 3, tv_nsec: 0))
         waitFor { engineSink.forwarded.count == 3 }
-        XCTAssertEqual(localSink.enqueued.count, 1, "no fan-out after detach")
+        #expect(localSink.enqueued.count == 1, "no fan-out after detach")
     }
 
     /// Attaching while already capturing recreates the tap so the new self-exclude
     /// takes effect immediately (mirrors the routing-exclusion recreate).
-    func test_attachWhileCapturing_recreatesTapWithSelfExclude() {
+    @Test func attachWhileCapturing_recreatesTapWithSelfExclude() {
         let tap = FeedbackFakeTap()
         let engineSink = SpyPCMSink()
         let localSink = SpySyncedSink()
@@ -333,13 +334,13 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             muteBehavior: .mutedWhenTapped)
         coordinator.start()
         waitForCapturing(coordinator)
-        XCTAssertEqual(tap.creates, 1)
-        XCTAssertFalse(tap.excludes(pid: sinkRenderPID))
+        #expect(tap.creates == 1)
+        #expect(!tap.excludes(pid: sinkRenderPID))
 
         coordinator.setSyncedLocalSink(localSink, renderProcessPID: sinkRenderPID)
         waitFor { tap.excludes(pid: self.sinkRenderPID) }
-        XCTAssertEqual(tap.creates, 2, "attaching a sink while capturing recreates the tap")
-        XCTAssertTrue(tap.excludes(pid: sinkRenderPID))
+        #expect(tap.creates == 2, "attaching a sink while capturing recreates the tap")
+        #expect(tap.excludes(pid: sinkRenderPID))
     }
 
     // MARK: - T3 Part B: base-rate resample (44.1 kHz airplay feed → device-native rate)
@@ -365,26 +366,26 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
     /// the base resampler must pass every sample through bit-for-bit — no
     /// interpolation, no priming lag — mirroring the engine converter's own
     /// "resample only when the rate differs from 44100" discipline (T3 Part B).
-    func test_baseResampler_identityRatio_isBitExactPassthrough() {
+    @Test func baseResampler_identityRatio_isBitExactPassthrough() {
         let resampler = SyncedLocalBaseResampler(inputRate: 44_100, outputRate: 44_100, channelCount: 2)
-        XCTAssertTrue(resampler.isIdentity)
-        XCTAssertEqual(resampler.ratio, 1.0, accuracy: 1e-12)
+        #expect(resampler.isIdentity)
+        #expect(abs(resampler.ratio - 1.0) <= 1e-12)
 
         let input: [Float] = (0..<40).map { Float($0) * 0.01 - 0.2 }
         let out = input.withUnsafeBufferPointer { buf in
             resampler.resample(input: buf.baseAddress!, frameCount: 20)
         }
-        XCTAssertEqual(out, input, "identity ratio must be a bit-exact passthrough")
+        #expect(out == input, "identity ratio must be a bit-exact passthrough")
     }
 
     /// Upsampling 44.1 kHz → 48 kHz must produce a frame count matching the rate
     /// ratio (never a hardcoded assumption) — the frame-count half of T5's
     /// "correct frame counts, no pitch shift" check.
-    func test_baseResampler_upsample44_1to48_producesRateScaledFrameCount() {
+    @Test func baseResampler_upsample44_1to48_producesRateScaledFrameCount() {
         let inputRate = 44_100.0, outputRate = 48_000.0
         let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
-        XCTAssertFalse(resampler.isIdentity)
-        XCTAssertEqual(resampler.ratio, inputRate / outputRate, accuracy: 1e-12)
+        #expect(!resampler.isIdentity)
+        #expect(abs(resampler.ratio - inputRate / outputRate) <= 1e-12)
 
         let durationSeconds = 1.0
         let frameCount = Int(inputRate * durationSeconds)
@@ -398,7 +399,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         // One second of audio in ⇒ ~one second out at the OUTPUT rate — 48,000
         // frames, not 44,100 — proving the frame math is keyed off the real
         // rates, never a hardcoded 44100 (plan T3 verify step).
-        XCTAssertEqual(Double(out.count), outputRate, accuracy: 8,
+        #expect(abs(Double(out.count) - outputRate) <= 8,
                        "1 s of 44.1 kHz input must resample to ~1 s of 48 kHz output frames")
     }
 
@@ -408,7 +409,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
     /// ~+8.8%" = 48000/44100) would leave a 440 Hz input sounding like ~479 Hz once
     /// played back at 48 kHz. Goertzel at both frequencies over the ACTUAL
     /// resampled output proves the tone landed at 440 Hz, not the pitched one.
-    func test_baseResampler_upsample_doesNotPitchShift_goertzel() {
+    @Test func baseResampler_upsample_doesNotPitchShift_goertzel() {
         let inputRate = 44_100.0, outputRate = 48_000.0, freq = 440.0
         let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
 
@@ -420,15 +421,15 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         let out = input.withUnsafeBufferPointer { buf in
             resampler.resample(input: buf.baseAddress!, frameCount: frameCount)
         }
-        XCTAssertFalse(out.isEmpty)
+        #expect(!out.isEmpty)
 
         let correctPower = goertzelPowerFloat(out, freq: freq, sampleRate: outputRate)
         let pitchedFreq = freq * outputRate / inputRate // ~479 Hz — the un-resampled bug's symptom
         let pitchedPower = goertzelPowerFloat(out, freq: pitchedFreq, sampleRate: outputRate)
 
-        XCTAssertGreaterThan(correctPower, 0.05,
+        #expect(correctPower > 0.05,
                              "the resampled output must retain the original 440 Hz tone")
-        XCTAssertLessThan(pitchedPower, correctPower / 50.0,
+        #expect(pitchedPower < correctPower / 50.0,
                           "the output must not show the ~+8.8% pitched-up frequency a missing base resample would produce")
     }
 
@@ -436,11 +437,11 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
     /// but not impossible): ratio > 1, still no pitch shift, frame count still
     /// rate-scaled — proves the resampler isn't secretly only correct in the
     /// up-sample direction the dropout bug exercises.
-    func test_baseResampler_downsample48to44_1_producesRateScaledFrameCount_noPitchShift() {
+    @Test func baseResampler_downsample48to44_1_producesRateScaledFrameCount_noPitchShift() {
         let inputRate = 48_000.0, outputRate = 44_100.0, freq = 440.0
         let resampler = SyncedLocalBaseResampler(inputRate: inputRate, outputRate: outputRate, channelCount: 1)
-        XCTAssertFalse(resampler.isIdentity)
-        XCTAssertEqual(resampler.ratio, inputRate / outputRate, accuracy: 1e-12)
+        #expect(!resampler.isIdentity)
+        #expect(abs(resampler.ratio - inputRate / outputRate) <= 1e-12)
 
         let frameCount = Int(inputRate * 0.5)
         var input = [Float](repeating: 0, count: frameCount)
@@ -450,13 +451,13 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         let out = input.withUnsafeBufferPointer { buf in
             resampler.resample(input: buf.baseAddress!, frameCount: frameCount)
         }
-        XCTAssertEqual(Double(out.count), outputRate * 0.5, accuracy: 8)
+        #expect(abs(Double(out.count) - outputRate * 0.5) <= 8)
 
         let correctPower = goertzelPowerFloat(out, freq: freq, sampleRate: outputRate)
         let pitchedFreq = freq * outputRate / inputRate
         let pitchedPower = goertzelPowerFloat(out, freq: pitchedFreq, sampleRate: outputRate)
-        XCTAssertGreaterThan(correctPower, 0.05)
-        XCTAssertLessThan(pitchedPower, correctPower / 50.0)
+        #expect(correctPower > 0.05)
+        #expect(pitchedPower < correctPower / 50.0)
     }
 
     /// Full pipeline (fan-out resample → `SyncedLocalSink`) at a NON-identity
@@ -469,7 +470,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
     /// `test_rampReleasesAtComputedHostTime_withinOneFrame`) — the "latency folds
     /// into the sync budget" half of T5, not just the pitch check above.
     #if canImport(AVFoundation)
-    func test_fanOutThroughResample_thenSink_releasesAtComputedTarget_noExtraDelay() throws {
+    @Test func fanOutThroughResample_thenSink_releasesAtComputedTarget_noExtraDelay() throws {
         let inputRate = 44_100.0
         let outputRate = 48_000.0
         let baseResampler = SyncedLocalBaseResampler(
@@ -496,7 +497,7 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
         let resampled = floats.withUnsafeBufferPointer { buf in
             baseResampler.resample(input: buf.baseAddress!, frameCount: rampCount)
         }
-        XCTAssertFalse(resampled.isEmpty)
+        #expect(!resampled.isEmpty)
 
         // 100 ms presentation − 10 ms measured latency − 3 ms safety = 87 ms —
         // the SAME formula/constants as the identity-rate sink test, with no
@@ -533,17 +534,16 @@ final class SyncedLocalFanoutTests: IsolatedTestCase {
             }
         }
 
-        let hostTime = try XCTUnwrap(firstNonSilenceHostTime, "audio was never released")
-        XCTAssertLessThanOrEqual(abs(hostTime - expectedTargetNanos), Int64(nsPerFrame.rounded()) * 2,
-                                 "resampled fan-out must still release within ~1 output frame of the SAME "
-                                 + "computed target — the base resample must not need its own delay term")
+        let hostTime = try #require(firstNonSilenceHostTime, "audio was never released")
+        #expect(max(hostTime, expectedTargetNanos) - min(hostTime, expectedTargetNanos) <= Int64(nsPerFrame.rounded()) * 2,
+                                 "resampled fan-out must still release within ~1 output frame of the SAME computed target — the base resample must not need its own delay term")
         // The anchor property: the Catmull-Rom kernel collapses to input[0] at
         // frac 0 in BOTH resample stages (base resample, then the sink's own
         // ppm-correction resampler at its initial ratio ≈ 1), so the very first
         // released sample is exactly the base resampler's own output[0] — no
         // reordering, no dropped lead-in.
-        let realSample = try XCTUnwrap(firstRealSample, "a non-silent sample must have been captured")
-        XCTAssertEqual(realSample, resampled[0], accuracy: 1e-6)
+        let realSample = try #require(firstRealSample, "a non-silent sample must have been captured")
+        #expect(abs(realSample - resampled[0]) <= 1e-6)
     }
     #endif
 }

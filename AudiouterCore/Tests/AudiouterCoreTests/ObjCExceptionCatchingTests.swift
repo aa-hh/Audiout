@@ -1,37 +1,32 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
-final class ObjCExceptionCatchingTests: XCTestCase {
+@Suite struct ObjCExceptionCatchingTests {
 
-    func testNSExceptionSurfacesAsSwiftErrorCarryingTheExceptionName() {
-        XCTAssertThrowsError(
+    @Test func nsExceptionSurfacesAsSwiftErrorCarryingTheExceptionName() {
+        #expect {
             try catchingObjCException {
                 NSException(name: NSExceptionName("AUDTestException"), reason: "boom", userInfo: nil).raise()
             }
-        ) { error in
-            guard let objcError = error as? ObjCExceptionError else {
-                XCTFail("Expected ObjCExceptionError, got \(error)")
-                return
-            }
-            XCTAssertEqual(objcError.name, "AUDTestException")
-            XCTAssertEqual(objcError.reason, "boom")
+        } throws: { error in
+            guard let objcError = error as? ObjCExceptionError else { return false }
+            return objcError.name == "AUDTestException" && objcError.reason == "boom"
         }
     }
 
-    func testCleanBlockReturnsItsValueNormally() throws {
+    @Test func cleanBlockReturnsItsValueNormally() throws {
         let value = try catchingObjCException { 42 }
-        XCTAssertEqual(value, 42)
+        #expect(value == 42)
     }
 
-    func testSwiftErrorThrownInsideBodyPropagatesUnchanged() {
+    @Test func swiftErrorThrownInsideBodyPropagatesUnchanged() {
         struct MyError: Error, Equatable { let code: Int }
 
-        XCTAssertThrowsError(
+        #expect(throws: MyError(code: 7)) {
             try catchingObjCException {
                 throw MyError(code: 7)
             }
-        ) { error in
-            XCTAssertEqual(error as? MyError, MyError(code: 7))
         }
     }
 }

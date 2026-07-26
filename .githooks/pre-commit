@@ -173,4 +173,76 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     echo "  Guard 4: full suite passed." >&2
 fi
 
+# ---------------------------------------------------------------------------
+# GUARD 5 (WARN-ONLY): don't backslide new tests onto XCTest.
+#
+# The XCTest -> swift-testing migration
+# (docs/notes/swift-testing-conversion-cookbook.md) is done for the large
+# majority of both AudiouterCore's and AirPlayEngine's test suites. New tests
+# should be written `import Testing` / `@Suite` / `@Test`, not `import XCTest`.
+#
+# This only fires on a newly ADDED `import XCTest` line (diffs the STAGED
+# content with `git diff --cached -U0`, same technique as Guard 3), so it never
+# nags about a file's pre-existing `import XCTest` — e.g.
+# `IsolatedTestCase.swift`'s legacy XCTest base, which legitimately still has
+# one, or any not-yet-converted file — unless someone is actively re-adding a
+# line there. Warn-only: this repo's migration was never enforced with a
+# blocking gate, so backsliding away from it shouldn't be either. It just needs
+# to be visible so it doesn't happen quietly.
+staged_swift_pkgs=$(git diff --cached --name-only --diff-filter=AM -- \
+    'AudiouterCore/' 'AirPlayEngine/' 2>/dev/null | grep '\.swift$')
+xctest_hits=""
+for f in $staged_swift_pkgs; do
+    added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
+    bad=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*import XCTest\b')
+    if [ -n "$bad" ]; then
+        xctest_hits="$xctest_hits\n  $f"
+    fi
+done
+if [ -n "$xctest_hits" ]; then
+    echo "" >&2
+    echo "  WARNING (non-blocking): new 'import XCTest' line(s) staged." >&2
+    echo "  The XCTest -> swift-testing migration is complete for the large" >&2
+    echo "  majority of this repo's suites. New tests should use" >&2
+    echo "  'import Testing' / '@Suite' / '@Test' instead — see" >&2
+    echo "  docs/notes/swift-testing-conversion-cookbook.md." >&2
+    printf "%b\n" "$xctest_hits" >&2
+    echo "" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 6 (BLOCKING): AirPlayEngine's own test suite must pass before its
+# Swift code is committed.
+#
+# AirPlayEngine is a standalone SwiftPM package (sibling of, not nested in,
+# AudiouterCore — see AirPlayEngine/AGENTS.md), so Guard 4's AudiouterCore run
+# never touches it: a commit that only changes AirPlayEngine currently gets no
+# automatic test run at all. This closes that gap with an independent guard —
+# deliberately NOT folded into Guard 4, so an AudiouterCore-only commit never
+# pays for an AirPlayEngine run it didn't need, and vice versa. A commit
+# touching both packages runs both suites.
+#
+# AirPlayEngine's suite is small (~144 tests, ~2s) — no lock/queue/pass-cache
+# machinery like scripts/run-tests.sh; a plain `swift test` inline is fast
+# enough that the machinery would cost more than it saves.
+#
+# Escape hatch: `git commit --no-verify`, same as Guard 4. Missing `swift`
+# toolchain => skip.
+staged_airplayengine=$(git diff --cached --name-only --diff-filter=ACM -- \
+    'AirPlayEngine/Sources/' 'AirPlayEngine/Tests/' 2>/dev/null | grep '\.swift$')
+if [ -n "$staged_airplayengine" ] && command -v swift >/dev/null 2>&1; then
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    echo "" >&2
+    echo "  Guard 6: AirPlayEngine Swift changed — running its test suite" >&2
+    echo "  before commit. ~2s; --no-verify to skip." >&2
+    if ! ( cd "$repo_root/AirPlayEngine" && swift test >&2 ); then
+        echo "" >&2
+        echo "  REFUSED: AirPlayEngine test suite failed. Fix the failures" >&2
+        echo "  (or 'git commit --no-verify' for a real emergency)." >&2
+        echo "" >&2
+        exit 1
+    fi
+    echo "  Guard 6: AirPlayEngine suite passed." >&2
+fi
+
 exit 0

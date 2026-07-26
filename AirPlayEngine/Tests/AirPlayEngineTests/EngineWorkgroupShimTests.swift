@@ -7,39 +7,39 @@
 // process can prove: engine_workgroup_join never crashes and returns EINVAL
 // when its output-token pointer is NULL.
 
-import XCTest
+import Testing
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class EngineWorkgroupShimTests: XCTestCase {
+@Suite struct EngineWorkgroupShimTests {
 
     // NULL-safety, hard requirement (T5 verify): the token output pointer
     // being NULL must return EINVAL, not crash. Device id is irrelevant to
     // this check — the shim rejects a NULL out_token before it ever touches
     // Core Audio.
-    func testJoinWithNullTokenPointerReturnsEINVALWithoutCrashing() {
+    @Test func joinWithNullTokenPointerReturnsEINVALWithoutCrashing() {
         let rc = engine_workgroup_join(0, nil)
-        XCTAssertEqual(rc, EINVAL, "engine_workgroup_join must return EINVAL for a NULL out_token, not crash")
+        #expect(rc == EINVAL, "engine_workgroup_join must return EINVAL for a NULL out_token, not crash")
     }
 
     // A device id with no 'oswg' property (kAudioObjectUnknown / 0 is not a
     // real device) must also fail cleanly with EINVAL and leave *out_token
     // untouched at NULL — not a random device left dangling.
-    func testJoinWithUnknownDeviceIdFailsCleanlyAndLeavesTokenNil() {
+    @Test func joinWithUnknownDeviceIdFailsCleanlyAndLeavesTokenNil() {
         // engine_workgroup_token is an opaque C struct (never defined, only
         // forward-declared), so the Clang importer bridges a pointer to it
         // as OpaquePointer — same convention this package already uses for
         // cfg_t / event_base / transcode contexts.
         var token: OpaquePointer? = nil
         let rc = engine_workgroup_join(0 /* kAudioObjectUnknown */, &token)
-        XCTAssertEqual(rc, EINVAL)
-        XCTAssertNil(token)
+        #expect(rc == EINVAL)
+        #expect(token == nil)
     }
 
     // leave(NULL) must be a documented safe no-op (mirrors free()'s
     // NULL-safety) so cleanup/defer paths can call it unconditionally even
     // when join() never succeeded.
-    func testLeaveWithNullTokenIsSafeNoOp() {
+    @Test func leaveWithNullTokenIsSafeNoOp() {
         engine_workgroup_leave(nil)
         engine_workgroup_leave(nil)
     }

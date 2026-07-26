@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// Unit tests for the real `OwnToneBackend` and its `OwnToneClient`, run against
@@ -9,11 +10,28 @@ import XCTest
 ///
 /// Grounded in `dev/notes/p1-owntone-api-brief.md` (poll-primary, re-GET after
 /// outputs/set, HTML error bodies, 500-on-empty-queue, "AirPlay 1"/"AirPlay 2").
-final class OwnToneBackendTests: XCTestCase {
+///
+/// **Test isolation note (swift-testing conversion):** `StubURLProtocol` used to
+/// hold a single process-global `static var handler`. Under XCTest's
+/// one-process-per-test-method model that was accidentally safe (no two test
+/// methods ever ran in the same process at the same time). Under
+/// swift-testing's in-process concurrent execution, two `@Test`s racing to set
+/// that one global would clobber each other's stub and read back a mixture of
+/// both tests' responses — a genuine data race, not just a style mismatch. The
+/// fix: `StubURLProtocol` now keys its handler lookup by a per-test id carried
+/// in a header on each request (`testIDHeaderField`), registered/unregistered
+/// per suite instance instead of a single shared `handler` var. This suite is a
+/// `final class` (not the usual `struct`) specifically so `deinit` can
+/// unregister its id — mirroring the old `tearDown()`'s `StubURLProtocol.reset()`.
+@Suite final class OwnToneBackendTests {
 
-    override func tearDown() {
-        StubURLProtocol.reset()
-        super.tearDown()
+    /// Unique per test instance (swift-testing creates a fresh suite instance
+    /// per `@Test`), used to key this test's stub responses so concurrent tests
+    /// never share a handler.
+    private let testID = UUID().uuidString
+
+    deinit {
+        StubURLProtocol.unregister(testID)
     }
 
     // MARK: Helpers
@@ -23,11 +41,18 @@ final class OwnToneBackendTests: XCTestCase {
                              connectingTimeout: TimeInterval = 10) -> OwnToneBackend {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]
+        config.httpAdditionalHeaders = [StubURLProtocol.testIDHeaderField: testID]
         let session = URLSession(configuration: config)
         let client = OwnToneClient(session: session, timeout: 2)
         return OwnToneBackend(client: client, webSocket: nil,
                               pollInterval: pollInterval, unreachablePollInterval: 0.05,
                               connectingTimeout: connectingTimeout)
+    }
+
+    /// Register this test's response handler. Replaces the old
+    /// `StubURLProtocol.handler = ...` global assignment.
+    private func setHandler(_ handler: @escaping @Sendable (URLRequest) -> StubURLProtocol.Response) {
+        StubURLProtocol.register(handler, for: testID)
     }
 
     /// Collect non-level events until `predicate` is satisfied or timeout.
@@ -37,17 +62,24 @@ final class OwnToneBackendTests: XCTestCase {
         until predicate: @escaping @Sendable ([BackendEvent]) -> Bool
     ) async -> [BackendEvent] {
         let stream = backend.makeEventStream()
-        let done = expectation(description: "predicate satisfied")
         let box = EventCollector()
-        let task = Task {
-            for await event in stream {
-                if case .level = event { continue }
-                let all = await box.append(event)
-                if predicate(all) { done.fulfill(); break }
+        await confirmation("predicate satisfied") { done in
+            let task = Task {
+                for await event in stream {
+                    if case .level = event { continue }
+                    let all = await box.append(event)
+                    if predicate(all) { done(); break }
+                }
+            }
+            defer { task.cancel() }
+            // The body must do the waiting itself — `confirmation` does not.
+            try? await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { _ = await task.value }
+                group.addTask { try await Task.sleep(for: .seconds(timeout)) }
+                try await group.next()
+                group.cancelAll()
             }
         }
-        await fulfillment(of: [done], timeout: timeout)
-        task.cancel()
         return await box.all
     }
 
@@ -91,8 +123,8 @@ final class OwnToneBackendTests: XCTestCase {
 
     /// Poll discovers outputs and emits `deviceAdded`, mapping the "AirPlay 1"/
     /// "AirPlay 2" type prefix onto `supportsAirPlay2` (brief don't-assume #5).
-    func testPollDiscoveryEmitsDeviceAddedWithTypeMapping() async {
-        StubURLProtocol.handler = { [self] request in
+    @Test func pollDiscoveryEmitsDeviceAddedWithTypeMapping() async {
+        setHandler { [self] request in
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
             case "/api/outputs": return .ok(outputsJSON([
@@ -112,15 +144,15 @@ final class OwnToneBackendTests: XCTestCase {
         let added = events.compactMap { if case .deviceAdded(let d) = $0 { return d } else { return nil } }
         let lg = added.first { $0.id == "111" }
         let express = added.first { $0.id == "222" }
-        XCTAssertEqual(lg?.supportsAirPlay2, true, "\"AirPlay 2\" → supportsAirPlay2 true")
-        XCTAssertEqual(express?.supportsAirPlay2, false, "\"AirPlay 1\" → supportsAirPlay2 false")
+        #expect(lg?.supportsAirPlay2 == true, "\"AirPlay 2\" → supportsAirPlay2 true")
+        #expect(express?.supportsAirPlay2 == false, "\"AirPlay 1\" → supportsAirPlay2 false")
     }
 
     /// A field change between polls emits exactly one `deviceUpdated` with the
     /// new value (poll-diff, not a re-add).
-    func testPollDiffEmitsDeviceUpdatedOnVolumeChange() async {
+    @Test func pollDiffEmitsDeviceUpdatedOnVolumeChange() async {
         let volume = Locked(50)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
             case "/api/outputs": return .ok(outputsJSON([("111", "TV", "AirPlay 2", true, volume.get())]))
@@ -138,13 +170,13 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.volume == 80 } else { return false } }
         }
-        XCTAssertTrue(events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "111" && d.volume == 80 } else { return false } })
+        #expect(events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "111" && d.volume == 80 } else { return false } })
     }
 
     /// An output absent from a later poll emits `deviceRemoved`.
-    func testPollDiffEmitsDeviceRemovedWhenOutputVanishes() async {
+    @Test func pollDiffEmitsDeviceRemovedWhenOutputVanishes() async {
         let present = Locked(true)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
             case "/api/outputs":
@@ -165,7 +197,7 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceRemoved(let id) = $0 { return id == "222" } else { return false } }
         }
-        XCTAssertTrue(events.contains { if case .deviceRemoved(let id) = $0 { return id == "222" } else { return false } })
+        #expect(events.contains { if case .deviceRemoved(let id) = $0 { return id == "222" } else { return false } })
     }
 
     /// Silent-select-failure: `outputs/set` 204s but the re-GET shows the target
@@ -174,9 +206,9 @@ final class OwnToneBackendTests: XCTestCase {
     /// the device ends `.failed` — but stays *available*: it answered the poll,
     /// so it's on the network; the *session* failed (connection-status brief §1,
     /// which deliberately replaced the old mark-unavailable behaviour).
-    func testSilentSelectFailureDetectedAndSurfacedAsFailed() async {
+    @Test func silentSelectFailureDetectedAndSurfacedAsFailed() async {
         let setCalls = Locked(0)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             // Always report the output as NOT selected — the selection never sticks.
@@ -199,25 +231,25 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend, timeout: 4) { [self] events in
             lastFailure(of: "dead", in: events) != nil
         }
-        XCTAssertEqual(lastFailure(of: "dead", in: events)?.cause, .unknown,
-                       "a select-revert with no better evidence should fail as .unknown")
+        #expect(lastFailure(of: "dead", in: events)?.cause == .unknown,
+                "a select-revert with no better evidence should fail as .unknown")
         let failedDevice = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, case .failed = d.connectionState { return d }
             return nil
         }.last
-        XCTAssertEqual(failedDevice?.isAvailable, true,
-                       "recovery failure must keep the device available — the session failed, not the network")
+        #expect(failedDevice?.isAvailable == true,
+                "recovery failure must keep the device available — the session failed, not the network")
         // outputs/set was called at least twice: the initial set + the recovery re-select.
-        XCTAssertGreaterThanOrEqual(setCalls.get(), 2, "recovery must re-issue outputs/set")
+        #expect(setCalls.get() >= 2, "recovery must re-issue outputs/set")
     }
 
     /// Zombie recovery success path: the selection sticks on the recovery
     /// re-select, and the `replayHook` (the coordinator's clear→add→play half)
     /// is invoked as part of recovery (brief §4 step 4).
-    func testZombieRecoveryReselectsAndInvokesReplayHook() async {
+    @Test func zombieRecoveryReselectsAndInvokesReplayHook() async {
         let selected = Locked(false)
         let setCalls = Locked(0)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -241,40 +273,41 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend, timeout: 4) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "s1" && d.isSelected } else { return false } }
         }
-        XCTAssertTrue(events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "s1" && d.isSelected } else { return false } },
-                      "recovery should end with the output actually selected")
-        XCTAssertTrue(replayed.get(), "the coordinator replay hook must fire during recovery")
+        #expect(events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "s1" && d.isSelected } else { return false } },
+                "recovery should end with the output actually selected")
+        #expect(replayed.get(), "the coordinator replay hook must fire during recovery")
     }
 
     /// Empty-queue guard: `player/play` on an empty queue is a hard 500 (brief
     /// don't-assume #4). The client surfaces it as `.http(500)` rather than
     /// masking it, so a caller (the coordinator) can guard.
-    func testPlayOnEmptyQueueSurfaces500() async {
-        StubURLProtocol.handler = { request in
+    @Test func playOnEmptyQueueSurfaces500() async {
+        setHandler { request in
             if request.url!.path == "/api/player/play" { return .html(500) }
             return .status(204)
         }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]
+        config.httpAdditionalHeaders = [StubURLProtocol.testIDHeaderField: testID]
         let client = OwnToneClient(session: URLSession(configuration: config), timeout: 2)
 
         do {
             try await client.play()
-            XCTFail("player/play on an empty queue should throw, not succeed")
+            Issue.record("player/play on an empty queue should throw, not succeed")
         } catch let error as OwnToneClient.ClientError {
-            XCTAssertEqual(error, .http(status: 500))
+            #expect(error == .http(status: 500))
         } catch {
-            XCTFail("unexpected error type: \(error)")
+            Issue.record("unexpected error type: \(error)")
         }
     }
 
     /// Connection-refused: the client maps `URLError.cannotConnectToHost` to
     /// `.unreachable`, and the backend surfaces every known device as unavailable
     /// (Q7 connect-only) while continuing to poll (no crash, no supervise).
-    func testConnectionRefusedSurfacesUnreachableAndKeepsPolling() async {
+    @Test func connectionRefusedSurfacesUnreachableAndKeepsPolling() async {
         // Start reachable so a device is discovered, then flip to refused.
         let refused = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             if refused.get() { return .refused }
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
@@ -291,23 +324,23 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend, timeout: 4) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "111" && !d.isAvailable } else { return false } }
         }
-        XCTAssertTrue(events.contains { if case .deviceUpdated(let d) = $0 { return !d.isAvailable } else { return false } },
-                      "connection-refused should mark known devices unavailable")
+        #expect(events.contains { if case .deviceUpdated(let d) = $0 { return !d.isAvailable } else { return false } },
+                "connection-refused should mark known devices unavailable")
 
         // And it recovers automatically when the server comes back.
         refused.set(false)
         let back = await collect(from: backend, timeout: 4) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == "111" && d.isAvailable } else { return false } }
         }
-        XCTAssertTrue(back.contains { if case .deviceUpdated(let d) = $0 { return d.isAvailable } else { return false } },
-                      "polling should resume and re-mark devices available when OwnTone returns")
+        #expect(back.contains { if case .deviceUpdated(let d) = $0 { return d.isAvailable } else { return false } },
+                "polling should resume and re-mark devices available when OwnTone returns")
     }
 
     /// Client-level: out-of-range volume is caller-clamped (the backend clamps
     /// with `.clampedToVolume` before calling), so the client never sends >100.
-    func testSetVolumeClampsBeforeSending() async {
+    @Test func setVolumeClampsBeforeSending() async {
         let sentVolume = Locked(-1)
-        StubURLProtocol.handler = { request in
+        setHandler { request in
             if request.httpMethod == "PUT", request.url!.path.hasPrefix("/api/outputs/"),
                let body = request.bodyData(),
                let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -326,9 +359,21 @@ final class OwnToneBackendTests: XCTestCase {
         _ = await collect(from: backend) { $0.contains { if case .deviceAdded = $0 { return true } else { return false } } }
 
         backend.setVolume(150, for: "111")
-        // Give the async PUT a moment.
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(sentVolume.get(), 100, "the backend must clamp to 100 before PUT — OwnTone 400s on out-of-range")
+        // Poll for the PUT rather than sleeping a fixed beat and hoping. The
+        // old `try? await Task.sleep(nanoseconds: 300_000_000)` was written when
+        // XCTest gave this test method its own process; under swift-testing's
+        // in-process concurrency 300 ms is simply not enough often enough — it
+        // failed with `sentVolume` still -1 (i.e. the PUT had not reached the
+        // stub at all) in 5 of 10 full-suite runs and 5 of 10 runs of just this
+        // file plus NativeBackendTests. This returns as soon as the PUT lands,
+        // so the generous ceiling only costs wall-clock in the failure case,
+        // and -1 (the sentinel) still surfaces as a real failure at the end.
+        var deadline = 400   // 400 x 10 ms = 4 s
+        while sentVolume.get() == -1 && deadline > 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            deadline -= 1
+        }
+        #expect(sentVolume.get() == 100, "the backend must clamp to 100 before PUT — OwnTone 400s on out-of-range")
     }
 
     // MARK: Connection state machine (dev/notes/p1-connection-status-brief.md §3)
@@ -338,9 +383,9 @@ final class OwnToneBackendTests: XCTestCase {
     /// re-GET AND the next poll tick agree it's selected. Once connected, the
     /// timeout must be disarmed — a short `connectingTimeout` here would fail
     /// the device if any stale timer survived.
-    func testEnableEmitsConnectingThenConnectedAndCancelsTimeout() async {
+    @Test func enableEmitsConnectingThenConnectedAndCancelsTimeout() async {
         let selected = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -363,26 +408,27 @@ final class OwnToneBackendTests: XCTestCase {
         let observed = states(of: "s1", in: events)
         guard let connecting = observed.firstIndex(of: .connecting),
               let connected = observed.firstIndex(of: .connected) else {
-            return XCTFail("expected both .connecting and .connected, got \(observed)")
+            Issue.record("expected both .connecting and .connected, got \(observed)")
+            return
         }
-        XCTAssertLessThan(connecting, connected, ".connecting must be emitted before .connected")
+        #expect(connecting < connected, ".connecting must be emitted before .connected")
         let connectedDevice = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, d.connectionState == .connected { return d }
             return nil
         }.first
-        XCTAssertEqual(connectedDevice?.isSelected, true, "a .connected device must also be selected")
+        #expect(connectedDevice?.isSelected == true, "a .connected device must also be selected")
 
         // Outlive the 0.5 s timeout: it must have been cancelled on connect.
         try? await Task.sleep(nanoseconds: 700_000_000)
-        XCTAssertEqual(backend.devices.first?.connectionState, .connected,
-                       "the connecting timeout must not fire after a successful connect")
+        #expect(backend.devices.first?.connectionState == .connected,
+                "the connecting timeout must not fire after a successful connect")
     }
 
     /// Sticky-failed (brief §1): the popover removes a failed id from the
     /// output set as *cleanup*, and that must not erase the warning. Re-adding
     /// the id afterwards is the retry path and goes back to `.connecting`.
-    func testFailedIsStickyAcrossCleanupAndRetriesAsConnecting() async {
-        StubURLProtocol.handler = { [self] request in
+    @Test func failedIsStickyAcrossCleanupAndRetriesAsConnecting() async {
+        setHandler { [self] request in
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
             // The selection never sticks — every enable attempt fails.
@@ -405,7 +451,8 @@ final class OwnToneBackendTests: XCTestCase {
         // Let the set call land and a few polls tick — the state must survive.
         try? await Task.sleep(nanoseconds: 300_000_000)
         guard case .failed = backend.devices.first?.connectionState else {
-            return XCTFail("removing a failed id from the set must keep it .failed (sticky), got \(String(describing: backend.devices.first?.connectionState))")
+            Issue.record("removing a failed id from the set must keep it .failed (sticky), got \(String(describing: backend.devices.first?.connectionState))")
+            return
         }
 
         // Retry: re-adding the failed id goes back to .connecting.
@@ -413,15 +460,15 @@ final class OwnToneBackendTests: XCTestCase {
         let retry = await collect(from: backend, timeout: 4) { [self] events in
             states(of: "dead", in: events).contains(.connecting)
         }
-        XCTAssertTrue(states(of: "dead", in: retry).contains(.connecting),
-                      "re-adding a failed id is the retry path → .connecting")
+        #expect(states(of: "dead", in: retry).contains(.connecting),
+                "re-adding a failed id is the retry path → .connecting")
     }
 
     /// Zombie drop with successful recovery: `.connected → .reconnecting →
     /// .connected`, in that order.
-    func testZombieDropEmitsReconnectingThenRecoversToConnected() async {
+    @Test func zombieDropEmitsReconnectingThenRecoversToConnected() async {
         let selected = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -450,19 +497,20 @@ final class OwnToneBackendTests: XCTestCase {
         }
         let observed = states(of: "s1", in: events)
         guard let reconnecting = observed.firstIndex(of: .reconnecting) else {
-            return XCTFail("expected .reconnecting after a zombie drop, got \(observed)")
+            Issue.record("expected .reconnecting after a zombie drop, got \(observed)")
+            return
         }
-        XCTAssertTrue(observed[reconnecting...].contains(.connected),
-                      "successful recovery must return to .connected")
+        #expect(observed[reconnecting...].contains(.connected),
+                "successful recovery must return to .connected")
     }
 
     /// Zombie drop where recovery fails: `.reconnecting →
     /// .failed(.droppedMidStream)` — and the device stays available (§1
     /// changed behaviour: the session failed, not the network).
-    func testZombieRecoveryFailureEndsFailedDroppedMidStreamAndAvailable() async {
+    @Test func zombieRecoveryFailureEndsFailedDroppedMidStreamAndAvailable() async {
         let selected = Locked(false)
         let allowSelect = Locked(true)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -488,25 +536,25 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend, timeout: 4) { [self] events in
             lastFailure(of: "s1", in: events) != nil
         }
-        XCTAssertEqual(lastFailure(of: "s1", in: events)?.cause, .droppedMidStream,
-                       "a failed reconnect must report .droppedMidStream")
-        XCTAssertTrue(states(of: "s1", in: events).contains(.reconnecting),
-                      ".reconnecting must be emitted before the failure")
+        #expect(lastFailure(of: "s1", in: events)?.cause == .droppedMidStream,
+                "a failed reconnect must report .droppedMidStream")
+        #expect(states(of: "s1", in: events).contains(.reconnecting),
+                ".reconnecting must be emitted before the failure")
         let failedDevice = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, case .failed = d.connectionState { return d }
             return nil
         }.last
-        XCTAssertEqual(failedDevice?.isAvailable, true,
-                       "a mid-stream drop must keep the device available")
+        #expect(failedDevice?.isAvailable == true,
+                "a mid-stream drop must keep the device available")
     }
 
     /// Timeout path: the confirm re-GET says selected, but no poll tick ever
     /// re-confirms it (a huge poll interval stands in for OwnTone's optimistic
     /// selected-then-revert window), so `.connecting` never resolves and the
     /// generation-token timeout fails it with `.timedOut`.
-    func testConnectingTimeoutFailsWithTimedOut() async {
+    @Test func connectingTimeoutFailsWithTimedOut() async {
         let selected = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -527,17 +575,17 @@ final class OwnToneBackendTests: XCTestCase {
         let events = await collect(from: backend, timeout: 4) { [self] events in
             lastFailure(of: "s1", in: events) != nil
         }
-        XCTAssertEqual(lastFailure(of: "s1", in: events)?.cause, .timedOut,
-                       "an unresolved .connecting must fail as .timedOut when the timeout fires")
-        XCTAssertFalse(states(of: "s1", in: events).contains(.connected),
-                       "the device never stabilized, so .connected must never be emitted")
+        #expect(lastFailure(of: "s1", in: events)?.cause == .timedOut,
+                "an unresolved .connecting must fail as .timedOut when the timeout fires")
+        #expect(!states(of: "s1", in: events).contains(.connected),
+                "the device never stabilized, so .connected must never be emitted")
     }
 
     /// `stop()` clears the connection lifecycle: a pending connecting timeout
     /// must never fire after the backend is stopped.
-    func testStopCancelsPendingConnectingTimeout() async {
+    @Test func stopCancelsPendingConnectingTimeout() async {
         let selected = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"): return .ok(outputsJSON([("s1", "Speaker", "AirPlay 2", selected.get(), 50)]))
@@ -568,8 +616,8 @@ final class OwnToneBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 400_000_000)
         let events = await box.all
         watcher.cancel()
-        XCTAssertNil(lastFailure(of: "s1", in: events),
-                     "stop() must cancel pending timeouts — no .failed after teardown")
+        #expect(lastFailure(of: "s1", in: events) == nil,
+                "stop() must cancel pending timeouts — no .failed after teardown")
     }
 
     /// `stop()` during an in-flight confirm re-GET: the resumed confirm's
@@ -578,9 +626,9 @@ final class OwnToneBackendTests: XCTestCase {
     /// `deviceRemoved` sweep — and a restart must begin from empty state.
     /// (stop() owns and cancels the select/confirm/recovery tasks; the
     /// `started` guard in `applyPoll` closes the remaining race.)
-    func testStopDuringInFlightConfirmDoesNotResurrectDevices() async {
+    @Test func stopDuringInFlightConfirmDoesNotResurrectDevices() async {
         let discoveryDone = Locked(false)
-        StubURLProtocol.handler = { [self] request in
+        setHandler { [self] request in
             switch (request.httpMethod ?? "", request.url!.path) {
             case ("GET", "/api/config"):  return .ok(configJSON)
             case ("GET", "/api/outputs"):
@@ -617,21 +665,22 @@ final class OwnToneBackendTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 600_000_000)
         let events = await box.all
         watcher.cancel()
-        XCTAssertTrue(backend.devices.isEmpty,
-                      "an in-flight confirm must not re-populate devices after stop()")
+        #expect(backend.devices.isEmpty,
+                "an in-flight confirm must not re-populate devices after stop()")
         guard let removal = events.lastIndex(where: { if case .deviceRemoved = $0 { return true } else { return false } }) else {
-            return XCTFail("stop() must emit deviceRemoved for the known device")
+            Issue.record("stop() must emit deviceRemoved for the known device")
+            return
         }
-        XCTAssertTrue(events[(removal + 1)...].isEmpty,
-                      "no deviceAdded/deviceUpdated may follow the stop() teardown sweep, got \(events[(removal + 1)...])")
+        #expect(events[(removal + 1)...].isEmpty,
+                "no deviceAdded/deviceUpdated may follow the stop() teardown sweep, got \(events[(removal + 1)...])")
     }
 
     /// The fire-and-forget diagnosis flow (brief §3): the immediate best-guess
     /// failure is emitted first, then replaced by the diagnosed one while the
     /// device is still `.failed`. The `DiagnosisContext` must carry the
     /// captured auth flag and the prior cause.
-    func testDiagnosisReplacesInitialFailureAndGetsAuthFlags() async {
-        StubURLProtocol.handler = { [self] request in
+    @Test func diagnosisReplacesInitialFailureAndGetsAuthFlags() async {
+        setHandler { [self] request in
             switch request.url!.path {
             case "/api/config":  return .ok(configJSON)
             // Never selects (enable always fails) + requires_auth:true so the
@@ -659,15 +708,15 @@ final class OwnToneBackendTests: XCTestCase {
             if case .failed(let f) = state { return f }
             return nil
         }
-        XCTAssertEqual(failures.first?.cause, .unknown,
-                       "the immediate best-guess failure must be emitted before diagnosis returns")
-        XCTAssertEqual(failures.last, diagnosed,
-                       "the diagnosed failure must replace the best guess")
+        #expect(failures.first?.cause == .unknown,
+                "the immediate best-guess failure must be emitted before diagnosis returns")
+        #expect(failures.last == diagnosed,
+                "the diagnosed failure must replace the best guess")
         let context = diagnostics.recorded.get()
-        XCTAssertEqual(context?.deviceID, "dead")
-        XCTAssertEqual(context?.deviceName, "Locked Speaker")
-        XCTAssertEqual(context?.requiresAuth, true, "the polled requires_auth flag must reach the diagnoser")
-        XCTAssertEqual(context?.priorCause, .unknown)
+        #expect(context?.deviceID == "dead")
+        #expect(context?.deviceName == "Locked Speaker")
+        #expect(context?.requiresAuth == true, "the polled requires_auth flag must reach the diagnoser")
+        #expect(context?.priorCause == .unknown)
     }
 }
 
@@ -720,9 +769,18 @@ extension URLRequest {
     }
 }
 
-/// A scriptable `URLProtocol` stub. Tests set `handler` to map a request to a
-/// canned `Response`; `.refused` simulates connection-refused so the
-/// unreachable/backoff path is exercised without a real socket.
+/// A scriptable `URLProtocol` stub. Tests set a handler (keyed by their own
+/// unique test id) to map a request to a canned `Response`; `.refused`
+/// simulates connection-refused so the unreachable/backoff path is exercised
+/// without a real socket.
+///
+/// **Not a single global `handler` any more.** swift-testing can run multiple
+/// `@Test`s concurrently in one process, and two tests racing to overwrite one
+/// shared `static var handler` would silently cross-contaminate each other's
+/// stubbed responses. Instead each test tags its `URLSessionConfiguration`
+/// with a unique id header (`testIDHeaderField`); `startLoading()` reads that
+/// header back off the actual request and looks up only that test's handler in
+/// a lock-protected dictionary.
 final class StubURLProtocol: URLProtocol {
 
     struct Response {
@@ -739,17 +797,36 @@ final class StubURLProtocol: URLProtocol {
         static let refused = Response(statusCode: 0, body: Data(), refuse: true)
     }
 
-    /// Set by each test. `nonisolated(unsafe)`-style access guarded by the tests'
-    /// single-threaded setup; the closure itself must be thread-safe (uses `Locked`).
-    static var handler: (@Sendable (URLRequest) -> Response)?
+    /// Header carrying the requesting test's unique id, set via
+    /// `URLSessionConfiguration.httpAdditionalHeaders` in each test's session.
+    static let testIDHeaderField = "X-Test-Stub-ID"
 
-    static func reset() { handler = nil }
+    private static let lock = NSLock()
+    private static var handlersByTestID: [String: @Sendable (URLRequest) -> Response] = [:]
+
+    /// Register `handler` for one test's id. Overwrites any previous handler
+    /// for the same id (a test re-scripting mid-run), never another test's.
+    static func register(_ handler: @escaping @Sendable (URLRequest) -> Response, for testID: String) {
+        lock.lock(); handlersByTestID[testID] = handler; lock.unlock()
+    }
+
+    /// Drop a test's handler once it's done — called from the suite's `deinit`.
+    static func unregister(_ testID: String) {
+        lock.lock(); handlersByTestID.removeValue(forKey: testID); lock.unlock()
+    }
+
+    private static func handler(for testID: String?) -> (@Sendable (URLRequest) -> Response)? {
+        guard let testID else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return handlersByTestID[testID]
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let handler = StubURLProtocol.handler else {
+        let testID = request.value(forHTTPHeaderField: StubURLProtocol.testIDHeaderField)
+        guard let handler = StubURLProtocol.handler(for: testID) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown)); return
         }
         let response = handler(request)

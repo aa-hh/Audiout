@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 import AirPlayEngine
 @testable import AudiouterCore
 
@@ -11,7 +12,7 @@ import AirPlayEngine
 /// vendored feature-bit gate), the colon-hex id round-trip (never
 /// reformatted), and de-dupe of a device advertising both `_airplay._tcp`
 /// and `_raop._tcp`.
-final class NativeDiscoveryTests: XCTestCase {
+@Suite struct NativeDiscoveryTests {
 
     // MARK: Double
 
@@ -90,13 +91,13 @@ final class NativeDiscoveryTests: XCTestCase {
     /// AP2-capable device with descriptor fields propagated verbatim, then a
     /// re-resolve with changed facts fires `.updated`, then removal fires
     /// `.disappeared`.
-    func testAP2DeviceAppearUpdateDisappear() {
+    @Test func ap2DeviceAppearUpdateDisappear() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
-        XCTAssertEqual(browser.startCount, 1)
+        #expect(browser.startCount == 1)
 
         // Appear.
         let service = airplayService(features: ap2Features)
@@ -104,49 +105,52 @@ final class NativeDiscoveryTests: XCTestCase {
 
         let appeared = events.wait(count: 1)
         guard case .appeared(let device)? = appeared.first else {
-            return XCTFail("expected .appeared, got \(appeared)")
+            Issue.record("expected .appeared, got \(appeared)")
+            return
         }
-        XCTAssertEqual(device.id, "AA:BB:CC:DD:EE:01")
-        XCTAssertTrue(device.isAirPlay2Supported)
-        XCTAssertEqual(device.descriptor.name, "Sonos Move")
-        XCTAssertEqual(device.descriptor.address, "192.168.1.10")
-        XCTAssertEqual(device.descriptor.port, 7000)
-        XCTAssertEqual(device.descriptor.family, .ipv4)
-        XCTAssertEqual(device.descriptor.txtRecord["model"], "S13")
-        XCTAssertEqual(device.descriptor.txtRecord["deviceid"], "AA:BB:CC:DD:EE:01")
-        XCTAssertEqual(device.outputID.rawValue, 0xAABBCCDDEE01)
+        #expect(device.id == "AA:BB:CC:DD:EE:01")
+        #expect(device.isAirPlay2Supported)
+        #expect(device.descriptor.name == "Sonos Move")
+        #expect(device.descriptor.address == "192.168.1.10")
+        #expect(device.descriptor.port == 7000)
+        #expect(device.descriptor.family == .ipv4)
+        #expect(device.descriptor.txtRecord["model"] == "S13")
+        #expect(device.descriptor.txtRecord["deviceid"] == "AA:BB:CC:DD:EE:01")
+        #expect(device.outputID.rawValue == 0xAABBCCDDEE01)
 
         // Update: same device, changed port (re-resolve with new facts).
         let moved = airplayService(features: ap2Features, port: 7001)
         browser.resolve(moved)
         let updated = events.wait(count: 2)
         guard case .updated(let updatedDevice)? = updated.last else {
-            return XCTFail("expected .updated, got \(updated)")
+            Issue.record("expected .updated, got \(updated)")
+            return
         }
-        XCTAssertEqual(updatedDevice.descriptor.port, 7001)
-        XCTAssertEqual(updatedDevice.id, "AA:BB:CC:DD:EE:01")
+        #expect(updatedDevice.descriptor.port == 7001)
+        #expect(updatedDevice.id == "AA:BB:CC:DD:EE:01")
 
         // Disappear.
         browser.remove(RemovedService(serviceType: .airplay, deviceID: "AA:BB:CC:DD:EE:01", name: "Sonos Move"))
         let disappeared = events.wait(count: 3)
         guard case .disappeared(let id, let wasAP2)? = disappeared.last else {
-            return XCTFail("expected .disappeared, got \(disappeared)")
+            Issue.record("expected .disappeared, got \(disappeared)")
+            return
         }
-        XCTAssertEqual(id, "AA:BB:CC:DD:EE:01")
-        XCTAssertTrue(wasAP2)
+        #expect(id == "AA:BB:CC:DD:EE:01")
+        #expect(wasAP2)
 
         // Snapshot is empty after disappear.
-        XCTAssertTrue(discovery.devices.isEmpty)
+        #expect(discovery.devices.isEmpty)
 
         discovery.stop()
-        XCTAssertEqual(browser.stopCount, 1)
+        #expect(browser.stopCount == 1)
     }
 
     // MARK: appear -> update -> disappear (AP1-only)
 
     /// A `_raop._tcp`-only resolve appears as AP1-only (never AP2), survives a
     /// re-resolve with changed facts as `.updated`, and disappears cleanly.
-    func testAP1OnlyDeviceAppearUpdateDisappear() {
+    @Test func ap1OnlyDeviceAppearUpdateDisappear() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -158,32 +162,35 @@ final class NativeDiscoveryTests: XCTestCase {
 
         let appeared = events.wait(count: 1)
         guard case .appeared(let device)? = appeared.first else {
-            return XCTFail("expected .appeared, got \(appeared)")
+            Issue.record("expected .appeared, got \(appeared)")
+            return
         }
-        XCTAssertEqual(device.id, "AA:BB:CC:DD:EE:99")
-        XCTAssertFalse(device.isAirPlay2Supported, "raop-only device must classify AP1-only")
-        XCTAssertEqual(device.descriptor.name, "Old Express")
-        XCTAssertEqual(device.descriptor.address, "192.168.1.20")
-        XCTAssertEqual(device.descriptor.port, 5000)
+        #expect(device.id == "AA:BB:CC:DD:EE:99")
+        #expect(!device.isAirPlay2Supported, "raop-only device must classify AP1-only")
+        #expect(device.descriptor.name == "Old Express")
+        #expect(device.descriptor.address == "192.168.1.20")
+        #expect(device.descriptor.port == 5000)
 
         // Update: re-resolve with a changed address.
         let moved = raopService(address: "192.168.1.21")
         browser.resolve(moved)
         let updated = events.wait(count: 2)
         guard case .updated(let updatedDevice)? = updated.last else {
-            return XCTFail("expected .updated, got \(updated)")
+            Issue.record("expected .updated, got \(updated)")
+            return
         }
-        XCTAssertEqual(updatedDevice.descriptor.address, "192.168.1.21")
-        XCTAssertFalse(updatedDevice.isAirPlay2Supported)
+        #expect(updatedDevice.descriptor.address == "192.168.1.21")
+        #expect(!updatedDevice.isAirPlay2Supported)
 
         // Disappear.
         browser.remove(RemovedService(serviceType: .raop, deviceID: "AA:BB:CC:DD:EE:99", name: "Old Express"))
         let disappeared = events.wait(count: 3)
         guard case .disappeared(let id, let wasAP2)? = disappeared.last else {
-            return XCTFail("expected .disappeared, got \(disappeared)")
+            Issue.record("expected .disappeared, got \(disappeared)")
+            return
         }
-        XCTAssertEqual(id, "AA:BB:CC:DD:EE:99")
-        XCTAssertFalse(wasAP2)
+        #expect(id == "AA:BB:CC:DD:EE:99")
+        #expect(!wasAP2)
 
         discovery.stop()
     }
@@ -192,7 +199,7 @@ final class NativeDiscoveryTests: XCTestCase {
 
     /// Every descriptor field (name/hostname/address/family/port/txt) is carried
     /// through from the resolved service to the discovered device untouched.
-    func testDescriptorFieldsPropagateVerbatim() {
+    @Test func descriptorFieldsPropagateVerbatim() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -206,12 +213,13 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(service)
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(device.descriptor.hostname, "sonos-move.local")
-        XCTAssertEqual(device.descriptor.family, .ipv6)
-        XCTAssertEqual(device.descriptor.address, "fe80::1")
-        XCTAssertEqual(device.descriptor.txtRecord, service.txtRecord)
+        #expect(device.descriptor.hostname == "sonos-move.local")
+        #expect(device.descriptor.family == .ipv6)
+        #expect(device.descriptor.address == "fe80::1")
+        #expect(device.descriptor.txtRecord == service.txtRecord)
 
         discovery.stop()
     }
@@ -221,7 +229,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A device advertising `_airplay._tcp` but WITHOUT valid AP2 feature bits
     /// (missing audio-support or core-utils-pairing bit) classifies as AP1-only,
     /// not AP2 — the classifier is bit-exact, not "advertises airplay at all."
-    func testAirplayServiceWithoutAP2BitsClassifiesAsAP1Only() {
+    @Test func airplayServiceWithoutAP2BitsClassifiesAsAP1Only() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -231,16 +239,17 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(features: nonAP2Features))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertFalse(device.isAirPlay2Supported, "features without AP2 bits must classify AP1-only")
+        #expect(!device.isAirPlay2Supported, "features without AP2 bits must classify AP1-only")
 
         discovery.stop()
     }
 
     /// A device advertising `_airplay._tcp` with NO `features` TXT key at all
     /// (missing key, not just missing bits) also classifies AP1-only.
-    func testAirplayServiceMissingFeaturesKeyClassifiesAsAP1Only() {
+    @Test func airplayServiceMissingFeaturesKeyClassifiesAsAP1Only() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -250,31 +259,32 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(features: nil))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertFalse(device.isAirPlay2Supported)
+        #expect(!device.isAirPlay2Supported)
 
         discovery.stop()
     }
 
     /// Direct unit coverage of the classifier (pure/static): a nil airplay
     /// advertisement (raop-only) always classifies AP1-only.
-    func testClassifyNilAirplayIsAP1Only() {
-        XCTAssertFalse(NativeDiscovery.classify(airplay: nil))
+    @Test func classifyNilAirplayIsAP1Only() {
+        #expect(!NativeDiscovery.classify(airplay: nil))
     }
 
-    func testParseFeaturesSingleHexValue() {
+    @Test func parseFeaturesSingleHexValue() {
         // Bit 9 set only (no core-utils bit) -> valid parse, not AP2 on its own.
-        XCTAssertEqual(NativeDiscovery.parseFeatures("0x00000200"), 0x200)
+        #expect(NativeDiscovery.parseFeatures("0x00000200") == 0x200)
     }
 
-    func testParseFeaturesTwoPartHexValue() {
+    @Test func parseFeaturesTwoPartHexValue() {
         let parsed = NativeDiscovery.parseFeatures("0x445F8A00,0x1C340")
-        XCTAssertEqual(parsed, UInt64(0x445F8A00) | (UInt64(0x1C340) << 32))
+        #expect(parsed == UInt64(0x445F8A00) | (UInt64(0x1C340) << 32))
     }
 
-    func testParseFeaturesInvalidReturnsNil() {
-        XCTAssertNil(NativeDiscovery.parseFeatures("not-hex"))
+    @Test func parseFeaturesInvalidReturnsNil() {
+        #expect(NativeDiscovery.parseFeatures("not-hex") == nil)
     }
 
     // MARK: Colon-hex id round-trip
@@ -282,7 +292,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// The colon-hex `deviceid` TXT value is passed through verbatim — never
     /// re-cased, re-punctuated, or reconstructed from the parsed `OutputID` —
     /// while the `OutputID` itself is the correct parse of the hex value.
-    func testColonHexIDRoundTripNeverReformatted() {
+    @Test func colonHexIDRoundTripNeverReformatted() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -294,25 +304,26 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(id: rawID, features: ap2Features))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(device.id, rawID, "the colon-hex id must be passed through verbatim, never reformatted")
-        XCTAssertEqual(device.descriptor.txtRecord["deviceid"], rawID)
-        XCTAssertEqual(device.outputID.rawValue, UInt64("aAbB1122Ff00", radix: 16)!)
+        #expect(device.id == rawID, "the colon-hex id must be passed through verbatim, never reformatted")
+        #expect(device.descriptor.txtRecord["deviceid"] == rawID)
+        #expect(device.outputID.rawValue == UInt64("aAbB1122Ff00", radix: 16)!)
 
         discovery.stop()
     }
 
     /// `parseDeviceID` directly: verbatim id string out, correctly parsed OutputID.
-    func testParseDeviceIDDirect() {
+    @Test func parseDeviceIDDirect() {
         let parsed = NativeDiscovery.parseDeviceID(["deviceid": "AA:BB:CC:DD:EE:FF"])
-        XCTAssertEqual(parsed?.id, "AA:BB:CC:DD:EE:FF")
-        XCTAssertEqual(parsed?.outputID.rawValue, 0xAABBCCDDEEFF)
+        #expect(parsed?.id == "AA:BB:CC:DD:EE:FF")
+        #expect(parsed?.outputID.rawValue == 0xAABBCCDDEEFF)
     }
 
     /// A TXT record with no `deviceid` key at all is dropped (nothing downstream
     /// can key on it) — `parseDeviceID` returns nil and no event fires.
-    func testMissingDeviceIDIsDropped() {
+    @Test func missingDeviceIDIsDropped() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -325,7 +336,7 @@ final class NativeDiscoveryTests: XCTestCase {
 
         // Give the serial queue a beat, then assert nothing arrived.
         let none = events.waitNone(timeout: 0.3)
-        XCTAssertTrue(none, "a resolve without a parseable deviceid must be dropped, not surfaced")
+        #expect(none, "a resolve without a parseable deviceid must be dropped, not surfaced")
 
         discovery.stop()
     }
@@ -339,7 +350,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// (`.updated`, `isAvailable == false`) while STAYING AP2 — a real AP2
     /// receiver powering off (its `_raop._tcp` lingers longer than its
     /// `_airplay._tcp`), NOT an AP1 downgrade — not a removal.
-    func testDedupesDeviceAdvertisingBothServiceTypes() {
+    @Test func dedupesDeviceAdvertisingBothServiceTypes() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -350,9 +361,10 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(id: id, name: "Both", features: ap2Features))
         let firstBatch = events.wait(count: 1)
         guard case .appeared(let first)? = firstBatch.first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertTrue(first.isAirPlay2Supported)
+        #expect(first.isAirPlay2Supported)
 
         // The same device also resolves on _raop._tcp. Since the rebuilt device
         // (still AP2, airplay descriptor still wins) is unchanged, NO additional
@@ -361,11 +373,11 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopService(id: id, name: "Both"))
         // Give the serial queue a beat to process, then assert no NEW event.
         let stillOne = events.waitCountStaysAt(1, timeout: 0.3)
-        XCTAssertTrue(stillOne, "an unchanged rebuild after de-dupe must not emit a spurious event")
+        #expect(stillOne, "an unchanged rebuild after de-dupe must not emit a spurious event")
 
-        XCTAssertEqual(discovery.devices.count, 1, "one device, not two, despite two service types")
-        XCTAssertEqual(discovery.devices.first?.id, id)
-        XCTAssertTrue(discovery.devices.first?.isAirPlay2Supported ?? false)
+        #expect(discovery.devices.count == 1, "one device, not two, despite two service types")
+        #expect(discovery.devices.first?.id == id)
+        #expect(discovery.devices.first?.isAirPlay2Supported ?? false)
 
         // Losing the _airplay._tcp advert alone (still has _raop._tcp) marks it
         // OFFLINE via .updated — STAYS AP2 (sticky), becomes unavailable. NOT an
@@ -373,21 +385,23 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Both"))
         let flipped = events.wait(count: 2)
         guard case .updated(let updated)? = flipped.last else {
-            return XCTFail("expected .updated (AP2 offline), got \(flipped)")
+            Issue.record("expected .updated (AP2 offline), got \(flipped)")
+            return
         }
-        XCTAssertTrue(updated.isAirPlay2Supported, "losing the airplay advert must NOT downgrade a sticky-AP2 device to AP1")
-        XCTAssertFalse(updated.isAvailable, "losing the airplay advert (raop still present) marks a sticky-AP2 device offline")
-        XCTAssertEqual(discovery.devices.count, 1, "device must still be present, not removed, after losing only one advert")
+        #expect(updated.isAirPlay2Supported, "losing the airplay advert must NOT downgrade a sticky-AP2 device to AP1")
+        #expect(!updated.isAvailable, "losing the airplay advert (raop still present) marks a sticky-AP2 device offline")
+        #expect(discovery.devices.count == 1, "device must still be present, not removed, after losing only one advert")
 
         // Now losing the remaining _raop._tcp advert removes it entirely.
         browser.remove(RemovedService(serviceType: .raop, deviceID: id, name: "Both"))
         let gone = events.wait(count: 3)
         guard case .disappeared(let goneID, let wasAP2)? = gone.last else {
-            return XCTFail("expected .disappeared, got \(gone)")
+            Issue.record("expected .disappeared, got \(gone)")
+            return
         }
-        XCTAssertEqual(goneID, id)
-        XCTAssertTrue(wasAP2, "a sticky-AP2 device is still AP2 when it fully disappears (engine teardown routes on this)")
-        XCTAssertTrue(discovery.devices.isEmpty)
+        #expect(goneID == id)
+        #expect(wasAP2, "a sticky-AP2 device is still AP2 when it fully disappears (engine teardown routes on this)")
+        #expect(discovery.devices.isEmpty)
 
         discovery.stop()
     }
@@ -395,7 +409,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A device that resolves `_raop._tcp` FIRST and then gains `_airplay._tcp`
     /// (the opposite order) is still de-duped to one device and flips AP1 -> AP2
     /// via `.updated`.
-    func testDedupeRaopFirstThenAirplayUpgrade() {
+    @Test func dedupeRaopFirstThenAirplayUpgrade() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -405,16 +419,18 @@ final class NativeDiscoveryTests: XCTestCase {
         let id = "AA:BB:CC:DD:EE:66"
         browser.resolve(raopService(id: id, name: "Upgrader"))
         guard case .appeared(let first)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertFalse(first.isAirPlay2Supported)
+        #expect(!first.isAirPlay2Supported)
 
         browser.resolve(airplayService(id: id, name: "Upgrader", features: ap2Features))
         guard case .updated(let upgraded)? = events.wait(count: 2).last else {
-            return XCTFail("expected .updated")
+            Issue.record("expected .updated")
+            return
         }
-        XCTAssertTrue(upgraded.isAirPlay2Supported, "gaining the airplay advert must flip AP1 -> AP2")
-        XCTAssertEqual(discovery.devices.count, 1)
+        #expect(upgraded.isAirPlay2Supported, "gaining the airplay advert must flip AP1 -> AP2")
+        #expect(discovery.devices.count == 1)
 
         discovery.stop()
     }
@@ -426,7 +442,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// what a Sonos Move does when powered off — must be reported as OFFLINE
     /// (`isAvailable == false`) while STAYING AP2 (`isAirPlay2Supported == true`),
     /// NOT reclassified AP1-only. It must NOT `.disappeared` (raop still present).
-    func testAP2LosingAirplayAdvertGoesOfflineNotAP1() {
+    @Test func ap2LosingAirplayAdvertGoesOfflineNotAP1() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -438,21 +454,23 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(id: id, name: "Sonos Move", features: ap2Features))
         browser.resolve(raopService(id: id, name: "Sonos Move"))
         guard case .appeared(let appeared)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertTrue(appeared.isAirPlay2Supported)
-        XCTAssertTrue(appeared.isAvailable)
+        #expect(appeared.isAirPlay2Supported)
+        #expect(appeared.isAvailable)
 
         // Power off: the `_airplay._tcp` record drops first, `_raop._tcp` lingers.
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos Move"))
         guard case .updated(let offline)? = events.wait(count: 2).last else {
-            return XCTFail("expected .updated when the airplay advert drops")
+            Issue.record("expected .updated when the airplay advert drops")
+            return
         }
-        XCTAssertTrue(offline.isAirPlay2Supported,
-                      "a sticky-AP2 device must STAY AP2 when it loses its airplay advert — it went offline, it did not downgrade")
-        XCTAssertFalse(offline.isAvailable,
-                       "losing the airplay advert (raop lingers) means the AP2 device is OFFLINE")
-        XCTAssertEqual(discovery.devices.count, 1, "still present (raop lingers), not disappeared")
+        #expect(offline.isAirPlay2Supported,
+                "a sticky-AP2 device must STAY AP2 when it loses its airplay advert — it went offline, it did not downgrade")
+        #expect(!offline.isAvailable,
+                "losing the airplay advert (raop lingers) means the AP2 device is OFFLINE")
+        #expect(discovery.devices.count == 1, "still present (raop lingers), not disappeared")
 
         discovery.stop()
     }
@@ -460,7 +478,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A sticky-AP2 device that goes offline (airplay advert dropped) and then
     /// comes back (airplay advert re-resolves) returns to available AP2 — the
     /// sticky bit doesn't wedge it permanently offline.
-    func testAP2OfflineThenBackOnlineRecoversAvailable() {
+    @Test func ap2OfflineThenBackOnlineRecoversAvailable() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -474,18 +492,20 @@ final class NativeDiscoveryTests: XCTestCase {
 
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
         guard case .updated(let offline)? = events.wait(count: 2).last else {
-            return XCTFail("expected offline .updated")
+            Issue.record("expected offline .updated")
+            return
         }
-        XCTAssertFalse(offline.isAvailable)
-        XCTAssertTrue(offline.isAirPlay2Supported)
+        #expect(!offline.isAvailable)
+        #expect(offline.isAirPlay2Supported)
 
         // Powers back on: airplay advert re-resolves.
         browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
         guard case .updated(let back)? = events.wait(count: 3).last else {
-            return XCTFail("expected recovery .updated")
+            Issue.record("expected recovery .updated")
+            return
         }
-        XCTAssertTrue(back.isAirPlay2Supported)
-        XCTAssertTrue(back.isAvailable, "an AP2 device that re-advertises airplay is reachable again")
+        #expect(back.isAirPlay2Supported)
+        #expect(back.isAvailable, "an AP2 device that re-advertises airplay is reachable again")
 
         discovery.stop()
     }
@@ -493,7 +513,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A genuine raop-only device (NEVER advertised `_airplay._tcp`) stays
     /// AP1-only and available — the sticky mechanism only affects devices that
     /// were EVER AP2. This is the regression guard for the "coming soon" row.
-    func testGenuineAP1OnlyStaysAP1AndAvailable() {
+    @Test func genuineAP1OnlyStaysAP1AndAvailable() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -503,10 +523,11 @@ final class NativeDiscoveryTests: XCTestCase {
         // raop-only from the start, and a re-resolve — never any airplay advert.
         browser.resolve(raopService(id: "AA:BB:CC:DD:EE:44", name: "Old Express"))
         guard case .appeared(let d)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertFalse(d.isAirPlay2Supported, "a never-AP2 device must classify AP1-only")
-        XCTAssertTrue(d.isAvailable, "a genuine AP1-only device is not marked offline by the sticky mechanism")
+        #expect(!d.isAirPlay2Supported, "a never-AP2 device must classify AP1-only")
+        #expect(d.isAvailable, "a genuine AP1-only device is not marked offline by the sticky mechanism")
 
         discovery.stop()
     }
@@ -540,7 +561,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// 12-hex-digit name prefix in canonical uppercase colon-hex — not dropped.
     /// This is the D6-violating bug the fix repairs: real shairport-sync speakers
     /// advertise exactly this TXT shape.
-    func testRaopNameDerivedIDSurfacesAsAP1Only() {
+    @Test func raopNameDerivedIDSurfacesAsAP1Only() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -551,19 +572,20 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Dev Speaker"))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared for a name-derived raop device (must NOT be dropped)")
+            Issue.record("expected .appeared for a name-derived raop device (must NOT be dropped)")
+            return
         }
         // Derived id canonicalized to uppercase colon-hex.
-        XCTAssertEqual(device.id, "6B:2E:52:B7:37:17")
-        XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
-        XCTAssertFalse(device.isAirPlay2Supported, "a raop-only device must classify AP1-only")
+        #expect(device.id == "6B:2E:52:B7:37:17")
+        #expect(device.outputID.rawValue == 0x6B2E52B73717)
+        #expect(!device.isAirPlay2Supported, "a raop-only device must classify AP1-only")
         // The engine-facing descriptor keeps the RAW instance name (with the
         // "<12-hex>@" MAC prefix) so the vendored `raop_device_cb` can re-parse
         // the id from it; the human-facing display name is stripped downstream
         // (`NativeBackend.mapDiscovered`), NOT on the descriptor.
-        XCTAssertEqual(device.descriptor.name, "6B2E52B73717@Dev Speaker")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name), "Dev Speaker")
-        XCTAssertEqual(device.descriptor.address, "192.168.1.42")
+        #expect(device.descriptor.name == "6B2E52B73717@Dev Speaker")
+        #expect(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name) == "Dev Speaker")
+        #expect(device.descriptor.address == "192.168.1.42")
 
         discovery.stop()
     }
@@ -571,28 +593,28 @@ final class NativeDiscoveryTests: XCTestCase {
     /// A raop-only instance name that already lacks the MAC@ prefix (no `deviceid`
     /// TXT, so it's dropped by identity — but `strippedRaopDisplayName` itself
     /// must be a no-op on such names) is returned unchanged.
-    func testStrippedRaopDisplayNameLeavesNameWithoutPrefixUnchanged() {
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("Living Room"), "Living Room")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("Kitchen Speaker"), "Kitchen Speaker")
+    @Test func strippedRaopDisplayNameLeavesNameWithoutPrefixUnchanged() {
+        #expect(NativeDiscovery.strippedRaopDisplayName("Living Room") == "Living Room")
+        #expect(NativeDiscovery.strippedRaopDisplayName("Kitchen Speaker") == "Kitchen Speaker")
     }
 
     /// Direct unit coverage: the MAC@ prefix is stripped only when it is exactly
     /// 12 hex digits followed by "@"; near-miss shapes (too few/many hex digits,
     /// non-hex characters, no "@" at all) pass through unchanged.
-    func testStrippedRaopDisplayNameEdgeCases() {
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717@Dev Speaker"), "Dev Speaker")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6b2e52b73717@lowercase"), "lowercase")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B7371@Eleven"), "6B2E52B7371@Eleven")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717AA@Thirteen"), "6B2E52B73717AA@Thirteen")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("ZZZZ52B73717@NonHex"), "ZZZZ52B73717@NonHex")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717"), "6B2E52B73717")
+    @Test func strippedRaopDisplayNameEdgeCases() {
+        #expect(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717@Dev Speaker") == "Dev Speaker")
+        #expect(NativeDiscovery.strippedRaopDisplayName("6b2e52b73717@lowercase") == "lowercase")
+        #expect(NativeDiscovery.strippedRaopDisplayName("6B2E52B7371@Eleven") == "6B2E52B7371@Eleven")
+        #expect(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717AA@Thirteen") == "6B2E52B73717AA@Thirteen")
+        #expect(NativeDiscovery.strippedRaopDisplayName("ZZZZ52B73717@NonHex") == "ZZZZ52B73717@NonHex")
+        #expect(NativeDiscovery.strippedRaopDisplayName("6B2E52B73717") == "6B2E52B73717")
     }
 
     /// A raop-only device keeps the RAW MAC-prefixed instance name on its
     /// engine-facing descriptor ("6B2E52B73717@Dev Speaker"), while the derived id
     /// keeps the full MAC in canonical colon-hex form. The human-facing strip
     /// ("Dev Speaker") is applied downstream, NOT on the descriptor.
-    func testRaopOnlyDisplayNameStripsMACPrefix() {
+    @Test func raopOnlyDisplayNameStripsMACPrefix() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -602,14 +624,15 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Dev Speaker"))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(device.descriptor.name, "6B2E52B73717@Dev Speaker",
-                       "the engine descriptor must keep the RAW MAC-prefixed name")
-        XCTAssertEqual(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name), "Dev Speaker",
-                       "the MAC@ prefix is stripped only for the human-facing display name")
-        XCTAssertEqual(device.id, "6B:2E:52:B7:37:17", "id derivation must still use the full raw name")
-        XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
+        #expect(device.descriptor.name == "6B2E52B73717@Dev Speaker",
+                "the engine descriptor must keep the RAW MAC-prefixed name")
+        #expect(NativeDiscovery.strippedRaopDisplayName(device.descriptor.name) == "Dev Speaker",
+                "the MAC@ prefix is stripped only for the human-facing display name")
+        #expect(device.id == "6B:2E:52:B7:37:17", "id derivation must still use the full raw name")
+        #expect(device.outputID.rawValue == 0x6B2E52B73717)
 
         discovery.stop()
     }
@@ -623,7 +646,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// and the real receiver would silently never register/connect. This also
     /// asserts the SYNC INVARIANT: the hex prefix `raop.c` re-parses equals the
     /// `OutputID` the Swift side already derived from the same instance name.
-    func testRaopOnlyDescriptorKeepsRawHexPrefixForEngineIDParse() {
+    @Test func raopOnlyDescriptorKeepsRawHexPrefixForEngineIDParse() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -633,30 +656,31 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Dev Speaker"))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertFalse(device.isAirPlay2Supported, "sanity: this is a raop-only device")
+        #expect(!device.isAirPlay2Supported, "sanity: this is a raop-only device")
 
         // (a) The engine descriptor still carries the 12-hex "@" prefix that
         // `raop_device_cb`'s `safe_hextou64` + `strchr(name, '@')` parse.
         let name = device.descriptor.name
         let parts = name.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
-        XCTAssertEqual(parts.count, 2, "descriptor name must retain the '@' the C backend looks for")
+        #expect(parts.count == 2, "descriptor name must retain the '@' the C backend looks for")
         let hexPrefix = String(parts[0])
-        XCTAssertEqual(hexPrefix.count, 12, "descriptor name must retain the 12-hex id prefix")
-        XCTAssertNotNil(UInt64(hexPrefix, radix: 16), "the prefix must be hex-parseable like safe_hextou64 does")
+        #expect(hexPrefix.count == 12, "descriptor name must retain the 12-hex id prefix")
+        #expect(UInt64(hexPrefix, radix: 16) != nil, "the prefix must be hex-parseable like safe_hextou64 does")
 
         // (b) SYNC INVARIANT: the hex prefix the C side parses equals the OutputID
         // the Swift side derived from the same instance name.
-        XCTAssertEqual(UInt64(hexPrefix, radix: 16), device.outputID.rawValue)
-        XCTAssertEqual(device.outputID.rawValue, 0x6B2E52B73717)
+        #expect(UInt64(hexPrefix, radix: 16) == device.outputID.rawValue)
+        #expect(device.outputID.rawValue == 0x6B2E52B73717)
 
         discovery.stop()
     }
 
     /// A raop-only device whose instance name has NO MAC@ prefix at all (already
     /// human-readable) is left unchanged — nothing to strip.
-    func testRaopOnlyDisplayNameWithoutPrefixUnchanged() {
+    @Test func raopOnlyDisplayNameWithoutPrefixUnchanged() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -669,9 +693,10 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopService(name: "Old Express"))
 
         guard case .appeared(let device)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(device.descriptor.name, "Old Express", "a name with no MAC@ prefix must be unchanged")
+        #expect(device.descriptor.name == "Old Express", "a name with no MAC@ prefix must be unchanged")
 
         discovery.stop()
     }
@@ -680,7 +705,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// `_airplay._tcp` (plain name, deviceid TXT) keeps the `_airplay._tcp` name
     /// verbatim — the airplay name wins and is never subject to the raop strip,
     /// confirmed regardless of which service resolves first.
-    func testDualAdvertisedKeepsAirplayNameOverRaopPrefixedName() {
+    @Test func dualAdvertisedKeepsAirplayNameOverRaopPrefixedName() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -691,19 +716,21 @@ final class NativeDiscoveryTests: XCTestCase {
         // raop first, with a MAC-prefixed name (as real dual-advertising gear does).
         browser.resolve(raopService(id: id, name: "6B2E52B73717@Raop Name"))
         guard case .appeared(let first)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(first.descriptor.name, "6B2E52B73717@Raop Name",
-                       "raop-only so far, so the engine descriptor keeps the RAW MAC-prefixed name")
+        #expect(first.descriptor.name == "6B2E52B73717@Raop Name",
+                "raop-only so far, so the engine descriptor keeps the RAW MAC-prefixed name")
 
         // Now the airplay advert resolves with a clean name -- it must win.
         browser.resolve(airplayService(id: id, name: "Airplay Name", features: ap2Features))
         guard case .updated(let merged)? = events.wait(count: 2).last else {
-            return XCTFail("expected .updated")
+            Issue.record("expected .updated")
+            return
         }
-        XCTAssertEqual(merged.descriptor.name, "Airplay Name", "the airplay name must win over the raop name once both are present")
-        XCTAssertTrue(merged.isAirPlay2Supported)
-        XCTAssertEqual(discovery.devices.count, 1)
+        #expect(merged.descriptor.name == "Airplay Name", "the airplay name must win over the raop name once both are present")
+        #expect(merged.isAirPlay2Supported)
+        #expect(discovery.devices.count == 1)
 
         discovery.stop()
     }
@@ -712,7 +739,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// then `_airplay._tcp` (deviceid TXT in canonical uppercase colon-hex) de-dupes
     /// into ONE device that flips AP1 -> AP2 — regardless of arrival order. The
     /// name-derived canonical form must equal the TXT deviceid form for the merge.
-    func testNameDerivedRaopThenAirplayTXTDedupesToOneAP2() {
+    @Test func nameDerivedRaopThenAirplayTXTDedupesToOneAP2() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -723,20 +750,22 @@ final class NativeDiscoveryTests: XCTestCase {
         // raop first, name-derived (no deviceid TXT).
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Combo"))
         guard case .appeared(let first)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(first.id, canonicalID)
-        XCTAssertFalse(first.isAirPlay2Supported)
+        #expect(first.id == canonicalID)
+        #expect(!first.isAirPlay2Supported)
 
         // Same device, now on _airplay._tcp with a deviceid TXT that matches the
         // derived canonical form. Must MERGE (one device) and flip to AP2.
         browser.resolve(airplayService(id: canonicalID, name: "Combo", features: ap2Features))
         guard case .updated(let upgraded)? = events.wait(count: 2).last else {
-            return XCTFail("expected .updated (AP1 -> AP2 merge)")
+            Issue.record("expected .updated (AP1 -> AP2 merge)")
+            return
         }
-        XCTAssertEqual(upgraded.id, canonicalID)
-        XCTAssertTrue(upgraded.isAirPlay2Supported, "gaining a matching airplay advert must flip to AP2")
-        XCTAssertEqual(discovery.devices.count, 1, "name-derived raop + deviceid-TXT airplay must be ONE device")
+        #expect(upgraded.id == canonicalID)
+        #expect(upgraded.isAirPlay2Supported, "gaining a matching airplay advert must flip to AP2")
+        #expect(discovery.devices.count == 1, "name-derived raop + deviceid-TXT airplay must be ONE device")
 
         discovery.stop()
     }
@@ -745,7 +774,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// TXT) FIRST and then `_raop._tcp` (name-derived) still de-dupes to one AP2
     /// device — the later name-derived resolve must not spawn a phantom second
     /// device.
-    func testAirplayTXTThenNameDerivedRaopDedupesToOneAP2() {
+    @Test func airplayTXTThenNameDerivedRaopDedupesToOneAP2() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -755,18 +784,19 @@ final class NativeDiscoveryTests: XCTestCase {
         let canonicalID = "6B:2E:52:B7:37:17"
         browser.resolve(airplayService(id: canonicalID, name: "Combo", features: ap2Features))
         guard case .appeared(let first)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertTrue(first.isAirPlay2Supported)
+        #expect(first.isAirPlay2Supported)
 
         // Same device also on _raop._tcp, name-derived. Rebuilt device is unchanged
         // (airplay descriptor still wins, still AP2), so no NEW event should fire.
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Combo"))
         let stillOne = events.waitCountStaysAt(1, timeout: 0.3)
-        XCTAssertTrue(stillOne, "an unchanged rebuild after name-derived de-dupe must not emit a spurious event")
-        XCTAssertEqual(discovery.devices.count, 1, "one device, not two, despite two service types")
-        XCTAssertEqual(discovery.devices.first?.id, canonicalID)
-        XCTAssertTrue(discovery.devices.first?.isAirPlay2Supported ?? false)
+        #expect(stillOne, "an unchanged rebuild after name-derived de-dupe must not emit a spurious event")
+        #expect(discovery.devices.count == 1, "one device, not two, despite two service types")
+        #expect(discovery.devices.first?.id == canonicalID)
+        #expect(discovery.devices.first?.isAirPlay2Supported ?? false)
 
         discovery.stop()
     }
@@ -774,7 +804,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// (c) A resolve with NEITHER a `deviceid` TXT NOR a MAC-prefixed instance name
     /// (a bare human-readable name like "Living Room") is dropped — no id can be
     /// keyed on it — and no event fires and nothing crashes.
-    func testNeitherTXTNorNamePrefixIsDroppedNoCrash() {
+    @Test func neitherTXTNorNamePrefixIsDroppedNoCrash() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let events = EventCollector()
@@ -789,8 +819,8 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(raopNameDerivedService(name: "6B2E52@Short"))
 
         let none = events.waitNone(timeout: 0.3)
-        XCTAssertTrue(none, "a resolve with no derivable id must be dropped, not surfaced")
-        XCTAssertTrue(discovery.devices.isEmpty)
+        #expect(none, "a resolve with no derivable id must be dropped, not surfaced")
+        #expect(discovery.devices.isEmpty)
 
         discovery.stop()
     }
@@ -798,22 +828,22 @@ final class NativeDiscoveryTests: XCTestCase {
     /// (d) A mixed-case hex prefix in the instance name round-trips to the same
     /// canonical uppercase colon-hex id (and correct OutputID) as its uppercase
     /// equivalent — the derivation is case-insensitive on input, canonical on output.
-    func testMixedCaseNamePrefixRoundTripsToCanonicalUppercase() {
+    @Test func mixedCaseNamePrefixRoundTripsToCanonicalUppercase() {
         // Direct derivation unit check: mixed-case in, uppercase colon-hex out.
         let mixed = NativeDiscovery.deriveIDFromInstanceName("6b2e52B73717@Dev Speaker")
-        XCTAssertEqual(mixed?.id, "6B:2E:52:B7:37:17")
-        XCTAssertEqual(mixed?.outputID.rawValue, 0x6B2E52B73717)
+        #expect(mixed?.id == "6B:2E:52:B7:37:17")
+        #expect(mixed?.outputID.rawValue == 0x6B2E52B73717)
 
         // A bare name with no "@" but a valid 12-hex body also derives (some
         // stacks omit the "@Name" suffix entirely).
         let bare = NativeDiscovery.deriveIDFromInstanceName("aabbccddeeff")
-        XCTAssertEqual(bare?.id, "AA:BB:CC:DD:EE:FF")
-        XCTAssertEqual(bare?.outputID.rawValue, 0xAABBCCDDEEFF)
+        #expect(bare?.id == "AA:BB:CC:DD:EE:FF")
+        #expect(bare?.outputID.rawValue == 0xAABBCCDDEEFF)
 
         // Non-hex and wrong-length prefixes derive nothing.
-        XCTAssertNil(NativeDiscovery.deriveIDFromInstanceName("Living Room"))
-        XCTAssertNil(NativeDiscovery.deriveIDFromInstanceName("zzzzzzzzzzzz@X"))
-        XCTAssertNil(NativeDiscovery.deriveIDFromInstanceName("6B2E52B7371@X")) // 11 digits
+        #expect(NativeDiscovery.deriveIDFromInstanceName("Living Room") == nil)
+        #expect(NativeDiscovery.deriveIDFromInstanceName("zzzzzzzzzzzz@X") == nil)
+        #expect(NativeDiscovery.deriveIDFromInstanceName("6B2E52B7371@X") == nil) // 11 digits
 
         // Through the full pipeline: mixed-case name and an uppercase deviceid-TXT
         // airplay advert for the same device merge (canonical forms are identical).
@@ -825,12 +855,13 @@ final class NativeDiscoveryTests: XCTestCase {
 
         browser.resolve(raopNameDerivedService(name: "6b2e52b73717@Combo"))
         guard case .appeared(let d)? = events.wait(count: 1).first else {
-            return XCTFail("expected .appeared")
+            Issue.record("expected .appeared")
+            return
         }
-        XCTAssertEqual(d.id, "6B:2E:52:B7:37:17")
+        #expect(d.id == "6B:2E:52:B7:37:17")
         browser.resolve(airplayService(id: "6B:2E:52:B7:37:17", name: "Combo", features: ap2Features))
         _ = events.wait(count: 2)
-        XCTAssertEqual(discovery.devices.count, 1, "mixed-case name-derived id must merge with the uppercase TXT id")
+        #expect(discovery.devices.count == 1, "mixed-case name-derived id must merge with the uppercase TXT id")
 
         discovery.stop()
     }
@@ -839,12 +870,12 @@ final class NativeDiscoveryTests: XCTestCase {
 
     /// `devices` reflects the current known set synchronously (used for first
     /// paint), independent of the event stream.
-    func testDevicesSnapshotReflectsKnownSet() {
+    @Test func devicesSnapshotReflectsKnownSet() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         discovery.start()
 
-        XCTAssertTrue(discovery.devices.isEmpty)
+        #expect(discovery.devices.isEmpty)
         browser.resolve(airplayService(features: ap2Features))
         browser.resolve(raopService())
 
@@ -853,8 +884,8 @@ final class NativeDiscoveryTests: XCTestCase {
         while discovery.devices.count < 2 && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
-        XCTAssertEqual(discovery.devices.count, 2)
-        XCTAssertEqual(Set(discovery.devices.map(\.id)), Set(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:99"]))
+        #expect(discovery.devices.count == 2)
+        #expect(Set(discovery.devices.map(\.id)) == Set(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:99"]))
 
         discovery.stop()
     }
@@ -874,52 +905,52 @@ final class NativeDiscoveryTests: XCTestCase {
     /// real-hardware PTP-over-IPv6 test proves the media/PTP path works.)
 
     /// IPv4 is the only acceptable family today.
-    func testIPv4Accepted() {
-        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: "192.168.4.50", family: .ipv4))
-        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: "169.254.1.1", family: .ipv4))
+    @Test func ipv4Accepted() {
+        #expect(NetworkFrameworkBrowser.isAcceptable(address: "192.168.4.50", family: .ipv4))
+        #expect(NetworkFrameworkBrowser.isAcceptable(address: "169.254.1.1", family: .ipv4))
     }
 
     /// Bare link-local IPv6, no zone suffix — rejected (both by the general
     /// IPv6 ban and by the link-local-specific classifier used for logging).
-    func testLinkLocalIPv6Rejected() {
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe80::1"))
-        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: "fe80::1", family: .ipv6))
+    @Test func linkLocalIPv6Rejected() {
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe80::1"))
+        #expect(!NetworkFrameworkBrowser.isAcceptable(address: "fe80::1", family: .ipv6))
     }
 
     /// The exact address from the live-gated bug report, with a `%en0` zone.
-    func testLinkLocalIPv6WithZoneRejected() {
+    @Test func linkLocalIPv6WithZoneRejected() {
         let address = "fe80::562a:1bff:fe79:89e%en0"
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String(address))
-        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: address, family: .ipv6))
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String(address))
+        #expect(!NetworkFrameworkBrowser.isAcceptable(address: address, family: .ipv6))
     }
 
     /// Uppercase / mixed-case link-local literals are still recognized by the
     /// classifier (used only for the loud "link-local vs global" log message).
-    func testLinkLocalIPv6CaseInsensitive() {
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("FE80::1"))
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("Fe80::562A:1BFF:Fe79:89E%en0"))
+    @Test func linkLocalIPv6CaseInsensitive() {
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String("FE80::1"))
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String("Fe80::562A:1BFF:Fe79:89E%en0"))
     }
 
     /// The full fe80::/10 block (first hextet 0xFE80...0xFEBF), not just the
     /// literal "fe80" prefix — e.g. "febf::1" is still inside the /10 block.
-    func testLinkLocalIPv6FullTenBitBlock() {
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("febf::1"))
-        XCTAssertTrue(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe90::1"))
+    @Test func linkLocalIPv6FullTenBitBlock() {
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String("febf::1"))
+        #expect(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe90::1"))
         // Just outside the /10 block on either side.
-        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("fec0::1"))  // site-local (deprecated), not link-local
-        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("fe7f::1"))
+        #expect(!NetworkFrameworkBrowser.isLinkLocalIPv6String("fec0::1"))  // site-local (deprecated), not link-local
+        #expect(!NetworkFrameworkBrowser.isLinkLocalIPv6String("fe7f::1"))
     }
 
     /// A global IPv6 address is NOT classified link-local by the classifier...
-    func testGlobalIPv6IsNotLinkLocal() {
-        XCTAssertFalse(NetworkFrameworkBrowser.isLinkLocalIPv6String("2001:db8::1"))
+    @Test func globalIPv6IsNotLinkLocal() {
+        #expect(!NetworkFrameworkBrowser.isLinkLocalIPv6String("2001:db8::1"))
     }
 
     /// ...but the overall acceptance policy still rejects it: the engine can't
     /// use ANY IPv6 yet (its `ipv6` conffile option is off), so "global, not
     /// link-local" isn't enough to be acceptable today.
-    func testGlobalIPv6RejectedByPolicyUntilEngineIPv6Enabled() {
-        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: "2001:db8::1", family: .ipv6))
+    @Test func globalIPv6RejectedByPolicyUntilEngineIPv6Enabled() {
+        #expect(!NetworkFrameworkBrowser.isAcceptable(address: "2001:db8::1", family: .ipv6))
     }
 
     /// Dual-stack device scenario: given a link-local IPv6 candidate and an
@@ -927,11 +958,11 @@ final class NativeDiscoveryTests: XCTestCase {
     /// reject the link-local candidate — this is the exact shape of the live
     /// bug (Sonos Move resolved to `fe80::562a:1bff:fe79:89e%en0` while an
     /// IPv4 address, `192.168.4.x`, was available and required for audio).
-    func testDualStackPrefersIPv4OverLinkLocalIPv6() {
+    @Test func dualStackPrefersIPv4OverLinkLocalIPv6() {
         let ipv4 = "192.168.4.23"
         let linkLocalV6 = "fe80::562a:1bff:fe79:89e%en0"
-        XCTAssertTrue(NetworkFrameworkBrowser.isAcceptable(address: ipv4, family: .ipv4))
-        XCTAssertFalse(NetworkFrameworkBrowser.isAcceptable(address: linkLocalV6, family: .ipv6))
+        #expect(NetworkFrameworkBrowser.isAcceptable(address: ipv4, family: .ipv4))
+        #expect(!NetworkFrameworkBrowser.isAcceptable(address: linkLocalV6, family: .ipv6))
     }
 
     // MARK: B9 — `.failed` recreate backoff (NetworkFrameworkBrowser)
@@ -944,26 +975,26 @@ final class NativeDiscoveryTests: XCTestCase {
     /// itself is a pure static and is fully covered here.
 
     /// 1s, 2s, 4s, 8s, 16s, then capped at 30s.
-    func testBackoffScheduleDoubles() {
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0), 1)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 1), 2)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 2), 4)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 3), 8)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 4), 16)
+    @Test func backoffScheduleDoubles() {
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0) == 1)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 1) == 2)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 2) == 4)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 3) == 8)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 4) == 16)
     }
 
     /// The schedule never exceeds the 30s cap, however many consecutive
     /// failures precede it.
-    func testBackoffScheduleCapsAtThirtySeconds() {
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 5), 30)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 6), 30)
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 20), 30)
+    @Test func backoffScheduleCapsAtThirtySeconds() {
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 5) == 30)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 6) == 30)
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 20) == 30)
     }
 
     /// Attempt 0 (no prior failures) is always the 1s floor, never a
     /// zero/negative delay.
-    func testBackoffScheduleFirstAttemptIsOneSecond() {
-        XCTAssertEqual(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0), 1)
+    @Test func backoffScheduleFirstAttemptIsOneSecond() {
+        #expect(NetworkFrameworkBrowser.nextDelay(afterAttempt: 0) == 1)
     }
 
     /// `NativeDiscovery` itself must not treat `.failed` as anything but
@@ -972,7 +1003,7 @@ final class NativeDiscoveryTests: XCTestCase {
     /// itself — only the real `NetworkFrameworkBrowser` does — but consumer
     /// behavior across the state change must stay sane either way: existing
     /// devices are untouched and later resolves still land normally).
-    func testFailedStateChangeDoesNotDropKnownDevices() {
+    @Test func failedStateChangeDoesNotDropKnownDevices() {
         let browser = FakeBrowser()
         let discovery = NativeDiscovery(browser: browser)
         let collector = EventCollector()
@@ -987,8 +1018,8 @@ final class NativeDiscoveryTests: XCTestCase {
 
         // The device must still be present — a transient `.failed` must not
         // spuriously drop it.
-        XCTAssertEqual(discovery.devices.count, 1)
-        XCTAssertEqual(discovery.devices.first?.id, "AA:BB:CC:DD:EE:01")
+        #expect(discovery.devices.count == 1)
+        #expect(discovery.devices.first?.id == "AA:BB:CC:DD:EE:01")
 
         // And a fresh resolve after `.failed` (what a real recreate would
         // eventually deliver) must still flow through as an ordinary update,
@@ -996,7 +1027,7 @@ final class NativeDiscoveryTests: XCTestCase {
         browser.resolve(airplayService(
             id: "AA:BB:CC:DD:EE:02", name: "Living Room", features: ap2Features))
         collector.wait(count: 2)
-        XCTAssertEqual(discovery.devices.count, 2)
+        #expect(discovery.devices.count == 2)
     }
 }
 

@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// T-CORRECTION: the continuous phase-lock DSP — a custom cubic fractional
@@ -10,7 +11,7 @@ import XCTest
 /// by advancing a "device clock" at a ppm skew from the reference timeline and
 /// asserting the loop converges phase error toward zero and HOLDS it there without
 /// over/under-shoot, exactly the T-CORRECTION verify step.
-final class PhaseControllerTests: IsolatedTestCase {
+@Suite final class PhaseControllerTests: IsolatedSuite {
 
     // MARK: - FractionalResampler
 
@@ -38,7 +39,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// At a constant `ratio == 1.0` the resampler is a bit-exact pass-through: each
     /// output frame equals the corresponding input frame (frac stays 0, so the cubic
     /// collapses to `d1` every step). Stereo, to exercise the multichannel path.
-    func test_resampler_unityRatioIsBitExactPassthrough() {
+    @Test func resampler_unityRatioIsBitExactPassthrough() {
         let cc = 2
         let inFrames = 500
         var input = [Float](repeating: 0, count: inFrames * cc)
@@ -55,16 +56,16 @@ final class PhaseControllerTests: IsolatedTestCase {
             resampler.render(into: $0, outFrameOffset: 0, outFrames: outFrames, ratio: 1.0,
                              pullFrame: puller.pull)
         }
-        XCTAssertEqual(produced, outFrames)
+        #expect(produced == outFrames)
         for f in 0..<outFrames {
-            XCTAssertEqual(out[f * cc], input[f * cc], accuracy: 1e-6, "L frame \(f)")
-            XCTAssertEqual(out[f * cc + 1], input[f * cc + 1], accuracy: 1e-6, "R frame \(f)")
+            #expect(abs(out[f * cc] - input[f * cc]) <= 1e-6, "L frame \(f)")
+            #expect(abs(out[f * cc + 1] - input[f * cc + 1]) <= 1e-6, "R frame \(f)")
         }
     }
 
     /// The very first emitted sample is bit-exactly input frame 0 regardless of the
     /// commanded ratio — the property that keeps the anchor release sample-accurate.
-    func test_resampler_firstSampleIsExactInputZero_atAnyRatio() {
+    @Test func resampler_firstSampleIsExactInputZero_atAnyRatio() {
         for ratio in [0.9998, 1.0, 1.0002] {
             let cc = 1
             var input = [Float](repeating: 0, count: 64)
@@ -76,7 +77,7 @@ final class PhaseControllerTests: IsolatedTestCase {
                 resampler.render(into: $0, outFrameOffset: 0, outFrames: 16, ratio: ratio,
                                  pullFrame: puller.pull)
             }
-            XCTAssertEqual(out[0], input[0], accuracy: 1e-6, "first sample at ratio \(ratio)")
+            #expect(abs(out[0] - input[0]) <= 1e-6, "first sample at ratio \(ratio)")
         }
     }
 
@@ -84,7 +85,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// exactly that rate. Checked directly and deterministically via
     /// `inputFramesConsumed` (which zero-crossing counting can't resolve at ppm
     /// scale): after K output frames it must have pulled ≈ K·ratio input frames.
-    func test_resampler_constantRatioRateAccuracy() {
+    @Test func resampler_constantRatioRateAccuracy() {
         for ratio in [0.99985, 1.0001, 1.02] {
             let cc = 1
             let outFrames = 100_000
@@ -101,10 +102,10 @@ final class PhaseControllerTests: IsolatedTestCase {
                 resampler.render(into: $0, outFrameOffset: 0, outFrames: outFrames, ratio: ratio,
                                  pullFrame: puller.pull)
             }
-            XCTAssertEqual(produced, outFrames, "ratio \(ratio): no underrun")
+            #expect(produced == outFrames, "ratio \(ratio): no underrun")
             // Consumed ≈ K·ratio; the constant priming/read-ahead offset is ≤ 4 frames.
             let expected = Double(outFrames) * ratio
-            XCTAssertEqual(Double(resampler.inputFramesConsumed), expected, accuracy: 4.0,
+            #expect(abs(Double(resampler.inputFramesConsumed) - expected) <= 4.0,
                            "ratio \(ratio): input consumed must track the commanded rate")
         }
     }
@@ -112,7 +113,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// Click-free under a continuous ppm sweep: sweeping the ratio 1.0 → 1.0002
     /// (0→200 ppm, the spike's validated range), the worst output first-difference
     /// stays within the clean-sine slope bound — no discontinuity injected.
-    func test_resampler_continuousSweepIsClickFree() {
+    @Test func resampler_continuousSweepIsClickFree() {
         let sr = 48_000.0
         let freq = 1_000.0
         let cc = 1
@@ -146,7 +147,7 @@ final class PhaseControllerTests: IsolatedTestCase {
         for i in (skip + 1)..<out.count { maxDiff = max(maxDiff, abs(out[i] - out[i - 1])) }
         // Clean-sine per-sample slope bound: 2π f / sr · amp.
         let cleanBound = Float(2.0 * Double.pi * freq / sr) * 0.9
-        XCTAssertLessThan(maxDiff, cleanBound * 1.5,
+        #expect(maxDiff < cleanBound * 1.5,
                           "no first-difference beyond the clean-sine slope ⇒ no click")
     }
 
@@ -192,7 +193,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// Under a constant clock skew the PI loop drives the residual phase error to
     /// ≈ zero (a P-only loop would leave a standing offset) and the correction
     /// converges to the skew itself — true continuous phase-lock, held indefinitely.
-    func test_controller_convergesToZeroUnderConstantSkew() {
+    @Test func controller_convergesToZeroUnderConstantSkew() {
         for skewPpm in [50.0, -50.0, 120.0] {
             let controller = PhaseController()
             let run = runLoop(controller: controller, cycles: 6_000,
@@ -205,10 +206,10 @@ final class PhaseControllerTests: IsolatedTestCase {
             // below the ~10 µs (½-frame) placement floor the spike measured.
             let tail = run.errorsFrames.suffix(90)
             let worstTailFrames = tail.map { abs($0) }.max() ?? .infinity
-            XCTAssertLessThan(worstTailFrames, 0.02,
+            #expect(worstTailFrames < 0.02,
                               "skew \(skewPpm): residual must hold near zero (\(worstTailFrames * nsPerFrame) ns)")
             // Correction converged to the skew (steady-state ratio == 1 + skew).
-            XCTAssertEqual(run.finalCorrectionPpm, skewPpm, accuracy: 1.0,
+            #expect(abs(run.finalCorrectionPpm - skewPpm) <= 1.0,
                            "skew \(skewPpm): correction should match the clock skew")
         }
     }
@@ -216,7 +217,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// The step response is over-damped: from an initial residual with a constant
     /// skew, the error decays without ringing — it never overshoots zero to the
     /// opposite side by more than a hair, and never blows up past its start.
-    func test_controller_noOvershootOrOscillation() {
+    @Test func controller_noOvershootOrOscillation() {
         let initial = 1.0
         let controller = PhaseController()
         let run = runLoop(controller: controller, cycles: 4_000,
@@ -224,28 +225,28 @@ final class PhaseControllerTests: IsolatedTestCase {
                           skewPpm: 40, initialErrorFrames: initial)
 
         let peak = run.errorsFrames.map { abs($0) }.max() ?? .infinity
-        XCTAssertLessThanOrEqual(peak, initial * 1.05,
+        #expect(peak <= initial * 1.05,
                                  "error must never grow meaningfully beyond its start (no blow-up)")
         // Opposite-sign overshoot below zero stays tiny (over-damped, not ringing).
         let mostNegative = run.errorsFrames.min() ?? -.infinity
-        XCTAssertGreaterThan(mostNegative, -0.10,
+        #expect(mostNegative > -0.10,
                              "any undershoot past zero must be negligible")
 
         // Monotone-ish settle: once inside a small band it stays inside (no late
         // oscillation re-diverging).
         if let firstInBand = run.errorsFrames.firstIndex(where: { abs($0) < 0.05 }) {
             let after = run.errorsFrames[firstInBand...]
-            XCTAssertTrue(after.allSatisfy { abs($0) < 0.10 },
+            #expect(after.allSatisfy { abs($0) < 0.10 },
                           "once within band the loop stays within band — no oscillation")
         } else {
-            XCTFail("loop never reached the settle band")
+            Issue.record("loop never reached the settle band")
         }
     }
 
     /// A large initial offset (e.g. a stale anchor after a lifecycle event) is still
     /// pulled in cleanly: the slew limit and ppm clamp bound the aggressiveness, and
     /// the loop still converges to ≈ zero without blowing up.
-    func test_controller_largeInitialOffsetConvergesWithinClamp() {
+    @Test func controller_largeInitialOffsetConvergesWithinClamp() {
         let controller = PhaseController()
         let run = runLoop(controller: controller, cycles: 20_000,
                           framesPerCycle: 512, sampleRate: 48_000,
@@ -264,17 +265,17 @@ final class PhaseControllerTests: IsolatedTestCase {
             contentPos += 512 * probe.ratio
             deviceTimeFrames += 512
         }
-        XCTAssertLessThanOrEqual(maxPpm, 200.0 + 1e-6, "correction stays within the ±200 ppm band")
+        #expect(maxPpm <= 200.0 + 1e-6, "correction stays within the ±200 ppm band")
 
         let worstTail = run.errorsFrames.suffix(90).map { abs($0) }.max() ?? .infinity
-        XCTAssertLessThan(worstTail, 0.02, "converges to ≈ zero from a large offset")
+        #expect(worstTail < 0.02, "converges to ≈ zero from a large offset")
     }
 
     /// A pathological, wildly-outsized error (far beyond anything the clamp is
     /// meant for) must saturate the correction at EXACTLY `maxPpm` (never a hair
     /// over) and hold there — the clamp boundary itself, not just "somewhere in the
     /// validated range" as the other convergence tests check.
-    func test_controller_saturatesAtExactPpmClampBoundary_bothSigns() {
+    @Test func controller_saturatesAtExactPpmClampBoundary_bothSigns() {
         for sign: Double in [1, -1] {
             let controller = PhaseController()
             // A single cycle's error many frames wide — enough to blow past both
@@ -284,13 +285,13 @@ final class PhaseControllerTests: IsolatedTestCase {
             for _ in 0..<200 {
                 _ = controller.update(phaseErrorNanos: sign * 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
             }
-            XCTAssertEqual(controller.correctionPpm, sign * controller.maxPpm, accuracy: 1e-9,
+            #expect(abs(controller.correctionPpm - sign * controller.maxPpm) <= 1e-9,
                            "sign \(sign): correction must saturate at exactly ±maxPpm, never exceed it")
             // One more update at the same huge error must NOT push it past the clamp.
             _ = controller.update(phaseErrorNanos: sign * 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
-            XCTAssertLessThanOrEqual(abs(controller.correctionPpm), controller.maxPpm + 1e-9,
+            #expect(abs(controller.correctionPpm) <= controller.maxPpm + 1e-9,
                                      "sign \(sign): repeated saturating updates must never exceed the clamp")
-            XCTAssertEqual(controller.ratio, 1.0 + sign * controller.maxPpm * 1e-6, accuracy: 1e-12,
+            #expect(abs(controller.ratio - (1.0 + sign * controller.maxPpm * 1e-6)) <= 1e-12,
                           "sign \(sign): the resampler ratio at the clamp must be exactly 1 ± maxPpm·1e-6")
         }
     }
@@ -299,7 +300,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// hold — driving a huge CONSTANT error for a long time must not let the
     /// integral term wind up past what `Ki` would need to hit `maxPpm` alone, which
     /// is what would otherwise cause an overshoot once the error suddenly reverses.
-    func test_controller_integratorAntiWindupBoundsOvershootAfterSignReversal() {
+    @Test func controller_integratorAntiWindupBoundsOvershootAfterSignReversal() {
         let controller = PhaseController()
         let nsPerFrame = 1_000_000_000.0 / 48_000.0
         // Saturate hard in the positive direction for a long time (simulates a huge
@@ -307,7 +308,7 @@ final class PhaseControllerTests: IsolatedTestCase {
         for _ in 0..<5_000 {
             _ = controller.update(phaseErrorNanos: 1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
         }
-        XCTAssertEqual(controller.correctionPpm, controller.maxPpm, accuracy: 1e-9)
+        #expect(abs(controller.correctionPpm - controller.maxPpm) <= 1e-9)
 
         // Error reverses sign abruptly (e.g. the real error was actually opposite
         // and clamped wrongly is not the case here — this proves anti-windup, not
@@ -319,11 +320,11 @@ final class PhaseControllerTests: IsolatedTestCase {
             _ = controller.update(phaseErrorNanos: -1_000 * nsPerFrame, nsPerFrame: nsPerFrame)
             if controller.correctionPpm <= 0 { cyclesToCrossZero = i + 1; break }
         }
-        XCTAssertGreaterThan(cyclesToCrossZero, 0, "correction must actually cross back through zero")
+        #expect(cyclesToCrossZero > 0, "correction must actually cross back through zero")
         // With slewPpmPerCycle = 25 and a 400 ppm total swing (+200 → −200), an
         // UN-wound-up loop crosses zero in ~8 cycles (200/25); anti-windup keeps it
         // in that neighborhood rather than the integrator adding a long extra delay.
-        XCTAssertLessThan(cyclesToCrossZero, 20,
+        #expect(cyclesToCrossZero < 20,
                           "anti-windup: reversal must not be delayed by a wound-up integrator")
     }
 
@@ -336,7 +337,7 @@ final class PhaseControllerTests: IsolatedTestCase {
     /// content's pts lives on — mimicking the capture-vs-output clock drift. Assert
     /// the sink's `latestPhaseErrorNanos` converges toward zero and HOLDS, proving
     /// the resampler+PI path actually locks phase over time (not just at release).
-    func test_renderCore_holdsPhaseUnderDeviceClockSkew() {
+    @Test func renderCore_holdsPhaseUnderDeviceClockSkew() {
         let sr = 48_000.0
         let cc = 1
         let N = 512
@@ -397,8 +398,8 @@ final class PhaseControllerTests: IsolatedTestCase {
             cycleStart += deviceStep
         }
 
-        XCTAssertTrue(released, "audio must have been released")
-        XCTAssertGreaterThan(errorsNs.count, 2_000, "should have many post-release cycles")
+        #expect(released, "audio must have been released")
+        #expect(errorsNs.count > 2_000, "should have many post-release cycles")
 
         // Held near zero over the final ~1 s: |error| well under one frame (20.8 µs)
         // — in fact within a few µs — despite the continuous 60 ppm skew that a
@@ -409,13 +410,13 @@ final class PhaseControllerTests: IsolatedTestCase {
         // latestPhaseErrorNanos held near zero indefinitely, not just small at release.
         let tail = errorsNs.suffix(90)
         let worstTailNs = tail.map { abs($0) }.max() ?? .max
-        XCTAssertLessThan(worstTailNs, 3_000,
+        #expect(worstTailNs < 3_000,
                           "phase held within a few µs under skew (was \(worstTailNs) ns)")
 
         // And it genuinely CONVERGED: the tail is much tighter than the early
         // post-release transient.
         let earlyWorst = errorsNs.prefix(200).map { abs($0) }.max() ?? 0
-        XCTAssertLessThan(worstTailNs, max(earlyWorst, 1), "the loop tightened phase over time")
+        #expect(worstTailNs < max(earlyWorst, 1), "the loop tightened phase over time")
     }
     #endif
 }

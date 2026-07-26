@@ -12,11 +12,12 @@
 //      proves the hot path actually feeds the tracker, and that
 //      `writeCadenceSnapshot()` reflects it.
 
-import XCTest
+import Testing
+import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class WriteCadenceTests: XCTestCase {
+@Suite struct WriteCadenceTests {
 
     // MARK: - WriteCadenceTracker unit tests
 
@@ -24,7 +25,7 @@ final class WriteCadenceTests: XCTestCase {
     /// overrun: each write's wall-clock gap to the audio time it represents is
     /// small and roughly symmetric, so it should not accumulate a meaningful
     /// running deficit OR overrun.
-    func testNominalFeedStaysNearZero() async throws {
+    @Test func nominalFeedStaysNearZero() async throws {
         let tracker = WriteCadenceTracker()
         let sampleRate = 44100
         let samplesPerWrite = 352 // AirPlay frame size
@@ -42,19 +43,19 @@ final class WriteCadenceTests: XCTestCase {
         }
 
         let snapshot = tracker.snapshot()
-        XCTAssertEqual(snapshot.writeCount, 21)
+        #expect(snapshot.writeCount == 21)
         // Scheduling jitter under CI/parallel-agent load is real but bounded;
         // the nominal feed should never accumulate anywhere near the underfed
         // feed's magnitude (asserted below at >> 0.15s over a much shorter,
         // deliberately-stalled run).
-        XCTAssertLessThan(snapshot.deficitSeconds, 0.15, "nominal feed should not accrue a meaningful deficit")
-        XCTAssertLessThan(snapshot.overrunSeconds, 0.15, "nominal feed should not accrue a meaningful overrun")
+        #expect(snapshot.deficitSeconds < 0.15, "nominal feed should not accrue a meaningful deficit")
+        #expect(snapshot.overrunSeconds < 0.15, "nominal feed should not accrue a meaningful overrun")
     }
 
     /// A paced/underfed feed — where each write's wall-clock gap is much
     /// larger than the audio time it represents (e.g. the producer stalls) —
     /// must show up as a growing deficit, not get silently absorbed.
-    func testUnderfedFeedReflectsDeficit() {
+    @Test func underfedFeedReflectsDeficit() {
         let tracker = WriteCadenceTracker()
         let sampleRate = 44100
         let samplesPerWrite = 352
@@ -71,21 +72,21 @@ final class WriteCadenceTests: XCTestCase {
         }
 
         let snapshot = tracker.snapshot()
-        XCTAssertEqual(snapshot.writeCount, 6)
+        #expect(snapshot.writeCount == 6)
         let expectedDeficitPerWrite = stallSeconds - audioSeconds
         let expectedTotal = expectedDeficitPerWrite * 5
         // Allow generous scheduling slop (Thread.sleep is not exact) but the
         // deficit must clearly reflect the stall, not be near zero.
-        XCTAssertGreaterThan(snapshot.deficitSeconds, expectedTotal * 0.5)
-        XCTAssertGreaterThan(snapshot.lastGapSeconds, 0, "last gap should be positive (behind) after a stall")
-        XCTAssertEqual(snapshot.overrunSeconds, 0, accuracy: 0.01, "an underfed feed should not also register overrun")
+        #expect(snapshot.deficitSeconds > expectedTotal * 0.5)
+        #expect(snapshot.lastGapSeconds > 0, "last gap should be positive (behind) after a stall")
+        #expect(abs(snapshot.overrunSeconds - 0) <= 0.01, "an underfed feed should not also register overrun")
     }
 
     /// The inverse: a burst of writes delivered faster than the audio time
     /// they represent (e.g. catching up after a stall) must register as
     /// overrun, tracked separately from deficit (never allowed to cancel a
     /// prior deficit out silently).
-    func testBurstFeedReflectsOverrun() {
+    @Test func burstFeedReflectsOverrun() {
         let tracker = WriteCadenceTracker()
         let sampleRate = 44100
         // A large sample count per write so its audio-time is much bigger
@@ -99,51 +100,78 @@ final class WriteCadenceTests: XCTestCase {
         }
 
         let snapshot = tracker.snapshot()
-        XCTAssertEqual(snapshot.writeCount, 4)
-        XCTAssertGreaterThan(snapshot.overrunSeconds, 2.5, "back-to-back big-audio-time writes should register as overrun")
-        XCTAssertLessThan(snapshot.lastGapSeconds, 0, "last gap should be negative (ahead) during a burst")
-        XCTAssertEqual(snapshot.deficitSeconds, 0, accuracy: 0.01)
+        #expect(snapshot.writeCount == 4)
+        #expect(snapshot.overrunSeconds > 2.5, "back-to-back big-audio-time writes should register as overrun")
+        #expect(snapshot.lastGapSeconds < 0, "last gap should be negative (ahead) during a burst")
+        #expect(abs(snapshot.deficitSeconds - 0) <= 0.01)
     }
 
     /// `reset()` clears counters AND forgets the last-write baseline, so the
     /// write immediately after a reset seeds fresh rather than comparing
     /// against a stale (now-ancient) timestamp and reporting a bogus deficit.
-    func testResetClearsCountersAndBaseline() {
+    @Test func resetClearsCountersAndBaseline() {
         let tracker = WriteCadenceTracker()
         tracker.record(samples: 352, sampleRate: 44100)
         Thread.sleep(forTimeInterval: 0.05)
         tracker.record(samples: 352, sampleRate: 44100)
-        XCTAssertGreaterThan(tracker.snapshot().deficitSeconds, 0)
+        #expect(tracker.snapshot().deficitSeconds > 0)
 
         tracker.reset()
         let afterReset = tracker.snapshot()
-        XCTAssertEqual(afterReset.writeCount, 0)
-        XCTAssertEqual(afterReset.deficitSeconds, 0)
-        XCTAssertEqual(afterReset.overrunSeconds, 0)
-        XCTAssertEqual(afterReset.lastGapSeconds, 0)
+        #expect(afterReset.writeCount == 0)
+        #expect(afterReset.deficitSeconds == 0)
+        #expect(afterReset.overrunSeconds == 0)
+        #expect(afterReset.lastGapSeconds == 0)
 
         // The very next record() call must seed the baseline again (no huge
         // deficit from comparing against the pre-reset timestamp).
         tracker.record(samples: 352, sampleRate: 44100)
-        XCTAssertEqual(tracker.snapshot().writeCount, 1)
-        XCTAssertEqual(tracker.snapshot().deficitSeconds, 0, "first record after reset only seeds the baseline")
+        #expect(tracker.snapshot().writeCount == 1)
+        #expect(tracker.snapshot().deficitSeconds == 0, "first record after reset only seeds the baseline")
     }
 
     /// Degenerate inputs (zero samples/rate) must be ignored, not corrupt the
     /// tracker or crash on a division.
-    func testDegenerateInputsAreIgnored() {
+    @Test func degenerateInputsAreIgnored() {
         let tracker = WriteCadenceTracker()
         tracker.record(samples: 0, sampleRate: 44100)
         tracker.record(samples: 352, sampleRate: 0)
-        XCTAssertEqual(tracker.snapshot().writeCount, 0)
+        #expect(tracker.snapshot().writeCount == 0)
     }
+}
 
-    // MARK: - AirPlayEngine.write(pcm:pts:) end-to-end
+// MARK: - AirPlayEngine.write(pcm:pts:) end-to-end
+//
+// Split out of `WriteCadenceTests` above and nested into
+// `SerializedEngineState` because these two — unlike the pure
+// `WriteCadenceTracker` cases — build a real `AirPlayEngine` and call
+// `enterHeadlessTestMode()`, which overwrites THREE process-wide `static
+// shared` hook targets (`CompletionRegistry.shared`, `StateStreamHub.shared`,
+// `RemoteEventHub.shared` — each `install()` re-points the C hook at the new
+// engine's hub) plus the shared `shims/outputs.c` registry. Under XCTest's
+// one-process-per-test-METHOD model only ever one engine existed at a time;
+// under swift-testing's in-process concurrency a second engine entering
+// headless mode mid-test steals the hooks from whichever engine
+// `StateStreamTests` / `RemoteEventStreamTests` / `AirPlayEngineAPITests` /
+// `E1StabilityTests` / `MultiStreamWriteRoutingTests` /
+// `StartBufferAndLatencyProbeTests` is driving — those tests then simply never
+// see their events and time out. Every other `enterHeadlessTestMode()` caller
+// in this target already nests here; this file was the one that did not.
+// (These two also stall on `Task.sleep` and assert tight cadence bounds, so
+// serialising them removes a second, independent source of flake.)
+//
+// The pure tracker suite above deliberately stays OUT of the serialized parent
+// — it touches nothing global, and over-adding costs real wall-clock since
+// everything under the parent runs strictly one at a time. Same split as
+// `AirPlayEngineScaffoldTests` / `AirPlayEngineScaffoldLinkTests`.
+extension SerializedEngineState {
+
+@Suite struct WriteCadenceEngineWritePathTests {
 
     /// The hot `write` path actually feeds the tracker: a paced/underfed
     /// synthetic feed through the real public API reflects a deficit via
     /// `writeCadenceSnapshot()`.
-    func testEngineWritePathFeedsCadenceTracker() async throws {
+    @Test func engineWritePathFeedsCadenceTracker() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
 
@@ -160,13 +188,13 @@ final class WriteCadenceTests: XCTestCase {
         }
 
         let snapshot = engine.writeCadenceSnapshot()
-        XCTAssertEqual(snapshot.writeCount, 6)
-        XCTAssertGreaterThan(snapshot.deficitSeconds, 0.1, "underfed real writes through the public API must show a deficit")
+        #expect(snapshot.writeCount == 6)
+        #expect(snapshot.deficitSeconds > 0.1, "underfed real writes through the public API must show a deficit")
     }
 
     /// A nominal feed through the public API stays ~zero, mirroring the unit
     /// test above but exercised through the actual hot path.
-    func testEngineWritePathNominalFeedStaysNearZero() async throws {
+    @Test func engineWritePathNominalFeedStaysNearZero() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
 
@@ -183,8 +211,10 @@ final class WriteCadenceTests: XCTestCase {
         }
 
         let snapshot = engine.writeCadenceSnapshot()
-        XCTAssertEqual(snapshot.writeCount, 11)
-        XCTAssertLessThan(snapshot.deficitSeconds, 0.15)
-        XCTAssertLessThan(snapshot.overrunSeconds, 0.15)
+        #expect(snapshot.writeCount == 11)
+        #expect(snapshot.deficitSeconds < 0.15)
+        #expect(snapshot.overrunSeconds < 0.15)
     }
 }
+
+} // extension SerializedEngineState

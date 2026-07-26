@@ -18,203 +18,250 @@
 //      out-of-band FAILED (rtsp_close_cb -> session_failure -> outputs_cb(-1,…))
 //      is delivered to the stream even though addOutput has already returned.
 
-import XCTest
+import Foundation
+import Testing
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-// @convention(c) hooks can't capture Swift state — record into file-scope globals.
-private var stateHookCalls: [(deviceId: UInt64, state: Int32)] = []
+// `@convention(c)` hooks can't capture Swift state. This used to record into a
+// file-scope `var` global, which was only safe because XCTest ran every test
+// METHOD in its own process; swift-testing runs tests concurrently in ONE
+// process, so that global was a real data race.
+//
+// `outputs_engine_state_set(cb, context)` takes a `void *context` that the
+// dispatcher hands back to the callback (shims/outputs.h §"Engine device-state
+// hook"), so the recording sink is a PER-TEST object reached through that
+// pointer — no shared mutable global. (The suite still nests into
+// `SerializedEngineState` because the C device registry underneath is itself
+// process-global.)
+private final class StateHookRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(deviceId: UInt64, state: Int32)] = []
+
+    func record(deviceId: UInt64, state: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        recorded.append((deviceId: deviceId, state: state))
+    }
+
+    var calls: [(deviceId: UInt64, state: Int32)] {
+        lock.lock(); defer { lock.unlock() }
+        return recorded
+    }
+}
 
 private let recordingStateCb: @convention(c) (
     UInt64, output_device_state, UnsafeMutableRawPointer?
-) -> Void = { deviceId, state, _ in
-    stateHookCalls.append((deviceId: deviceId, state: state.rawValue))
+) -> Void = { deviceId, state, context in
+    guard let context else { return }
+    Unmanaged<StateHookRecorder>.fromOpaque(context)
+        .takeUnretainedValue()
+        .record(deviceId: deviceId, state: state.rawValue)
 }
 
-final class StateStreamTests: XCTestCase {
+// `shims/outputs.c`'s device/callback registry is process-global C state, so this
+// suite nests into the package's one `.serialized` parent (see
+// SerializedEngineStateSuite.swift). Do NOT repeat `.serialized` here.
+extension SerializedEngineState {
 
-    override func setUp() {
-        super.setUp()
-        stateHookCalls.removeAll()
-        outputs_dispatcher_reset()
-        drainRegistry()
-    }
+    // A `final class`, not a `struct`: the per-test teardown below must actually
+    // run (it NULLs the C state hook and frees the heap devices), and `deinit` is
+    // illegal on a struct.
+    @Suite final class StateStreamTests {
 
-    override func tearDown() {
-        outputs_dispatcher_reset()
-        drainRegistry()
-        super.tearDown()
-    }
+        /// Fresh per test — swift-testing instantiates the suite once per `@Test`.
+        private let stateRecorder = StateHookRecorder()
 
-    // MARK: helpers
-
-    @discardableResult
-    private func makeDevice(id: UInt64, advertised: Bool = true, session: Bool = false)
-        -> UnsafeMutablePointer<output_device>
-    {
-        let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
-        dev.initialize(to: output_device())
-        dev.pointee.id = id
-        let canonical = outputs_device_add(dev, false)!
-        canonical.pointee.advertised = advertised ? 1 : 0
-        canonical.pointee.session = session ? UnsafeMutableRawPointer(bitPattern: 0x1) : nil
-        return canonical
-    }
-
-    private func drainRegistry() {
-        while let head = outputs_list() { outputs_device_remove(head) }
-    }
-
-    // MARK: - C layer: a SPENT-id (-1) report reaches the state hook, not dropped.
-    //
-    // This is the crux of the backlog item. outputs_cb(-1, …) previously returned
-    // immediately (the "no callback promised / already spent" sentinel), so a
-    // transition reported after an op's completion had spent its id was invisible.
-    // Now it is routed out-of-band to the state hook.
-    func testSpentIdReportReachesStateHook() {
-        let deviceId: UInt64 = 0x542A1B79089E
-        makeDevice(id: deviceId, advertised: true, session: true)
-        outputs_engine_state_set(recordingStateCb, nil)
-
-        // The exact call session_status() makes after callback_id was cleared to
-        // -1: a genuine state transition with no live waiter.
-        outputs_cb(-1, deviceId, OUTPUT_STATE_FAILED)
-
-        // Deferred, never inline (re-entrancy safety) — same as the armed path.
-        XCTAssertEqual(stateHookCalls.count, 0, "state delivery must be deferred")
-
-        outputs_cb_deferred_run()
-
-        XCTAssertEqual(stateHookCalls.count, 1, "spent-id transition must reach the state hook")
-        XCTAssertEqual(stateHookCalls.first?.deviceId, deviceId)
-        XCTAssertEqual(stateHookCalls.first?.state, OUTPUT_STATE_FAILED.rawValue)
-    }
-
-    // MARK: - C layer: an ARMED report also reaches the state hook (once), so a
-    // subscriber sees op-driven transitions too, not only out-of-band ones.
-    func testArmedReportAlsoReachesStateHook() {
-        let deviceId: UInt64 = 0xAABB
-        let dev = makeDevice(id: deviceId, advertised: true, session: true)
-        outputs_engine_state_set(recordingStateCb, nil)
-
-        let cbId = outputs_callback_add(dev, { _, _ in }) // non-NULL status cb required
-        outputs_cb(cbId, deviceId, OUTPUT_STATE_CONNECTED)
-        outputs_cb_deferred_run()
-
-        XCTAssertEqual(stateHookCalls.count, 1)
-        XCTAssertEqual(stateHookCalls.first?.deviceId, deviceId)
-        XCTAssertEqual(stateHookCalls.first?.state, OUTPUT_STATE_CONNECTED.rawValue)
-
-        // Spent slot: a second drain delivers nothing (no double-count).
-        outputs_cb_deferred_run()
-        XCTAssertEqual(stateHookCalls.count, 1)
-    }
-
-    // MARK: - Swift layer: makeStateStream() yields the out-of-band transition.
-    //
-    // Full engine path through the genuine dispatcher: fire a synthetic
-    // post-terminal outputs_cb(-1,…) + deferred run and assert the stream yields
-    // the (OutputID, OutputState) transition. No polling anywhere.
-    func testStateStreamYieldsOutOfBandTransition() async throws {
-        let id = OutputID(rawValue: 0xC0FFEE)
-        makeDevice(id: id.rawValue, advertised: true, session: true)
-
-        let engine = AirPlayEngine()
-        await engine.enterHeadlessTestMode() // installs the state hook (no start())
-
-        let reader = StreamReader(engine.makeStateStream())
-
-        // Fire the out-of-band FAILED transition (spent id) through the REAL
-        // dispatcher, exactly as airplay.c's rtsp_close_cb -> session_failure ->
-        // session_status(callback_id == -1) would. Delivery is synchronous into
-        // the stream's buffer, so the reader below returns it immediately; the
-        // timeout only guards against a regression (dropped delivery) hanging.
-        outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
-        outputs_cb_deferred_run()
-
-        let element = try await reader.next(timeout: 2)
-        XCTAssertEqual(element.0, id)
-        XCTAssertEqual(element.1, .failed)
-
-        await engine.stop() // finishes the stream cleanly
-    }
-
-    // MARK: - Swift layer: the `.connected -> .failed` regression this exists for.
-    //
-    // addOutput resolves on CONNECTED (spending the callback_id). AFTERWARD the
-    // receiver drops RTSP and a FAILED transition arrives out-of-band. The
-    // completion bridge can't see it (id spent); the state stream must.
-    func testStreamObservesFailAfterAddOutputResolved() async throws {
-        let id = OutputID(rawValue: 0x542A1B79089E)
-        makeDevice(id: id.rawValue, advertised: true, session: true)
-
-        let engine = AirPlayEngine()
-        await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
-        await engine.registerKnownOutputForTest(id)
-
-        let reader = StreamReader(engine.makeStateStream())
-
-        // 1) addOutput resolves via the armed CONNECTED completion (id now spent).
-        async let op: Void = engine.addOutput(id)
-        try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
-        try await op
-        let resolved = await engine.stateOf(id)
-        XCTAssertEqual(resolved, .connected)
-
-        // The stream also observed the CONNECTED transition (armed report).
-        let first = try await reader.next(timeout: 2)
-        XCTAssertEqual(first.1, .connected)
-
-        // 2) Out-of-band FAILED after the op resolved — the transition the
-        //    completion bridge is blind to.
-        outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
-        outputs_cb_deferred_run()
-
-        let failed = try await reader.next(timeout: 2)
-        XCTAssertEqual(failed.0, id)
-        XCTAssertEqual(failed.1, .failed)
-
-        await engine.stop()
-    }
-
-    // MARK: - PTP clock availability (T4)
-    //
-    // Headless mode never calls start() (no engine thread, no ptpd_find_or_bind),
-    // so the only thing assertable without a real/gated session is the default:
-    // ptpClockAvailable stays `true` until a real start() determines otherwise,
-    // matching every pre-T4 caller's existing (unchanged) behavior.
-    func testPtpClockAvailableDefaultsTrueBeforeStart() async {
-        let engine = AirPlayEngine()
-        let available = await engine.ptpClockAvailable
-        XCTAssertTrue(available, "clock availability must default healthy until a real start() says otherwise")
-    }
-
-    // MARK: - internal helpers
-
-    /// Fire a synthetic completion once the waiter is armed (same pattern as
-    /// AirPlayEngineAPITests). The wrapper uses the lowest free slot (0 after a
-    /// reset) for a single in-flight op.
-    private func fireWhenArmed(
-        id: UInt64,
-        state: output_device_state,
-        engine: AirPlayEngine
-    ) async throws {
-        // Gate on the REGISTRY waiter, not just the C callback slot: `startOp`
-        // arms `outputs_callback_add` before `completions.arm`, so firing on the
-        // C callback alone can hit the window before the waiter exists — the
-        // completion is then dropped and the op hangs until its timeout. See the
-        // twin helper in AirPlayEngineAPITests for the full rationale.
-        for _ in 0..<200 {
-            if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                outputs_cb(0, id, state)
-                outputs_cb_deferred_run()
-                return
-            }
-            try await Task.sleep(nanoseconds: 1_000_000)
+        init() {
+            outputs_dispatcher_reset()
+            drainRegistry()
         }
-        XCTFail("waiter was never armed for device \(String(format: "0x%llX", id))")
-    }
 
+        deinit {
+            // Tear the C hook down FIRST. Swift runs `deinit` before releasing the
+            // instance's stored properties, so the raw context pointer the
+            // dispatcher held can never outlive the `stateRecorder` it points at.
+            outputs_dispatcher_reset()   // NULLs the state hook *and* its context
+            drainRegistry()
+        }
+
+        // MARK: helpers
+
+        /// Install the recording state hook against THIS test's recorder.
+        private func installRecordingStateHook() {
+            outputs_engine_state_set(
+                recordingStateCb,
+                Unmanaged.passUnretained(stateRecorder).toOpaque()
+            )
+        }
+
+        @discardableResult
+        private func makeDevice(id: UInt64, advertised: Bool = true, session: Bool = false)
+            -> UnsafeMutablePointer<output_device>
+        {
+            let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            dev.initialize(to: output_device())
+            dev.pointee.id = id
+            let canonical = outputs_device_add(dev, false)!
+            canonical.pointee.advertised = advertised ? 1 : 0
+            canonical.pointee.session = session ? UnsafeMutableRawPointer(bitPattern: 0x1) : nil
+            return canonical
+        }
+
+        private func drainRegistry() {
+            while let head = outputs_list() { outputs_device_remove(head) }
+        }
+
+        // MARK: - C layer: a SPENT-id (-1) report reaches the state hook, not dropped.
+        //
+        // This is the crux of the backlog item. outputs_cb(-1, …) previously returned
+        // immediately (the "no callback promised / already spent" sentinel), so a
+        // transition reported after an op's completion had spent its id was invisible.
+        // Now it is routed out-of-band to the state hook.
+        @Test func spentIdReportReachesStateHook() {
+            let deviceId: UInt64 = 0x542A1B79089E
+            makeDevice(id: deviceId, advertised: true, session: true)
+            installRecordingStateHook()
+
+            // The exact call session_status() makes after callback_id was cleared to
+            // -1: a genuine state transition with no live waiter.
+            outputs_cb(-1, deviceId, OUTPUT_STATE_FAILED)
+
+            // Deferred, never inline (re-entrancy safety) — same as the armed path.
+            #expect(stateRecorder.calls.count == 0, "state delivery must be deferred")
+
+            outputs_cb_deferred_run()
+
+            #expect(stateRecorder.calls.count == 1, "spent-id transition must reach the state hook")
+            #expect(stateRecorder.calls.first?.deviceId == deviceId)
+            #expect(stateRecorder.calls.first?.state == OUTPUT_STATE_FAILED.rawValue)
+        }
+
+        // MARK: - C layer: an ARMED report also reaches the state hook (once), so a
+        // subscriber sees op-driven transitions too, not only out-of-band ones.
+        @Test func armedReportAlsoReachesStateHook() {
+            let deviceId: UInt64 = 0xAABB
+            let dev = makeDevice(id: deviceId, advertised: true, session: true)
+            installRecordingStateHook()
+
+            let cbId = outputs_callback_add(dev, { _, _ in }) // non-NULL status cb required
+            outputs_cb(cbId, deviceId, OUTPUT_STATE_CONNECTED)
+            outputs_cb_deferred_run()
+
+            #expect(stateRecorder.calls.count == 1)
+            #expect(stateRecorder.calls.first?.deviceId == deviceId)
+            #expect(stateRecorder.calls.first?.state == OUTPUT_STATE_CONNECTED.rawValue)
+
+            // Spent slot: a second drain delivers nothing (no double-count).
+            outputs_cb_deferred_run()
+            #expect(stateRecorder.calls.count == 1)
+        }
+
+        // MARK: - Swift layer: makeStateStream() yields the out-of-band transition.
+        //
+        // Full engine path through the genuine dispatcher: fire a synthetic
+        // post-terminal outputs_cb(-1,…) + deferred run and assert the stream yields
+        // the (OutputID, OutputState) transition. No polling anywhere.
+        @Test func stateStreamYieldsOutOfBandTransition() async throws {
+            let id = OutputID(rawValue: 0xC0FFEE)
+            makeDevice(id: id.rawValue, advertised: true, session: true)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode() // installs the state hook (no start())
+
+            let reader = StreamReader(engine.makeStateStream())
+
+            // Fire the out-of-band FAILED transition (spent id) through the REAL
+            // dispatcher, exactly as airplay.c's rtsp_close_cb -> session_failure ->
+            // session_status(callback_id == -1) would. Delivery is synchronous into
+            // the stream's buffer, so the reader below returns it immediately; the
+            // timeout only guards against a regression (dropped delivery) hanging.
+            outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
+            outputs_cb_deferred_run()
+
+            let element = try await reader.next(timeout: 2)
+            #expect(element.0 == id)
+            #expect(element.1 == .failed)
+
+            await engine.stop() // finishes the stream cleanly
+        }
+
+        // MARK: - Swift layer: the `.connected -> .failed` regression this exists for.
+        //
+        // addOutput resolves on CONNECTED (spending the callback_id). AFTERWARD the
+        // receiver drops RTSP and a FAILED transition arrives out-of-band. The
+        // completion bridge can't see it (id spent); the state stream must.
+        @Test func streamObservesFailAfterAddOutputResolved() async throws {
+            let id = OutputID(rawValue: 0x542A1B79089E)
+            makeDevice(id: id.rawValue, advertised: true, session: true)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            let reader = StreamReader(engine.makeStateStream())
+
+            // 1) addOutput resolves via the armed CONNECTED completion (id now spent).
+            async let op: Void = engine.addOutput(id)
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_CONNECTED, engine: engine)
+            try await op
+            let resolved = await engine.stateOf(id)
+            #expect(resolved == .connected)
+
+            // The stream also observed the CONNECTED transition (armed report).
+            let first = try await reader.next(timeout: 2)
+            #expect(first.1 == .connected)
+
+            // 2) Out-of-band FAILED after the op resolved — the transition the
+            //    completion bridge is blind to.
+            outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
+            outputs_cb_deferred_run()
+
+            let failed = try await reader.next(timeout: 2)
+            #expect(failed.0 == id)
+            #expect(failed.1 == .failed)
+
+            await engine.stop()
+        }
+
+        // MARK: - PTP clock availability (T4)
+        //
+        // Headless mode never calls start() (no engine thread, no ptpd_find_or_bind),
+        // so the only thing assertable without a real/gated session is the default:
+        // ptpClockAvailable stays `true` until a real start() determines otherwise,
+        // matching every pre-T4 caller's existing (unchanged) behavior.
+        @Test func ptpClockAvailableDefaultsTrueBeforeStart() async {
+            let engine = AirPlayEngine()
+            let available = await engine.ptpClockAvailable
+            #expect(available, "clock availability must default healthy until a real start() says otherwise")
+        }
+
+        // MARK: - internal helpers
+
+        /// Fire a synthetic completion once the waiter is armed (same pattern as
+        /// AirPlayEngineAPITests). The wrapper uses the lowest free slot (0 after a
+        /// reset) for a single in-flight op.
+        private func fireWhenArmed(
+            id: UInt64,
+            state: output_device_state,
+            engine: AirPlayEngine
+        ) async throws {
+            // Gate on the REGISTRY waiter, not just the C callback slot: `startOp`
+            // arms `outputs_callback_add` before `completions.arm`, so firing on the
+            // C callback alone can hit the window before the waiter exists — the
+            // completion is then dropped and the op hangs until its timeout. See the
+            // twin helper in AirPlayEngineAPITests for the full rationale.
+            for _ in 0..<200 {
+                if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                    outputs_cb(0, id, state)
+                    outputs_cb_deferred_run()
+                    return
+                }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
+        }
+
+    }
 }
 
 /// Drains an `AsyncStream` into a thread-safe FIFO on a background task, and

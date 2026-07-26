@@ -1,11 +1,12 @@
 import Network
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// Drives ``NetworkConnectionDiagnostics`` purely through its injected seams —
 /// no real network, filesystem, or clock — covering every row of the brief §4
 /// decision table.
-final class ConnectionDiagnosticsTests: XCTestCase {
+@Suite struct ConnectionDiagnosticsTests {
 
     // MARK: Builders
 
@@ -42,7 +43,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
 
     // MARK: Step 1 — auth flag wins
 
-    func testAuthFlagWinsBeforeAnyProbe() async {
+    @Test func authFlagWinsBeforeAnyProbe() async {
         // Even with a log line + present Bonjour + refused probe that would map
         // elsewhere, requiresAuth short-circuits to .authRequired with no detail.
         let diag = diagnostics(
@@ -51,57 +52,57 @@ final class ConnectionDiagnosticsTests: XCTestCase {
             logTail: { "No response from Kitchen" }
         )
         let result = await diag.diagnose(context(requiresAuth: true))
-        XCTAssertEqual(result.cause, .authRequired)
-        XCTAssertNil(result.detail)
+        #expect(result.cause == .authRequired)
+        #expect(result.detail == nil)
     }
 
     // MARK: Step 2 — engine-log patterns
 
-    func testLogNoResponseMapsToNotResponding() async {
+    @Test func logNoResponseMapsToNotResponding() async {
         let line = "[player] No response from Kitchen (giving up)"
         let diag = diagnostics(logTail: { line })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .notResponding)
-        XCTAssertEqual(result.detail, line)
+        #expect(result.cause == .notResponding)
+        #expect(result.detail == line)
     }
 
-    func testLog403MapsToRefusedOrBusy() async {
+    @Test func log403MapsToRefusedOrBusy() async {
         let line = "[raop] Kitchen returned status 403 Forbidden"
         let diag = diagnostics(logTail: { line })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .refusedOrBusy)
-        XCTAssertEqual(result.detail, line)
+        #expect(result.cause == .refusedOrBusy)
+        #expect(result.detail == line)
     }
 
-    func testLogAuthPatternMapsToAuthRequired() async {
+    @Test func logAuthPatternMapsToAuthRequired() async {
         let line = "[raop] Kitchen requires pairing before streaming"
         let diag = diagnostics(logTail: { line })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .authRequired)
-        XCTAssertEqual(result.detail, line)
+        #expect(result.cause == .authRequired)
+        #expect(result.detail == line)
     }
 
-    func testLogPasswordPatternMapsToAuthRequired() async {
+    @Test func logPasswordPatternMapsToAuthRequired() async {
         let line = "[raop] Kitchen: password needed"
         let diag = diagnostics(logTail: { line })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .authRequired)
+        #expect(result.cause == .authRequired)
     }
 
     /// "failed to activate" alone is inconclusive: it must NOT decide the cause,
     /// but the matched line still rides along as `detail` while probing continues.
-    func testFailedToActivateAloneKeepsProbingButRetainsDetail() async {
+    @Test func failedToActivateAloneKeepsProbingButRetainsDetail() async {
         let line = "[player] failed to activate Kitchen"
         let diag = diagnostics(
             bonjour: { _ in .absent },  // step 3 decides → .vanished
             logTail: { line }
         )
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .vanished)
-        XCTAssertEqual(result.detail, line, "the inconclusive log line still becomes detail")
+        #expect(result.cause == .vanished)
+        #expect(result.detail == line, "the inconclusive log line still becomes detail")
     }
 
-    func testLogScansNewestLineFirst() async {
+    @Test func logScansNewestLineFirst() async {
         // Two matching lines; the newest (last) one should win.
         let tail = """
         [player] No response from Kitchen
@@ -109,11 +110,11 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         """
         let diag = diagnostics(logTail: { tail })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .refusedOrBusy, "the 403 line is newer than the no-response line")
-        XCTAssertTrue(result.detail?.contains("403") == true)
+        #expect(result.cause == .refusedOrBusy, "the 403 line is newer than the no-response line")
+        #expect(result.detail?.contains("403") == true)
     }
 
-    func testLogIgnoresLinesNotNamingTheDevice() async {
+    @Test func logIgnoresLinesNotNamingTheDevice() async {
         // A 403 for a different device must not be attributed to Kitchen.
         let tail = """
         [raop] Bedroom returned status 403 Forbidden
@@ -126,58 +127,58 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         let result = await diag.diagnose(context())
         // The only Kitchen line ("enabling") is inconclusive → falls through to
         // Bonjour, and it becomes the detail.
-        XCTAssertEqual(result.cause, .vanished)
-        XCTAssertEqual(result.detail, "[player] enabling Kitchen")
+        #expect(result.cause == .vanished)
+        #expect(result.detail == "[player] enabling Kitchen")
     }
 
-    func testDeviceNameMatchIsCaseInsensitive() async {
+    @Test func deviceNameMatchIsCaseInsensitive() async {
         let line = "[player] No response from KITCHEN"
         let diag = diagnostics(logTail: { line })
         let result = await diag.diagnose(context(deviceName: "kitchen"))
-        XCTAssertEqual(result.cause, .notResponding)
+        #expect(result.cause == .notResponding)
     }
 
     // MARK: Step 3 — Bonjour presence
 
-    func testAbsentFromBonjourMapsToVanished() async {
+    @Test func absentFromBonjourMapsToVanished() async {
         let diag = diagnostics(bonjour: { _ in .absent })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .vanished)
-        XCTAssertNil(result.detail)
+        #expect(result.cause == .vanished)
+        #expect(result.detail == nil)
     }
 
-    func testVanishedKeepsInconclusiveLogDetail() async {
+    @Test func vanishedKeepsInconclusiveLogDetail() async {
         let line = "[player] failed to activate Kitchen"
         let diag = diagnostics(
             bonjour: { _ in .absent },
             logTail: { line }
         )
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .vanished)
-        XCTAssertEqual(result.detail, line)
+        #expect(result.cause == .vanished)
+        #expect(result.detail == line)
     }
 
     // MARK: Step 4 — TCP probe classification
 
-    func testProbeReadyMapsToNotResponding() async {
+    @Test func probeReadyMapsToNotResponding() async {
         let diag = diagnostics(tcpProbe: { _ in .ready })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .notResponding)
+        #expect(result.cause == .notResponding)
     }
 
-    func testProbeRefusedMapsToRefusedOrBusy() async {
+    @Test func probeRefusedMapsToRefusedOrBusy() async {
         let diag = diagnostics(tcpProbe: { _ in .refused })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .refusedOrBusy)
+        #expect(result.cause == .refusedOrBusy)
     }
 
-    func testProbeTimedOutMapsToNotResponding() async {
+    @Test func probeTimedOutMapsToNotResponding() async {
         let diag = diagnostics(tcpProbe: { _ in .timedOut })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .notResponding)
+        #expect(result.cause == .notResponding)
     }
 
-    func testProbeReceivesTheMatchedEndpoint() async {
+    @Test func probeReceivesTheMatchedEndpoint() async {
         // The endpoint that Bonjour resolved must be the one handed to the probe.
         let resolved = BonjourPresence.Endpoint(serviceName: "AABBCC@Kitchen", serviceType: "_raop._tcp")
         let seen = EndpointBox()
@@ -190,42 +191,42 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         )
         _ = await diag.diagnose(context())
         let captured = await seen.value
-        XCTAssertEqual(captured?.serviceName, "AABBCC@Kitchen")
-        XCTAssertEqual(captured?.serviceType, "_raop._tcp")
+        #expect(captured?.serviceName == "AABBCC@Kitchen")
+        #expect(captured?.serviceType == "_raop._tcp")
     }
 
-    func testPresentWithoutEndpointFallsThroughToPriorCause() async {
+    @Test func presentWithoutEndpointFallsThroughToPriorCause() async {
         // Present but no resolvable endpoint → skip the probe → step 5.
         let diag = diagnostics(bonjour: { _ in BonjourPresence(isPresent: true, endpoint: nil) })
         let result = await diag.diagnose(context(priorCause: .droppedMidStream))
-        XCTAssertEqual(result.cause, .droppedMidStream)
+        #expect(result.cause == .droppedMidStream)
     }
 
     // MARK: Step 5 — fallback to priorCause
 
-    func testNothingConclusiveFallsBackToPriorCause() async {
+    @Test func nothingConclusiveFallsBackToPriorCause() async {
         // Present but no endpoint → the probe is skipped and step 5 carries the
         // backend's prior guess (.timedOut here) through unchanged.
         let diag = diagnostics(bonjour: { _ in BonjourPresence(isPresent: true, endpoint: nil) })
         let result = await diag.diagnose(context(priorCause: .timedOut))
-        XCTAssertEqual(result.cause, .timedOut)
+        #expect(result.cause == .timedOut)
     }
 
-    func testFallbackKeepsInconclusiveLogDetail() async {
+    @Test func fallbackKeepsInconclusiveLogDetail() async {
         let line = "[player] failed to activate Kitchen"
         let diag = diagnostics(
             bonjour: { _ in BonjourPresence(isPresent: true, endpoint: nil) },
             logTail: { line }
         )
         let result = await diag.diagnose(context(priorCause: .unknown))
-        XCTAssertEqual(result.cause, .unknown)
-        XCTAssertEqual(result.detail, line, "the log line survives all the way to the fallback")
+        #expect(result.cause == .unknown)
+        #expect(result.detail == line, "the log line survives all the way to the fallback")
     }
 
-    func testFallbackUsesUnknownWhenPriorCauseIsUnknown() async {
+    @Test func fallbackUsesUnknownWhenPriorCauseIsUnknown() async {
         let diag = diagnostics(bonjour: { _ in BonjourPresence(isPresent: true, endpoint: nil) })
         let result = await diag.diagnose(context(priorCause: .unknown))
-        XCTAssertEqual(result.cause, .unknown)
+        #expect(result.cause == .unknown)
     }
 
     // MARK: Default TCP probe — NWConnection state classification
@@ -236,48 +237,48 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     // transient — only an active refusal may decide there; everything else
     // must leave the 3 s bound in charge.
 
-    func testProbeVerdictReadyIsReady() {
-        XCTAssertEqual(NetworkConnectionDiagnostics.probeVerdict(for: .ready), .ready)
+    @Test func probeVerdictReadyIsReady() {
+        #expect(NetworkConnectionDiagnostics.probeVerdict(for: .ready) == .ready)
     }
 
-    func testProbeVerdictWaitingRefusedIsRefused() {
-        XCTAssertEqual(
-            NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ECONNREFUSED))),
+    @Test func probeVerdictWaitingRefusedIsRefused() {
+        #expect(
+            NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ECONNREFUSED))) ==
             .refused)
     }
 
-    func testProbeVerdictTransientWaitingIsNotTerminal() {
+    @Test func probeVerdictTransientWaitingIsNotTerminal() {
         // A momentarily-unrouted host (path change) can still reach .ready
         // within the bound — the first .waiting must NOT resolve the probe.
-        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.EHOSTUNREACH))))
-        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ENETDOWN))))
+        #expect(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.EHOSTUNREACH))) == nil)
+        #expect(NetworkConnectionDiagnostics.probeVerdict(for: .waiting(.posix(.ENETDOWN))) == nil)
     }
 
-    func testProbeVerdictFailedRefusedIsRefused() {
-        XCTAssertEqual(
-            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ECONNREFUSED))),
+    @Test func probeVerdictFailedRefusedIsRefused() {
+        #expect(
+            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ECONNREFUSED))) ==
             .refused)
     }
 
-    func testProbeVerdictOtherHardFailureIsTimedOut() {
-        XCTAssertEqual(
-            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ETIMEDOUT))),
+    @Test func probeVerdictOtherHardFailureIsTimedOut() {
+        #expect(
+            NetworkConnectionDiagnostics.probeVerdict(for: .failed(.posix(.ETIMEDOUT))) ==
             .timedOut)
     }
 
-    func testProbeVerdictNonTerminalStatesKeepWaiting() {
-        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .setup))
-        XCTAssertNil(NetworkConnectionDiagnostics.probeVerdict(for: .preparing))
+    @Test func probeVerdictNonTerminalStatesKeepWaiting() {
+        #expect(NetworkConnectionDiagnostics.probeVerdict(for: .setup) == nil)
+        #expect(NetworkConnectionDiagnostics.probeVerdict(for: .preparing) == nil)
     }
 
     // MARK: Never-throws / robustness
 
-    func testNilLogTailIsSkippedGracefully() async {
+    @Test func nilLogTailIsSkippedGracefully() async {
         // No log available → straight to Bonjour → probe.
         let diag = diagnostics(logTail: { nil })
         let result = await diag.diagnose(context())
-        XCTAssertEqual(result.cause, .notResponding)  // present + probe ready
-        XCTAssertNil(result.detail)
+        #expect(result.cause == .notResponding)  // present + probe ready
+        #expect(result.detail == nil)
     }
 }
 

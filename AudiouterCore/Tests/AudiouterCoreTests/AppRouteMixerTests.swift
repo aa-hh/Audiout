@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 ahh and contributors.
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// Hermetic tests for ``AppRouteMixer`` (T5). Every seam is injected — a
@@ -9,7 +10,7 @@ import XCTest
 /// destination-set topology AND the sample math run without Core Audio, a real
 /// tap, or the engine. These are the highest-stakes tests in the routing plan:
 /// a mixing bug is audible garbage.
-final class AppRouteMixerTests: XCTestCase {
+@Suite struct AppRouteMixerTests {
 
     // MARK: Doubles
 
@@ -111,18 +112,18 @@ final class AppRouteMixerTests: XCTestCase {
 
     // MARK: - 1. Destination-set computation
 
-    func testDisjointRoutesProduceSeparateSets() {
+    @Test func disjointRoutesProduceSeparateSets() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev2")])
         let sets = m.destinationSets
-        XCTAssertEqual(sets.count, 2)
-        XCTAssertEqual(Set(sets.flatMap { $0.deviceIDs }), ["dev1", "dev2"])
-        XCTAssertTrue(sets.allSatisfy { $0.bundleIDs.count == 1 && $0.deviceIDs.count == 1 })
+        #expect(sets.count == 2)
+        #expect(Set(sets.flatMap { $0.deviceIDs }) == ["dev1", "dev2"])
+        #expect(sets.allSatisfy { $0.bundleIDs.count == 1 && $0.deviceIDs.count == 1 })
     }
 
     /// `.noRedirect` and `.currentDevice` are mixer-equivalent: neither ever
     /// participates in a destination set, and neither gets a stream id.
-    func testNoRedirectAndCurrentDeviceAreBothExcludedFromMixerTopology() {
+    @Test func noRedirectAndCurrentDeviceAreBothExcludedFromMixerTopology() {
         let m = mixer()
         m.updateRoutes([
             route("com.spotify.client", to: "kitchen"),
@@ -130,86 +131,86 @@ final class AppRouteMixerTests: XCTestCase {
             AppRoute(bundleID: "com.apple.Music", displayName: "Music", destination: .currentDevice),
         ])
         let sets = m.destinationSets
-        XCTAssertEqual(sets.count, 1)
-        XCTAssertEqual(sets[0].bundleIDs, ["com.spotify.client"],
+        #expect(sets.count == 1)
+        #expect(sets[0].bundleIDs == ["com.spotify.client"],
                        "neither .noRedirect nor .currentDevice ever joins a destination set")
-        XCTAssertNil(m.streamID(for: "us.zoom.xos"))
-        XCTAssertNil(m.streamID(for: "com.apple.Music"))
+        #expect(m.streamID(for: "us.zoom.xos") == nil)
+        #expect(m.streamID(for: "com.apple.Music") == nil)
     }
 
-    func testDevicesWithIdenticalMembershipShareOneStream() {
+    @Test func devicesWithIdenticalMembershipShareOneStream() {
         let m = mixer()
         m.updateRoutes([
             route("a", to: "dev1"), route("b", to: "dev1"),
             route("a", to: "dev2"), route("b", to: "dev2"),
         ])
         let sets = m.destinationSets
-        XCTAssertEqual(sets.count, 1)
-        XCTAssertEqual(sets[0].bundleIDs, ["a", "b"])
-        XCTAssertEqual(sets[0].deviceIDs, ["dev1", "dev2"])
+        #expect(sets.count == 1)
+        #expect(sets[0].bundleIDs == ["a", "b"])
+        #expect(sets[0].deviceIDs == ["dev1", "dev2"])
     }
 
-    func testOverlappingButUnequalMembershipStayDistinct() {
+    @Test func overlappingButUnequalMembershipStayDistinct() {
         let m = mixer()
         m.updateRoutes([
             route("a", to: "dev1"), route("b", to: "dev1"),
             route("b", to: "dev2"),
         ])
         let sets = m.destinationSets.sorted { $0.bundleIDs.count > $1.bundleIDs.count }
-        XCTAssertEqual(sets.count, 2)
-        XCTAssertEqual(sets[0].bundleIDs, ["a", "b"])
-        XCTAssertEqual(sets[0].deviceIDs, ["dev1"])
-        XCTAssertEqual(sets[1].bundleIDs, ["b"])
-        XCTAssertEqual(sets[1].deviceIDs, ["dev2"])
+        #expect(sets.count == 2)
+        #expect(sets[0].bundleIDs == ["a", "b"])
+        #expect(sets[0].deviceIDs == ["dev1"])
+        #expect(sets[1].bundleIDs == ["b"])
+        #expect(sets[1].deviceIDs == ["dev2"])
     }
 
-    func testNoRoutesProducesZeroSets() {
+    @Test func noRoutesProducesZeroSets() {
         let m = mixer()
         m.updateRoutes([route("a", to: nil), route("b", to: nil)])
-        XCTAssertTrue(m.destinationSets.isEmpty)
+        #expect(m.destinationSets.isEmpty)
     }
 
-    func testStreamIDsStartAtOne() {
+    @Test func streamIDsStartAtOne() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1")])
-        XCTAssertEqual(m.destinationSets.map { $0.streamID }, [1])
+        #expect(m.destinationSets.map { $0.streamID } == [1])
     }
 
     // MARK: - 2. Stream_id stability
 
-    func testSameSignatureKeepsStreamIDAcrossRecompute() {
+    @Test func sameSignatureKeepsStreamIDAcrossRecompute() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev2")])
         let firstA = m.streamID(for: "a")
         let firstB = m.streamID(for: "b")
 
         m.updateRoutes([route("a", to: "dev1", volume: 50), route("b", to: "dev2")])
-        XCTAssertEqual(m.streamID(for: "a"), firstA)
-        XCTAssertEqual(m.streamID(for: "b"), firstB)
+        #expect(m.streamID(for: "a") == firstA)
+        #expect(m.streamID(for: "b") == firstB)
     }
 
-    func testChangedMembershipGetsDifferentStreamID() {
+    @Test func changedMembershipGetsDifferentStreamID() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1")])
         let original = m.streamID(for: "a")!
 
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
         let changed = m.destinationSets.first { $0.bundleIDs == ["a", "b"] }!.streamID
-        XCTAssertNotEqual(changed, original, "a new membership must not reuse the old set's id blindly")
-        XCTAssertNil(m.destinationSets.first { $0.bundleIDs == ["a"] })
+        #expect(changed != original, "a new membership must not reuse the old set's id blindly")
+        #expect(m.destinationSets.first { $0.bundleIDs == ["a"] } == nil)
     }
 
-    func testUnchangedSetKeepsIDWhenAnotherSetChanges() {
+    @Test func unchangedSetKeepsIDWhenAnotherSetChanges() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev2")])
         let bID = m.destinationSets.first { $0.bundleIDs == ["b"] }!.streamID
 
         m.updateRoutes([route("a", to: "dev1"), route("c", to: "dev1"), route("b", to: "dev2")])
         let bIDAfter = m.destinationSets.first { $0.bundleIDs == ["b"] }!.streamID
-        XCTAssertEqual(bID, bIDAfter, "an unrelated set must not be reassigned")
+        #expect(bID == bIDAfter, "an unrelated set must not be reassigned")
     }
 
-    func testTopologyCallbackFiresOnlyOnRealChange() {
+    @Test func topologyCallbackFiresOnlyOnRealChange() {
         let m = mixer()
         let count = Counter()
         m.onDestinationSetsChanged = { _ in count.bump() }
@@ -217,12 +218,12 @@ final class AppRouteMixerTests: XCTestCase {
         m.updateRoutes([route("a", to: "dev1")])             // change -> fire
         m.updateRoutes([route("a", to: "dev1", volume: 20)]) // volume only -> no fire
         m.updateRoutes([route("a", to: "dev2")])             // device change -> fire
-        XCTAssertEqual(count.value, 2)
+        #expect(count.value == 2)
     }
 
     // MARK: - 3. Summing correctness + clipping
 
-    func testTwoAppsToSameDeviceSumSampleAccurately() {
+    @Test func twoAppsToSameDeviceSumSampleAccurately() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -236,10 +237,10 @@ final class AppRouteMixerTests: XCTestCase {
         m.flush()
 
         let all = pairs(sink.combined)
-        XCTAssertEqual(all.count, 2)
-        XCTAssertEqual(all[0].0, 110); XCTAssertEqual(all[0].1, 220)
-        XCTAssertEqual(all[1].0, 330); XCTAssertEqual(all[1].1, 440)
-        XCTAssertTrue(sink.all.allSatisfy { $0.streamID == m.streamID(for: "a") })
+        #expect(all.count == 2)
+        #expect(all[0].0 == 110); #expect(all[0].1 == 220)
+        #expect(all[1].0 == 330); #expect(all[1].1 == 440)
+        #expect(sink.all.allSatisfy { $0.streamID == m.streamID(for: "a") })
     }
 
     /// Regression for Bug T1 ("two apps routed -> audio extremely compressed or
@@ -252,7 +253,7 @@ final class AppRouteMixerTests: XCTestCase {
     /// RTP timestamps (audible corruption). A single stream driven by real time
     /// must emit exactly one real-time's worth of frames with contiguous,
     /// never-rewound presentation timestamps.
-    func testTwoInterleavedAppsNeitherOverDeliverNorRewindPTS() {
+    @Test func twoInterleavedAppsNeitherOverDeliverNorRewindPTS() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -281,7 +282,7 @@ final class AppRouteMixerTests: XCTestCase {
         for emitted in sink.all {
             let startFrame = AppRouteMixer.frameIndex(of: emitted.pts)
             if let expected = expectedNextFrame {
-                XCTAssertEqual(startFrame, expected,
+                #expect(startFrame == expected,
                                "emissions must be contiguous; a rewound/overlapping pts is receiver corruption")
             }
             expectedNextFrame = startFrame + Int64(emitted.frameCount)
@@ -290,11 +291,11 @@ final class AppRouteMixerTests: XCTestCase {
         // 2. Exactly one real-time span of frames (no over-delivery == no slow-down).
         let totalEmitted = sink.all.reduce(0) { $0 + $1.frameCount }
         let realSpan = Int(frame - start)     // iterations * bufFrames
-        XCTAssertEqual(totalEmitted, realSpan,
+        #expect(totalEmitted == realSpan,
                        "two mixed apps must emit exactly one real-time's worth of frames, not more")
     }
 
-    func testClippingEngagesAtBoundaryWithoutWrapping() {
+    @Test func clippingEngagesAtBoundaryWithoutWrapping() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -308,21 +309,21 @@ final class AppRouteMixerTests: XCTestCase {
         m.flush()
 
         let all = pairs(sink.combined)
-        XCTAssertEqual(all[0].0, 32767, "positive overflow clamps to Int16.max")
-        XCTAssertEqual(all[0].1, -32768, "negative overflow clamps to Int16.min")
+        #expect(all[0].0 == 32767, "positive overflow clamps to Int16.max")
+        #expect(all[0].1 == -32768, "negative overflow clamps to Int16.min")
     }
 
-    func testStaticClipHelperBoundaries() {
-        XCTAssertEqual(AppRouteMixer.clip(40000), 32767)
-        XCTAssertEqual(AppRouteMixer.clip(-40000), -32768)
-        XCTAssertEqual(AppRouteMixer.clip(0), 0)
-        XCTAssertEqual(AppRouteMixer.clip(32767), 32767)
-        XCTAssertEqual(AppRouteMixer.clip(-32768), -32768)
+    @Test func staticClipHelperBoundaries() {
+        #expect(AppRouteMixer.clip(40000) == 32767)
+        #expect(AppRouteMixer.clip(-40000) == -32768)
+        #expect(AppRouteMixer.clip(0) == 0)
+        #expect(AppRouteMixer.clip(32767) == 32767)
+        #expect(AppRouteMixer.clip(-32768) == -32768)
     }
 
     // MARK: - 4. Per-app volume scaling
 
-    func testVolumeScalesAppContributionBeforeSumming() {
+    @Test func volumeScalesAppContributionBeforeSumming() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -337,11 +338,11 @@ final class AppRouteMixerTests: XCTestCase {
         m.flush()
 
         let all = pairs(sink.combined)
-        XCTAssertEqual(all[0].0, 2500)
-        XCTAssertEqual(all[0].1, 2500)
+        #expect(all[0].0 == 2500)
+        #expect(all[0].1 == 2500)
     }
 
-    func testZeroVolumeContributesSilence() {
+    @Test func zeroVolumeContributesSilence() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -354,24 +355,24 @@ final class AppRouteMixerTests: XCTestCase {
         m.flush()
 
         let all = pairs(sink.combined)
-        XCTAssertEqual(all[0].0, 1234, "muted app adds nothing")
-        XCTAssertEqual(all[0].1, 5678)
+        #expect(all[0].0 == 1234, "muted app adds nothing")
+        #expect(all[0].1 == 5678)
     }
 
-    func testStaticScaledSamplesRoundsToNearest() {
+    @Test func staticScaledSamplesRoundsToNearest() {
         var data = Data(count: 2)
         data.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
             let bits = UInt16(bitPattern: 3)
             raw[0] = UInt8(bits & 0xFF); raw[1] = UInt8(bits >> 8)
         }
-        XCTAssertEqual(AppRouteMixer.scaledStereoSamples(data, volumePercent: 50), [2]) // 1.5 -> 2
-        XCTAssertEqual(AppRouteMixer.scaledStereoSamples(data, volumePercent: 100), [3])
-        XCTAssertEqual(AppRouteMixer.scaledStereoSamples(data, volumePercent: 0), [0])
+        #expect(AppRouteMixer.scaledStereoSamples(data, volumePercent: 50) == [2]) // 1.5 -> 2
+        #expect(AppRouteMixer.scaledStereoSamples(data, volumePercent: 100) == [3])
+        #expect(AppRouteMixer.scaledStereoSamples(data, volumePercent: 0) == [0])
     }
 
     // MARK: - 5. Composite plan scenario (Spotify -> Kitchen, Zoom local)
 
-    func testSpotifyRoutedZoomLocalYieldsExactlyOneSetWithoutZoom() {
+    @Test func spotifyRoutedZoomLocalYieldsExactlyOneSetWithoutZoom() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -382,10 +383,10 @@ final class AppRouteMixerTests: XCTestCase {
         ])
 
         let sets = m.destinationSets
-        XCTAssertEqual(sets.count, 1)
-        XCTAssertEqual(sets[0].bundleIDs, ["com.spotify.client"])
-        XCTAssertEqual(sets[0].deviceIDs, ["kitchen"])
-        XCTAssertNil(m.streamID(for: "us.zoom.xos"))
+        #expect(sets.count == 1)
+        #expect(sets[0].bundleIDs == ["com.spotify.client"])
+        #expect(sets[0].deviceIDs == ["kitchen"])
+        #expect(m.streamID(for: "us.zoom.xos") == nil)
 
         // Even a defensive Zoom buffer (never happens — no tap) produces nothing.
         m.handleStateChange(bundleID: "com.spotify.client", state: capturing())
@@ -394,16 +395,16 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleBuffer(bundleID: "com.spotify.client", buffer: s16Buffer(frames: [(500, 500)], atSecond: 1))
         m.flush()
 
-        XCTAssertTrue(sink.all.allSatisfy { $0.streamID == sets[0].streamID })
+        #expect(sink.all.allSatisfy { $0.streamID == sets[0].streamID })
         let all = pairs(sink.combined)
-        XCTAssertEqual(all.count, 1)
-        XCTAssertEqual(all[0].0, 500)
-        XCTAssertEqual(all[0].1, 500)
+        #expect(all.count == 1)
+        #expect(all[0].0 == 500)
+        #expect(all[0].1 == 500)
     }
 
     // MARK: - pts alignment + emission behaviour
 
-    func testSingleStreamPassesBuffersThroughVerbatimWithOwnPTS() {
+    @Test func singleStreamPassesBuffersThroughVerbatimWithOwnPTS() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -420,15 +421,15 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(111, 111)], atSecond: 1))
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(222, 222)], atSecond: 2))
 
-        XCTAssertEqual(sink.all.count, 2, "each buffer passes straight through")
-        XCTAssertEqual(pairs(sink.all[0].pcm).map(\.0), [111])
-        XCTAssertEqual(pairs(sink.all[1].pcm).map(\.0), [222])
-        XCTAssertEqual(sink.all[0].pts.tv_sec, 1, "buffer keeps its own capture pts")
-        XCTAssertEqual(sink.all[1].pts.tv_sec, 2)
-        XCTAssertEqual(pairs(sink.combined).count, 2, "no synthetic silence gap")
+        #expect(sink.all.count == 2, "each buffer passes straight through")
+        #expect(pairs(sink.all[0].pcm).map(\.0) == [111])
+        #expect(pairs(sink.all[1].pcm).map(\.0) == [222])
+        #expect(sink.all[0].pts.tv_sec == 1, "buffer keeps its own capture pts")
+        #expect(sink.all[1].pts.tv_sec == 2)
+        #expect(pairs(sink.combined).count == 2, "no synthetic silence gap")
     }
 
-    func testSingleStreamEmitsImmediatelyWithNoHoldWindow() {
+    @Test func singleStreamEmitsImmediatelyWithNoHoldWindow() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -439,21 +440,23 @@ final class AppRouteMixerTests: XCTestCase {
         // — the hold window only applies to the 2+-app summing path, so the
         // common single-redirect case carries no added latency.
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(1, 1), (2, 2)], atSecond: 1))
-        XCTAssertEqual(pairs(sink.combined).count, 2, "single-stream buffer emits immediately")
+        #expect(pairs(sink.combined).count == 2, "single-stream buffer emits immediately")
     }
 
-    func testFrameIndexRoundTrips() {
+    @Test func frameIndexRoundTrips() {
         let ts = timespec(tv_sec: 3, tv_nsec: 500_000_000)
         let frame = AppRouteMixer.frameIndex(of: ts)
-        XCTAssertEqual(frame, Int64(3 * 44100 + 22050))
+        #expect(frame == Int64(3 * 44100 + 22050))
         let back = AppRouteMixer.timestamp(ofFrame: frame)
-        XCTAssertEqual(back.tv_sec, 3)
-        XCTAssertEqual(back.tv_nsec, 500_000_000, accuracy: 30_000) // sub-frame rounding
+        #expect(back.tv_sec == 3)
+        // sub-frame rounding: use max-minus-min pattern for integer nanoseconds
+        let expected = 500_000_000
+        #expect(max(back.tv_nsec, expected) - min(back.tv_nsec, expected) <= 30_000, "sub-frame rounding")
     }
 
     // MARK: - Robustness: no converter / not routed
 
-    func testBufferDroppedWhenNoConverterYet() {
+    @Test func bufferDroppedWhenNoConverterYet() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -461,10 +464,10 @@ final class AppRouteMixerTests: XCTestCase {
         // No handleStateChange(.capturing) -> no converter learned yet.
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(1, 1)], atSecond: 1))
         m.flush()
-        XCTAssertTrue(sink.isEmpty, "a buffer before format is known is dropped, not crashed")
+        #expect(sink.isEmpty, "a buffer before format is known is dropped, not crashed")
     }
 
-    func testStopClearsConverterSoLaterBuffersDrop() {
+    @Test func stopClearsConverterSoLaterBuffersDrop() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -473,7 +476,7 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleStateChange(bundleID: "a", state: .idle)   // stopped
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(7, 7)], atSecond: 1))
         m.flush()
-        XCTAssertTrue(sink.isEmpty)
+        #expect(sink.isEmpty)
     }
 
     // MARK: - 6. Per-app POST-volume metering (T2)
@@ -496,27 +499,27 @@ final class AppRouteMixerTests: XCTestCase {
         return levels.all.last!.rms
     }
 
-    func testMeteringOnFiresPlausibleSourceRMSForSingleContributor() {
+    @Test func meteringOnFiresPlausibleSourceRMSForSingleContributor() {
         let level = singleContributorLevel(forVolume: 100)
-        XCTAssertGreaterThan(level, 0, "a non-silent buffer must report a non-zero RMS")
-        XCTAssertLessThanOrEqual(level, 1.0, "RMS is normalized to 0...1")
+        #expect(level > 0, "a non-silent buffer must report a non-zero RMS")
+        #expect(level <= 1.0, "RMS is normalized to 0...1")
     }
 
     /// Proves the reported level is a SOURCE/program level (PRE-volume): the app's
     /// routing-volume slider must NOT change it, so a low slider can't leave the
     /// bar stuck near-empty while the source is loud (ahh's meter feedback).
-    func testMeteringReportsSourceLevelIndependentOfRoutingVolume() {
+    @Test func meteringReportsSourceLevelIndependentOfRoutingVolume() {
         let fullVolume = singleContributorLevel(forVolume: 100)
         let halfVolume = singleContributorLevel(forVolume: 50)
         let mutedVolume = singleContributorLevel(forVolume: 0)
 
-        XCTAssertEqual(halfVolume, fullVolume, accuracy: 0.0001,
+        #expect(abs(halfVolume - fullVolume) <= 0.0001,
             "halving the routing volume must NOT change the reported source RMS")
-        XCTAssertEqual(mutedVolume, fullVolume, accuracy: 0.0001,
+        #expect(abs(mutedVolume - fullVolume) <= 0.0001,
             "even a 0% routing volume still reports the app's true source level")
     }
 
-    func testMeteringOffNeverFiresAppLevel() {
+    @Test func meteringOffNeverFiresAppLevel() {
         let m = mixer()
         let levels = LevelSink()
         m.onAppLevel = { levels.append($0, $1) }
@@ -525,14 +528,14 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleStateChange(bundleID: "a", state: capturing())
         m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(16000, 16000)], atSecond: 1))
         m.flush()
-        XCTAssertTrue(levels.isEmpty, "onAppLevel must not fire while metering is inactive (default state)")
+        #expect(levels.isEmpty, "onAppLevel must not fire while metering is inactive (default state)")
     }
 
     /// Two apps sharing one device's stream (the multi-contributor path) must each
     /// report THEIR OWN source RMS, not a value derived from the summed mix -- a
     /// loud "a" and a quiet "b" (distinct source buffers) must yield distinct
     /// levels keyed to their own bundle IDs.
-    func testMeteringOnMultiContributorFiresPerAppNotMixedSum() {
+    @Test func meteringOnMultiContributorFiresPerAppNotMixedSum() {
         let m = mixer()
         let levels = LevelSink()
         m.onAppLevel = { levels.append($0, $1) }
@@ -546,11 +549,10 @@ final class AppRouteMixerTests: XCTestCase {
         m.handleBuffer(bundleID: "b", buffer: s16Buffer(frames: [(1000, 1000)], atSecond: 1))
 
         let recorded = levels.all
-        XCTAssertEqual(recorded.count, 2, "each app's own buffer must fire its own onAppLevel call")
+        #expect(recorded.count == 2, "each app's own buffer must fire its own onAppLevel call")
         let aLevel = recorded.first { $0.bundleID == "a" }!.rms
         let bLevel = recorded.first { $0.bundleID == "b" }!.rms
-        XCTAssertGreaterThan(aLevel, bLevel,
-            "the louder app's OWN source RMS must be reported per bundle ID -- if levels came from " +
-            "the summed accumulator instead of each app's own buffer, both would report the same value")
+        #expect(aLevel > bLevel,
+            "the louder app's OWN source RMS must be reported per bundle ID -- if levels came from the summed accumulator instead of each app's own buffer, both would report the same value")
     }
 }

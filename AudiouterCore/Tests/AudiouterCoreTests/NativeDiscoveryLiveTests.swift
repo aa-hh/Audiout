@@ -1,10 +1,11 @@
-import XCTest
+import Foundation
+import Testing
 import AirPlayEngine
 @testable import AudiouterCore
 
 /// Live-LAN discovery tests for ``NativeDiscovery`` (T-NB-DISCOVERY-1).
 ///
-/// EVERY test in this file skips via `XCTSkip` unless the environment variable
+/// EVERY test in this file skips unless the environment variable
 /// `AIRPLAY_LIVE_DISCOVERY=1` is set. This is the D7 exception: passive Bonjour
 /// discovery scans against the real LAN are allowed during development
 /// (browsing is read-only — no root, no PTP, no audio). Not part of the
@@ -18,21 +19,19 @@ import AirPlayEngine
 ///   dev/fake-speakers.sh
 /// and stop it afterwards:
 ///   dev/stop-fake-speakers.sh
-final class NativeDiscoveryLiveTests: XCTestCase {
+private enum LiveDiscoveryGate {
+    static let isEnabled = ProcessInfo.processInfo.environment["AIRPLAY_LIVE_DISCOVERY"] == "1"
+    static let skipReason = "Set AIRPLAY_LIVE_DISCOVERY=1 to run live LAN discovery scans (D7 exception)."
+}
 
-    private func requireLiveEnabled() throws {
-        guard ProcessInfo.processInfo.environment["AIRPLAY_LIVE_DISCOVERY"] == "1" else {
-            throw XCTSkip("Set AIRPLAY_LIVE_DISCOVERY=1 to run live LAN discovery scans (D7 exception).")
-        }
-    }
+@Suite(.enabled(if: LiveDiscoveryGate.isEnabled, Comment(rawValue: LiveDiscoveryGate.skipReason)))
+struct NativeDiscoveryLiveTests {
 
     /// Browse the real LAN briefly (using the production `NetworkFrameworkBrowser`)
     /// and assert at least one AP2 device resolves with a well-formed descriptor:
     /// non-empty name, non-empty numeric address, a plausible RTSP port, and a
     /// colon-hex `deviceid` that round-trips to a nonzero `OutputID`.
-    func testLiveScanFindsAtLeastOneAP2Device() throws {
-        try requireLiveEnabled()
-
+    @Test func liveScanFindsAtLeastOneAP2Device() throws {
         let discovery = NativeDiscovery() // production NetworkFrameworkBrowser
         let collector = LiveEventCollector()
         discovery.onEvent = { collector.append($0) }
@@ -55,7 +54,7 @@ final class NativeDiscoveryLiveTests: XCTestCase {
         }
 
         guard let ap2 = devices.first(where: { $0.isAirPlay2Supported }) else {
-            XCTFail("""
+            Issue.record("""
                 No AirPlay-2 device resolved on the LAN within 12s. Expected fleet: \
                 Sonos Move / Move 2 / AirPort Express. Ensure they're powered on \
                 the same network segment and mDNS multicast isn't blocked (see \
@@ -64,26 +63,24 @@ final class NativeDiscoveryLiveTests: XCTestCase {
             return
         }
 
-        XCTAssertFalse(ap2.descriptor.name.isEmpty, "AP2 device must have a non-empty service name")
-        XCTAssertFalse(ap2.descriptor.address.isEmpty, "AP2 device must have a resolved numeric address")
-        XCTAssertGreaterThan(ap2.descriptor.port, 0, "AP2 device must have a resolved RTSP port")
-        XCTAssertFalse(ap2.id.isEmpty, "AP2 device must carry the colon-hex deviceid")
-        XCTAssertGreaterThan(ap2.outputID.rawValue, 0, "the parsed OutputID must be nonzero")
+        #expect(!ap2.descriptor.name.isEmpty, "AP2 device must have a non-empty service name")
+        #expect(!ap2.descriptor.address.isEmpty, "AP2 device must have a resolved numeric address")
+        #expect(ap2.descriptor.port > 0, "AP2 device must have a resolved RTSP port")
+        #expect(!ap2.id.isEmpty, "AP2 device must carry the colon-hex deviceid")
+        #expect(ap2.outputID.rawValue > 0, "the parsed OutputID must be nonzero")
         // Colon-hex round-trip sanity: re-parsing the descriptor's own txt yields
         // the identical id string (never reformatted) and the same OutputID.
         let reparsed = NativeDiscovery.parseDeviceID(ap2.descriptor.txtRecord)
-        XCTAssertEqual(reparsed?.id, ap2.id)
-        XCTAssertEqual(reparsed?.outputID, ap2.outputID)
+        #expect(reparsed?.id == ap2.id)
+        #expect(reparsed?.outputID == ap2.outputID)
     }
 
     /// Snapshot-only variant: gives a longer window and dumps full classification
     /// (AP2 vs AP1-only) for every device seen, for manual eyeballing against the
     /// expected fleet during the T-NB-DISCOVERY-1 live verification pass. Not a
     /// hard assertion beyond "at least one device total resolved" — the AP2-
-    /// specific assertion lives in `testLiveScanFindsAtLeastOneAP2Device` above.
-    func testLiveScanEnumeratesFullFleet() throws {
-        try requireLiveEnabled()
-
+    /// specific assertion lives in `liveScanFindsAtLeastOneAP2Device` above.
+    @Test func liveScanEnumeratesFullFleet() throws {
         let discovery = NativeDiscovery()
         let collector = LiveEventCollector()
         discovery.onEvent = { collector.append($0) }
@@ -101,7 +98,7 @@ final class NativeDiscoveryLiveTests: XCTestCase {
                   "model=\(d.descriptor.txtRecord["model"] ?? "?")")
         }
 
-        XCTAssertFalse(devices.isEmpty, "expected at least one AirPlay/RAOP device on the LAN")
+        #expect(!devices.isEmpty, "expected at least one AirPlay/RAOP device on the LAN")
     }
 }
 

@@ -1,5 +1,16 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
+
+#if canImport(AudioToolbox)
+/// Hoists the "no default output device available in this environment" skip
+/// (cookbook §9's "awkward case that CAN be hoisted") into a suite-discovery-time
+/// probe: the condition doesn't depend on state built up during a test body, it's
+/// discoverable by just trying the same real-hardware call once up front.
+enum LocalOutputLatencyGate {
+    static let hasDefaultOutputDevice: Bool = (try? LocalOutputLatency.measure()) != nil
+}
+#endif
 
 /// T-LATENCY: `LocalOutputLatency.measure()` reads the CURRENT DEFAULT OUTPUT
 /// DEVICE's safety offset + device latency + active-stream latency + buffer
@@ -10,16 +21,13 @@ import XCTest
 /// output latency is on the order of a few ms to a few tens of ms, never zero
 /// (the buffer-frame-size term alone guarantees a non-zero floor) and never
 /// absurdly large (seconds).
-final class LocalOutputLatencyTests: IsolatedTestCase {
+@Suite final class LocalOutputLatencyTests: IsolatedSuite {
 
-    func test_measure_returnsPlausibleNonZeroLatency() throws {
-        #if canImport(AudioToolbox)
-        let measurement: LocalOutputLatencyMeasurement
-        do {
-            measurement = try LocalOutputLatency.measure()
-        } catch {
-            throw XCTSkip("No default output device available in this environment: \(error)")
-        }
+    #if canImport(AudioToolbox)
+    @Test(.enabled(if: LocalOutputLatencyGate.hasDefaultOutputDevice,
+                    "No default output device available in this environment"))
+    func measureReturnsPlausibleNonZeroLatency() throws {
+        let measurement = try LocalOutputLatency.measure()
 
         NSLog(
             """
@@ -31,28 +39,26 @@ final class LocalOutputLatencyTests: IsolatedTestCase {
             measurement.streamLatencyFrames, measurement.bufferFrameSizeFrames,
             measurement.nominalSampleRate, measurement.totalFrames, measurement.totalMilliseconds)
 
-        XCTAssertGreaterThan(measurement.nominalSampleRate, 0)
-        XCTAssertGreaterThan(measurement.totalFrames, 0)
-        XCTAssertGreaterThan(measurement.totalMilliseconds, 0)
+        #expect(measurement.nominalSampleRate > 0)
+        #expect(measurement.totalFrames > 0)
+        #expect(measurement.totalMilliseconds > 0)
         // A real device's total output latency is well under one second —
         // this catches a unit-conversion bug (e.g. frames treated as ms).
-        XCTAssertLessThan(measurement.totalMilliseconds, 1000)
-        #else
-        throw XCTSkip("AudioToolbox unavailable on this platform")
-        #endif
+        #expect(measurement.totalMilliseconds < 1000)
     }
 
-    func test_defaultOutputDeviceID_matchesMeasuredDevice() throws {
-        #if canImport(AudioToolbox)
-        do {
-            let deviceID = try LocalOutputLatency.defaultOutputDeviceID()
-            let measurement = try LocalOutputLatency.measure(deviceID: deviceID)
-            XCTAssertGreaterThan(measurement.nominalSampleRate, 0)
-        } catch {
-            throw XCTSkip("No default output device available in this environment: \(error)")
-        }
-        #else
-        throw XCTSkip("AudioToolbox unavailable on this platform")
-        #endif
+    @Test(.enabled(if: LocalOutputLatencyGate.hasDefaultOutputDevice,
+                    "No default output device available in this environment"))
+    func defaultOutputDeviceIDMatchesMeasuredDevice() throws {
+        let deviceID = try LocalOutputLatency.defaultOutputDeviceID()
+        let measurement = try LocalOutputLatency.measure(deviceID: deviceID)
+        #expect(measurement.nominalSampleRate > 0)
     }
+    #else
+    @Test(.disabled("AudioToolbox unavailable on this platform"))
+    func measureReturnsPlausibleNonZeroLatency() throws {}
+
+    @Test(.disabled("AudioToolbox unavailable on this platform"))
+    func defaultOutputDeviceIDMatchesMeasuredDevice() throws {}
+    #endif
 }

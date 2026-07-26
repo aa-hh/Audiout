@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
@@ -23,7 +23,15 @@ import AppKit
 /// regresses, `perform` sends an `NSPopUpButton`-only selector (e.g.
 /// `indexOfSelectedItem`) to an `NSMenuItem` and the test fails loudly instead
 /// of passing while the feature is dead.
-final class MainOutRowMenuDispatchTests: XCTestCase {
+// `@MainActor` is load-bearing, not decoration: this suite builds and drives
+// AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
+// each test method on the main thread, so the annotation was never needed;
+// swift-testing schedules non-isolated `@Test` bodies on the cooperative
+// pool, where the same calls trip AppKit's "modifications to layout engine
+// from a background thread" exception and take the whole process down
+// (observed in `AppRowViewTests` during this migration). Do not remove it.
+@MainActor
+@Suite struct MainOutRowMenuDispatchTests {
 
     private final class RecordingDelegate: MainOutRowView.Delegate {
         var selectedTargets: [MainOutTarget] = []
@@ -57,56 +65,59 @@ final class MainOutRowMenuDispatchTests: XCTestCase {
     /// `action` on its OWN `target`, passing the item as sender.
     private func fire(_ item: NSMenuItem) {
         guard let action = item.action, let target = item.target as? NSObject else {
-            return XCTFail("menu item is missing its target/action wiring")
+            Issue.record("menu item is missing its target/action wiring")
+            return
         }
         _ = target.perform(action, with: item)
     }
 
     // MARK: Structural — the fix's core invariant
 
-    func testGroupMenuItemCarriesItsTargetAsRepresentedObject() {
+    @Test func groupMenuItemCarriesItsTargetAsRepresentedObject() {
         let (row, _) = makeRow()
         let item = row.test_menuItem(for: .group(id: "g1"))
-        XCTAssertNotNil(item, "the 'tester' group must have a real, selectable menu item")
-        XCTAssertEqual(item?.representedObject as? MainOutTarget, .group(id: "g1"),
-                       "the group item must carry its MainOutTarget so the handler can decode it")
+        #expect(item != nil, "the 'tester' group must have a real, selectable menu item")
+        #expect(item?.representedObject as? MainOutTarget == .group(id: "g1"),
+                "the group item must carry its MainOutTarget so the handler can decode it")
     }
 
-    func testOutputGroupsHeaderIsDisabledAndInert() {
+    @Test func outputGroupsHeaderIsDisabledAndInert() {
         let (row, _) = makeRow()
         // The header renders via an uppercased `attributedTitle`, which is what
         // `NSMenuItem.title` reports back.
         let header = row.test_menuItem(titled: "OUTPUT GROUPS")
-        XCTAssertNotNil(header, "the 'Output Groups' section header must exist")
-        XCTAssertFalse(header?.isEnabled ?? true,
-                       "the header must be disabled so it can't be clicked like a real choice")
-        XCTAssertNil(header?.representedObject,
-                     "the header carries no target — clicking it must route nowhere")
+        #expect(header != nil, "the 'Output Groups' section header must exist")
+        #expect(!(header?.isEnabled ?? true),
+                "the header must be disabled so it can't be clicked like a real choice")
+        #expect(header?.representedObject == nil,
+                "the header carries no target — clicking it must route nowhere")
     }
 
     // MARK: Behavioral — the regression guard
 
     /// The test that would have caught the original bug: clicking the group
     /// (via the real action path) must route Main Out to that group.
-    func testFiringGroupMenuItemRoutesToThatGroup() {
+    @Test func firingGroupMenuItemRoutesToThatGroup() {
         let (row, delegate) = makeRow(current: .selectedDevices)
         guard let item = row.test_menuItem(for: .group(id: "g1")) else {
-            return XCTFail("no group menu item to fire")
+            Issue.record("no group menu item to fire")
+            return
         }
         fire(item)
-        XCTAssertEqual(delegate.selectedTargets, [.group(id: "g1")],
-                       "firing the group's real menu action must select that group")
+        #expect(delegate.selectedTargets == [.group(id: "g1")],
+                "firing the group's real menu action must select that group")
     }
 
     /// The other direction: firing "Selected Devices" routes back to it, proving
     /// the dispatch reads each item's own target rather than a fixed index.
-    func testFiringSelectedDevicesMenuItemRoutesToSelectedDevices() {
+    @Test func firingSelectedDevicesMenuItemRoutesToSelectedDevices() {
         let (row, delegate) = makeRow(current: .group(id: "g1"))
         guard let item = row.test_menuItem(for: .selectedDevices) else {
-            return XCTFail("no Selected Devices menu item to fire")
+            Issue.record("no Selected Devices menu item to fire")
+            return
         }
         fire(item)
-        XCTAssertEqual(delegate.selectedTargets, [.selectedDevices],
-                       "firing the Selected Devices menu action must select it")
+        #expect(delegate.selectedTargets == [.selectedDevices],
+                "firing the Selected Devices menu action must select it")
     }
 }

@@ -320,8 +320,12 @@ import CoreAudio
 
     // MARK: - Settle window (F-SETTLE)
 
-    /// Rapid flaps (the actual BT headset scenario) produce exactly 1 delivery.
-    @Test func settleWindowCoalescesRapidFlaps() {
+    /// The BT headset burst collapses to at most TWO deliveries — an immediate
+    /// leading one (so a tap the first transition silenced rebuilds at once) plus
+    /// one trailing reconcile of the settled value — never one-per-notification.
+    /// (The Recorder's tracked rate is fixed at 48k, so both the leading and the
+    /// settled reading diverge from it and record.)
+    @Test func rapidFlapsCollapseToLeadingPlusOneTrailing() {
         let hal = FakeHAL()
         let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
@@ -329,47 +333,80 @@ import CoreAudio
         monitor.start()
 
         // Four rapid fires — like the WH-1000XM3 connect sequence.
-        hal.rate = 16_000; hal.fire(rateSelector)
-        hal.rate = 44_100; hal.fire(rateSelector)
-        hal.rate = 16_000; hal.fire(rateSelector)
-        hal.rate = 44_100; hal.fire(rateSelector)
-        // Drain once at the end — not after each fire.
+        hal.rate = 16_000; hal.fire(rateSelector)   // leading: delivers 16k now
+        hal.rate = 44_100; hal.fire(rateSelector)   // coalesced
+        hal.rate = 16_000; hal.fire(rateSelector)   // coalesced
+        hal.rate = 44_100; hal.fire(rateSelector)   // coalesced
+
+        // Leading already landed before any drain.
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.nominalRate == 16_000)
+
         monitor._drainForTesting()
 
-        // Only the last settled value delivered, exactly once.
+        // Four fires, exactly two deliveries — not four.
+        #expect(recorder.received.count == 2)
+        #expect(recorder.received.last?.nominalRate == 44_100)
+    }
+
+    /// A single isolated change delivers on the LEADING edge — immediately, with
+    /// no settle-window wait — so an ordinary device switch never eats a window
+    /// of silence, and the trailing edge does not double-deliver it.
+    @Test func singleChangeDeliversImmediatelyWithoutWaitingOutTheWindow() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100
+        hal.fire(rateSelector)
+        // Delivered already — before any drain, without the 60s window elapsing.
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.nominalRate == 44_100)
+
+        monitor._drainForTesting()
+        // The trailing reconcile does not re-fire an already-settled value.
+        #expect(recorder.received.count == 1)
+    }
+
+    /// DEFECT 1 (F-SETTLE review): a rate that flaps and RETURNS to the value a
+    /// subscriber is built on (48k→44k→48k) nets to no change — but the 48→44
+    /// transition really silenced the tap. A net-value trailing debounce would
+    /// deliver nothing and leave it silent forever; the leading edge fires on the
+    /// 48→44 transition, so the tap is rebuilt regardless of where the burst ends.
+    @Test func flapReturningToTrackedValueStillDeliversViaLeadingEdge() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100; hal.fire(rateSelector)   // leading: transition off 48k
+        hal.rate = 48_000; hal.fire(rateSelector)   // returns to the tracked value
+        monitor._drainForTesting()
+
+        // The leading delivery landed — the tap is not left silent. The trailing
+        // net value equals the tracked 48k, so no redundant second rebuild.
         #expect(recorder.received.count == 1)
         #expect(recorder.received.first?.nominalRate == 44_100)
     }
 
-    /// A single genuine change still delivers after the window drains.
-    @Test func settleWindowDeliversAfterWindowExpires() {
+    /// `stop()` inside the window cancels the pending TRAILING reconcile — the
+    /// leading delivery already ran, but the reconcile must not fire after stop.
+    @Test func stopCancelsPendingTrailingDelivery() {
         let hal = FakeHAL()
         let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
         let recorder = Recorder(deviceID: 42, rate: 48_000)
         recorder.attach(to: monitor)
         monitor.start()
 
-        hal.rate = 44_100
-        hal.fire(rateSelector)
-        // Nothing yet — the fan-out is armed, not run.
-        #expect(recorder.received.isEmpty)
-        monitor._drainForTesting()
-        // Exactly one delivery once the window collapses.
+        hal.rate = 44_100; hal.fire(rateSelector)   // leading delivery (count 1)
+        hal.rate = 16_000; hal.fire(rateSelector)   // arms a trailing reconcile
         #expect(recorder.received.count == 1)
-    }
 
-    /// `stop()` before the window expires cancels the pending delivery.
-    @Test func stopCancelsPendingSettleDelivery() {
-        let hal = FakeHAL()
-        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
-        let recorder = Recorder(deviceID: 42, rate: 48_000)
-        recorder.attach(to: monitor)
-        monitor.start()
-
-        hal.rate = 44_100
-        hal.fire(rateSelector)
-        monitor.stop()  // cancels the pending fan-out
+        monitor.stop()                              // cancels the trailing
         monitor._drainForTesting()
-        #expect(recorder.received.isEmpty)
+        #expect(recorder.received.count == 1)       // trailing never ran
     }
 }

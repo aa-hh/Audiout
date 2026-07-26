@@ -148,6 +148,12 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// settle window. Only ever touched on ``queue``.
     private var pendingFanout: DispatchWorkItem?
 
+    /// Whether a notification arrived AFTER this burst's leading-edge delivery, so
+    /// the trailing edge still owes subscribers the settled value. Only ever
+    /// touched on ``queue``. See ``handleNotification()`` for why the fan-out is
+    /// leading + trailing rather than trailing-only.
+    private var settleDirty = false
+
     // MARK: - Lifecycle
 
     /// - Parameter settleWindow: how long the reading must hold still before the
@@ -197,6 +203,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             started = false
             pendingFanout?.cancel()
             pendingFanout = nil
+            settleDirty = false
             removeListeners()
         }
     }
@@ -252,33 +259,69 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
 
     // MARK: - Notification handling (on `queue`)
 
-    /// One live read, then a trailing-edge-debounced per-subscriber decision.
-    /// Both listeners land here.
+    /// One live read, then a LEADING + trailing-edge-debounced per-subscriber
+    /// decision. Both listeners land here.
     ///
-    /// ## Why the fan-out waits (F-SETTLE)
+    /// ## Why the fan-out coalesces (F-SETTLE)
     /// Measured live: connecting a Sony WH-1000XM3 makes the HAL post FOUR rate
     /// notifications in 0.9s — 44100→16000→44100→16000 — as the macOS Bluetooth
     /// stack negotiates HFP against A2DP. It happens with no app running at all,
     /// so it is not something this process can suppress at the source. Fanning
     /// each one out synchronously cost four full tap-pipeline rebuilds per
-    /// connect, and the intermediate 16k readings are transient garbage nothing
-    /// should ever be rebuilt on.
+    /// connect, and the intermediate readings are transient garbage.
     ///
-    /// So the READ stays immediate — ``current`` must never lag, and the rate
-    /// listener has to follow an identity change right away or the new device's
-    /// renegotiation goes unwatched — while the DELIVERY is armed one settle
-    /// window out and re-armed by every notification inside it. The burst
-    /// collapses to a single fan-out of the value that actually stuck.
+    /// ## Why LEADING + trailing, not trailing-only
+    /// A rate transition SILENCES a process tap the instant it happens — the tap
+    /// goes all-zero on a 44.1↔48 renegotiation and only a full rebuild revives
+    /// it (see ``PerAppCaptureCoordinator``'s tap-silence note). The kill is the
+    /// *transition*, not the resting mismatch. So a pure trailing debounce keyed
+    /// on the settled value has a hole: a burst that flaps and RETURNS to the
+    /// value a subscriber is built on (48k→44k→48k) nets to "no change" and fires
+    /// nothing — yet the 48→44 transition already killed the tap, leaving it
+    /// silent forever. To close that, the FIRST notification of a burst delivers
+    /// immediately (leading edge): whatever transition started the burst rebuilds
+    /// the tap at once, and an ordinary single device switch never eats a settle
+    /// window of silence either. Notifications inside the window then coalesce,
+    /// and one trailing delivery reconciles to the value that actually stuck.
+    ///
+    /// The READ stays immediate regardless — ``current`` must never lag, and the
+    /// rate listener has to follow an identity change right away or the new
+    /// device's renegotiation goes unwatched.
     private func handleNotification() {
         let live = readLive()
         latest = live
         retargetRateListenerIfNeeded(to: live.deviceID)
 
+        if pendingFanout == nil {
+            // Leading edge — first notification of a (possibly one-shot) burst.
+            deliverToSubscribers()
+            settleDirty = false
+        } else {
+            // Inside the window — coalesce; the trailing edge reconciles.
+            settleDirty = true
+        }
+        scheduleTrailingFanout()
+    }
+
+    /// Arm (or re-arm) the trailing delivery one settle window out. It fires only
+    /// if a notification landed after the leading delivery (``settleDirty``), so a
+    /// lone change does not double-deliver an already-settled value.
+    ///
+    /// razor: no max-wait cap. A burst that never settles (distinct-value
+    /// notifications faster than the window, indefinitely) would starve the
+    /// trailing reconcile — but the leading edge already delivered the burst's
+    /// first change, and the real self-sustaining storm this codebase hit was
+    /// same-value (killed by ``TapRebuildDecision``'s loop-breaker), not
+    /// distinct-value. If a distinct-value storm is ever observed, cap here:
+    /// deliver at most `maxWait` after the first un-reconciled notification.
+    private func scheduleTrailingFanout() {
         pendingFanout?.cancel()
         var item: DispatchWorkItem!
         item = DispatchWorkItem { [weak self] in
             guard let self, !item.isCancelled else { return }
             self.pendingFanout = nil
+            guard self.settleDirty else { return }
+            self.settleDirty = false
             self.deliverToSubscribers()
         }
         pendingFanout = item
@@ -333,6 +376,10 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             guard let pending = pendingFanout else { return }
             pending.cancel()
             pendingFanout = nil
+            // Same gate the real trailing work item applies: reconcile only if a
+            // notification landed after the leading delivery.
+            guard settleDirty else { return }
+            settleDirty = false
             deliverToSubscribers()
         }
     }

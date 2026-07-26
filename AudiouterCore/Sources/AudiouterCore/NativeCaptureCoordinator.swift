@@ -185,15 +185,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// read only by ``handleBuffer(_:)``.
     private var _bufferSnapshot: BufferSnapshot = .empty
 
-    /// STABILITY(C6) (whole-system port of `PerAppCaptureCoordinator`'s
-    /// per-slot flag): set when a rebuild trigger — a default-output-device
+    /// STABILITY(C6): set when a rebuild trigger — a default-output-device
     /// change (`handleDeviceChange()`), or an exclusion-list change
     /// (`updateRouting(...)`) — arrives while we're already mid-rebuild
     /// (`.creatingTap`), so it isn't silently dropped. The in-flight
     /// `recreateTap()` replays a fresh rebuild once it lands back in
     /// `.capturing`, coalescing however many were dropped into one retry.
-    /// Confined to `queue`. See dev/notes/stability-audit-2026-07-18.md §C6.
-    private var pendingDeviceChange = false
+    /// Confined to `queue`, which is also ``TapRebuildCoalescer``'s lock
+    /// contract. See dev/notes/stability-audit-2026-07-18.md §C6.
+    ///
+    /// Single-sourced with `PerAppCaptureCoordinator.Slot.rebuildCoalescer` —
+    /// the mechanism used to be written out twice (architecture review
+    /// 2026-07-26, defect A).
+    private var rebuildCoalescer = TapRebuildCoalescer()
 
     /// Whether RMS should be computed and handed to `onLevel` (T-GATE). `false`
     /// until ``setMeteringActive(_:)`` first flips it on — the popover isn't shown
@@ -970,6 +974,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// takes effect if currently `.capturing`; a race with a concurrent
     /// `stop()`/failure is a no-op. Surfaced as a fresh `.capturing(format')`
     /// transition, or `.failed` if re-creation fails.
+    ///
+    /// ## Sibling implementation
+    /// `PerAppCaptureCoordinator.handleDeviceChange(bundleID:)` runs the SAME
+    /// claim-under-lock / teardown-off-the-lock / commit-under-lock shape, per
+    /// bundle-ID slot instead of per coordinator. The two are deliberately kept
+    /// as separate bodies rather than one parameterized template — see
+    /// [TapRebuildLifecycle.swift](TapRebuildLifecycle.swift) for the step-by-step
+    /// list of what actually differs and why a shared template would be a
+    /// closure sandwich. The parts that are genuinely identical
+    /// (``TapRebuildCoalescer``, ``TapReanchor``) DO live there and are used by
+    /// both. **A behavioural fix to the choreography here almost certainly
+    /// needs the same fix there** — that "same fix, written twice" is exactly
+    /// the cost the architecture review priced (2026-07-26, defect A).
     private func recreateTap(cause: RebuildCause) {
         // Under the lock ONLY: check we're still capturing, claim the old tap,
         // and snapshot the current exclusion pids (queue-confined). The blocking
@@ -993,7 +1010,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         ) = queue.sync {
             guard case .capturing(let oldFormat) = _state else {
                 if case .creatingTap = _state {
-                    pendingDeviceChange = true
+                    rebuildCoalescer.markPending()
                     // Telemetry (T2): STABILITY(C6) coalescing point — a
                     // rebuild trigger arrived while already mid-rebuild, so it
                     // is being deferred/coalesced rather than dropped (see the
@@ -1068,9 +1085,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // STABILITY(C6): a rebuild trigger landed while we were rebuilding —
                 // replay it once now that we're capturing again, coalescing however
                 // many were dropped into a single retry.
-                let replay = pendingDeviceChange
-                pendingDeviceChange = false
-                return (nil, replay)
+                return (nil, rebuildCoalescer.takePending())
             }
             commit.orphan?.teardown()
             // T7 EDGE 3, SECOND HALF — join the NEW aggregate's workgroup, only once
@@ -1103,21 +1118,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // anchored to against what the incoming one landed on closes that window
             // with a fact instead of an assumption. A tap that doesn't report its
             // device (`nil`) abstains from the identity half, leaving the rate compare.
-            let rateMoved = claim.previousRate.map { $0 != format.sampleRate } ?? false
-            let deviceMoved: Bool = {
-                guard let before = claim.previousDeviceID, let after = newTap.tappedDeviceID
-                else { return false }
-                return before != after
-            }()
-            if commit.orphan == nil, cause == .deviceOrRateChange || rateMoved || deviceMoved {
+            let reanchor = TapReanchor(
+                previousRate: claim.previousRate, newRate: format.sampleRate,
+                previousDeviceID: claim.previousDeviceID, newDeviceID: newTap.tappedDeviceID)
+            if commit.orphan == nil, cause == .deviceOrRateChange || reanchor.didReanchor {
                 if cause == .exclusionChange {
                     // Worth its own line: an exclusion-cause rebuild that turned out to
                     // re-anchor is exactly the silent-dropout window this compare exists
                     // to catch, and nothing else in the trail would show it.
                     Telemetry.log(.captureWS, "rebuild_reanchored", [
                         "cause": "exclusionChange",
-                        "rateMoved": rateMoved ? "true" : "false",
-                        "deviceMoved": deviceMoved ? "true" : "false",
+                        "rateMoved": reanchor.rateMoved ? "true" : "false",
+                        "deviceMoved": reanchor.deviceMoved ? "true" : "false",
                     ])
                 }
                 onDeviceRateRebuild?()

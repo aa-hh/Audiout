@@ -140,11 +140,16 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private final class Slot {
         var state: State = .idle
         var tap: ProcessAudioTap?
-        /// STABILITY(C6) (per-app port): set when a device-change notification
-        /// arrives while this slot is mid-rebuild (`.creatingTap`), so it isn't
-        /// silently dropped — see `handleDeviceChange(bundleID:)` and
-        /// dev/notes/stability-audit-2026-07-18.md §C6.
-        var pendingDeviceChange = false
+        /// STABILITY(C6): set when a device-change notification arrives while
+        /// this slot is mid-rebuild (`.creatingTap`), so it isn't silently
+        /// dropped — see `handleDeviceChange(bundleID:)` and
+        /// dev/notes/stability-audit-2026-07-18.md §C6. Confined to `queue`,
+        /// which is also ``TapRebuildCoalescer``'s lock contract.
+        ///
+        /// Single-sourced with `NativeCaptureCoordinator.rebuildCoalescer` —
+        /// the mechanism used to be written out twice (architecture review
+        /// 2026-07-26, defect A).
+        var rebuildCoalescer = TapRebuildCoalescer()
         /// W1-T4: the process-OBJECT set this slot's LIVE tap was last built
         /// against — the per-slot compare-before-rebuild baseline for live
         /// membership diffing (``handleMembershipChange()``). Recorded on each
@@ -442,6 +447,22 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// ID's process set (it may have relaunched, or gained/lost child
     /// processes, since capture started) and recreate the tap + aggregate
     /// against the new device.
+    ///
+    /// ## Sibling implementation
+    /// `NativeCaptureCoordinator.recreateTap(cause:)` runs the SAME
+    /// claim-under-lock / teardown-off-the-lock / commit-under-lock shape, for
+    /// its one whole-system tap instead of per bundle-ID slot. The two are
+    /// deliberately kept as separate bodies rather than one parameterized
+    /// template — see [TapRebuildLifecycle.swift](TapRebuildLifecycle.swift)
+    /// for the step-by-step list of what actually differs (notably: that path
+    /// leaves/joins an audio I/O workgroup, this one has no workgroup
+    /// membership to drop; this path re-resolves the process set mid-rebuild
+    /// and can bail to `.failed`, that one has no such step). The parts that
+    /// are genuinely identical (``TapRebuildCoalescer``, ``TapReanchor``) DO
+    /// live there and are used by both. **A behavioural fix to the
+    /// choreography here almost certainly needs the same fix there** — that
+    /// "same fix, written twice" is exactly the cost the architecture review
+    /// priced (2026-07-26, defect A).
     private func handleDeviceChange(bundleID: String) {
         Telemetry.log(.capturePA, "device_change_fired", ["bundleID": bundleID])
         // STABILITY(C6) (per-app port of NativeCaptureCoordinator's fix sketch,
@@ -455,7 +476,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             guard let slot = slots[bundleID] else { return (false, nil, nil) }
             guard case .capturing(let oldFormat) = slot.state else {
                 if case .creatingTap = slot.state {
-                    slot.pendingDeviceChange = true
+                    slot.rebuildCoalescer.markPending()
                 }
                 return (false, nil, nil)
             }
@@ -472,7 +493,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // rebuild will replay it once it lands in `.capturing`, see the
             // "replaying coalesced pending device change" log below) or
             // simply discarded (no slot / not capturing and not rebuilding).
-            let pendingNow = queue.sync { slots[bundleID]?.pendingDeviceChange ?? false }
+            let pendingNow = queue.sync { slots[bundleID]?.rebuildCoalescer.isPending ?? false }
             Telemetry.log(.capturePA, "device_change_coalesced", ["bundleID": bundleID, "pending": String(pendingNow)])
             return
         }
@@ -513,7 +534,20 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // no live Core Audio here — so this coordinator-level emission,
             // testable via the existing FakeProcessTap/fireDeviceChange()
             // seam, is the one exercised by PerAppCaptureCoordinatorTests.)
-            if let oldFormat = claim.oldFormat, oldFormat.sampleRate != format.sampleRate {
+            //
+            // The compare itself is ``TapReanchor`` — single-sourced with
+            // `NativeCaptureCoordinator`'s identical `previousRate == nil
+            // abstains` rule (architecture review 2026-07-26, defect A). Only
+            // the RATE half applies here: this coordinator doesn't track the
+            // tapped device's identity, and `TapReanchor.deviceMoved`
+            // deliberately abstains (`false`) rather than guessing, so no
+            // behaviour changes. There is also no per-app analogue of the
+            // whole-system `onDeviceRateRebuild` session reset to fire — each
+            // per-app stream is rebound by `AppRouteMixer`, not by resetting a
+            // shared RTP session.
+            let reanchor = TapReanchor(
+                previousRate: claim.oldFormat?.sampleRate, newRate: format.sampleRate)
+            if reanchor.rateMoved, let oldFormat = claim.oldFormat {
                 Telemetry.log(.capturePA, "rate_rebuild", [
                     "bundleID": bundleID,
                     "oldRate": String(oldFormat.sampleRate),
@@ -531,9 +565,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 // STABILITY(C6): a device-change notification landed while we were
                 // rebuilding — replay it once now that we're capturing again,
                 // coalescing however many were dropped into a single retry.
-                guard slot.pendingDeviceChange else { return false }
-                slot.pendingDeviceChange = false
-                return true
+                return slot.rebuildCoalescer.takePending()
             }
             if replay {
                 Telemetry.log(.capturePA, "device_change_replay", ["bundleID": bundleID])

@@ -143,13 +143,28 @@ dead**:
 - **consume the event** (return `nil` from the tap callback) so macOS doesn't also show
   the crossed-out HUD.
 
-### 2. The gate — only intercept when the keys are actually dead
-When the default output is a normal, settable device, do NOT consume the key — let
-macOS handle it and let the existing `.systemVolumeChanged` path move Main. Only
-intercept when `systemOutputVolume == nil` (or a directly-observed unsettable state).
-Getting this wrong either double-moves Main on normal outputs or leaves the tap eating
-keys the OS should handle. Re-evaluate the gate when the default device changes
-(`SystemOutputVolume` already watches `kAudioHardwarePropertyDefaultOutputDevice`).
+### 2. The gate — ONE "we own volume" mode, not two bolt-ons (Alec, 2026-07-26)
+Reframe: #0b (apply Main to the Mac's own output) and this key interception are the
+OUTPUT and INPUT halves of the SAME condition — "the system volume isn't ours to write,
+so we take the wheel." Build them as one mode keyed off one predicate, not two features
+with two gates. When the mode is ON: intercept + consume the volume keys AND fold Main
+into `syncedLocalGain`. When OFF (normal settable output): do neither — let macOS handle
+the keys and let the system-volume write carry Main to the Mac, exactly as today.
+
+**Detecting the mode is the crux, and the obvious gate is WRONG.** Do NOT gate on
+`systemOutputVolume == nil` or any capability probe: Alec's live session proved the
+aggregate LIES — `aggtool status` reports `vmvc=true scalarMain=true muteMain=true` while
+delivering none of it, so it reads as a settable device and slips through a nil/capability
+gate, and the takeover silently never fires (volume just dies). Reliable detection:
+
+> **default output is OUR OWN aggregate (match by the UID/name we created it with)**
+> **— OR — a genuinely unreadable output (`systemOutputVolume == nil`, real HDMI).**
+
+We own the aggregate's identity because we create it (coexistence Wave 3 / `aggtool`),
+so a direct identity match is exact where a behavioral/capability test is fragile. Re-
+evaluate on default-device change (`SystemOutputVolume` already watches
+`kAudioHardwarePropertyDefaultOutputDevice`). Getting this wrong is a SILENT failure in
+both directions — double-moving Main on a normal output, or dead volume on the aggregate.
 
 ### 3. Accessibility grant — now MANDATORY, was optional
 `MediaKeyController`'s posting degraded gracefully without the grant (`post` just

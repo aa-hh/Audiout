@@ -25,8 +25,10 @@ extension SerializedSharedState {
         deinit {
             // The latch is deliberately one-way and process-global; leaving it set
             // would pin `effectiveStatus()` to `.granted` for every later test in
-            // this process. Reset regardless of how the test exited.
+            // this process. Reset regardless of how the test exited. Same
+            // rationale applies to the proven-code-identity fingerprint (T8).
             SystemAudioCaptureTCC._resetLatchForTesting()
+            SystemAudioCaptureTCC._resetProvenCodeIdentityForTesting()
         }
 
         // MARK: - The locked truth table (all nine combinations)
@@ -117,6 +119,32 @@ extension SerializedSharedState {
             // would silently leak a latched grant into the rest of the process.
             #expect(SystemAudioCaptureTCC.effectiveStatus() ==
                     SystemAudioCaptureTCC.combinedStatus())
+        }
+
+        // MARK: - Proven code-identity fingerprint (T8)
+
+        @Test func provenCodeIdentity_startsNil() {
+            SystemAudioCaptureTCC._resetProvenCodeIdentityForTesting()
+            #expect(SystemAudioCaptureTCC.provenCodeIdentity() == nil)
+        }
+
+        @Test func recordProvenCodeIdentity_isReadableAfterRecording() {
+            SystemAudioCaptureTCC._resetProvenCodeIdentityForTesting()
+            SystemAudioCaptureTCC.recordProvenCodeIdentity("cdhash-abc123")
+            #expect(SystemAudioCaptureTCC.provenCodeIdentity() == "cdhash-abc123")
+        }
+
+        @Test func recordProvenCodeIdentity_overwritesAnEarlierValue() {
+            SystemAudioCaptureTCC._resetProvenCodeIdentityForTesting()
+            SystemAudioCaptureTCC.recordProvenCodeIdentity("cdhash-old")
+            SystemAudioCaptureTCC.recordProvenCodeIdentity("cdhash-new")
+            #expect(SystemAudioCaptureTCC.provenCodeIdentity() == "cdhash-new")
+        }
+
+        @Test func resetSeam_actuallyClearsTheProvenIdentity() {
+            SystemAudioCaptureTCC.recordProvenCodeIdentity("cdhash-abc123")
+            SystemAudioCaptureTCC._resetProvenCodeIdentityForTesting()
+            #expect(SystemAudioCaptureTCC.provenCodeIdentity() == nil)
         }
     }
 }

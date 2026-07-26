@@ -81,21 +81,16 @@ This supersedes `dev/notes/warm-signal-v3.md` §5.8's "unify a warm-neutral rest
 (per-permission colour is back, not a shared neutral) and extends §1.3 (the accent dial now has
 four more dial-aware tokens, Subtle column only, alongside gold/ember/glow).
 
-## Groups window
-- **Raise content contrast significantly** — the warm-content-on-warm-pane is genuinely too low
-  to read (independent of the headless snapshot's dim inactive-window tone). Increase separation
-  between text, rows, and the pane.
-- **Liquid Glass sidebar on macOS 26+** (the system liquid-glass sidebar material) with a graceful
-  **solid warm fallback** on older systems.
-- (Also still owed from earlier: member rows should adopt the v4 rail/node language — a
-  groups-consistency pass. Can fold in here or stay separate.)
+## Groups window — DONE
+See: `fd77c79` (window-snapshot tool bug fix), `ffe966c` (sidebar Liquid Glass + warm tint),
+`9b97984` (MembershipRowView.Surface split + BusRailOverlayView rail), `1aaf9ac` (MembershipWellView
+well/hairlines), `06ee4b6` (elastic sections, 560×505 window, inline rename field), `d3d86c2`
+(review-follow-up: device-pane insets, section padding, title-text centering, gold rail terminus).
+Docs in `AudiouterWindowUI/AGENTS.md` and `AudiouterSharedUI/AGENTS.md`. Rules locked: text colors
+frozen (contrast via surfaces only); row height 28pt (no slack for matching popover's 42pt); header
+parity between the group editor and device-detail panes is enforced by test.
 
-## Settings
-- **Add tabs** to kill the long vertical scroll: **General / Appearance / Audio** (the existing
-  sections already group that way). Each tab short + scannable.
-- **Decouple the panel surfaces so each sizes to its own content.** Root problem Alec spotted:
-  Settings, Groups, etc. share one panel shell, so opening tall Settings forces its height onto
-  Groups → the narrow-tall Groups bug. Fix: each surface (Groups short-and-wide, Settings
-  tab-compact) sizes independently; neither dictates the other's geometry. Mechanism is
-  engineering's call (separate right-sized windows, or shell sizes-to-content per surface) — the
-  locked OUTCOME is each panel fits what it actually shows.
+## Settings — DONE
+See: `9760490` (General/Appearance/Audio tabs in a standalone window; panel sizing decoupled per
+surface, closing the narrow-tall Groups bug) and `ad948ea` (two live-only sizing fixes found in
+on-screen testing).

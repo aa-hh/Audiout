@@ -39,6 +39,21 @@ public final class ControlPanelWindowController: NSWindowController {
     /// no-op when asked to show what's already showing.
     private var currentContent: NSViewController?
 
+    /// Content controllers that have completed their FIRST mount, keyed by
+    /// `ObjectIdentifier` so a specific content instance is sized at most once
+    /// for the life of the shell. A later `setContent` re-hosting the same
+    /// instance (e.g. returning to Groups after some other content showed) is
+    /// a pure swap — it must never re-apply `defaultSize:` and stomp a size
+    /// the user has since dragged. See `setContent` and the AGENTS.md rule
+    /// contrasting this with the Settings window's "re-measure every show".
+    private var sizedContentIDs = Set<ObjectIdentifier>()
+
+    /// The anchor rect `show(anchorRect:)` was last called with, in screen
+    /// coordinates — remembered so `windowDidResize` can recompute the beak's
+    /// horizontal position against the SAME status-item anchor rather than a
+    /// fraction frozen at open time. `nil` when the panel was last centered.
+    private var lastAnchorRect: NSRect?
+
     /// Purely decorative window (T11) sitting BEHIND the real panel, drawing
     /// the rounded bubble + arrow "beak" that visually ties the panel to the
     /// menu-bar status item. `ignoresMouseEvents = true` — it never receives
@@ -157,14 +172,43 @@ public final class ControlPanelWindowController: NSWindowController {
         return (window, view)
     }
 
-    /// Swap the hosted content — the "one panel at a time" mechanism: opening
-    /// Settings while Groups is showing calls this rather than opening a new
-    /// window. No-ops when `controller` is already the hosted content.
-    public func setContent(_ controller: NSViewController) {
+    /// Swap the hosted content — the "one panel at a time" mechanism: hosting
+    /// new content while something else is showing calls this rather than
+    /// opening a new window. No-ops when `controller` is already the hosted
+    /// content.
+    ///
+    /// `defaultSize` seeds the panel's size on the FIRST mount of `controller`
+    /// ONLY (tracked by `ObjectIdentifier` in `sizedContentIDs`) — a later
+    /// re-host of the same instance never re-applies it, so a size the user
+    /// has since dragged survives a swap away and back. This is the
+    /// deliberate OPPOSITE of the Settings window's "re-measure before every
+    /// show" rule — see `AudiouterSettingsUI/AGENTS.md` and this file's
+    /// AGENTS.md for why both are correct for their own surface.
+    ///
+    /// TRAP, found by manual AppKit probe: assigning `window.contentViewController`
+    /// is NOT size-neutral by itself — AppKit resizes the window to a generic
+    /// (500, 500) fallback the moment a controller (new OR previously hosted)
+    /// is (re-)assigned, before this method gets a chance to size anything. A
+    /// naive "only call `setContentSize` on first mount" guard is defeated by
+    /// that assignment alone, so a re-host would silently snap to (500, 500)
+    /// instead of holding its current size. The fix: capture the panel's size
+    /// BEFORE reassigning, and on every re-host (not just the first mount)
+    /// explicitly restore it right after — `defaultSize` only wins on a
+    /// controller's genuine first mount.
+    public func setContent(_ controller: NSViewController, defaultSize: NSSize = NSSize(width: 720, height: 460)) {
         guard currentContent !== controller else { return }
         currentContent = controller
+        let priorSize = window?.frame.size
         window?.contentViewController = controller
         configureContentAppearance(controller.view)
+
+        let id = ObjectIdentifier(controller)
+        if sizedContentIDs.contains(id) {
+            if let priorSize { window?.setContentSize(priorSize) }
+        } else {
+            sizedContentIDs.insert(id)
+            window?.setContentSize(defaultSize)
+        }
     }
 
     /// T11: round the hosted content's corners to match the backing bubble's
@@ -227,6 +271,7 @@ public final class ControlPanelWindowController: NSWindowController {
     /// unchanged from T1 on purpose.
     public func show(anchorRect: NSRect?) {
         guard let panel = window else { return }
+        lastAnchorRect = anchorRect
         panel.contentView?.layoutSubtreeIfNeeded()
         let size = panel.frame.size
 
@@ -369,6 +414,34 @@ extension ControlPanelWindowController: NSWindowDelegate {
     public func windowWillClose(_ notification: Notification) {
         animateDisappearance()
         onClose?()
+    }
+
+    /// Resync the decorative bubble/beak window when the user drags the
+    /// panel's (resizable) edge. `addChildWindow` (see `init`) tracks the
+    /// parent's TRANSLATION automatically but never its SIZE — confirmed by a
+    /// manual AppKit probe: `setContentSize` alone left the child desynced at
+    /// its old size, `setFrameOrigin` alone tracked correctly. This re-runs
+    /// the same lockstep math `show(anchorRect:)` performs after ordering on
+    /// screen, in the same order: resize `backingWindow` to the panel's new
+    /// frame (plus `beakHeight`) FIRST — `beakFraction`'s path math reads the
+    /// view's (new) `bounds.width`, so the resize has to land before it's
+    /// recomputed — then recompute `beakFraction` from the remembered anchor
+    /// against the new frame, then `invalidateShadow()` LAST so the shadow
+    /// reflects the just-redrawn shape. `lastAnchorRect` is `nil` when the
+    /// panel was last centered (no anchor to track), in which case the beak
+    /// simply keeps its current fraction.
+    public func windowDidResize(_ notification: Notification) {
+        guard let panel = window else { return }
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let frame = panel.frame
+        backingWindow.setFrame(
+            NSRect(x: frame.minX, y: frame.minY,
+                  width: frame.width, height: frame.height + ControlPanelBackingView.beakHeight),
+            display: true)
+        if let anchor = lastAnchorRect, frame.width > 0 {
+            backingView.beakFraction = (anchor.midX - frame.minX) / frame.width
+        }
+        backingWindow.invalidateShadow()
     }
 }
 

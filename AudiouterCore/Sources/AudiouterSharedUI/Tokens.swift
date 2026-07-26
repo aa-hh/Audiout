@@ -222,6 +222,41 @@ public enum Tokens {
                        light: 0xCBBEA1, lightHighContrast: 0xBEAF90)
         }
 
+        /// The Groups window sidebar's warm surface (T7, Q4-b): on macOS 26+,
+        /// drawn as a PARTIAL-ALPHA wash (`SidebarViewController`'s
+        /// `SidebarWarmSurfaceView` applies `.withAlphaComponent`, ~0.30, a
+        /// taste dial) sitting between Apple's automatic Liquid Glass
+        /// sidebar material and the outline view — there is no public API to
+        /// tint the automatic glass itself, so this rides on top of it
+        /// instead. Below macOS 26 (no glass to tint) the SAME color is drawn
+        /// fully opaque as the sidebar's whole backing, standing in for the
+        /// system `.sidebar` material. One case serves both roles because
+        /// they're the same hue at two alpha levels, never two competing
+        /// custom colors. CONTRAST RATIONALE: this is a background surface,
+        /// not a foreground instrument (no stated floor, same precedent as
+        /// `canvas`/`panel`/`raised`) — the values are chosen to sit near the
+        /// existing warm surface ladder rather than against a measured floor.
+        /// Measured for the record (WCAG relative luminance, opaque/fallback
+        /// use): dark `#1F1A15` is 1.07:1 vs `canvas` `#16130F` / 1.01:1 vs
+        /// `panel` `#1D1915` (a near-invisible step, deliberately — the
+        /// sidebar should read as part of the same warm surface family, not a
+        /// clashing plane); light `#F2EBDC` is 1.04:1 vs `canvas` `#F4EFE7` /
+        /// 1.12:1 vs `panel` `#FBF8F2`, and 1.04:1 against today's neutral
+        /// sidebar grey `#F0F0F0` it replaces — enough of a warm hue shift to
+        /// read visibly warmer while staying a quiet background. Row text
+        /// (`Tokens.Color.label`/`secondaryLabel`) is unaffected — those are
+        /// system dynamic colors already proven legible over the warm
+        /// canvas/panel ladder elsewhere, and the 26+ overlay's low alpha
+        /// makes any shift negligible. IC variants (my picks, flagged for a
+        /// future accessibility sweep like `ringConnected`'s) deepen/lighten
+        /// for a slightly more distinct plane under Increase Contrast: dark
+        /// `#2A241C` (1.21:1 vs `canvas`), light `#E9DFC9` (1.25:1 vs
+        /// `panel`).
+        public static var sidebarWarmTint: NSColor {
+            warmDynamic(name: "sidebarWarmTint", dark: 0x1F1A15, darkHighContrast: 0x2A241C,
+                       light: 0xF2EBDC, lightHighContrast: 0xE9DFC9)
+        }
+
         // MARK: Connection-ring instruments (spec §3.2, S1)
         //
         // The two hues the halo connection ring (``HaloRingView``) needs. Teal
@@ -723,9 +758,9 @@ public enum Tokens {
         /// window background, About panel). Alias of
         /// `NSVisualEffectView.Material.windowBackground`.
         public static var windowBackground: NSVisualEffectView.Material { .windowBackground }
-        /// The source-list sidebar material, applied implicitly by
-        /// `NSTabViewItem.sidebar(withViewController:)` in
-        /// `SidebarViewController`/`MixerWindowController`. Alias of
+        /// The source-list sidebar material, applied via
+        /// `NSSplitViewItem(sidebarWithViewController:)` in
+        /// `MixerWindowController`. Alias of
         /// `NSVisualEffectView.Material.sidebar`.
         public static var sidebar: NSVisualEffectView.Material { .sidebar }
     }

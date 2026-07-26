@@ -11,28 +11,32 @@ import AudiouterSharedUI
 /// audio — it only ever renders a `Device` snapshot plus which saved groups
 /// it belongs to.
 ///
-/// Layout, top to bottom, form column capped to ``contentMaxWidth`` and top-
-/// pinned to `safeAreaLayoutGuide` — the same structural pattern
-/// `GroupEditorViewController` uses:
-/// - a large (``DeviceIconWellView/size``pt) device icon, resolved via an
-///   injected `DeviceIconController` + `Device.Kind.symbolName` fallback (the
-///   same resolution path `DeviceIcon` uses everywhere else — an override
-///   that's gone stale on this OS still falls back to the kind default rather
-///   than a blank glyph);
-/// - APPROVED CUSTOM ELEMENT (the only one this phase — `../../AGENTS.md`): a
-///   Contacts-style hover scrim over that icon (the shared
-///   ``DeviceIconWellView``). Hovering shows a translucent full-coverage
-///   scrim with a centered white pencil
-///   glyph; clicking it presents `IconPickerViewController` as an anchored
+/// Layout, top to bottom, in an ELASTIC form column top-pinned to
+/// `safeAreaLayoutGuide` — structurally identical to
+/// `GroupEditorViewController`, off the same ``GroupsPaneLayout`` numbers:
+/// - a HEADER SECTION (``GroupedSectionView``) holding the large
+///   (``DeviceIconWellView/size``pt) device icon and the device name SIDE BY
+///   SIDE. The icon is resolved via an injected `DeviceIconController` +
+///   `Device.Kind.symbolName` fallback (the same resolution path `DeviceIcon`
+///   uses everywhere else — an override that's gone stale on this OS still
+///   falls back to the kind default rather than a blank glyph);
+/// - APPROVED CUSTOM ELEMENT (the only one this phase — `../../AGENTS.md`): the
+///   shared ``DeviceIconWellView``'s always-present corner pencil badge.
+///   Clicking the well presents `IconPickerViewController` as an anchored
 ///   popover, and picking a symbol (or "use default") writes straight through
 ///   `DeviceIconController.setSymbolName`/`resetIcon`, instant-apply like the
 ///   group editor's icon well;
-/// - the device name as a title;
-/// - a read-only metadata form (secondary-colour captions), sectioned into two
-///   groups separated by a thin stock `NSBox` divider: device STATE (Status,
-///   Available, Volume, Kind) above the line, MEMBERSHIP ("In groups:" — the
-///   saved groups from the injected `GroupController` whose `memberIDs`
-///   contain this device) below it;
+/// - the device name as a PLAIN LABEL — same geometry as the group editor's
+///   title, deliberately different skin. Bordered + pencil means editable; bare
+///   means read-only, which is exactly the difference between a group's name
+///   (renameable here) and a device's (not);
+/// - the read-only metadata in two grouped sections (secondary-colour captions
+///   leading, values right-aligned into their own column): device STATE
+///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups:" —
+///   the saved groups from the injected `GroupController` whose `memberIDs`
+///   contain this device) in the second. The sections' own inset hairlines
+///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
+///   rule that stopped a third of the way across the pane);
 /// - a minimal, single-line secondary-colour hint ("View-only — control
 ///   playback from the menu-bar popover.") under the form. Deliberately
 ///   terse: the fuller "configure here / play in the popover" teaching lives
@@ -42,13 +46,6 @@ import AudiouterSharedUI
 /// control of any kind lives here — that's the popover/mixer's job, not this
 /// pane's.
 public final class DeviceDetailViewController: NSViewController {
-
-    /// Caps the form's content column width, matching
-    /// `GroupEditorViewController.contentMaxWidth`.
-    private static let contentMaxWidth: CGFloat = 400
-
-    /// Fixed caption-column width so the five metadata rows line up.
-    private static let captionWidth: CGFloat = 90
 
     private let groupController: GroupController
 
@@ -61,7 +58,16 @@ public final class DeviceDetailViewController: NSViewController {
 
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private let formStack = NSStackView()
+    /// The header's own bounded section (icon + name side by side) — the same
+    /// shape, at the same geometry, as the group editor's header section.
+    private let headerWell = GroupedSectionView()
+    /// The device-STATE section (Status / Available / Volume / Kind) and the
+    /// MEMBERSHIP section ("In groups"), each a `GroupedSectionView` whose own
+    /// inset hairlines separate its rows.
+    private let stateWell = GroupedSectionView()
+    private let groupsWell = GroupedSectionView()
+    private let stateStack = NSStackView()
+    private let groupsStack = NSStackView()
     // Text is set at declaration (not in `loadView`) so it's correct even
     // before the view hierarchy is lazily loaded — `refreshUI()` mutates the
     // other labels the same way, independent of `loadView` having run.
@@ -96,17 +102,24 @@ public final class DeviceDetailViewController: NSViewController {
             _ = self?.presentIconPicker()
         }
 
+        // A PLAIN label, deliberately: no fill, no border, no pencil. The
+        // decoration IS the message — the group editor's title wears all three
+        // because it is renameable, and a device's name is not.
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.heading
         nameLabel.alignment = .natural   // left-aligned (LTR) to match the form column
         nameLabel.lineBreakMode = .byTruncatingTail
+        // A long device name TRUNCATES; it never widens the pane. Without this
+        // the label's default compression resistance beats the split view's own
+        // divider geometry, and a long name silently squeezes the sidebar past
+        // its minimum thickness.
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        // Two logical groups within one outer stack: device STATE (status,
-        // availability, volume, kind) above a thin stock separator, then
-        // MEMBERSHIP ("In groups:") below it — the wider inter-group spacing
-        // plus the divider is what actually reads as sectioning; the rows
-        // within a group keep the tighter spacing they always had.
-        let stateStack = NSStackView()
+        // Device STATE (status, availability, volume, kind) in one section,
+        // MEMBERSHIP ("In groups:") in another — the two bounded sections are
+        // what read as sectioning now, replacing the stock `NSBox` rule that
+        // used to sit between them and stop a third of the way across the pane.
+        stateStack.translatesAutoresizingMaskIntoConstraints = false
         stateStack.orientation = .vertical
         stateStack.alignment = .leading
         stateStack.spacing = 10
@@ -116,59 +129,137 @@ public final class DeviceDetailViewController: NSViewController {
             ("Volume", volumeValueLabel),
             ("Kind", kindValueLabel),
         ] {
-            stateStack.addArrangedSubview(makeMetadataRow(caption: caption, valueLabel: valueLabel))
+            let row = makeMetadataRow(caption: caption, valueLabel: valueLabel)
+            stateStack.addArrangedSubview(row)
+            // Rows FILL the section, so a right-aligned value lands on the
+            // section's own inset edge rather than at the end of its own
+            // intrinsic width.
+            row.widthAnchor.constraint(equalTo: stateStack.widthAnchor).isActive = true
         }
 
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-
+        groupsStack.translatesAutoresizingMaskIntoConstraints = false
+        groupsStack.orientation = .vertical
+        groupsStack.alignment = .leading
+        groupsStack.spacing = 10
         let membershipRow = makeMetadataRow(caption: "In groups:", valueLabel: groupsValueLabel)
-
-        formStack.translatesAutoresizingMaskIntoConstraints = false
-        formStack.orientation = .vertical
-        formStack.alignment = .leading
-        formStack.spacing = 18
-        for v in [stateStack, divider, membershipRow] { formStack.addArrangedSubview(v) }
-        // Stretch the divider to the column's full width — an arranged
-        // subview otherwise sizes to its own intrinsic (near-zero) width
-        // under `.leading` alignment, drawing an invisible sliver.
-        divider.widthAnchor.constraint(equalTo: formStack.widthAnchor).isActive = true
+        groupsStack.addArrangedSubview(membershipRow)
+        membershipRow.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = Tokens.Font.caption
         hintLabel.textColor = Tokens.Color.secondaryLabel
         hintLabel.lineBreakMode = .byTruncatingTail
+        // A pane-level footnote, not a form row: it spans the column's FULL
+        // width (see its constraints) and yields before the pane does. At its
+        // intrinsic ~310 pt it is wider than the content lane inside the
+        // sections, and a label that refuses to compress forces the whole split
+        // view wider than the window — it was squeezing the sidebar past its
+        // own minimum thickness.
+        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let container = NSView()
-        // The form column: capped to `contentMaxWidth`, leading-aligned, pinned
-        // below the safe area — same column idiom `GroupEditorViewController`
-        // uses, so everything hangs off the column's edges rather than the
-        // container's.
+        // The form column: symmetric margins off the pane, ELASTIC up to
+        // `GroupsPaneLayout.contentMaxWidth` — the same column idiom
+        // `GroupEditorViewController` uses, off the same constants, so the two
+        // panes are interchangeable behind one sidebar.
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [iconWell, nameLabel, formStack, hintLabel] { column.addSubview(v) }
+        // Sections go in FIRST so they sit behind the content they back
+        // (non-interactive either way — `GroupedSectionView.hitTest` is nil).
+        // The HEADER keeps the full spine-gutter inset so its icon + name stay
+        // pinned to the group editor's; the metadata sections below use the
+        // rail-free inset, because no rail runs past them and reserving the
+        // lane left them looking hollow (design review 2026-07-25).
+        headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
+        stateWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        for well in [headerWell, stateWell, groupsWell] {
+            well.translatesAutoresizingMaskIntoConstraints = false
+            column.addSubview(well)
+        }
+        for v in [iconWell, nameLabel, stateStack, groupsStack, hintLabel] { column.addSubview(v) }
         container.addSubview(column)
 
+        // The rows' own hairlines come from the section, which reads their LIVE
+        // frames on every draw.
+        stateWell.rows = stateStack.arrangedSubviews
+
+        let columnFill = column.trailingAnchor.constraint(
+            equalTo: container.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
+        columnFill.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
-            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 20),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            column.widthAnchor.constraint(lessThanOrEqualToConstant: Self.contentMaxWidth),
-            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor,
+                                        constant: GroupsPaneLayout.columnTopInset),
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                            constant: GroupsPaneLayout.columnInset),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor,
+                                             constant: -GroupsPaneLayout.columnTrailingInset),
+            column.widthAnchor.constraint(lessThanOrEqualToConstant: GroupsPaneLayout.contentMaxWidth),
+            columnFill,
 
-            iconWell.topAnchor.constraint(equalTo: column.topAnchor),
-            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            // HEADER PARITY (design review 2026-07-25), now GEOMETRIC: every
+            // number below comes from `GroupsPaneLayout`, the same source the
+            // group editor reads, so the icon well and the title land on the
+            // same x and the band is the same height in both panes. They used
+            // to sit ~22.5 pt apart, so switching sidebar selection visibly
+            // jumped the header sideways. This pane draws no rail, so the
+            // reserved gutter simply reads as a wider left margin — the
+            // alignment is worth more than reclaiming it.
+            headerWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            headerWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            headerWell.topAnchor.constraint(equalTo: column.topAnchor),
+            headerWell.bottomAnchor.constraint(equalTo: iconWell.bottomAnchor,
+                                               constant: GroupsPaneLayout.headerPadding),
 
-            nameLabel.topAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: 12),
-            nameLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            nameLabel.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            iconWell.topAnchor.constraint(equalTo: column.topAnchor,
+                                          constant: GroupsPaneLayout.headerPadding),
+            iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
+                                              constant: GroupsPaneLayout.contentLeadingInset),
 
-            formStack.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 24),
-            formStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            formStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
+            nameLabel.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+                                               constant: GroupsPaneLayout.iconToTitleGap),
+            nameLabel.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerWell.trailingAnchor,
+                                                constant: -GroupsPaneLayout.contentTrailingInset),
 
-            hintLabel.topAnchor.constraint(equalTo: formStack.bottomAnchor, constant: 16),
+            stateStack.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
+                                            constant: 14 + GroupedSectionView.verticalPadding),
+            stateStack.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            stateStack.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+
+            stateWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            stateWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            stateWell.topAnchor.constraint(equalTo: stateStack.topAnchor,
+                                           constant: -GroupedSectionView.verticalPadding),
+            stateWell.bottomAnchor.constraint(equalTo: stateStack.bottomAnchor,
+                                              constant: GroupedSectionView.verticalPadding),
+
+            groupsStack.topAnchor.constraint(equalTo: stateWell.bottomAnchor,
+                                             constant: 14 + GroupedSectionView.verticalPadding),
+            groupsStack.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            groupsStack.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+
+            groupsWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            groupsWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            groupsWell.topAnchor.constraint(equalTo: groupsStack.topAnchor,
+                                            constant: -GroupedSectionView.verticalPadding),
+            groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
+                                               constant: GroupedSectionView.verticalPadding),
+
+            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor, constant: 16),
+            // The full column, NOT the content lane inside the sections: this
+            // is a footnote about the pane, so it reads across it (the same way
+            // the window's own footer caption spans the whole pane) and gets
+            // the width it needs instead of truncating inside a lane that's
+            // 38.5 pt narrower.
             hintLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
             hintLabel.bottomAnchor.constraint(equalTo: column.bottomAnchor),
@@ -183,21 +274,40 @@ public final class DeviceDetailViewController: NSViewController {
     /// mark itself as non-interactive.
     private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
 
-    /// Build one "Caption   Value" row: a fixed-width secondary-colour caption
-    /// (so all five rows' values line up in a column) plus the value label.
+    /// Build one "Caption ······ Value" row: a secondary-colour caption on the
+    /// leading edge and its value RIGHT-ALIGNED on the trailing edge, so the
+    /// values line up in a real column that uses the section's full width.
+    /// (They used to hang off a fixed 90 pt caption column, which left them
+    /// stranded mid-pane in a window this wide.)
+    ///
+    /// The row fills its section: the caller pins each row's width to the
+    /// stack's, so "trailing" means the section's own inset edge.
     private func makeMetadataRow(caption: String, valueLabel: NSTextField) -> NSView {
         let captionLabel = NSTextField(labelWithString: caption)
         captionLabel.textColor = Tokens.Color.secondaryLabel
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
-        captionLabel.widthAnchor.constraint(equalToConstant: Self.captionWidth).isActive = true
+        captionLabel.setContentHuggingPriority(.required, for: .horizontal)
+        captionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.alignment = .right
         valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let row = NSStackView(views: [captionLabel, valueLabel])
-        row.orientation = .horizontal
-        row.alignment = .firstBaseline
-        row.spacing = 6
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(captionLabel)
+        row.addSubview(valueLabel)
+        NSLayoutConstraint.activate([
+            captionLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            captionLabel.topAnchor.constraint(equalTo: row.topAnchor),
+            captionLabel.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            valueLabel.firstBaselineAnchor.constraint(equalTo: captionLabel.firstBaselineAnchor),
+            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: captionLabel.trailingAnchor,
+                                                constant: 8),
+            valueLabel.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+        ])
         return row
     }
 
@@ -358,6 +468,73 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_iconSymbolName: String? {
         guard let device = shownDevice else { return nil }
         return deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+    }
+
+    /// HEADER PARITY hooks — the three numbers that must match
+    /// `GroupEditorViewController`'s identically-named hooks, so switching
+    /// sidebar selection never shifts the header (`GroupsHeaderParityTests`).
+
+    /// The icon well's laid-out frame in the pane's own coordinates.
+    public var test_headerIconFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return iconWell.convert(iconWell.bounds, to: view)
+    }
+
+    /// The title's ALIGNMENT rect in the pane's own coordinates — what auto
+    /// layout actually pins, so a plain label and the editor's editable field
+    /// (whose alignment insets differ from their frames) compare honestly.
+    public var test_headerTitleAlignmentFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return nameLabel.alignmentRect(forFrame: nameLabel.convert(nameLabel.bounds, to: view))
+    }
+
+    /// The header SECTION's laid-out frame in the pane's own coordinates.
+    public var test_headerSectionFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return headerWell.convert(headerWell.bounds, to: view)
+    }
+
+    /// Leading inset of the metadata rows, measured from their section's own
+    /// edge. This pane draws NO rail, so its rows use the tighter
+    /// `railFreeContentLeadingInset` rather than reserving the spine's lane —
+    /// its HEADER still uses the full inset so the icon + name stay pinned to
+    /// the group editor's (design review 2026-07-25).
+    public var test_metadataRowInset: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        let row = stateStack.convert(stateStack.bounds, to: view)
+        let section = stateWell.convert(stateWell.bounds, to: view)
+        return row.minX - section.minX
+    }
+
+    /// The number of `GroupedSectionView` sections this pane draws (header +
+    /// state + "In groups") — the detail pane adopts the SAME section shape the
+    /// group editor uses, rather than a bare form on the pane.
+    public var test_sectionCount: Int {
+        view.subviews.flatMap(\.subviews).filter { $0 is GroupedSectionView }.count
+    }
+
+    /// True when the pane still mounts a stock `NSBox` separator — it must
+    /// not: the sections' own inset hairlines replaced the orphaned 185 pt rule
+    /// that stopped a third of the way across the pane.
+    public var test_hasBoxDivider: Bool {
+        func containsBox(_ v: NSView) -> Bool {
+            v is NSBox || v.subviews.contains(where: containsBox)
+        }
+        return containsBox(view)
+    }
+
+    /// The device NAME's own trailing edge vs the value column's, so a test can
+    /// assert the metadata values really right-align into the section instead
+    /// of hanging off a fixed caption width.
+    public var test_valueTrailingX: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        return statusValueLabel.convert(statusValueLabel.bounds, to: view).maxX
+    }
+
+    /// The state section's laid-out frame in the pane's own coordinates.
+    public var test_stateSectionFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return stateWell.convert(stateWell.bounds, to: view)
     }
 
     /// Drive the hover scrim's visibility headlessly (a real `mouseEntered`/

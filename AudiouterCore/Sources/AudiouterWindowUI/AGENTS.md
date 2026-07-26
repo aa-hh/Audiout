@@ -116,22 +116,118 @@ to a backend directly.
   creation (`GroupCreationSheetController`) is a separate, parallel flow.
 - **`MembershipRowView` is a shared checklist row.** Used by both the
   creation sheet and the group editor to present devices as a checkbox list
-  (memberships, not routing). The popover's `DeviceRowView` remains the
-  routing-and-volume row; never conflate them.
+  (memberships, not routing). When shown in the group editor's membership
+  checklist (`Surface.warmPane`), the checkbox becomes an invisible cell +
+  gold `MembershipBusView` node, tied together by a `BusRailOverlayView`
+  rail hooked out of the group's icon well; in the "New Group" creation
+  sheet (`Surface.systemSheet`), it stays a plain stock checkbox row. The
+  popover's `DeviceRowView` remains the routing-and-volume row; never
+  conflate them. Gold on the warm pane measures too low contrast (≈2.3-2.5:1)
+  against the system sheet's white background, so this split confines the
+  gold to where the background can support it.
+- **`GroupedSectionView` is this window's ONE section shape**, in its own file
+  (it used to be `private` inside the editor) so both panes share it rather
+  than growing look-alikes: a rounded `Tokens.Color.well` fill,
+  `Tokens.Color.hairline` border, and inset hairline dividers between adjacent
+  rows — a section holding fewer than two rows draws none, which is what lets
+  it also serve as the plain header container. The editor uses two (header +
+  membership list); the detail pane uses three (header + device state + "In
+  groups"). Its `contentLeadingInset` is always
+  `GroupsPaneLayout.contentLeadingInset`, so the dividers start where the
+  content does. `GroupsWindowTextColorLockTests` samples the editor's real
+  drawn fill/divider through reflection on the stored property named
+  **`membershipWell`** — renaming that property breaks the test's reach.
+- **The content column is ELASTIC, with two anchoring traps.** Both panes give
+  the column symmetric margins (`PopoverColumnGrid.leadingInset` /
+  `.trailingInset`, 14 each) and let it STRETCH to the pane — a high-priority
+  "fill" constraint out to the trailing margin, stopped by a required
+  `<= GroupsPaneLayout.contentMaxWidth` cap. Before this the sections hugged
+  their ~277pt intrinsic content (the widest device name plus a permanently
+  reserved "Unavailable" label) and left a dead strip beside them; rows now
+  fill the section so a trailing annotation lands on the section's own edge.
+  Two things break SUBTLY the moment the column takes its own margin, because
+  both used to be pinned to the CONTAINER and were only accidentally right:
+  (1) `railOverlay` must be re-pinned to the COLUMN, or the spine and the
+  nodes separate by exactly the margin — `test_nodeCenterXInOverlaySpace` is
+  the guard, and it must equal `PopoverColumnGrid.railGutterCenterX`;
+  (2) the "Delete group…" button's leading anchor must be re-based to the
+  column, or it drifts one margin left of everything it sits under.
+- **The editor pane has NO scroll view, so its fitting height is a hard
+  budget — and the budget is NOT the window's height.** The window is
+  `.fullSizeContentView`, so the pane starts at its SAFE AREA (the title bar,
+  ~32pt) and the persistent footer strip (~28pt) comes off the bottom: a
+  content pane gets `MixerWindowController.defaultContentSize.height` minus
+  both. A guard that compares against the whole window height passes while the
+  pane overflows — which is exactly what happened: the pre-fix editor wanted
+  484pt of a 445pt budget (39pt of list and the "Delete group…" button below
+  the window's edge) and the old `<= 505` assertion was green. Assert against
+  `test_titleBarHeight` + `test_contentPaneChromeHeight`, both measured off
+  the real window (`MembershipRailTests
+  .testEditorFitsTheHeightTheWindowActuallyGivesIt`).
+- **Window defaults live in `MixerWindowController`, once each.**
+  `defaultContentSize` is 560×505 (narrowed from 720 when the panes became
+  elastic), `minimumContentSize` is 480×420, and the sidebar is capped at
+  `maximumThickness = 260`. `defaultFrameAutosaveName` was BUMPED to
+  `"MixerWindow-v2"` in the same change: an existing install has a frame saved
+  under the old key and would keep opening at its old size forever, so the new
+  default would never be seen. Bump it again if a future default change must
+  reach existing installs — and expect exactly one such adoption per bump.
 - **No toolbar, no volume UI.** The window mounts no `NSToolbar` at all —
   the master slider left with the mixer pane (live-test feedback 2026-07-18).
   Anything that changes what you HEAR belongs in the popover.
 - **Auto-select, never a no-op pane.** With no sidebar selection the window
   selects the first saved group's editor; with zero groups it shows
   `GroupsEmptyStateViewController` ("No groups yet" + a New Group button that
-  runs the same creation sheet).
-- **Header parity between groups and devices.** `GroupEditorViewController`
-  and `DeviceDetailViewController` share the identical large-icon header —
-  the same `DeviceIconWellView` (size, edit badge, click-to-pick) — the only
-  difference being that a group's title is an EDITABLE borderless field
-  (commits like a Finder rename) while a device's title is a static label.
-  An editable `NSTextField` has no intrinsic width: the title uses a FIXED
-  width constraint, not a `<=` cap (a cap alone collapses it to zero).
+  runs the same creation sheet). The empty-state subtitle is "Music first —
+  rooms can come later."
+- **Header parity is GEOMETRIC, and lives in `GroupsPaneLayout`.**
+  `GroupEditorViewController` and `DeviceDetailViewController` swap places
+  behind one sidebar, so their headers must land on the same pixels: same
+  icon-well x, same title x and vertical centre, same 92pt band height
+  (`GroupsPaneLayout.headerBandHeight` = `headerPadding` + `DeviceIconWellView
+  .size` + `headerPadding`). Every shared number — `columnInset`,
+  `contentLeadingInset`, `contentMaxWidth`, `headerPadding`, `iconToTitleGap`
+  — is read from that one enum rather than copied; the two panes carried
+  hand-copied literals once and drifted ~22.5pt apart, which made switching
+  sidebar selection jump the header sideways. `GroupsHeaderParityTests`
+  asserts the real laid-out frames, not the constants, so a new constraint
+  that quietly wins can't pass it.
+- **The header is SIDE BY SIDE: icon BESIDE name, not above it** (design
+  review 2026-07-25). Stacking cost 30pt on a pane that was already
+  overflowing its own window. Because the two now share one horizontal band,
+  the rail's origin hook is back on the ICON WELL (`railHookAnchor`) — hooking
+  the icon hooks the name's line, and the well is a fixed 64pt tile rather
+  than a field whose width changes with the name it holds.
+- **Edit-affordance vocabulary: bordered + pencil = editable, bare =
+  read-only.** A group's name is renameable, so it wears the
+  `WarmNameFieldCell` skin (raised fill, hairline border, trailing pencil); a
+  device's name is not, so it is a plain label at the identical geometry. The
+  decoration IS the message — the same rule the icon wells already run (the
+  device *icon* is editable, so it wears a pencil badge). Don't decorate a
+  read-only string, and don't strip the field's skin to "match" the detail
+  pane. The two pencils share `PopoverColumnGrid.editAffordanceRestAlpha` /
+  `editAffordanceHoverAlpha` so the header's two cues can't drift.
+- **The rename field is a REAL `NSTextField`; only its drawing is ours.**
+  `WarmNameFieldCell` (in `AudiouterSharedUI`) is swapped in the way
+  `MembershipRowView` swaps `InvisibleSwitchCell` — cell FIRST, configuration
+  after. Behaviour contract, all covered by `GroupRenameFieldTests`: Return
+  commits · focus loss commits · **Escape reverts** to the pre-edit name
+  (routed through `control(_:textView:doCommandBy:)`; it did nothing before) ·
+  **emptying restores the previous name into the field** (the rename was
+  already refused, but the field was left blank while the group kept its old
+  name — the UI lied) · first focus selects all, Finder-style · hover changes
+  drawing only, never geometry (R7).
+  An editable `NSTextField` has NO intrinsic width, so the width is three
+  constraints, not one: a REQUIRED `>= 140` floor (a bare `<=` cap collapses
+  it to zero — it rendered invisible once, snapshot-caught 2026-07-18), a
+  hand-MEASURED "hug the name" width, and a 999-priority `<=` cap against the
+  section's inset edge (it used to be a FIXED 260 that hung ~21pt past its
+  section). The measured width sits BELOW `.defaultLow`: at a normal priority
+  a long group name was satisfied by growing the whole content pane, which
+  squeezed the sidebar past its own minimum thickness. Same reason
+  `DeviceDetailViewController`'s name label and view-only hint have lowered
+  compression resistance — in this window, text truncates; it never moves
+  furniture.
 - **No synthesized clicks in headless runs.** Every controller exposes
   `test_*` methods mirroring a real UI action; add one for any new
   user-facing action or it becomes untestable outside a live window.
@@ -142,7 +238,12 @@ to a backend directly.
   instead of the mixer; it only ever renders a `Device` snapshot (name,
   status, availability, volume, kind) plus which saved groups it belongs to
   (via the injected `GroupController`). No slider, no mute, no Selected-
-  Devices toggle, no group-activation control lives here.
+  Devices toggle, no group-activation control lives here. Its metadata sits in
+  two `GroupedSectionView`s (device state, then "In groups"), captions
+  leading and values RIGHT-ALIGNED into a real column that uses the section's
+  width — the old fixed 90pt caption column stranded them mid-pane, and the
+  stock `NSBox` separator between the two groups is gone (it drew a rule that
+  stopped a third of the way across). `test_hasBoxDivider` keeps it gone.
 - **The icon-edit badge is the one approved custom-drawn element**
   (`../../AGENTS.md`) — `DeviceIconWellView`, shared by exactly two hosts:
   `DeviceDetailViewController` and `GroupEditorViewController` (header
@@ -193,6 +294,16 @@ to a backend directly.
   window's sidebar/editor/creation-sheet icon wells all resolve it through
   the same `DeviceIcon.resolve(_:default:)` path as device overrides, so a
   group icon and a device icon never fall back differently.
+- **Text colors are frozen; contrast lifts from surfaces, not hue.** The
+  entire Groups window uses Apple's stock semantic text colors
+  (`.secondaryLabel`, `.tertiaryLabel`) everywhere — no warm-tinted text
+  anywhere. Contrast improvements in the Warm Signal redesign come ONLY from
+  new surface layers (the well, hairlines, sidebar tint) — never from text
+  color changes — a locked tradeoff accepted by Alec. Light-mode secondary/
+  tertiary text stays below common readability floors (≈3:1 ceiling), but
+  changing it to warm text risked breaking cohesion with other AppKit panes
+  and other apps. This is not an oversight; don't "fix" it back to warm text
+  without re-confirming the decision.
 
 ## Map
 
@@ -207,5 +318,7 @@ to a backend directly.
 | `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom-drawn icon-edit badge lives on its icon well. |
 | `IconPickerViewController` | Curated SF Symbol grid + validated free-text search, presented as an anchored popover; reports a symbol name via `onPick`. |
 | `MembershipRowView` | Checkbox + icon + name row used in creation sheet and editor. |
-| `DeviceIconWellView` | Shared large icon + at-rest edit badge (the one approved custom element; no hover scrim); used by editor + detail headers. |
+| `DeviceIconWellView` | Shared large icon + at-rest edit badge (the one approved custom element; no hover scrim); used by editor + detail headers. Its badge alphas come from `PopoverColumnGrid.editAffordanceRestAlpha`/`HoverAlpha`, shared with the rename field's pencil. |
+| `GroupsPaneLayout` | The content panes' shared grid: column margins, width cap, content inset, header padding/gap, derived header band height. The single source both panes read, so header parity can't drift. |
+| `GroupedSectionView` | This window's one grouped-section container (`well` fill, `hairline` border, inset row dividers). Used by the editor (header + list) and the detail pane (header + state + groups). |
 | `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |

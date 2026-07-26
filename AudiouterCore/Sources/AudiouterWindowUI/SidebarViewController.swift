@@ -76,11 +76,28 @@ public final class SidebarViewController: NSViewController {
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
     private let addButton = NSButton()
+    private let warmSurfaceView: SidebarWarmSurfaceView
 
     /// Top-level nodes (the two section headers). Rebuilt on `reload`.
     private var roots: [Node] = []
 
-    public init() {
+    /// Whether THIS OS renders the sidebar's automatic Liquid Glass (macOS
+    /// 26+) — the injected seam T7 needs (spec Q4-b: warm tint on 26+, opaque
+    /// warm fallback below). Never read via a bare `#available` on the
+    /// drawing path itself; both branches must be exercisable from a test
+    /// regardless of the machine the suite runs on (this box is macOS 27, so
+    /// without this seam the `< 26` fallback would be untestable here). Same
+    /// injection shape as `SetupModel.osGatesLocalNetwork`/`localNetworkGated`
+    /// — a static real-OS-value property, injected through a defaulted init
+    /// parameter so existing `SidebarViewController()` call sites (e.g.
+    /// `MixerWindowController`) are unaffected, and a test can construct
+    /// either branch directly.
+    public static var osSupportsLiquidGlassSidebar: Bool {
+        if #available(macOS 26, *) { return true } else { return false }
+    }
+
+    public init(osSupportsLiquidGlassSidebar: Bool = SidebarViewController.osSupportsLiquidGlassSidebar) {
+        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: osSupportsLiquidGlassSidebar)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -187,10 +204,24 @@ public final class SidebarViewController: NSViewController {
         addBar.addSubview(addButton)
 
         let container = NSView()
+        // The warm surface sits BEHIND everything else (glass tint on
+        // macOS 26+, opaque warm fallback below) and BENEATH the outline
+        // view (T7, spec Q4-b) — added first so it's the bottommost
+        // subview, pinned to the container's full bounds so both the row
+        // list and the add bar read as one warm surface. Non-interactive
+        // (`hitTest` returns nil): it must never swallow a click meant for
+        // a sidebar row or the add button.
+        warmSurfaceView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(warmSurfaceView)
         container.addSubview(scrollView)
         container.addSubview(addBar)
 
         NSLayoutConstraint.activate([
+            warmSurfaceView.topAnchor.constraint(equalTo: container.topAnchor),
+            warmSurfaceView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            warmSurfaceView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            warmSurfaceView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -408,6 +439,102 @@ public final class SidebarViewController: NSViewController {
     /// `viewDidAppear()` actually claimed it).
     public var test_isOutlineViewFirstResponder: Bool {
         view.window?.firstResponder === outlineView
+    }
+
+    // MARK: Test-support hooks (T7 — warm sidebar surface, Q4-b)
+
+    /// True on macOS 26+ (per the injected seam): the sidebar's automatic
+    /// Liquid Glass is left in place and this is the LOW-ALPHA warm wash
+    /// drawn on top of it. Mutually exclusive with
+    /// ``test_hasFallbackBacking``.
+    public var test_hasTintOverlay: Bool { warmSurfaceView.rendersOnGlass }
+
+    /// True below macOS 26 (per the injected seam): there is no automatic
+    /// glass to tint, so this is the OPAQUE warm backing standing in for it.
+    /// Mutually exclusive with ``test_hasTintOverlay``.
+    public var test_hasFallbackBacking: Bool { !warmSurfaceView.rendersOnGlass }
+
+    /// The alpha the 26+ tint overlay draws at (0 when this OS renders the
+    /// opaque fallback instead — the two never blend, one or the other).
+    public var test_warmSurfaceAlpha: CGFloat {
+        warmSurfaceView.rendersOnGlass ? SidebarWarmSurfaceView.tintAlpha : 1
+    }
+}
+
+/// The Groups window sidebar's warm surface (T7, spec Q4-b): a non-
+/// interactive view sitting between the sidebar's system material and the
+/// outline view. On macOS 26+ the automatic Liquid Glass sidebar material
+/// (applied by `NSSplitViewItem(sidebarWithViewController:)` outside this
+/// controller's own view — there is no public API to tint it directly) is
+/// left completely alone; this draws a LOW-ALPHA warm wash on top of it.
+/// Below macOS 26 there is no glass to tint at all, so this draws the SAME
+/// color fully opaque as the sidebar's whole backing.
+///
+/// Deliberately NOT drawn by setting `outlineView.backgroundColor` —
+/// `NSTableView.h`'s `NSTableViewStyleSourceList` doc comment states that
+/// moving a source-list table's background color off the system "source
+/// list" color drops the blur/vibrant selection-highlight style entirely.
+/// This view is a separate layer behind the (untouched) outline view instead.
+private final class SidebarWarmSurfaceView: NSView {
+
+    /// Whether THIS instance renders atop Apple's automatic glass (true) or
+    /// stands in as the opaque fallback (false) — set once at init from the
+    /// controller's injected seam value, never re-read live (the OS version
+    /// a process runs under doesn't change mid-session).
+    let rendersOnGlass: Bool
+
+    /// The 26+ overlay's alpha — a taste dial, to be judged live against
+    /// real glass. The plan's original 0.06–0.10 band was ARITHMETICALLY
+    /// TOO WEAK to do the job: the sidebar's base grey is a perfectly
+    /// neutral `#F0F0F0`, and `sidebarWarmTint` carries a 22-unit red-to-
+    /// blue spread, so an 0.08 wash shifts it by ~2 units — invisible. The
+    /// warm cast has to be comparable to the content pane's own (`panel`
+    /// `#FBF8F2` spreads 9 units), which needs `22 × alpha ≈ 9`, i.e. ~0.4;
+    /// 0.30 sits just under that so the sidebar reads warm without
+    /// out-warming the pane it sits beside. Chosen deliberately high rather
+    /// than low: dialing DOWN from a visible wash is far easier to judge by
+    /// eye than nudging up from no perceptible change.
+    static let tintAlpha: CGFloat = 0.30
+
+    init(rendersOnGlass: Bool) {
+        self.rendersOnGlass = rendersOnGlass
+        super.init(frame: .zero)
+        wantsLayer = true
+        // Reconcile live on a mid-session Reduce Transparency / Increase
+        // Contrast toggle (`AudiouterSharedUI/AGENTS.md`'s instrument rule —
+        // neither arrives through this view's own lifecycle otherwise).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Never intercepts a click meant for a sidebar row or the add button —
+    /// this view exists purely to paint a tint underneath them.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var isFlipped: Bool { false }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        needsDisplay = true
+    }
+
+    /// A light/dark appearance flip re-resolves `Tokens.Color.sidebarWarmTint`
+    /// (its dynamic provider reads `effectiveAppearance` at draw time), so
+    /// this just needs to trigger the repaint.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let base = Tokens.Color.sidebarWarmTint
+        let color = rendersOnGlass ? base.withAlphaComponent(Self.tintAlpha) : base
+        color.setFill()
+        bounds.fill()
     }
 }
 

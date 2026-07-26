@@ -547,6 +547,39 @@ public enum PopoverColumnGrid {
     /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
     public static let faderDisabledAlpha: CGFloat = 0.4
 
+    // MARK: Inline rename field (Groups window header)
+    //
+    // The group editor's title is a REAL `NSTextField` wearing a drawing-only
+    // skin (`WarmNameFieldCell`) — the same "only the DRAWING changes" contract
+    // `WarmFaderCell` has over the sliders. Its geometry is named here, beside
+    // the other Groups-window/popover geometry, so a future density setting
+    // swaps it in one place instead of hunting literals in the controller.
+
+    /// Height of the inline rename field. Tall enough to read as a control
+    /// (rather than a label with a box around it) while still fitting beside
+    /// the 64 pt icon well in the side-by-side header band.
+    public static let titleFieldHeight: CGFloat = 28
+    /// Corner radius of the inline rename field. Deliberately NOT a capsule:
+    /// the fully-rounded shape is already spoken for by the engaged mute pill
+    /// (`mutePillCornerRadius`), which means "control engaged" — a capsule here
+    /// would collide with that vocabulary. A soft rounded rect reads as "field."
+    public static let titleFieldCornerRadius: CGFloat = 6
+
+    // MARK: Edit-affordance alphas (Groups window header)
+    //
+    // The header carries TWO edit cues that must never drift apart: the icon
+    // well's corner pencil badge (`DeviceIconWellView`) and the rename field's
+    // trailing pencil (`WarmNameFieldCell`). Both read these, so "at rest" and
+    // "under the pointer" mean the same thing in both.
+
+    /// Alpha of an always-present edit affordance at rest — visible enough to
+    /// be discoverable without a hover, quiet enough not to compete with the
+    /// content it marks.
+    public static let editAffordanceRestAlpha: CGFloat = 0.7
+    /// Alpha of an edit affordance while the pointer (or keyboard focus) is on
+    /// the thing it marks.
+    public static let editAffordanceHoverAlpha: CGFloat = 1.0
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

@@ -134,6 +134,11 @@ import AppKit
             runningAppsProvider: { [] },
             latency: model)
         #expect(controller.test_audio.test_hasLatencySection)
+        // `test_contentFittingSize` measures the SELECTED tab, and the Audio
+        // tab isn't selected by default (the window always opens on General) —
+        // select it first or this asserts General's height, not the Audio
+        // pane's.
+        controller.test_selectTab(at: 2)
         #expect(controller.test_contentFittingSize.height > 100)
     }
 

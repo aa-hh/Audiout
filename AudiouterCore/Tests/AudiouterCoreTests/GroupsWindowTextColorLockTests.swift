@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
@@ -35,7 +36,23 @@ import AppKit
 /// expected colors into a parallel fixture, so a call-site edit anywhere in
 /// these seven files is caught the same way a real screenshot would catch it.
 @MainActor
-final class GroupsWindowTextColorLockTests: IsolatedTestCase {
+@Suite final class GroupsWindowTextColorLockTests: IsolatedSuite {
+
+    /// CONVERSION NOTE: the two `guard ... else { throw XCTSkip(...) }` sites
+    /// below (`membershipWellView(of:)`, `sampledColumnColors`) used to record
+    /// a SKIP for a condition that, in practice, never fires on this toolchain
+    /// (a real WindowServer is always available under `swift test` on macOS).
+    /// swift-testing has no in-body "mark skipped" equivalent — traits are
+    /// evaluated before the test runs (migration cookbook §9) — and both
+    /// helpers must return a real value, so an early `return` isn't available
+    /// the way it is in a Void-returning test body. Throwing this instead of
+    /// `XCTSkip` means the enclosing test now reports FAILED rather than
+    /// SKIPPED if this environment guard is ever actually hit. Flagged per the
+    /// cookbook's guidance rather than inventing a hoisted trait for a
+    /// condition that only resolves after real AppKit calls.
+    private struct TestEnvironmentLimitation: Error, CustomStringConvertible {
+        let description: String
+    }
 
     // MARK: WCAG-adjacent color-identity helpers (mirrors `NoTintOnRingsOrMetersGuardTests`/
     // `ControlPanelBackingViewTests`' resolved-component-comparison idiom)
@@ -99,34 +116,41 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
     /// window) is a stock semantic and never a warm token, in BOTH
     /// appearances. This is the enforcement point: it fails loudly and names
     /// the frozen decision so whoever breaks it understands why it's here.
+    ///
+    /// `sourceLocation` defaults to the CALLER's location (`#_sourceLocation`
+    /// is captured at the call site, same idea as XCTest's `file:`/`line:`
+    /// defaults), so a failure inside this helper still points at the test
+    /// that called it.
     private func assertFrozenToStock(_ color: NSColor?, _ label: String,
-                                      file: StaticString = #filePath, line: UInt = #line) {
+                                      sourceLocation: SourceLocation = #_sourceLocation) {
         guard let color else {
-            return XCTFail("\(label): no textColor to check", file: file, line: line)
+            Issue.record("\(label): no textColor to check", sourceLocation: sourceLocation)
+            return
         }
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             guard let resolvedColor = resolved(color, appearanceName: appearanceName) else {
-                return XCTFail("\(label): color did not resolve under \(appearanceName.rawValue)",
-                               file: file, line: line)
+                Issue.record("\(label): color did not resolve under \(appearanceName.rawValue)",
+                             sourceLocation: sourceLocation)
+                return
             }
 
             let matchesStock = stockSemantics.contains {
                 sameColor(resolvedColor, resolved($0.color, appearanceName: appearanceName))
             }
-            XCTAssertTrue(matchesStock,
-                "\(label) is not a stock AppKit semantic color under \(appearanceName.rawValue). " +
+            #expect(matchesStock,
+                Comment(rawValue: "\(label) is not a stock AppKit semantic color under \(appearanceName.rawValue). " +
                 "Groups-window text colors are FROZEN to stock AppKit greys (screens-followup " +
                 "contrast decision, 2026-07-25) — separation comes from surfaces (T5's well/" +
                 "hairline), never from recoloring text. Do not repoint this label to a warm " +
-                "Tokens.Color token.", file: file, line: line)
+                "Tokens.Color token."), sourceLocation: sourceLocation)
 
             for warm in warmTokens {
                 let resolvedWarm = resolved(warm.color, appearanceName: appearanceName)
-                XCTAssertFalse(sameColor(resolvedColor, resolvedWarm),
-                    "\(label) matches the warm token Tokens.Color.\(warm.name) under " +
+                #expect(!sameColor(resolvedColor, resolvedWarm),
+                    Comment(rawValue: "\(label) matches the warm token Tokens.Color.\(warm.name) under " +
                     "\(appearanceName.rawValue) — Groups-window text colors must stay stock " +
                     "AppKit greys (screens-followup contrast decision, 2026-07-25); do not " +
-                    "repoint text to a warm palette token.", file: file, line: line)
+                    "repoint text to a warm palette token."), sourceLocation: sourceLocation)
             }
         }
     }
@@ -143,12 +167,13 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
     }
 
     private func assertAllLabelsFrozen(in view: NSView, host: String,
-                                        file: StaticString = #filePath, line: UInt = #line) {
+                                        sourceLocation: SourceLocation = #_sourceLocation) {
         let fields = allTextFields(in: view)
-        XCTAssertFalse(fields.isEmpty, "\(host): expected at least one label to check", file: file, line: line)
+        #expect(!fields.isEmpty, "\(host): expected at least one label to check",
+                sourceLocation: sourceLocation)
         for field in fields {
             assertFrozenToStock(field.textColor, "\(host) label \"\(field.stringValue)\"",
-                                file: file, line: line)
+                                sourceLocation: sourceLocation)
         }
     }
 
@@ -166,7 +191,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
 
     // MARK: 1. NEGATIVE — DeviceDetailViewController
 
-    func testDeviceDetailViewControllerLabelsStayStock() throws {
+    @Test func deviceDetailViewControllerLabelsStayStock() throws {
         let controller = makeGroupController()
         let vc = DeviceDetailViewController(groupController: controller)
         vc.loadView()
@@ -178,14 +203,14 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
 
     // MARK: 2. NEGATIVE — MembershipRowView (both available + unavailable/dimmed)
 
-    func testMembershipRowViewLabelsStayStockWhenAvailable() {
+    @Test func membershipRowViewLabelsStayStockWhenAvailable() {
         let row = MembershipRowView(device: makeDevice(isAvailable: true), checked: true, surface: .warmPane)
         row.frame = NSRect(x: 0, y: 0, width: 280, height: 32)
         row.layoutSubtreeIfNeeded()
         assertAllLabelsFrozen(in: row, host: "MembershipRowView(available)")
     }
 
-    func testMembershipRowViewLabelsStayStockWhenUnavailable() {
+    @Test func membershipRowViewLabelsStayStockWhenUnavailable() {
         let row = MembershipRowView(device: makeDevice(isAvailable: false), checked: false, surface: .warmPane)
         row.frame = NSRect(x: 0, y: 0, width: 280, height: 32)
         row.layoutSubtreeIfNeeded()
@@ -194,29 +219,29 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
 
     // MARK: 3. NEGATIVE — SidebarViewController's outline cells (all four Node payloads)
 
-    func testSidebarOutlineCellsStayStock() throws {
+    @Test func sidebarOutlineCellsStayStock() throws {
         let sidebar = SidebarViewController()
         let group = Group(name: "Downstairs", memberIDs: [], memberVolumes: [:])
         let device = makeDevice()
 
-        let headerCell = try XCTUnwrap(
+        let headerCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.header("Groups"))) as? NSTableCellView)
         assertFrozenToStock(headerCell.textField?.textColor, "Sidebar header cell")
 
-        let groupCell = try XCTUnwrap(
+        let groupCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.group(group))) as? NSTableCellView)
         assertFrozenToStock(groupCell.textField?.textColor, "Sidebar group row cell")
 
-        let deviceCell = try XCTUnwrap(
+        let deviceCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.device(device))) as? NSTableCellView)
         assertFrozenToStock(deviceCell.textField?.textColor, "Sidebar device row cell")
 
-        let unavailableCell = try XCTUnwrap(
+        let unavailableCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil,
                                 item: SidebarViewController.Node(.device(makeDevice(isAvailable: false)))) as? NSTableCellView)
         assertFrozenToStock(unavailableCell.textField?.textColor, "Sidebar unavailable-device row cell (dimmed path)")
 
-        let emptyStateCell = try XCTUnwrap(
+        let emptyStateCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.emptyState("No groups yet"))) as? NSTableCellView)
         assertFrozenToStock(emptyStateCell.textField?.textColor, "Sidebar empty-state placeholder cell")
     }
@@ -240,7 +265,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
         return editor
     }
 
-    func testGroupEditorViewControllerLabelsStayStock() throws {
+    @Test func groupEditorViewControllerLabelsStayStock() throws {
         let editor = try makeEditor()
         assertAllLabelsFrozen(in: editor.view, host: "GroupEditorViewController")
     }
@@ -253,7 +278,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
                                      frameAutosaveName: uniqueName("GroupsWindowTextColorLockTests"))
     }
 
-    func testMixerWindowFooterAndEmptyStateLabelsStayStock() {
+    @Test func mixerWindowFooterAndEmptyStateLabelsStayStock() {
         let window = makeMixerWindow()
         window.update(devices: [])
         // Zero groups + zero devices selects the empty state (per AGENTS.md's
@@ -266,14 +291,14 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
         content.view.frame = NSRect(x: 0, y: 0, width: 720, height: 460)
         content.view.layoutSubtreeIfNeeded()
         assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty state)")
-        XCTAssertTrue(window.test_isShowingEmptyState, "expected the empty state pane with zero groups/devices")
-        XCTAssertEqual(window.test_emptyState.test_messageText, "No groups yet.")
-        XCTAssertEqual(window.test_emptyState.test_subtitleText, "Music first — rooms can come later.")
+        #expect(window.test_isShowingEmptyState, "expected the empty state pane with zero groups/devices")
+        #expect(window.test_emptyState.test_messageText == "No groups yet.")
+        #expect(window.test_emptyState.test_subtitleText == "Music first — rooms can come later.")
     }
 
     // MARK: 6. NEGATIVE — IconPickerViewController
 
-    func testIconPickerViewControllerLabelsStayStock() {
+    @Test func iconPickerViewControllerLabelsStayStock() {
         let picker = IconPickerViewController()
         picker.loadView()
         picker.test_setSearchText("zzz-no-such-symbol-zzz") // forces the "No matches" empty-results label on screen
@@ -284,7 +309,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
 
     // MARK: 7. NEGATIVE — GroupCreationSheetController
 
-    func testGroupCreationSheetControllerLabelsStayStock() {
+    @Test func groupCreationSheetControllerLabelsStayStock() {
         let controller = makeGroupController()
         let sheet = GroupCreationSheetController(groupController: controller)
         sheet.loadView()
@@ -309,7 +334,8 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
         let mirror = Mirror(reflecting: editor)
         guard let child = mirror.children.first(where: { $0.label == "membershipWell" }),
               let view = child.value as? NSView else {
-            throw XCTSkip("membershipWell stored property not found via reflection — GroupEditorViewController's internal layout changed")
+            throw TestEnvironmentLimitation(
+                description: "membershipWell stored property not found via reflection — GroupEditorViewController's internal layout changed")
         }
         return view
     }
@@ -317,7 +343,7 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
     private func sampledColumnColors(of view: NSView, appearanceName: NSAppearance.Name) throws -> [NSColor] {
         view.appearance = NSAppearance(named: appearanceName)
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-            throw XCTSkip("no bitmap rep available in this environment")
+            throw TestEnvironmentLimitation(description: "no bitmap rep available in this environment")
         }
         view.cacheDisplay(in: view.bounds, to: rep)
         let x = rep.pixelsWide / 2
@@ -330,41 +356,46 @@ final class GroupsWindowTextColorLockTests: IsolatedTestCase {
         return colors
     }
 
-    func testMembershipWellFillIsWellTokenBothAppearances() throws {
+    @Test func membershipWellFillIsWellTokenBothAppearances() throws {
         let editor = try makeEditor()
         let well = try membershipWellView(of: editor)
-        XCTAssertGreaterThan(well.bounds.width, 0, "well must have real layout to sample")
+        #expect(well.bounds.width > 0, "well must have real layout to sample")
 
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let colors = try sampledColumnColors(of: well, appearanceName: appearanceName)
             guard let expectedWell = resolved(Tokens.Color.well, appearanceName: appearanceName) else {
-                throw XCTSkip("well token did not resolve under \(appearanceName.rawValue)")
+                // CONVERSION NOTE: was `throw XCTSkip(...)`; an early `return`
+                // is available here (unlike the two helpers above) since this
+                // is directly inside a Void-returning @Test body, and XCTSkip
+                // also aborted the whole test rather than just this iteration.
+                return
             }
             let matches = colors.filter { sameColor($0, expectedWell, tolerance: 0.02) }
-            XCTAssertFalse(matches.isEmpty,
-                "GroupedSectionView's fill under \(appearanceName.rawValue) never matched " +
+            #expect(!matches.isEmpty,
+                Comment(rawValue: "GroupedSectionView's fill under \(appearanceName.rawValue) never matched " +
                 "Tokens.Color.well — the T5 recessed checklist background must stay the well " +
                 "token; if this legitimately changed, that's a design decision for Alec, not a " +
-                "silent repaint.")
+                "silent repaint."))
         }
     }
 
-    func testMembershipWellHasHairlineTokenDividerBothAppearances() throws {
+    @Test func membershipWellHasHairlineTokenDividerBothAppearances() throws {
         let editor = try makeEditor()
-        XCTAssertGreaterThan(editor.test_membershipWellRowCount, 1,
-                             "need >1 row for a hairline divider to exist at all")
+        #expect(editor.test_membershipWellRowCount > 1,
+                "need >1 row for a hairline divider to exist at all")
         let well = try membershipWellView(of: editor)
 
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let colors = try sampledColumnColors(of: well, appearanceName: appearanceName)
             guard let expectedHairline = resolved(Tokens.Color.hairline, appearanceName: appearanceName) else {
-                throw XCTSkip("hairline token did not resolve under \(appearanceName.rawValue)")
+                // CONVERSION NOTE: see membershipWellFillIsWellTokenBothAppearances above.
+                return
             }
             let matches = colors.filter { sameColor($0, expectedHairline, tolerance: 0.02) }
-            XCTAssertFalse(matches.isEmpty,
-                "GroupedSectionView never painted a Tokens.Color.hairline-colored pixel under " +
+            #expect(!matches.isEmpty,
+                Comment(rawValue: "GroupedSectionView never painted a Tokens.Color.hairline-colored pixel under " +
                 "\(appearanceName.rawValue) despite \(editor.test_membershipWellRowCount) rows — " +
-                "the T5 divider between adjacent rows must stay the hairline token.")
+                "the T5 divider between adjacent rows must stay the hairline token."))
         }
     }
 }

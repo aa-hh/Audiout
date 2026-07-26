@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
@@ -22,7 +23,7 @@ import AppKit
 /// `contrastRatio` at lines ~293-310 are `private` to that file, so this file
 /// carries its own copies rather than reaching across files).
 @MainActor
-final class MembershipWellContrastTests: IsolatedTestCase {
+@Suite final class MembershipWellContrastTests: IsolatedSuite {
 
     // MARK: WCAG contrast math (mirrors AppTetherColorTests' private helpers)
 
@@ -55,36 +56,36 @@ final class MembershipWellContrastTests: IsolatedTestCase {
 
     // MARK: Measured floors (task spec: well vs panel >= 1.10:1, hairline vs panel >= 1.25:1)
 
-    func testWellVsPanelClearsTheContainerFloorBothAppearances() {
+    @Test func wellVsPanelClearsTheContainerFloorBothAppearances() {
         let floor: CGFloat = 1.10
 
         let darkWell = resolved(Tokens.Color.well, appearanceName: .darkAqua)
         let darkPanel = resolved(Tokens.Color.panel, appearanceName: .darkAqua)
         let darkRatio = contrastRatio(darkWell, darkPanel)
-        XCTAssertGreaterThanOrEqual(darkRatio, floor,
-                                    "well vs panel (dark): \(darkRatio):1 below the \(floor):1 container floor")
+        #expect(darkRatio >= floor,
+                "well vs panel (dark): \(darkRatio):1 below the \(floor):1 container floor")
 
         let lightWell = resolved(Tokens.Color.well, appearanceName: .aqua)
         let lightPanel = resolved(Tokens.Color.panel, appearanceName: .aqua)
         let lightRatio = contrastRatio(lightWell, lightPanel)
-        XCTAssertGreaterThanOrEqual(lightRatio, floor,
-                                    "well vs panel (light): \(lightRatio):1 below the \(floor):1 container floor")
+        #expect(lightRatio >= floor,
+                "well vs panel (light): \(lightRatio):1 below the \(floor):1 container floor")
     }
 
-    func testHairlineVsPanelClearsTheSeparatorFloorBothAppearances() {
+    @Test func hairlineVsPanelClearsTheSeparatorFloorBothAppearances() {
         let floor: CGFloat = 1.25
 
         let darkHairline = resolved(Tokens.Color.hairline, appearanceName: .darkAqua)
         let darkPanel = resolved(Tokens.Color.panel, appearanceName: .darkAqua)
         let darkRatio = contrastRatio(darkHairline, darkPanel)
-        XCTAssertGreaterThanOrEqual(darkRatio, floor,
-                                    "hairline vs panel (dark): \(darkRatio):1 below the \(floor):1 separator floor")
+        #expect(darkRatio >= floor,
+                "hairline vs panel (dark): \(darkRatio):1 below the \(floor):1 separator floor")
 
         let lightHairline = resolved(Tokens.Color.hairline, appearanceName: .aqua)
         let lightPanel = resolved(Tokens.Color.panel, appearanceName: .aqua)
         let lightRatio = contrastRatio(lightHairline, lightPanel)
-        XCTAssertGreaterThanOrEqual(lightRatio, floor,
-                                    "hairline vs panel (light): \(lightRatio):1 below the \(floor):1 separator floor")
+        #expect(lightRatio >= floor,
+                "hairline vs panel (light): \(lightRatio):1 below the \(floor):1 separator floor")
     }
 
     /// FOR THE RECORD (design review 2026-07-25): the inline rename field is
@@ -94,19 +95,19 @@ final class MembershipWellContrastTests: IsolatedTestCase {
     /// separation between the control fill and the section fill gets the same
     /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
     /// 1.251:1 light.
-    func testRaisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
+    @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
         let floor: CGFloat = 1.15
 
         let darkRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .darkAqua),
                                       resolved(Tokens.Color.well, appearanceName: .darkAqua))
-        XCTAssertGreaterThanOrEqual(darkRatio, floor,
-                                    "raised vs well (dark): \(darkRatio):1 below the \(floor):1 floor — " +
-                                    "the rename field/icon well would sink into the section they sit in")
+        #expect(darkRatio >= floor,
+                Comment(rawValue: "raised vs well (dark): \(darkRatio):1 below the \(floor):1 floor — " +
+                "the rename field/icon well would sink into the section they sit in"))
 
         let lightRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .aqua),
                                        resolved(Tokens.Color.well, appearanceName: .aqua))
-        XCTAssertGreaterThanOrEqual(lightRatio, floor,
-                                    "raised vs well (light): \(lightRatio):1 below the \(floor):1 floor")
+        #expect(lightRatio >= floor,
+                "raised vs well (light): \(lightRatio):1 below the \(floor):1 floor")
     }
 
     // MARK: Structural — the editor's checklist actually wears the new surface
@@ -140,22 +141,22 @@ final class MembershipWellContrastTests: IsolatedTestCase {
     /// The warm pane's checklist gets the recessed well + hairlines: the well
     /// is kept in sync with the current candidate rows (4 devices here) and
     /// sits BEHIND the row stack in z-order, so it never steals a row's click.
-    func testWarmPaneChecklistHasARecessedWellBehindTheRows() throws {
+    @Test func warmPaneChecklistHasARecessedWellBehindTheRows() throws {
         let editor = try makeEditor()
-        XCTAssertEqual(editor.test_membershipWellRowCount, 4,
-                       "the well is fed one entry per candidate row")
-        XCTAssertTrue(editor.test_membershipWellIsBehindStack,
-                     "the well sits BEHIND the stack in z-order")
+        #expect(editor.test_membershipWellRowCount == 4,
+                "the well is fed one entry per candidate row")
+        #expect(editor.test_membershipWellIsBehindStack,
+                "the well sits BEHIND the stack in z-order")
     }
 
     /// A membership toggle rebuilds the row list (an unchecked unavailable
     /// device can disappear) — the well must be re-pointed at the CURRENT
     /// rows on every rebuild, not just the initial `show`.
-    func testWellRowCountFollowsARebuild() throws {
+    @Test func wellRowCountFollowsARebuild() throws {
         let editor = try makeEditor()
-        XCTAssertEqual(editor.test_membershipWellRowCount, 4)
+        #expect(editor.test_membershipWellRowCount == 4)
         editor.test_setMembership(true, for: "c")
-        XCTAssertEqual(editor.test_membershipWellRowCount, 4,
-                       "still 4 — no device dropped out of the candidate list")
+        #expect(editor.test_membershipWellRowCount == 4,
+                "still 4 — no device dropped out of the candidate list")
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
@@ -22,7 +23,7 @@ import AppKit
 /// exposed — the rail overlay and the delete button both had to move from the
 /// container to the column.
 @MainActor
-final class GroupsHeaderParityTests: IsolatedTestCase {
+@Suite final class GroupsHeaderParityTests: IsolatedSuite {
 
     private func tempDirectory() -> URL {
         let dir = scratchDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -61,7 +62,7 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
 
     // MARK: Parity
 
-    func testBothPanesPutTheIconWellAndTitleAtTheSameGeometry() throws {
+    @Test func bothPanesPutTheIconWellAndTitleAtTheSameGeometry() throws {
         let (window, _, _, group) = try makeWindow()
 
         window.test_select(.group(id: group.id))
@@ -76,23 +77,23 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
         let detailTitle = window.test_detail.test_headerTitleAlignmentFrame
         let detailHeader = window.test_detail.test_headerSectionFrame
 
-        XCTAssertEqual(editorIcon.minX, detailIcon.minX, accuracy: 0.01,
-                       "the icon well must start at the same x in both panes — a difference here " +
-                       "is a visible sideways jump when the sidebar selection changes")
-        XCTAssertEqual(editorIcon.width, detailIcon.width, accuracy: 0.01)
-        XCTAssertEqual(editorIcon.height, detailIcon.height, accuracy: 0.01)
-        XCTAssertEqual(editorTitle.minX, detailTitle.minX, accuracy: 0.01,
-                       "the title's leading edge (its ALIGNMENT rect — what auto layout pins) must " +
-                       "match, even though one is an editable field and the other a plain label")
-        XCTAssertEqual(editorTitle.midY, detailTitle.midY, accuracy: 0.01,
-                       "both titles are vertically centred on the icon well beside them")
-        XCTAssertEqual(editorHeader.height, detailHeader.height, accuracy: 0.01,
-                       "identical header BAND height, so the content below starts at the same y")
-        XCTAssertEqual(editorHeader.minX, detailHeader.minX, accuracy: 0.01)
-        XCTAssertEqual(editorHeader.width, detailHeader.width, accuracy: 0.01)
+        #expect(abs(editorIcon.minX - detailIcon.minX) <= 0.01,
+                Comment(rawValue: "the icon well must start at the same x in both panes — a difference here " +
+                "is a visible sideways jump when the sidebar selection changes"))
+        #expect(abs(editorIcon.width - detailIcon.width) <= 0.01)
+        #expect(abs(editorIcon.height - detailIcon.height) <= 0.01)
+        #expect(abs(editorTitle.minX - detailTitle.minX) <= 0.01,
+                Comment(rawValue: "the title's leading edge (its ALIGNMENT rect — what auto layout pins) must " +
+                "match, even though one is an editable field and the other a plain label"))
+        #expect(abs(editorTitle.midY - detailTitle.midY) <= 0.01,
+                "both titles are vertically centred on the icon well beside them")
+        #expect(abs(editorHeader.height - detailHeader.height) <= 0.01,
+                "identical header BAND height, so the content below starts at the same y")
+        #expect(abs(editorHeader.minX - detailHeader.minX) <= 0.01)
+        #expect(abs(editorHeader.width - detailHeader.width) <= 0.01)
     }
 
-    func testHeaderBandIsTheDerivedSideBySideHeight() throws {
+    @Test func headerBandIsTheDerivedSideBySideHeight() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
@@ -100,20 +101,20 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
         // 92 = padding + the icon well + padding, all of it derived: the icon
         // and the name share one horizontal band now instead of stacking, which
         // is where the 30 pt this pane needed came from.
-        XCTAssertEqual(GroupsPaneLayout.headerBandHeight,
-                       GroupsPaneLayout.headerPadding * 2 + DeviceIconWellView.size, accuracy: 0.01)
-        XCTAssertEqual(window.test_editor.test_headerSectionFrame.height,
-                       GroupsPaneLayout.headerBandHeight, accuracy: 0.01)
+        #expect(abs(GroupsPaneLayout.headerBandHeight
+                    - (GroupsPaneLayout.headerPadding * 2 + DeviceIconWellView.size)) <= 0.01)
+        #expect(abs(window.test_editor.test_headerSectionFrame.height
+                    - GroupsPaneLayout.headerBandHeight) <= 0.01)
 
         let icon = window.test_editor.test_headerIconFrame
         let title = window.test_editor.test_headerTitleAlignmentFrame
-        XCTAssertEqual(title.minX, icon.maxX + GroupsPaneLayout.iconToTitleGap, accuracy: 0.01,
-                       "the title sits BESIDE the icon, one gap away")
-        XCTAssertEqual(title.midY, icon.midY, accuracy: 0.01,
-                       "…vertically centred on it, not baselined off its bottom")
+        #expect(abs(title.minX - (icon.maxX + GroupsPaneLayout.iconToTitleGap)) <= 0.01,
+                "the title sits BESIDE the icon, one gap away")
+        #expect(abs(title.midY - icon.midY) <= 0.01,
+                "…vertically centred on it, not baselined off its bottom")
     }
 
-    func testHeaderContentStartsAtTheSharedContentInset() throws {
+    @Test func headerContentStartsAtTheSharedContentInset() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
@@ -124,11 +125,11 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
         let detailInset = window.test_detail.test_headerIconFrame.minX
             - window.test_detail.test_headerSectionFrame.minX
 
-        XCTAssertEqual(editorInset, GroupsPaneLayout.contentLeadingInset, accuracy: 0.01,
-                       "the icon starts past the rail gutter the editor reserves")
-        XCTAssertEqual(detailInset, GroupsPaneLayout.contentLeadingInset, accuracy: 0.01,
-                       "the detail pane reserves the same lane even though it draws no rail — " +
-                       "alignment is worth more than reclaiming it")
+        #expect(abs(editorInset - GroupsPaneLayout.contentLeadingInset) <= 0.01,
+                "the icon starts past the rail gutter the editor reserves")
+        #expect(abs(detailInset - GroupsPaneLayout.contentLeadingInset) <= 0.01,
+                Comment(rawValue: "the detail pane reserves the same lane even though it draws no rail — " +
+                "alignment is worth more than reclaiming it"))
     }
 
     /// The HEADER is pinned across both panes (above), but everything BELOW it
@@ -137,7 +138,7 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
     /// occupying the gap (design review 2026-07-25). The two insets must stay
     /// genuinely different, or one of the two halves of that decision has been
     /// quietly undone.
-    func testDetailMetadataRowsUseTheRailFreeInsetNotTheHeaderOne() throws {
+    @Test func detailMetadataRowsUseTheRailFreeInsetNotTheHeaderOne() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
@@ -146,48 +147,48 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
         let headerInset = window.test_detail.test_headerIconFrame.minX
             - window.test_detail.test_headerSectionFrame.minX
 
-        XCTAssertEqual(rowInset, GroupsPaneLayout.railFreeContentLeadingInset, accuracy: 0.01,
-                       "no rail runs past the metadata rows, so they don't reserve its lane")
-        XCTAssertLessThan(rowInset, headerInset,
-                          "the rows must sit tighter than the header, which stays pinned to the " +
-                          "editor's for cross-pane alignment")
-        XCTAssertGreaterThan(headerInset - rowInset, 1,
-                             "a difference this small means the rail-free inset has drifted back " +
-                             "toward the header's and the hollow leading edge is returning")
+        #expect(abs(rowInset - GroupsPaneLayout.railFreeContentLeadingInset) <= 0.01,
+                "no rail runs past the metadata rows, so they don't reserve its lane")
+        #expect(rowInset < headerInset,
+                Comment(rawValue: "the rows must sit tighter than the header, which stays pinned to the " +
+                "editor's for cross-pane alignment"))
+        #expect(headerInset - rowInset > 1,
+                Comment(rawValue: "a difference this small means the rail-free inset has drifted back " +
+                "toward the header's and the hollow leading edge is returning"))
     }
 
     // MARK: The elastic column
 
-    func testSectionsStretchWithThePaneInsteadOfHuggingTheirContent() throws {
+    @Test func sectionsStretchWithThePaneInsteadOfHuggingTheirContent() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
 
         let pane = window.test_editor.view.frame.width
         let header = window.test_editor.test_headerSectionFrame
-        XCTAssertEqual(header.minX, GroupsPaneLayout.columnInset, accuracy: 0.01,
-                       "SYMMETRIC margins: the section starts one margin in, not at the pane edge")
-        XCTAssertEqual(pane - header.maxX, GroupsPaneLayout.columnTrailingInset, accuracy: 0.01,
-                       "…and ends one margin short of the other side, with no dead strip")
-        XCTAssertGreaterThan(header.width, 250,
-                             "the section fills the pane rather than its ~277pt intrinsic content")
+        #expect(abs(header.minX - GroupsPaneLayout.columnInset) <= 0.01,
+                "SYMMETRIC margins: the section starts one margin in, not at the pane edge")
+        #expect(abs((pane - header.maxX) - GroupsPaneLayout.columnTrailingInset) <= 0.01,
+                "…and ends one margin short of the other side, with no dead strip")
+        #expect(header.width > 250,
+                "the section fills the pane rather than its ~277pt intrinsic content")
     }
 
-    func testColumnStopsGrowingAtTheContentMaxWidth() throws {
+    @Test func columnStopsGrowingAtTheContentMaxWidth() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         // A pane far wider than the cap: the section must stop stretching.
         window.window?.setContentSize(NSSize(width: 1200, height: 700))
         settle(window)
 
-        XCTAssertEqual(window.test_editor.test_headerSectionFrame.width,
-                       GroupsPaneLayout.contentMaxWidth, accuracy: 0.5,
-                       "the column is elastic UP TO the cap — past it the form would read as a slab")
+        #expect(abs(window.test_editor.test_headerSectionFrame.width
+                    - GroupsPaneLayout.contentMaxWidth) <= 0.5,
+                "the column is elastic UP TO the cap — past it the form would read as a slab")
     }
 
     // MARK: The two anchoring traps the elastic column exposed
 
-    func testEveryNodeStillLandsOnTheOverlaysGutterLineAfterTheColumnMovedIn() throws {
+    @Test func everyNodeStillLandsOnTheOverlaysGutterLineAfterTheColumnMovedIn() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
@@ -195,47 +196,46 @@ final class GroupsHeaderParityTests: IsolatedTestCase {
         // The overlay is pinned to the COLUMN. Pinned to the container (as it
         // was) the spine and the nodes separate by exactly `columnInset`.
         for id in window.test_editor.test_candidateDeviceIDs {
-            let x = try XCTUnwrap(window.test_editor.test_nodeCenterXInOverlaySpace(for: id))
-            XCTAssertEqual(x, PopoverColumnGrid.railGutterCenterX, accuracy: 0.01,
-                           "\(id)'s node must sit exactly on the drawn spine")
+            let x = try #require(window.test_editor.test_nodeCenterXInOverlaySpace(for: id))
+            #expect(abs(x - PopoverColumnGrid.railGutterCenterX) <= 0.01,
+                    "\(id)'s node must sit exactly on the drawn spine")
         }
     }
 
-    func testDeleteButtonLinesUpWithTheContentAboveIt() throws {
+    @Test func deleteButtonLinesUpWithTheContentAboveIt() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
 
-        XCTAssertEqual(window.test_editor.test_deleteButtonFrame.minX,
-                       window.test_editor.test_headerIconFrame.minX, accuracy: 0.01,
-                       "the button hangs off the COLUMN like everything else — anchored to the " +
-                       "container it drifts one margin to the left of the whole form")
+        #expect(abs(window.test_editor.test_deleteButtonFrame.minX
+                    - window.test_editor.test_headerIconFrame.minX) <= 0.01,
+                Comment(rawValue: "the button hangs off the COLUMN like everything else — anchored to the " +
+                "container it drifts one margin to the left of the whole form"))
     }
 
     // MARK: The detail pane adopts the same sections
 
-    func testDetailPaneWearsGroupedSectionsAndNoOrphanedRule() throws {
+    @Test func detailPaneWearsGroupedSectionsAndNoOrphanedRule() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        XCTAssertEqual(window.test_detail.test_sectionCount, 3,
-                       "header + device state + In groups, all the same section shape the editor uses")
-        XCTAssertFalse(window.test_detail.test_hasBoxDivider,
-                       "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
-                       "the way across the pane; the sections' own inset hairlines separate rows now")
+        #expect(window.test_detail.test_sectionCount == 3,
+                "header + device state + In groups, all the same section shape the editor uses")
+        #expect(!window.test_detail.test_hasBoxDivider,
+                Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
+                "the way across the pane; the sections' own inset hairlines separate rows now"))
     }
 
-    func testDetailValuesRightAlignIntoTheSectionsWidth() throws {
+    @Test func detailValuesRightAlignIntoTheSectionsWidth() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
         let section = window.test_detail.test_stateSectionFrame
         let valueTrailing = window.test_detail.test_valueTrailingX
-        XCTAssertEqual(section.maxX - valueTrailing, GroupsPaneLayout.contentTrailingInset,
-                       accuracy: 2.5,
-                       "values right-align on the section's own inset edge (± the text field's own " +
-                       "alignment inset), instead of hanging off a fixed 90pt caption column")
+        #expect(abs((section.maxX - valueTrailing) - GroupsPaneLayout.contentTrailingInset) <= 2.5,
+                Comment(rawValue: "values right-align on the section's own inset edge (± the text field's own " +
+                "alignment inset), instead of hanging off a fixed 90pt caption column"))
     }
 }

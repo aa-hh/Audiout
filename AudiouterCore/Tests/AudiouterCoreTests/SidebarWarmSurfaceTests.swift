@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
@@ -19,7 +19,7 @@ import AppKit
 /// sides of it explicitly rather than relying on whatever OS the suite
 /// happens to run under.
 @MainActor
-final class SidebarWarmSurfaceTests: IsolatedTestCase {
+@Suite struct SidebarWarmSurfaceTests {
 
     /// Force `loadView()` to run (AppKit builds the view tree lazily) without
     /// ever ordering a real window on screen.
@@ -28,20 +28,20 @@ final class SidebarWarmSurfaceTests: IsolatedTestCase {
         return controller
     }
 
-    func test_macOS26Plus_showsTintOverlay_notFallbackBacking() {
+    @Test func macOS26PlusShowsTintOverlayNotFallbackBacking() {
         let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: true))
 
-        XCTAssertTrue(sidebar.test_hasTintOverlay)
-        XCTAssertFalse(sidebar.test_hasFallbackBacking)
-        XCTAssertEqual(sidebar.test_warmSurfaceAlpha, 0.30, accuracy: 0.0001)
+        #expect(sidebar.test_hasTintOverlay)
+        #expect(!sidebar.test_hasFallbackBacking)
+        #expect(abs(sidebar.test_warmSurfaceAlpha - 0.30) <= 0.0001)
     }
 
-    func test_belowMacOS26_showsFallbackBacking_notTintOverlay() {
+    @Test func belowMacOS26ShowsFallbackBackingNotTintOverlay() {
         let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: false))
 
-        XCTAssertTrue(sidebar.test_hasFallbackBacking)
-        XCTAssertFalse(sidebar.test_hasTintOverlay)
-        XCTAssertEqual(sidebar.test_warmSurfaceAlpha, 1, accuracy: 0.0001)
+        #expect(sidebar.test_hasFallbackBacking)
+        #expect(!sidebar.test_hasTintOverlay)
+        #expect(abs(sidebar.test_warmSurfaceAlpha - 1) <= 0.0001)
     }
 
     /// The default (no explicit seam override) must resolve from the real
@@ -50,8 +50,8 @@ final class SidebarWarmSurfaceTests: IsolatedTestCase {
     /// default wiring (used by `MixerWindowController`'s
     /// `SidebarViewController()` call site) isn't silently stuck on one
     /// branch.
-    func test_defaultInit_matchesRealOSSeamValue() {
+    @Test func defaultInitMatchesRealOSSeamValue() {
         let sidebar = loaded(SidebarViewController())
-        XCTAssertEqual(sidebar.test_hasTintOverlay, SidebarViewController.osSupportsLiquidGlassSidebar)
+        #expect(sidebar.test_hasTintOverlay == SidebarViewController.osSupportsLiquidGlassSidebar)
     }
 }

@@ -20,14 +20,15 @@
 //     the leave-before-thread-exit edge) lives in
 //     AirPlayEngineTests/WorkgroupLifecycleTests.swift.
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 #if canImport(CoreAudio)
 import CoreAudio
 #endif
 
-final class WorkgroupLifecycleTests: IsolatedTestCase {
+@Suite final class WorkgroupLifecycleTests: IsolatedSuite {
 
     // MARK: Doubles
 
@@ -134,7 +135,7 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
 
     // MARK: - Edge 1: join at start
 
-    func testStartJoinsTheAggregatesWorkgroupExactlyOnce() {
+    @Test func startJoinsTheAggregatesWorkgroupExactlyOnce() {
         let tap = FakeTap()
         tap.aggregateIDScript = [4242]
         let spy = SpyWorkgroup()
@@ -142,13 +143,13 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
 
         coordinator.start()
 
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
-        XCTAssertEqual(
-            spy.calls, [.join(4242)],
+        #expect(coordinator.state == .capturing(tap.format))
+        #expect(
+            spy.calls == [.join(4242)],
             "start() joins exactly once, naming the AGGREGATE device the tap built")
     }
 
-    func testStartIsIdempotentAndDoesNotJoinTwice() {
+    @Test func startIsIdempotentAndDoesNotJoinTwice() {
         let tap = FakeTap()
         let spy = SpyWorkgroup()
         let coordinator = makeCoordinator(tap: tap, workgroup: spy)
@@ -156,10 +157,10 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         coordinator.start()
         coordinator.start()   // already capturing — a no-op
 
-        XCTAssertEqual(spy.joins, 1, "a second join on an already-joined thread would return EALREADY")
+        #expect(spy.joins == 1, "a second join on an already-joined thread would return EALREADY")
     }
 
-    func testStartDoesNotJoinWhenTheTapPublishesNoWorkgroup() {
+    @Test func startDoesNotJoinWhenTheTapPublishesNoWorkgroup() {
         // Plan risk #6: a tap-bearing aggregate may publish no 'oswg' at all. That
         // must be a quiet degrade-to-QoS-only, not a join attempt and not a failure.
         let tap = FakeTap()
@@ -169,11 +170,11 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
 
         coordinator.start()
 
-        XCTAssertEqual(coordinator.state, .capturing(tap.format), "capture still succeeds")
-        XCTAssertEqual(spy.calls, [], "nothing to join, so nothing is called")
+        #expect(coordinator.state == .capturing(tap.format), "capture still succeeds")
+        #expect(spy.calls == [], "nothing to join, so nothing is called")
     }
 
-    func testFailedStartNeverJoins() {
+    @Test func failedStartNeverJoins() {
         let tap = FakeTap()
         tap.startError = .tapCreationFailed(reason: "denied")
         let spy = SpyWorkgroup()
@@ -181,10 +182,10 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
 
         coordinator.start()
 
-        XCTAssertEqual(spy.calls, [], "no aggregate was ever created — there is nothing to join")
+        #expect(spy.calls == [], "no aggregate was ever created — there is nothing to join")
     }
 
-    func testStartThatLosesToARacingStopDoesNotJoin() {
+    @Test func startThatLosesToARacingStopDoesNotJoin() {
         // The orphan path: stop() wins while createAndStart is in flight, so the
         // just-built tap is discarded. Joining a workgroup we are about to destroy
         // would only have to be unwound again.
@@ -195,13 +196,13 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
 
         coordinator.start()
 
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertEqual(spy.joins, 0, "the orphaned tap's workgroup is never joined")
+        #expect(coordinator.state == .idle)
+        #expect(spy.joins == 0, "the orphaned tap's workgroup is never joined")
     }
 
     // MARK: - stop(): leave, and no join left dangling
 
-    func testStopLeavesTheWorkgroup() {
+    @Test func stopLeavesTheWorkgroup() {
         let tap = FakeTap()
         tap.aggregateIDScript = [9]
         let spy = SpyWorkgroup()
@@ -210,19 +211,19 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         coordinator.start()
         coordinator.stop()
 
-        XCTAssertEqual(spy.calls, [.join(9), .leave])
+        #expect(spy.calls == [.join(9), .leave])
     }
 
-    func testStopFromIdleDoesNotLeave() {
+    @Test func stopFromIdleDoesNotLeave() {
         let spy = SpyWorkgroup()
         let coordinator = makeCoordinator(tap: FakeTap(), workgroup: spy)
 
         coordinator.stop()
 
-        XCTAssertEqual(spy.calls, [], "a stop() with nothing running has no membership to unwind")
+        #expect(spy.calls == [], "a stop() with nothing running has no membership to unwind")
     }
 
-    func testStartStopStartRejoins() {
+    @Test func startStopStartRejoins() {
         let tap = FakeTap()
         tap.aggregateIDScript = [11, 12]
         let spy = SpyWorkgroup()
@@ -232,13 +233,13 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         coordinator.stop()
         coordinator.start()
 
-        XCTAssertEqual(spy.calls, [.join(11), .leave, .join(12)])
-        XCTAssertEqual(spy.joins, spy.leaves + 1, "one unmatched join = the live membership")
+        #expect(spy.calls == [.join(11), .leave, .join(12)])
+        #expect(spy.joins == spy.leaves + 1, "one unmatched join = the live membership")
     }
 
     // MARK: - Edge 3: on tap recreate, LEAVE OLD then JOIN NEW
 
-    func testDeviceChangeRebuildLeavesTheOldWorkgroupBeforeJoiningTheNew() {
+    @Test func deviceChangeRebuildLeavesTheOldWorkgroupBeforeJoiningTheNew() {
         let tap = FakeTap()
         tap.aggregateIDScript = [100, 200]
         let spy = SpyWorkgroup()
@@ -247,14 +248,13 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         coordinator.start()
         tap.fireDeviceChange()
 
-        XCTAssertEqual(tap.creates, 2, "the device change rebuilt the tap")
-        XCTAssertEqual(
-            spy.calls, [.join(100), .leave, .join(200)],
-            "leave-then-join: joining first would return EALREADY and then the leave "
-            + "would drop the only membership, leaving the audio thread in none")
+        #expect(tap.creates == 2, "the device change rebuilt the tap")
+        #expect(
+            spy.calls == [.join(100), .leave, .join(200)],
+            "leave-then-join: joining first would return EALREADY and then the leave would drop the only membership, leaving the audio thread in none")
     }
 
-    func testExclusionChangeRebuildAlsoLeavesThenJoins() {
+    @Test func exclusionChangeRebuildAlsoLeavesThenJoins() {
         // The other recreate trigger (updateRouting / setSyncedLocalSink), which
         // fires on ordinary connects — not just on device changes.
         let tap = FakeTap()
@@ -267,11 +267,11 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
             appRoutes: [AppRoute(bundleID: "com.example.a", displayName: "A", destination: .device(id: "dev"))],
             excludedBundleIDs: [])
 
-        XCTAssertEqual(tap.creates, 2)
-        XCTAssertEqual(spy.calls, [.join(1), .leave, .join(2)])
+        #expect(tap.creates == 2)
+        #expect(spy.calls == [.join(1), .leave, .join(2)])
     }
 
-    func testRepeatedRebuildsNeverAccumulateMemberships() {
+    @Test func repeatedRebuildsNeverAccumulateMemberships() {
         let tap = FakeTap()
         tap.aggregateIDScript = [1, 2, 3, 4]
         let spy = SpyWorkgroup()
@@ -282,16 +282,16 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         tap.fireDeviceChange()
         tap.fireDeviceChange()
 
-        XCTAssertEqual(spy.calls, [.join(1), .leave, .join(2), .leave, .join(3), .leave, .join(4)])
-        XCTAssertEqual(
-            spy.joins - spy.leaves, 1,
+        #expect(spy.calls == [.join(1), .leave, .join(2), .leave, .join(3), .leave, .join(4)])
+        #expect(
+            spy.joins - spy.leaves == 1,
             "the join/leave counts stay balanced to exactly one live membership")
 
         coordinator.stop()
-        XCTAssertEqual(spy.joins, spy.leaves, "and stop() balances the last one")
+        #expect(spy.joins == spy.leaves, "and stop() balances the last one")
     }
 
-    func testRebuildWhoseRecreateFailsLeavesWithoutRejoining() {
+    @Test func rebuildWhoseRecreateFailsLeavesWithoutRejoining() {
         let tap = FakeTap()
         tap.aggregateIDScript = [5, 6]
         let spy = SpyWorkgroup()
@@ -302,14 +302,15 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         tap.fireDeviceChange()
 
         guard case .failed = coordinator.state else {
-            return XCTFail("expected .failed after a rebuild that could not recreate the tap")
+            Issue.record("expected .failed after a rebuild that could not recreate the tap")
+            return
         }
-        XCTAssertEqual(
-            spy.calls, [.join(5), .leave],
+        #expect(
+            spy.calls == [.join(5), .leave],
             "the old membership is still released even though there is no new aggregate to join")
     }
 
-    func testRebuildIntoATapWithNoWorkgroupLeavesAndDoesNotJoin() {
+    @Test func rebuildIntoATapWithNoWorkgroupLeavesAndDoesNotJoin() {
         let tap = FakeTap()
         tap.aggregateIDScript = [8, nil]
         let spy = SpyWorkgroup()
@@ -318,22 +319,22 @@ final class WorkgroupLifecycleTests: IsolatedTestCase {
         coordinator.start()
         tap.fireDeviceChange()
 
-        XCTAssertEqual(spy.calls, [.join(8), .leave])
+        #expect(spy.calls == [.join(8), .leave])
     }
 
     // MARK: - The seam is optional
 
-    func testNilWorkgroupSeamChangesNothingAboutCapture() {
+    @Test func nilWorkgroupSeamChangesNothingAboutCapture() {
         // Every edge must be a no-op when the feature is not wired (the default for
         // the rest of the suite), not a crash and not a behaviour change.
         let tap = FakeTap()
         let coordinator = makeCoordinator(tap: tap, workgroup: nil)
 
         coordinator.start()
-        XCTAssertEqual(coordinator.state, .capturing(tap.format))
+        #expect(coordinator.state == .capturing(tap.format))
         tap.fireDeviceChange()
-        XCTAssertEqual(tap.creates, 2)
+        #expect(tap.creates == 2)
         coordinator.stop()
-        XCTAssertEqual(coordinator.state, .idle)
+        #expect(coordinator.state == .idle)
     }
 }

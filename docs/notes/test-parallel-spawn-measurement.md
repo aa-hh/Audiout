@@ -1,3 +1,15 @@
+> **Status (2026-07-26):** the finding below (one XCTest process per test
+> *method*) drove the cost analysis that motivated migrating this repo's
+> suites off XCTest onto Apple's `swift-testing`, which runs tests
+> concurrently in-process instead of forking. That migration is now done for
+> the large majority of both `AudiouterCore` and `AirPlayEngine`'s test
+> targets, so the process-spawn cost measured here no longer applies to most
+> of the suite — see
+> [swift-testing-conversion-cookbook.md](swift-testing-conversion-cookbook.md)
+> for the how, and [swift-testing-migration-brief.md](swift-testing-migration-brief.md)
+> for the status. This document is kept as-is below as the historical
+> measurement that motivated the change, not updated to match the new state.
+
 # What determines the xctest process count under `swift test --parallel`
 
 Measured 2026-07-25 in this repo (worktree `.claude/worktrees/test-class-consolidation`),

@@ -16,17 +16,25 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   hold a real WindowServer connection — an un-gated `makeKeyAndOrderFront`/
   `NSApp.activate`/`popover.show`/etc. in one of these code paths flashes a
   real, empty window on the developer's actual screen for the run's duration.
-  `HeadlessRuntime.isActive` detects `swift test` automatically (checks whether
-  `XCTest` is loaded into the process — reliable regardless of invocation, no
-  env var needed); the 5 non-app executable tools each set
-  `AIRPLAY_HEADLESS=1` at the very top of their own `run()`, before touching
-  AppKit. Only gate the actual presentation call — keep layout/sizing/model
-  work (`layoutSubtreeIfNeeded`, `setContentSize`, frame-origin math) running
-  unconditionally, since headless assertions (structural tests, offscreen PNG
-  renders via `bitmapImageRepForCachingDisplay`) depend on it and never need
-  the window actually on screen. The real app (`AudiouterApp`) never sets the
-  env var and isn't an XCTest process, so a live launch always shows its
-  windows normally.
+  `HeadlessRuntime.isActive` detects `swift test` automatically via a DUAL
+  check (`HeadlessRuntime.isXCTestLoaded || HeadlessRuntime.isSwiftTestingLoaded`)
+  — `isXCTestLoaded` checks whether `XCTest` is loaded into the process
+  (`NSClassFromString("XCTestCase") != nil`); `isSwiftTestingLoaded` covers
+  swift-testing, which exposes no Objective-C classes for `NSClassFromString`
+  to see, by `dlsym`-ing its type-descriptor symbols
+  (`$s7Testing4TestVMn`/`$s7Testing5IssueVMn`, the nominal type descriptors for
+  `Testing.Test`/`Testing.Issue`) against `RTLD_DEFAULT` — reliable regardless
+  of invocation or which test framework a given file uses, no env var needed,
+  and it means window-gating survives once the last `import XCTest` is gone;
+  the 5 non-app executable tools each set `AIRPLAY_HEADLESS=1` at the very top
+  of their own `run()`, before touching AppKit. Only gate the actual
+  presentation call — keep layout/sizing/model work (`layoutSubtreeIfNeeded`,
+  `setContentSize`, frame-origin math) running unconditionally, since headless
+  assertions (structural tests, offscreen PNG renders via
+  `bitmapImageRepForCachingDisplay`) depend on it and never need the window
+  actually on screen. The real app (`AudiouterApp`) never sets the env var and
+  links neither test library, so a live launch always shows its windows
+  normally.
 - **`Device.isSelected` means "currently in the backend's output set"
   (streaming now) — NOT membership in the UI's Selected Devices set**
   (`GroupController.selectedDeviceIDs`). The output set is exactly the Selected
@@ -344,10 +352,20 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   If all slots stay busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
   the runner proceeds **uncapped** rather than failing — it exists to protect
   the CPU, not to gate correctness, and must never block a commit for a reason
-  the committer cannot see. `swift test` parallelizes at the test-**METHOD**
-  level (corrected — see the measured spawn-count finding above): each test
-  method runs in its own process, so tests must not race on cross-process
-  shared state.
+  the committer cannot see. **That measured process-per-method cost belongs to
+  the XCTest era and no longer describes most of this suite.** The migration
+  to swift-testing (`docs/notes/swift-testing-conversion-cookbook.md`) is done
+  for the large majority of files: those `@Suite` tests run **concurrently,
+  in-process** (Swift structured-concurrency task scheduling, not one OS
+  process per test), so "tests must not race on cross-process shared state" is
+  no longer the operative risk for them — the risk is now an **in-process**
+  race on anything `static`/global, guarded by `IsolatedSuite` (see above) and,
+  for process-global C/singleton state, by nesting into
+  `SerializedSharedStateSuite.swift`'s `.serialized` `SerializedSharedState`
+  parent suite. A small number of files remain on the legacy `XCTestCase` base
+  (current count via `git grep ': XCTestCase'` under `AudiouterCore/Tests/`) —
+  for those, and only those, the old process-per-method isolation reasoning
+  above still applies.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
   Guard 4 runs the full suite via `scripts/run-tests.sh` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
@@ -367,24 +385,41 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   buys: these seven tests depend on real hardware and a machine-wide daemon, so
   they are timing-sensitive to whatever else the Mac is doing — the documented
   cause of three unrelated tests flaking under `--parallel` on a busy machine.
-  `AudioHardwareTestGate.skipUnlessEnabled()` is called from that file's
-  `makeStartedEngine()` — the one choke point all seven hardware tests share, so
-  a newly added test inherits the gate rather than silently reintroducing the
-  load. The 7 skip by default (visibly, with a reason); the 3 that only exercise
-  the pure static `isFollowableTransport` still run. Run the real ones
-  deliberately when working on local playback:
+  `AudioHardwareTestGate.trait` (a `ConditionTrait`) is applied to ONE nested
+  `@Suite(AudioHardwareTestGate.trait) struct RealHardware { ... }` inside
+  `LocalPlaybackEngineTests` — the one choke point every hardware test lives
+  inside, so a newly added hardware test inherits the gate automatically by
+  being written inside `RealHardware`, with nothing to remember per test.
+  swift-testing evaluates skip conditions as traits before the test body runs,
+  so the old shape (a `skipUnlessEnabled()` call inside a shared helper every
+  hardware test called) no longer works — `AudioHardwareTestGate
+  .skipUnlessEnabled()` still exists but is legacy, kept only for any
+  not-yet-converted `XCTestCase` hardware test. Everything inside
+  `RealHardware` skips by default (visibly, with a reason); the handful of
+  pure/static tests outside it (e.g. exercising `isFollowableTransport`)
+  always run. Run the real ones deliberately when working on local playback:
   `AIRPLAY_AUDIO_HARDWARE_TESTS=1 swift test --filter LocalPlaybackEngineTests`.
   They are NOT faked — `LocalPlaybackControlling` is the protocol fakes already
   implement, so spying here would delete the only coverage of the real engine.
-- **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
-  each suite its own process, two suites that both write `UserDefaults.standard`
-  or the same `FileManager.default.temporaryDirectory` path race and flake.
-  Subclass `IsolatedTestCase` (`Tests/AudiouterCoreTests/IsolatedTestCase.swift`)
-  and use `scratchDir` (per-test temp dir), `isolatedDefaults` (per-test suite),
-  or `uniqueName(_:)` (for APIs like `NSWindow.setFrameAutosaveName` that always
-  write `.standard`) instead of the shared globals. `.githooks/pre-commit`
-  Guard 3 warns when a newly added test line reaches those globals; a line that
-  genuinely must touch one takes a trailing `isolation-ok` comment.
+- **Isolate shared state via `IsolatedSuite` (new/converted suites) or
+  `IsolatedTestCase` (legacy).** Two suites/tests that both write
+  `UserDefaults.standard` or the same `FileManager.default.temporaryDirectory`
+  path race and flake — under swift-testing's in-process concurrency this is no
+  longer only a `--parallel`-process hazard, it can happen between any two
+  tests running concurrently in the same process.
+  `Tests/AudiouterCoreTests/IsolatedTestCase.swift` holds the shared
+  `TestIsolation` mechanism plus two bases over it: **`IsolatedSuite`** — the
+  swift-testing base, inherit this in any new or converted suite
+  (`@Suite final class Foo: IsolatedSuite`) — and **`IsolatedTestCase`**, the
+  legacy XCTest base, kept only because a few files still subclass it (verify
+  the current set with `git grep IsolatedTestCase`); nothing currently forces
+  its removal, so it stays deliberately until the last such file converts. Both
+  bases expose the identical member set — `scratchDir` (per-test temp dir),
+  `isolatedDefaults` (per-test suite), `uniqueName(_:)` (for APIs like
+  `NSWindow.setFrameAutosaveName` that always write `.standard`) — instead of
+  the shared globals. `.githooks/pre-commit` Guard 3 warns when a newly added
+  test line reaches those globals; a line that genuinely must touch one takes a
+  trailing `isolation-ok` comment.
 - **`Telemetry.log(...)` is always-on** (gated only by `HeadlessRuntime.isActive`,
   never an env var), non-blocking, and must never call back into a caller. Never
   call it from the IOProc/render path — only from the (non-realtime) decision
@@ -396,8 +431,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   assert its emissions (e.g. `PerAppCaptureCoordinatorTests`' `capturePA`/
   `rate_rebuild` assertion) — install it, drive the real code path, read back
   what was captured, then call it again with `nil` (also a synchronous flush
-  barrier) before the test returns so it never bleeds into the next test method
-  in the same process.
+  barrier) before the test returns. `_installTestSink` is process-global state,
+  and swift-testing runs tests **concurrently inside one process** (unlike
+  XCTest's one-process-per-method model), so a `defer { ... nil }` alone no
+  longer keeps one test's sink from bleeding into a concurrently-running one —
+  every suite that touches this seam (`TelemetryTests`,
+  `NativeCaptureCoordinatorTests`, `PerAppCaptureCoordinatorTests`,
+  `NativeBackendTests`, `SetupModelTests`; confirmed via
+  `git grep _installTestSink`) nests into the shared `SerializedSharedState`
+  parent suite (`Tests/AudiouterCoreTests/SerializedSharedStateSuite.swift`,
+  `.serialized`) for true mutual exclusion instead.
 
 ## Map
 

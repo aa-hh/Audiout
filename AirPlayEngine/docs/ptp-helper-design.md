@@ -70,18 +70,25 @@ stop (mirrors nqptp — ptp-study §3).
 
 ### 1.3 What the unprivileged engine does
 
-The shipped engine is a pure **client** (mode 3, ptp-study §1), as landed in
+The shipped engine is a pure **deferred client** (mode 3, ptp-study §1), as landed in
 `AirPlayEngine/Sources/CAirPlayEngine/shims/ptpd.c` (T-SHIM-1). By default it
-is **find-only** — it never calls `airptp_daemon_bind`. A dev/CI-only escape
-hatch, `AUDIOUTER_PTP_INPROC_BIND=1`, restores the old in-process bind so the
-engine can still be exercised end-to-end before the root helper is installed
-(see §6.3); the shipped default has no such fallback. The shim reimplements
+is **find-only** — it never calls `airptp_daemon_bind`, and it **does not find the
+clock at engine startup** (T2b/7295940). Instead, the clock lookup is deferred to
+connect time: when a user clicks a device to stream, the app connects to the helper's
+Mach service (T2/4c7da45, demand-starting it), then the session's `convergeDevice`
+call runs `ptpd_daemon_probe()` (T4/1298a70) which finds the helper and snapshots the
+clock_id. A dev/CI-only escape hatch, `AUDIOUTER_PTP_INPROC_BIND=1`, restores the old
+in-process bind so the engine can still be exercised end-to-end before the root helper
+is installed (see §6.3); the shipped default has no such fallback. The shim reimplements
 OwnTone's six `ptpd_*` wrappers pointed **find-only**:
 
 - `ptpd_find_or_bind()` → `airptp_daemon_find()` **only** — never binds (the
-  helper owns the ports). Read-only mmap of `/airptp_shm`.
+  helper owns the ports). Read-only mmap of `/airptp_shm`. **Now called per connect,
+  not at engine start** (T4).
 - `ptpd_init()` → no-op (a found shared daemon means `start()` is skipped —
-  ptp-study §1 `ptpd.c:120-121`).
+  ptp-study §1 `ptpd.c:120-121`). **Returns 0 ("deferred") when no daemon is present**
+  (T2b/7295940), so the engine never latches `airplay_ptp_is_disabled` until a live
+  helper is found.
 - `ptpd_clock_id_get()` → `airptp_clock_id_get()` — pure struct read from the
   client's snapshot; the value is sent to the speaker in RTSP SETUP
   (`airplay.c:2741`).
@@ -155,11 +162,17 @@ Shipped verbatim as `scripts/ptp-helper.plist`, installed by
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>   <!-- path is relative to the app bundle -->
 
-    <key>RunAtLoad</key>
-    <true/>
-
     <key>KeepAlive</key>
-    <true/>                                       <!-- see §2.4: restart-on-crash -->
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>                                       <!-- respawn only on crash (non-zero exit) -->
+
+    <key>MachServices</key>
+    <dict>
+        <key>com.audiouter.Audiouter.ptphelper</key>
+        <true/>
+    </dict>                                       <!-- demand-start trigger: launchd launches on first app connect -->
 
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
     <string>com.audiouter.Audiouter</string>
@@ -181,10 +194,13 @@ Notes:
   survey of OwnTone's upstream daemon reached the same conclusion, "reuse
   airptpd.c almost verbatim", but the shipped helper is a fresh file, not a
   port of that daemon — see §6.1).
-- No `Sockets`/socket-activation: PTP must own 319/320 for its whole lifetime, so
-  bind-on-start under `RunAtLoad` + `KeepAlive` is correct, not launchd on-demand
-  socket handoff. (And socket-activation can't hand off a *bound* privileged
-  socket the way the master loop needs — the helper binds itself.)
+- **On-demand launch (T3):** `RunAtLoad` is removed and `MachServices` + demand-start
+  replace the always-up guarantee. The helper launches only when the app connects to
+  the Mach service (typically when the user clicks a device to stream). **Why:** macOS's
+  own AirPlay 2 sender needs UDP 319/320; holding them permanently breaks the system
+  AirPlay dropdown (confirmed live 2026-07-26). T5's automatic takeover requires them
+  to be released when idle, so the helper must not bind at boot — instead it launches
+  on demand, binds briefly during streaming, and self-exits when the last peer disconnects.
 
 ### 2.3 One-time user approval UX
 
@@ -210,28 +226,35 @@ verdict sticks to already-bound sockets — SPEC 0c). Under launchd `KeepAlive`,
 "restart" = `SMAppService` re-register / `launchctl kickstart -k`, or simply the
 next KeepAlive respawn.
 
-### 2.4 KeepAlive — solving the study's "client can't see mid-session crash"
+### 2.4 KeepAlive — crash-only respawn with idle-exit
 
 The study flags a real hazard (ptp-study §2, §3 crash semantics, §5.3): a client
 that already `find()`'d holds a **one-shot snapshot** — it `munmap`s immediately
 (`airptp.c:209`), so it will **not** notice a mid-session helper crash via the shm
 heartbeat, and will keep `sendto`-ing peer TLVs into a dead listener (silent
-no-op). Two mechanisms together close this:
+no-op). Two mechanisms together handle this:
 
-- **`KeepAlive=true`** → launchd respawns the helper immediately on crash.
-  `daemon_shm_create` does `shm_unlink` before `O_EXCL` create (ptp-study §3), so
-  a leftover `/airptp_shm` from the dead instance never blocks the restart —
-  the helper is **restart-safe with no manual cleanup**. The OS also reclaims the
-  bound 319/320 on process death, so the rebind is clean.
-- **Engine re-`find()` per session** → because a live snapshot can't detect a
-  crash, the engine must call `airptp_daemon_find()` **at the start of every
-  session** (not once at launch) and check the returned liveness `ts` against the
-  15 s stale window (`AIRPTP_STALE_SECS`, `airptp.c:198`). A stale/missing find =
-  "PTP unavailable" surfaced to the UI; the app waits for KeepAlive to bring the
-  helper back, then re-finds.
+- **`KeepAlive={SuccessfulExit: false}`** (T2, T3) → launchd respawns the helper
+  **only on crash** (non-zero exit). A **clean exit 0** (idle-exit when the peer
+  table is empty, or bind-give-up when 319/320 never became available) is left
+  down, not fought back up. `daemon_shm_create` does `shm_unlink` before `O_EXCL`
+  create (ptp-study §3), so a leftover `/airptp_shm` from the dead instance never
+  blocks the restart — the helper is **restart-safe with no manual cleanup**. The
+  OS also reclaims the bound 319/320 on process death, so the rebind is clean. The
+  exit-code contract is the bridge: every expected outcome (idle exit, bind gave up,
+  SIGTERM) returns 0; only a genuine internal failure returns non-zero.
+- **Engine re-`find()` per connect** (T4) → the engine calls
+  `airptp_daemon_find()` **at the start of every session** (not once at launch) and
+  checks the returned liveness `ts` against the 15 s stale window (`AIRPTP_STALE_SECS`,
+  `airptp.c:198`). The app also **demand-starts** the helper via a Mach service
+  connection on the click that starts the session (T2 check-in), so a lazy helper
+  has time to bind before the engine's find window opens. A stale/missing find =
+  "PTP unavailable" surfaced to the UI; the app waits for the next session start
+  (or user retry) to re-find.
 
-Net: launchd guarantees the helper is *up*; per-session re-find guarantees the
-engine *notices* if it briefly wasn't. Neither alone is sufficient.
+Net: launchd respawns on crash only (idle-exit keeps ports free for macOS's AirPlay);
+per-session demand-start and re-find guarantee the engine can find a live helper when
+a user clicks to stream.
 
 ---
 
@@ -313,26 +336,33 @@ the study found in OwnTone's own daemon (ptp-study §3). All shim work
 
 ## 5. Threading / lifecycle
 
-### 5.1 Startup order: helper before engine session
+### 5.1 Startup order: helper launched on demand at session start
 
 1. **App launch:** register the SMAppService daemon (§2.3); ensure `.status ==
-   .enabled` (else drive the approval UX). Under `RunAtLoad`+`KeepAlive` the helper
-   is already running before any session.
-2. **Helper start (root):** `bind(319/320)` → `start(is_shared=true)` → publishes
-   `/airptp_shm`, begins the master loop. `start()` returns only after the loop is
+   .enabled` (else drive the approval UX). The helper is **not running yet**
+   (no `RunAtLoad`); it will be launched on demand when a user clicks a device.
+2. **User clicks device to stream:** app calls `PTPHelperService.ensureHelperUp()` or
+   connects to the Mach service (T2 check-in) → launchd **demand-starts** the helper
+   (if not already running).
+3. **Helper start (root, on-demand):** `bind(319/320)` with retry (~10 s) → `start(is_shared=true)`
+   → publishes `/airptp_shm`, begins the master loop. `start()` returns only after the loop is
    up and the shm exists (the daemon blocks the caller on a start-result pipe —
-   ptp-study §2 lifecycle), so once launchd reports it running, `find()` will
-   succeed.
-3. **Engine session start (unprivileged):** on **each** session,
-   `airptp_daemon_find()` → snapshot clock_id/ports; send clock_id to the speaker
-   in RTSP SETUP; as each speaker's SETUP reply returns its timing-peer address,
+   ptp-study §2 lifecycle). **Failure to bind (ports busy, e.g. macOS AirPlay holding them)
+   is not fatal** (T2/4c7da45) — the helper exits cleanly (status 0) and will retry on the
+   next session start (T4).
+4. **Engine session start (unprivileged):** on **each** session, **`ptpd_daemon_probe()`**
+   (T4/1298a70) calls `airptp_daemon_find()` → snapshot clock_id/ports; send clock_id to the
+   speaker in RTSP SETUP; as each speaker's SETUP reply returns its timing-peer address,
    `airptp_peer_add()` over loopback. The helper then emits PTP to that speaker.
-4. **Session teardown:** `airptp_peer_remove()` per speaker (`airplay.c:1244`).
-   The helper keeps running (KeepAlive); its peer table self-prunes any peers the
-   engine forgot to remove after `last_seen + 15 s` (ptp-study §2).
+5. **Session teardown:** `airptp_peer_remove()` per speaker (`airplay.c:1244`).
+   The peer table drops to zero; the helper's idle-exit timer (T2) counts down ~15 s,
+   then the helper calls `airptp_end()` and exits cleanly (status 0) — launchd does not
+   respawn it (§2.4), and UDP 319/320 are released so macOS can reclaim them.
 
-The helper's lifecycle is **independent of and outlives** any single engine
-session — it is a long-lived shared clock, exactly like nqptp.
+The helper's lifecycle is **session-scoped and self-managing** — it launches when needed,
+binds the ports briefly during streaming, and releases them when idle (unlike nqptp,
+which is long-lived; this choice is what enables coexistence with macOS's AirPlay per
+§2.2).
 
 ### 5.2 What the engine does on stale / no find() data
 
@@ -476,17 +506,26 @@ only, not live-tested, until Developer-ID signing lands.
 
 ### 6.4 Verification checklist for this design
 
-- [ ] **T-PTP-PROBE passes** (root bind of 319/320 succeeds on the target macOS) —
-      **gating**, run first.
-- [ ] SMAppService daemon registers, appears in Login Items, reaches `.enabled`
-      after user approval.
-- [ ] Engine (client mode) `find()`s the helper's `/airptp_shm`, reads clock_id,
-      adds/removes a peer over loopback — validated on high ports via
-      `airptp_ports_override` with no root (CI).
-- [ ] KeepAlive respawns the helper on `kill -9`; engine's next per-session
-      `find()` recovers; UI shows "clock unavailable" during the gap.
-- [ ] Two-host harness: this Mac = helper/master, second box = nqptp/receiver;
-      a PTP-timed AP2 session to shairport plays in sync.
+**Waves 1–2 (T1–T7) BUILT+COMMITTED (2026-07-26, SHAs in PLAN-AIRPLAY-COEXISTENCE.md):**
+
+- [x] **T-PTP-PROBE equivalent** — G1 live port probe (PLAN Wave 0) confirmed root bind of 319/320 succeeds on macOS;
+      macOS releases ports ~1–3 s after default-output switch-away.
+- [x] **T1 (libairptp)** — `airptp_peer_active_count()` exposed + `localhost_msg_send()` family fix (40f49b6).
+- [x] **T2 (helper on-demand)** — Mach check-in, bind retry, idle-exit, exit-code contract (4c7da45).
+- [x] **T3 (plist)** — `RunAtLoad` removed, `KeepAlive={SuccessfulExit:false}`, `MachServices` + demand-start (e05f5a1).
+- [x] **T4 (app demand-start + per-connect probe)** — `PTPHelperService`, `ptpd_daemon_probe()`, `PTPClockProbe.swift` (1298a70).
+- [x] **T5 (default-output switch)** — `DefaultOutputSwitcher.swift` (c437b26).
+- [x] **T6 (takeover UI)** — `TakeoverStatus`, `BackendEvent.takeoverStatus`, banner (bee8ef1).
+- [x] **T7 (yield-back verification)** — `PTPYieldBackTests.swift` (281cd66).
+
+**Remaining:**
+- [ ] SMAppService daemon registers, appears in Login Items, reaches `.enabled` after user approval (ad-hoc cannot verify; Developer ID needed).
+- [ ] Engine (client mode, per-connect) finds the helper's `/airptp_shm`, reads clock_id,
+      adds/removes a peer over loopback — CI validated on high ports via `airptp_ports_override` with no root.
+- [ ] Crash-respawn: helper crashes mid-session (`kill -9`); launchd respawns on KeepAlive;
+      engine's next session peer-add detects stale shm and surfaces "clock unavailable"; recovery on retry.
+- [ ] Idle-exit: session ends (all peers removed) → helper self-exits ≤ 45 s → ports free → system AirPlay dropdown works.
+- [ ] Two-host live test (dev Mac = helper, receiver = shairport) still pending (Alec's post-commit checklist).
 
 ---
 

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AirPlayEngine
 import Foundation
 import ServiceManagement
+import XPC
 
 /// The state of the privileged PTP helper daemon — the root `SMAppService`
 /// launchd daemon that owns UDP 319/320 and the PTP master clock so AirPlay 2
@@ -107,5 +109,120 @@ public struct SMAppServicePTPHelper: PTPHelperManaging {
 
     public func openSystemSettingsLoginItems() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+}
+
+// MARK: - Connect-time activation (T4, PLAN-AIRPLAY-COEXISTENCE.md)
+
+/// Outcome of asking the on-demand PTP helper to be ready for an about-to-run
+/// connect. Declared here (not derived ad hoc by a caller) because a later
+/// task (T6, the "Taking over…" UI) consumes this same type — one shared
+/// definition, not two.
+public enum PTPHelperActivationOutcome: Equatable, Sendable {
+    /// The helper is up and its clock is readable right now — safe to
+    /// `addOutput`.
+    case ready
+    /// The user hasn't approved the helper in Login Items & Extensions (or it
+    /// isn't registered/found at all). Carries the exact status so a caller
+    /// can tell "never registered" from "waiting on the user". No Mach touch,
+    /// no wait happened — launchd will not demand-start an unapproved job, so
+    /// there was nothing to wait for.
+    case needsApproval(PTPHelperStatus)
+    /// Approved and touched, but no clock became readable before the
+    /// timeout — the bind may still be racing macOS's own AirPlay off the
+    /// ports (G1: ~1-3 s typical), or the daemon failed to come up at all.
+    case timingPortsUnavailable
+}
+
+/// Demand-starts the PTP helper for an about-to-connect session and waits,
+/// bounded, until its clock is actually readable. This is the ONE connect-time
+/// seam `NativeBackend.convergeDevice` calls, immediately before `addOutput` —
+/// never at `engine.start()`, which would be the launch-time wake the locked
+/// decision (Q1=B, PLAN-AIRPLAY-COEXISTENCE.md) forbids. A protocol so tests
+/// inject a fake with no real Mach service, launchd, or root daemon involved.
+public protocol PTPHelperActivating: Sendable {
+    /// Cheap, synchronous peek at whether the NEXT `activate(timeout:)` call
+    /// will actually wait (status already `.enabled`) or short-circuit
+    /// instantly (T6, the takeover status strip) — the exact same read
+    /// `activate` itself performs first. Exposed separately so a caller can
+    /// decide whether to show a transient "taking over" state BEFORE
+    /// starting the (possibly-blocking) call, without duplicating the
+    /// outcome logic or ever showing that state for the instant-return cases.
+    var willWaitForClock: Bool { get }
+
+    /// - Parameter timeout: total budget, after the Mach touch, to wait for
+    ///   the clock to become readable.
+    func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome
+}
+
+/// Production ``PTPHelperActivating``. Reads ``PTPHelperManaging/status``
+/// FIRST — this ordering is the point of the task, not an optimization: only
+/// when it is already `.enabled` does this touch the Mach service or wait at
+/// all, so the most common real-world failure (never approved) returns
+/// `.needsApproval` instantly instead of hanging out the full `timeout`.
+/// Reuses the existing ``PTPHelperManaging`` seam (``PermissionProviders/ptpHelper``,
+/// ``SimulatedPTPHelper``) for that read rather than inventing a parallel one.
+public struct PTPHelperActivator: PTPHelperActivating {
+    /// Mirrors ``SMAppServicePTPHelper/plistName`` minus the trailing
+    /// `.plist` — the exact string `scripts/ptp-helper.plist`'s
+    /// `MachServices` key registers (`__BUNDLE_ID__.ptphelper`) and the
+    /// helper's own `AUDIOUTER_PTP_MACH_SERVICE` check-ins on
+    /// (`AirPlayEngine/Sources/ptp-helper/main.c`).
+    public static var machServiceName: String {
+        "\(Bundle.main.bundleIdentifier ?? "com.audiouter.Audiouter").ptphelper"
+    }
+
+    private let ptpHelper: PTPHelperManaging
+    private let machServiceName: String
+    private let pollInterval: TimeInterval
+
+    public init(
+        ptpHelper: PTPHelperManaging = SMAppServicePTPHelper(),
+        machServiceName: String = PTPHelperActivator.machServiceName,
+        pollInterval: TimeInterval = 0.2
+    ) {
+        self.ptpHelper = ptpHelper
+        self.machServiceName = machServiceName
+        self.pollInterval = pollInterval
+    }
+
+    public var willWaitForClock: Bool { ptpHelper.status == .enabled }
+
+    public func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+        let status = ptpHelper.status
+        guard status == .enabled else { return .needsApproval(status) }
+
+        // Held for the whole wait below via `withExtendedLifetime` — releasing
+        // it early would let ARC invalidate the connection mid-handshake.
+        let touch = Self.touchMachService(named: machServiceName)
+
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while Date() < deadline {
+            if PTPClockProbe.isReady() { break }
+            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+        }
+        let ready = PTPClockProbe.isReady()
+        withExtendedLifetime(touch) {}
+        return ready ? .ready : .timingPortsUnavailable
+    }
+
+    /// One fire-and-forget touch of `name`'s Mach service: launchd
+    /// demand-starts the helper the moment a lookup for its `MachServices`
+    /// name occurs. `.privileged` because the service is registered by a ROOT
+    /// launchd job — macOS requires that flag for a non-root client to reach
+    /// it. The daemon's own listener accepts the connection and ignores
+    /// every message it's sent (`ptp_helper_mach_checkin`,
+    /// `AirPlayEngine/Sources/ptp-helper/main.c`) — shm + loopback UDP stay
+    /// the only real data path (`ptp-helper-design.md` §4) — so the message
+    /// sent here carries no payload; it only exists to force the lookup to
+    /// happen now rather than whenever XPC feels like it.
+    private static func touchMachService(named name: String) -> xpc_connection_t {
+        let queue = DispatchQueue(label: "com.audiouter.ptphelper.touch")
+        let connection = xpc_connection_create_mach_service(
+            name, queue, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
+        xpc_connection_set_event_handler(connection) { _ in }
+        xpc_connection_resume(connection)
+        xpc_connection_send_message(connection, xpc_dictionary_create_empty())
+        return connection
     }
 }

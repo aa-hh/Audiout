@@ -45,13 +45,14 @@
 // six files but does NOT belong here: it touches a *different* set of
 // process-globals (`libairptp`'s `airptp_event_port` / `airptp_general_port`
 // / `airptp_shm_name`, overridden via `ptp_test_ports_override()` /
-// `ptp_test_shm_name_override()` — see that file's `tearDown()`), not the
-// `shims/outputs.c` device registry this suite exists for. It is the only
-// test in its file today, so it has no sibling to collide with yet, but if a
-// second PTP-IPC test is ever added, it will need its OWN serialized parent
-// for the `libairptp` globals rather than piggybacking on this one — the two
-// registries are unrelated and serializing them together would just be
-// unnecessary lock contention.
+// `ptp_test_shm_name_override()` — see that file's `deinit`), not the
+// `shims/outputs.c` device registry this suite exists for. T2b added a
+// second PTP-IPC test (`ShimUnitTests.swift`'s `PtpdShimTests`, covering
+// `shims/ptpd.c`'s deferred-lookup contract), so per this comment's original
+// prediction, both now nest under their OWN dedicated serialized parent,
+// `SerializedLibairptpState` (`SerializedLibairptpStateSuite.swift`) —
+// still separate from this one, since the two registries remain unrelated
+// and serializing them together would just be unnecessary lock contention.
 //
 // Do NOT repeat `.serialized` on a child suite — it inherits from this
 // parent. Do NOT add a suite here that only needs its own isolated

@@ -396,6 +396,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
         popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
+        // T6 (takeover status strip, state 1's "Open Login Items…" button): the
+        // same `PTPHelperManaging` seam `registerPTPHelperIfNeeded()` already
+        // reads, reused rather than standing up a second instance.
+        popoverController.onOpenPTPHelperLoginItems = { [weak self] in
+            self?.permissionProviders.ptpHelper.openSystemSettingsLoginItems()
+        }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability (`OwnToneBackend`), so this is a no-op
@@ -1294,6 +1300,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // is an explicit follow-up. Log and return; no device model to repaint.
             log("event: \(describe(event))")
             return
+        case .takeoverStatus(let status):
+            // T6: a progressive explanation of the T5+T4 handover, alongside the
+            // connecting row it explains. Purely informational: show or clear the
+            // popover's takeover strip; no device model changed, no audio path is
+            // altered — handle it and return.
+            popoverController.setTakeoverStatus(status)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -1340,6 +1354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
         case .streamHealth(let id, let recovering):
             return "streamHealth(\(id), recovering: \(recovering))"
+        case .takeoverStatus(let status):
+            return "takeoverStatus(\(status.map { "\($0)" } ?? "nil"))"
         }
     }
 

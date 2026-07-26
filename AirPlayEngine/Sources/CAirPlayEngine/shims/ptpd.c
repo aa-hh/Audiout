@@ -59,26 +59,77 @@ hexdump(const char *msg, uint8_t *mem, size_t len)
   DHEXDUMP(E_DBG, L_AIRPLAY, mem, (int)len, msg);
 }
 
+// T2b (deferred PTP lookup): ptpd_init() no longer latches "unavailable"
+// just because the helper daemon hadn't started yet, so ptpd_hdl can still
+// be NULL the first time a call reaches here (session/slave setup, not
+// engine startup). Retry the find lazily rather than trusting the earlier
+// verdict — the helper is demand-started (spins up on the user's first
+// connect), so it may well be up by now. Once found, ptpd_hdl is cached for
+// the rest of the process (same single-assignment discipline as
+// ptpd_init()); only ptpd_deinit() clears it. If still not found, fall back
+// to the existing failure sentinel instead of dereferencing a NULL handle —
+// airptp_clock_id_get()/airptp_peer_add() read hdl->state immediately with
+// no NULL check of their own.
 uint64_t
 ptpd_clock_id_get(void)
 {
   uint64_t clock_id;
   int ret;
 
+  if (!ptpd_hdl)
+    ptpd_hdl = airptp_daemon_find();
+  if (!ptpd_hdl)
+    return (uint64_t)-1;
+
   ret = airptp_clock_id_get(&clock_id, ptpd_hdl);
   return (ret == 0) ? clock_id : (uint64_t)-1;
 }
 
+// T2b: see ptpd_clock_id_get() above — same lazy-find + NULL-guard reasoning.
 int
 ptpd_slave_add(uint32_t *slave_id, const char *addr)
 {
+  if (!ptpd_hdl)
+    ptpd_hdl = airptp_daemon_find();
+  if (!ptpd_hdl)
+    return -1;
+
   return airptp_peer_add(slave_id, addr, ptpd_hdl);
 }
 
+// T2b: NULL guard only (no lazy find — removing a slave that was never
+// added because no clock was ever found is correctly a no-op, not a reason
+// to start probing for a daemon). airptp_peer_remove() also reads
+// hdl->state immediately with no NULL check of its own.
 void
 ptpd_slave_remove(uint32_t slave_id)
 {
+  if (!ptpd_hdl)
+    return;
+
   airptp_peer_remove(slave_id, ptpd_hdl);
+}
+
+// T4 (PLAN-AIRPLAY-COEXISTENCE.md; ptp-helper-design.md §5.1/§5.2): a
+// connect-time readiness check for the app side to poll while it waits for
+// the on-demand helper it just woke over the Mach service. Deliberately its
+// OWN local handle, never the module-global ptpd_hdl: ptpd_find_or_bind()
+// would overwrite that global (and log "Using host's ptp daemon" every
+// call), which this probe must not do — it only answers "is a shared daemon
+// up right now", it does not adopt one. airptp_daemon_find() already
+// validates the version and the 15s heartbeat, so a successful find IS the
+// readiness signal; airptp_end() on a find()'d (non-daemon) handle just
+// frees the local struct, touching no shared state (see airptp_end()).
+int
+ptpd_daemon_probe(void)
+{
+  struct airptp_handle *hdl = airptp_daemon_find();
+
+  if (!hdl)
+    return -1;
+
+  airptp_end(hdl);
+  return 0;
 }
 
 // Thread: main (normal privileges in the shipped find-only path; root only
@@ -128,6 +179,19 @@ ptpd_find_or_bind(void)
 }
 
 // Thread: main (normal privileges)
+//
+// T2b (deferred PTP availability, AirPlayEngine/docs/ptp-helper-design.md
+// §1.3/§5.1-5.2): the root helper is demand-started — NOT running yet at
+// engine start, only spun up on the user's first connect — so "no daemon
+// found" here is DEFERRED, not a verdict that PTP is unavailable for the
+// life of the process. Returning 0 keeps the vendored airplay.c's
+// airplay_ptp_is_disabled latch clear (it is set only when this returns
+// < 0), so every PTP-capable device discovered afterwards still gets
+// use_ptp=1; the real lookup is retried lazily, once per process until it
+// succeeds, by ptpd_clock_id_get()/ptpd_slave_add() at actual
+// connect/session time (see those functions below). The find attempt here
+// is still made (best-effort — no cost if the daemon happens to already be
+// up), it just no longer gates the return value.
 int
 ptpd_init(uint64_t clock_id_seed)
 {
@@ -139,7 +203,7 @@ ptpd_init(uint64_t clock_id_seed)
   if (!ptpd_hdl)
     {
       ptpd_hdl = airptp_daemon_find();
-      return ptpd_hdl ? 0 : -1;
+      return 0;
     }
   else if (!airptp_create_own_service)
     return 0;

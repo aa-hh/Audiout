@@ -43,6 +43,13 @@ public struct ConnectionFailure: Equatable, Sendable {
         case authRequired     // password / pairing needed (unsupported)
         case droppedMidStream // was connected, silently dropped, recovery failed
         case timedOut         // connecting never resolved within 10 s
+        // No shared PTP clock was reachable at connect time (T4,
+        // PLAN-AIRPLAY-COEXISTENCE.md) — the on-demand helper either isn't
+        // approved yet or didn't bind in time. Hard-failed rather than left
+        // pending: a PTP-only receiver (Sonos/HomePod) accepts the session
+        // but plays silence with no clock, so "connecting" would hang forever
+        // with no audio.
+        case timingUnavailable
         case unknown
     }
 
@@ -72,6 +79,7 @@ extension ConnectionFailure {
         case .authRequired:     return "Password required"
         case .droppedMidStream: return "Connection dropped"
         case .timedOut:         return "Took too long"
+        case .timingUnavailable: return "Sync unavailable"
         case .unknown:          return "Couldn't connect"
         }
     }
@@ -91,6 +99,8 @@ extension ConnectionFailure {
             return "The speaker dropped the stream and reconnecting failed. Check the speaker, then try again."
         case .timedOut:
             return "The connection attempt didn't complete. The speaker or network may be busy — try again."
+        case .timingUnavailable:
+            return "This speaker needs the Speaker Sync helper to stay in time, and it isn't ready. Approve it in Login Items & Extensions if prompted, then try again."
         case .unknown:
             return "The connection failed for an unknown reason. Try again, or check the speaker."
         }

@@ -196,6 +196,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// wires this to open the Settings window.
     public var onOpenSettings: (() -> Void)?
 
+    /// Called when the user taps the takeover status strip's "Open Login
+    /// Items…" button (T6, state 1). The app wires this to
+    /// `PTPHelperManaging.openSystemSettingsLoginItems()` — the same seam
+    /// `SetupModel.openPTPHelperLoginItems()` already wraps for onboarding;
+    /// this is a second call site onto the identical system deep link, not a
+    /// new mechanism. `nil` (the default) means the button, if ever rendered,
+    /// taps into nothing — the app always wires this in practice.
+    public var onOpenPTPHelperLoginItems: (() -> Void)?
+
     /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
     /// (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -592,7 +601,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Test-only: whether the fallback banner is currently reflected in the panel.
     var test_localFallbackBannerText: String? { panel.test_bannerText }
 
-    // MARK: System-AirPlay guard note (Wave 3 W3-T3)
+    // MARK: System-AirPlay guard note (Wave 3 W3-T3) + takeover status strip (T6)
+    //
+    // Both conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
+    // — there is only one, never two stacked notes (PLAN-AIRPLAY-COEXISTENCE.md T6).
+    // PRECEDENCE: a takeover status, when present, outranks the double-path guard
+    // note; the double-path note reappears underneath the instant the takeover
+    // status clears. Each condition keeps its own idempotence-check state var
+    // (`systemAirPlayNoteActive` / `takeoverStatus`); `applyNoteSlot()` is the one
+    // place that resolves precedence and actually pushes to the panel, called by
+    // both setters and by the tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -606,6 +624,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `rebuild()` so a rebuild mid-condition keeps it pinned.
     private var systemAirPlayNoteActive = false
 
+    /// The takeover status strip's current state (T6), or `nil` when there's
+    /// nothing to explain. Drives the note (see PRECEDENCE above); re-applied on
+    /// every `rebuild()` so a rebuild mid-takeover keeps it pinned.
+    private var takeoverStatus: TakeoverStatus?
+
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
     /// (`AppDelegate`) directly — a whole-app condition with no home on `Device`,
@@ -614,18 +637,80 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public func setSystemAirPlayNoteActive(_ active: Bool) {
         guard active != systemAirPlayNoteActive else { return }
         systemAirPlayNoteActive = active
-        if isEffectivelyShown {
-            // Update the note in place and re-fit; not a full rebuild — the cards
-            // are unchanged, only the pinned note appears/disappears.
-            panel.setSystemAirPlayNote(active ? Self.systemAirPlayNoteText : nil)
-            panel.panelContentDidChangeHeight(animated: true)
-        }
-        // When not shown, the next `rebuildForOpen()` re-applies it from
-        // `systemAirPlayNoteActive` (see the tail of `rebuild()`).
+        applyNoteSlot()
     }
 
-    /// Test-only: whether the system-AirPlay note is currently reflected in the panel.
+    /// Show, update, or clear the takeover status strip (T6,
+    /// `BackendEvent.takeoverStatus`). Called by the host (`AppDelegate`)
+    /// directly, same shape as ``setSystemAirPlayNoteActive(_:)``. Idempotent: a
+    /// repeat of the current state (including repeated `nil`) is a no-op.
+    public func setTakeoverStatus(_ status: TakeoverStatus?) {
+        guard status != takeoverStatus else { return }
+        takeoverStatus = status
+        applyNoteSlot()
+    }
+
+    /// Resolve which note currently owns the single note slot (the PRECEDENCE
+    /// rule above) and push it to the panel. Not a full rebuild — the cards are
+    /// unchanged, only the pinned note appears/disappears/changes.
+    private func applyNoteSlot() {
+        guard isEffectivelyShown else { return }
+        let note = resolvedSystemAirPlayNote
+        panel.setSystemAirPlayNote(note.text, action: note.action)
+        panel.panelContentDidChangeHeight(animated: true)
+        // When not shown, the next `rebuildForOpen()` re-applies this from the
+        // tail of `rebuild()`.
+    }
+
+    /// What the note slot should currently show: a takeover status (T6) outranks
+    /// the double-path guard (W3-T3); neither active means no note. `action` is
+    /// non-nil only for `.needsApproval` (state 1) — the one state with an actual
+    /// remedy this button can offer.
+    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?) {
+        if let takeoverStatus {
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus))
+        }
+        if systemAirPlayNoteActive {
+            return (Self.systemAirPlayNoteText, nil)
+        }
+        return (nil, nil)
+    }
+
+    /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
+    /// plain language throughout, never "PTP"/"bind"/"ports 319/320". State 3's
+    /// copy is the plan's own exact wording; the others follow its voice.
+    static func takeoverStatusText(for status: TakeoverStatus) -> String {
+        switch status {
+        case .needsApproval:
+            return "Speaker Sync needs permission to run. Open Login Items to approve it."
+        case .helperMissing:
+            return "Speaker Sync is missing from this copy of Audiouter. Reinstall Audiouter to fix it."
+        case .takingOver:
+            return "Taking audio back from macOS…"
+        case .timedOut:
+            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
+        }
+    }
+
+    /// The strip's action button. Only state 1 (`.needsApproval`) has one: state
+    /// 2's own doc says plainly there's nothing an approval UX can do about a
+    /// missing bundle component; state 3 is transient; state 4 needs a DIFFERENT
+    /// app to yield, which no button here can cause.
+    private func takeoverStatusAction(for status: TakeoverStatus) -> SystemAirPlayNoteBannerView.Action? {
+        guard case .needsApproval = status else { return nil }
+        return SystemAirPlayNoteBannerView.Action(
+            title: "Open Login Items…",
+            accessibilityLabel: "Open Login Items to approve Speaker Sync",
+            handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+    }
+
+    /// Test-only: whichever note (double-path guard or takeover strip) currently
+    /// occupies the slot, or `nil` if neither is active.
     var test_systemAirPlayNoteText: String? { panel.test_systemAirPlayNoteText }
+    /// Test-only: whether the currently-shown note has an action button.
+    var test_systemAirPlayNoteHasActionButton: Bool { panel.test_systemAirPlayNoteHasActionButton }
+    /// Test-only: simulate a click on the note's action button, if any.
+    func test_tapSystemAirPlayNoteAction() { panel.test_tapSystemAirPlayNoteAction() }
 
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
@@ -850,10 +935,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // above dropped it with everything else, so a rebuild that happens WHILE the
         // fallback is active (e.g. a device set change) must restore it.
         panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
-        // Re-pin the system-AirPlay guard note (W3-T3) the same way — mutually
-        // exclusive with the banner above (see `setSystemAirPlayNoteActive`'s doc),
-        // but re-applied independently so either one restores correctly on its own.
-        panel.setSystemAirPlayNote(systemAirPlayNoteActive ? Self.systemAirPlayNoteText : nil)
+        // Re-pin the note slot (W3-T3 double-path guard / T6 takeover strip) the
+        // same way — resolved through the same PRECEDENCE `applyNoteSlot()` uses,
+        // so a rebuild mid-takeover (or mid-double-path) restores the right one.
+        let note = resolvedSystemAirPlayNote
+        panel.setSystemAirPlayNote(note.text, action: note.action)
     }
 
     private func orderedDevices() -> [Device] {

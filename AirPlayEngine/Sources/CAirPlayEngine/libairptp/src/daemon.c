@@ -170,6 +170,28 @@ peer_clear(struct airptp_peer *peer)
   memset(peer, 0, sizeof(struct airptp_peer));
 }
 
+// Publishes the number of peers seen within AIRPTP_STALE_SECS for
+// cross-thread reads via airptp_peer_active_count(). Daemon thread only -
+// it walks peers[]/num_peers, which the daemon thread owns. Called after
+// every peer table mutation plus on the 5 s shm heartbeat (shm_update_cb),
+// so the count also DECAYS while peers age out without any add/del - a
+// crashed engine's forgotten peers must not read as activity forever (they
+// are only physically pruned on the next peer_add, see peers_prune()).
+static void
+active_peers_publish(struct airptp_daemon *daemon)
+{
+  uint64_t now = time(NULL);
+  int count = 0;
+  int i;
+
+  for (i = 0; i < daemon->num_peers; i++) {
+    if (daemon->peers[i].last_seen + AIRPTP_STALE_SECS > now)
+      count++;
+  }
+
+  atomic_store(&daemon->active_peers_published, count);
+}
+
 static void
 peers_prune(struct airptp_daemon *daemon)
 {
@@ -193,6 +215,8 @@ peers_prune(struct airptp_daemon *daemon)
     }
 
   daemon->num_peers -= n_pruned;
+
+  active_peers_publish(daemon);
 }
 
 static void
@@ -256,6 +280,8 @@ daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
   if (!event_pending(daemon->send_sync_timer, EV_TIMEOUT, NULL))
     event_add(daemon->send_sync_timer, &daemon_send_sync_tv);
 
+  active_peers_publish(daemon);
+
   scope_id = (peer->naddr.sa.sa_family == AF_INET6) ? peer->naddr.sin6.sin6_scope_id : 0;
   airptp_logmsg("Added peer id %" PRIu32 ", address %s, scope id %u, num_peers %d", peer->id, straddr, scope_id, daemon->num_peers);
   return 0;
@@ -289,6 +315,7 @@ daemon_peer_del(struct airptp_daemon *daemon, struct airptp_peer *peer)
   }
 
   daemon->num_peers--;
+  active_peers_publish(daemon);
   airptp_logmsg("Removed peer id %" PRIu32 ", num_peers %d", peer_id, daemon->num_peers);
   return 0;
 }
@@ -367,6 +394,10 @@ shm_update_cb(int fd, short what, void *arg)
   struct airptp_daemon *daemon = arg;
 
   daemon->info->ts = time(NULL);
+
+  // Re-publish on the heartbeat so the active count decays as peers age past
+  // AIRPTP_STALE_SECS even when no peer add/del arrives to trigger it.
+  active_peers_publish(daemon);
 
   event_add(daemon->shm_update_timer, &daemon_shm_update_tv);
 }

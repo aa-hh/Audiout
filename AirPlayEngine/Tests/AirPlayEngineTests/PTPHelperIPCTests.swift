@@ -42,12 +42,14 @@
 // NOT nested under `SerializedEngineState` (migration cookbook §22): this
 // file mutates a completely different set of process-globals — libairptp's
 // `airptp_event_port` / `airptp_general_port` / `airptp_shm_name` — not
-// `shims/outputs.c`'s device registry. It is the only test in its file, so
-// nothing collides with it today; if a second PTP-IPC test is ever added,
-// give this suite its own `.serialized` rather than folding it into that
-// unrelated lock.
+// `shims/outputs.c`'s device registry. That second PTP suite has now arrived
+// (`PTPHelperLifecycleTests.swift`), so as `SerializedEngineStateSuite.swift`
+// anticipated, this file nests under the libairptp globals' OWN serialized
+// parent, `SerializedLibairptpState` (declared in that file) — not the unrelated
+// outputs-registry lock. Do NOT add `.serialized` here; it inherits.
 
 import Testing
+import Foundation
 import PTPHelperTestSupport
 
 /// High test-only ports (ptp-helper-design.md §6.2's documented CI path).
@@ -93,6 +95,8 @@ enum PortBindGate {
         return true
     }()
 }
+
+extension SerializedLibairptpState {
 
 @Suite(.enabled(
     if: PortBindGate.canBindTestPorts,
@@ -176,10 +180,39 @@ final class PTPHelperIPCTests {
         // rather than leaving the out-param untouched.
         #expect(peerID != 0, "peer_add should hand back a non-zero peer id")
 
+        // --- daemon-side active peer count (airptp_peer_active_count) ---
+        // The count is a daemon-side concept (it exists so an on-demand
+        // helper can idle-exit and release 319/320); a client (find()'d)
+        // handle has no peer table and must report -1, not 0 - "no peers"
+        // and "not a daemon" are different answers.
+        #expect(ptp_test_peer_active_count(clientHdl) == -1,
+                "active count on a client handle should be -1 (daemon-side only)")
+
+        // peer_add above is fire-and-forget loopback UDP, so the daemon
+        // registers the peer asynchronously - poll with a timeout rather
+        // than asserting immediately.
+        #expect(pollActiveCount(masterHdl, until: 1),
+                "master's active peer count should reach 1 after peer_add")
+
         // Fire-and-forget over loopback UDP (libairptp/src/ptp_msg_handle.c's
-        // *_send helpers do not wait for an ack) - nothing further to
-        // assert beyond a clean, non-crashing call, torn down explicitly so
+        // *_send helpers do not wait for an ack), torn down explicitly so
         // the master's peer table doesn't matter for test repeatability.
         ptp_test_peer_remove(peerID, clientHdl)
+
+        #expect(pollActiveCount(masterHdl, until: 0),
+                "master's active peer count should return to 0 after peer_remove")
+    }
+
+    /// Polls the daemon-side active peer count until it reaches `target`
+    /// (true) or ~2 s elapse (false). Both peer control messages are async
+    /// loopback UDP, so every count assertion needs a settle window.
+    private func pollActiveCount(_ hdl: OpaquePointer, until target: Int32) -> Bool {
+        for _ in 0..<100 {
+            if ptp_test_peer_active_count(hdl) == target { return true }
+            usleep(20_000)
+        }
+        return ptp_test_peer_active_count(hdl) == target
     }
 }
+
+} // extension SerializedLibairptpState

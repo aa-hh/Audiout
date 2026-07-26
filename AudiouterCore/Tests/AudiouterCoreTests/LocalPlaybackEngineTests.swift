@@ -121,36 +121,6 @@ private let tapFormat = TapFormat(
         #expect(!isOurs("Sonos Living Room"))
     }
 
-    /// (d) The default output changes (BT connects) → the engine re-points exactly
-    /// once; a follow-up notification whose resolved target is UNCHANGED does ZERO
-    /// rebuilds (the compare-before-rebuild loop-breaker).
-    @Test func defaultOutputChangeRepointsOnceThenZeroOnUnchanged() throws {
-        // Start with no resolvable device so the real engine boots on AVAudioEngine's
-        // own default (no fake device id is ever actually applied to hardware).
-        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
-        let engine = LocalPlaybackEngine(outputResolver: resolver)
-        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
-        defer { engine.stop() }
-        #expect(engine.test_configuredTargetDevice == nil)
-        #expect(engine.test_repointCount == 0)
-
-        // BT connects: the default output now resolves to a new device.
-        resolver.setDefaultDevice(200)
-        engine.handleDefaultOutputChange()
-        engine.test_flushGraphQueue()
-        #expect(engine.test_repointCount == 1, "a changed default output must repoint exactly once")
-        #expect(engine.test_configuredTargetDevice == 200)
-
-        // A duplicate/spurious notification resolving to the SAME target: no work.
-        // (Fired twice to be sure the guard is stable, not one-shot.)
-        engine.handleDefaultOutputChange()
-        engine.handleDefaultOutputChange()
-        engine.test_flushGraphQueue()
-        #expect(engine.test_repointCount == 1,
-                "an unchanged resolved target must do zero rebuilds (compare-before-rebuild)")
-        #expect(engine.test_configuredTargetDevice == 200)
-    }
-
     /// Every test that drives a real `AVAudioEngine` against the Mac's actual
     /// output. The trait IS the gate (`AudioHardwareTestGate`) — do not add
     /// per-test `.enabled(if:)`, and do not move a hardware test out of this
@@ -339,6 +309,43 @@ private let tapFormat = TapFormat(
             engine.receive(buffer: constantBuffer(amplitude: 0.5), for: bundleID)
             #expect(recorder.count == 1,
                     "receive() after a config change must still fire — the engine rebuilt, it did not die")
+        }
+
+        // MARK: - Default output re-pointing (d)
+
+        /// The default output changes (BT connects) → the engine re-points exactly
+        /// once; a follow-up notification whose resolved target is UNCHANGED does
+        /// ZERO rebuilds (the compare-before-rebuild loop-breaker). Moved into
+        /// `RealHardware`: `addApp` builds a real `AVAudioEngine` here exactly like
+        /// every other test in this nested suite, even though the *resolved
+        /// target* itself is driven by a fake resolver — the gate is about real
+        /// Core Audio engine construction, not about whether the target id is
+        /// real hardware.
+        @Test func defaultOutputChangeRepointsOnceThenZeroOnUnchanged() throws {
+            // Start with no resolvable device so the real engine boots on AVAudioEngine's
+            // own default (no fake device id is ever actually applied to hardware).
+            let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+            let engine = LocalPlaybackEngine(outputResolver: resolver)
+            try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+            defer { engine.stop() }
+            #expect(engine.test_configuredTargetDevice == nil)
+            #expect(engine.test_repointCount == 0)
+
+            // BT connects: the default output now resolves to a new device.
+            resolver.setDefaultDevice(200)
+            engine.handleDefaultOutputChange()
+            engine.test_flushGraphQueue()
+            #expect(engine.test_repointCount == 1, "a changed default output must repoint exactly once")
+            #expect(engine.test_configuredTargetDevice == 200)
+
+            // A duplicate/spurious notification resolving to the SAME target: no work.
+            // (Fired twice to be sure the guard is stable, not one-shot.)
+            engine.handleDefaultOutputChange()
+            engine.handleDefaultOutputChange()
+            engine.test_flushGraphQueue()
+            #expect(engine.test_repointCount == 1,
+                    "an unchanged resolved target must do zero rebuilds (compare-before-rebuild)")
+            #expect(engine.test_configuredTargetDevice == 200)
         }
     }
 }

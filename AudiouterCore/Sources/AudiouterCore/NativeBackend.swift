@@ -328,6 +328,44 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// coalesces rapid flips; this is just the last whole-set request.
     private var expectedSelected: Set<String> = []
 
+    // MARK: Master gain stages (Main Out × Group — all on `stateQueue`)
+    //
+    // Main Out is a master GAIN, not a value that rewrites per-device volumes: what
+    // reaches a device is `Main × Group × Device`, multiplied on the UI's 0–100
+    // scale BEFORE the dB/curve mapping. The product is formed in exactly one place
+    // (`engineVolume(forID:uiVolume:)`) and is NEVER STORED — `known[id].volume`
+    // stays the user's own setting for that device, forever. Storing the effective
+    // value is the corruption this whole design exists to avoid: it would ratchet
+    // (each re-push re-attenuating an already-attenuated level) and it would
+    // silently overwrite what the user dialled in. Both stages are 100 (identity)
+    // until something sets them, so a build that never calls `setMasterGain` behaves
+    // exactly as before.
+
+    /// Main Out's master gain, 0–100.
+    private var mainOutGain = 100
+
+    /// The active group's master gain, 0–100 — 100 whenever no group is active,
+    /// which makes it the identity.
+    private var groupGain = 100
+
+    /// The last system output volume this backend has SEEN: seeded from the HAL in
+    /// `start()` (a read, never a write) and refreshed on every
+    /// `systemVolume.onExternalChange`. Two read-only jobs:
+    ///
+    /// - it publishes the Mac's current level through ``systemOutputVolume`` so Main
+    ///   can adopt it at launch, and
+    /// - it is the EMIT BASIS for `.systemVolumeChanged`. That comparison used to be
+    ///   against `known[localDeviceID].volume`, which no longer tracks the system at
+    ///   all — so the old basis would not only be meaningless, it would SWALLOW the
+    ///   event whenever the Mac's own fader happened to equal the new system level.
+    ///
+    /// **Not an echo memo.** Suppressing echoes of our own writes is
+    /// ``SystemOutputVolume/lastKnownVolume``'s job and stays there (one suppression
+    /// memo, at the HAL helper); by the time `onExternalChange` fires, an echo has
+    /// already been filtered out. This memo only decides whether a change that IS
+    /// external is news.
+    private var lastSeenSystemVolume: Int?
+
     // MARK: Capture gate (BUG: passthrough ran the tap and muted the Mac)
     //
     // The tap is `.mutedWhenTapped` (NativeCaptureCoordinator.swift:122) — it
@@ -1057,6 +1095,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { ptpClockAvailable }
     }
 
+    /// The Mac's current system output volume, or `nil` when the default output has
+    /// no readable volume control. Served from ``lastSeenSystemVolume`` (seeded by
+    /// `start()`'s HAL read, kept fresh by `onExternalChange`) rather than a fresh
+    /// blocking HAL read, so a main-thread caller never waits on coreaudiod.
+    public var systemOutputVolume: Int? {
+        stateQueue.sync { lastSeenSystemVolume }
+    }
+
     public func makeEventStream() -> AsyncStream<BackendEvent> {
         AsyncStream { continuation in
             let key = UUID()
@@ -1082,11 +1128,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `systemVolume.start()` (SystemOutputVolume's contract), which is what lets
         // them run here, ahead of the queue hop.
         let localName = Self.currentOutputDeviceName()
+        // A READ, never a write: this publishes Main's launch value through
+        // `systemOutputVolume` (Main ADOPTS the Mac's actual level at launch, with
+        // the persisted `AppSettings.mainOutVolume` as the fallback for the `nil`
+        // case — an HDMI/aggregate output with no settable volume). Opening the app
+        // must not move the user's volume, so nothing is written back here.
         let localVolume = systemVolume.currentVolume()
         let localMuted = systemVolume.currentMuted()
         stateQueue.async {
             guard !self.started else { return }
             self.started = true
+            self.lastSeenSystemVolume = localVolume
             // Surface the Mac's OWN current output device immediately (BUG B), so
             // the popover has a "Current Device" row and GroupController can seed
             // the local-passthrough default the moment `start()` runs — before any
@@ -1094,7 +1146,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // It is NEVER fed to the engine or `addOutput`-ed: it's the local
             // output, not an AirPlay receiver (guarded everywhere by
             // `isLocalDevice`, and it has no `outputIDs` entry to add).
-            self.surfaceLocalDevice(name: localName, volume: localVolume, muted: localMuted)
+            self.surfaceLocalDevice(name: localName, muted: localMuted)
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. Every
@@ -1127,12 +1179,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
             self.stateQueue.async {
-                let previousVolume = self.known[Self.localDeviceID]?.volume
+                let previousVolume = self.lastSeenSystemVolume
+                // nil = that control is unreadable on this device; leave the last
+                // known value rather than fabricating a 0/false.
+                if let volume { self.lastSeenSystemVolume = volume }
                 self.applyLocal(Self.localDeviceID) { device in
                     device.name = name
-                    // nil = that control is unreadable on this device; leave the last
-                    // known value rather than fabricating a 0/false.
-                    if let volume { device.volume = volume }
+                    // `device.volume` is deliberately NOT synced from the system
+                    // level any more: the local row is the Mac's OWN fader (a trim
+                    // under Main), and Main Out is what owns the Mac's hardware
+                    // level. Mute IS still real hardware mute, so it keeps syncing.
                     if let muted { device.isMuted = muted }
                 }
 
@@ -1157,6 +1213,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 //     - `volume != previousVolume` — `onExternalChange` also fires for
                 //       a mute-only change. Mirroring an unmoved volume would be a
                 //       no-op write per keypress-that-wasn't; only a real move is news.
+                //       The basis is `lastSeenSystemVolume` (the last SYSTEM level we
+                //       saw), NOT the local row's `Device.volume`: that row no longer
+                //       tracks the system, so comparing against it would swallow a
+                //       genuine change whenever the Mac's own fader happened to sit
+                //       at the new system level, and Main would miss it.
                 //     Echoes of our OWN writes never arrive here at all —
                 //     `SystemOutputVolume` suppresses those by comparing a fresh read
                 //     against its last-known state, which is why no flag is needed to
@@ -1479,14 +1540,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let clamped = volume.clampedToVolume
         // The local row is not an engine output — it has no `outputIDs` entry, so the
         // guard below would drop this write on the floor (the reason its slider did
-        // nothing). Drive the Mac's own default output device instead.
+        // nothing). It needs its own branch.
         if id == Self.localDeviceID {
-            // The model update is `stateQueue`'s (it owns `known`); the Core Audio
-            // write is NOT — it must never run on the queue every device update is
-            // behind. Both orders survive a slider drag: same-thread callers enqueue
-            // to `stateQueue` and to the helper's queue in FIFO order.
-            stateQueue.async { self.applyLocal(id) { $0.volume = clamped } }
-            systemVolume.setVolume(clamped)
+            // This row is the Mac's OWN fader now, not the system volume: writing
+            // hardware here belongs solely to the Main path
+            // (`setMasterGain(mirrorToSystemVolume: true)`). What this level DOES
+            // drive is the delayed local sink's gain, so trimming the Mac inside a
+            // "play everywhere" set levels only the Mac.
+            stateQueue.async {
+                self.applyLocal(id) { $0.volume = clamped }
+                self.pushSyncedLocalGain()
+            }
             return
         }
         stateQueue.async {
@@ -1536,6 +1600,73 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.restoreEffectiveVolume(id, outputID: outputID)
             }
         }
+    }
+
+    public func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {
+        let main = mainOut.clampedToVolume
+        let newGroup = group.clampedToVolume
+        stateQueue.async {
+            // When we mirror to hardware, the system volume is about to become `main`,
+            // so record it as the last system level we've seen — BEFORE the
+            // gain-changed guard below, which would otherwise skip this on a
+            // same-value re-push. `SystemOutputVolume` suppresses the echo of that
+            // write, so `onExternalChange` never delivers it to update the memo for
+            // us; without this, a later genuine external change back to the
+            // pre-drag value compares equal to a stale memo and is silently dropped
+            // (Main desyncs from the system). Owned by `stateQueue`, like the memo.
+            //
+            // razor: KNOWN EDGE — a readable-but-UNWRITABLE default output (some USB
+            // DACs) no-ops the write below, so the system is NOT at `main`, yet this
+            // memo says it is; a later external change *to `main`* would then be
+            // dropped. Can't gate on the result — `setVolume` is fire-and-forget async
+            // (SystemOutputVolume.swift:369). This line fixes the COMMON settable case
+            // (the one the original bug bit); the writability-aware sync for unsettable
+            // outputs belongs to the follow-up (PLAN-VOLUME-KEY-INTERCEPTION §0b).
+            if mirrorToSystemVolume { self.lastSeenSystemVolume = main }
+            guard main != self.mainOutGain || newGroup != self.groupGain else { return }
+            let groupChanged = newGroup != self.groupGain
+            self.mainOutGain = main
+            self.groupGain = newGroup
+
+            // RE-PUSH, never re-store. `pushVolume` puts the freshly multiplied
+            // value on the wire and leaves `known[id].volume` — the user's own
+            // setting — untouched. `applyLocal` would overwrite each device's stored
+            // level with the effective value (the exact corruption this design
+            // exists to avoid) and emit a spurious `deviceUpdated`.
+            //
+            // No new debounce for a fader drag: `pushVolume`'s existing
+            // `volumeInFlight`/`volumePending` coalescing already collapses a burst
+            // to at most one extra call per output, latest-wins.
+            for (id, outputID) in self.outputIDs where !self.muted.contains(id) {
+                self.pushVolume(outputID, engineValue: self.engineVolume(
+                    forID: id, uiVolume: self.known[id]?.volume ?? 0))
+            }
+            // The Mac's own path carries `group × device` only (Main arrives there
+            // through the system volume), so only a group change moves it.
+            if groupChanged { self.pushSyncedLocalGain() }
+        }
+        // The hardware system-volume write is now the Main path's ALONE
+        // (`setVolume`'s local branch no longer does it), and only when the caller
+        // asked to mirror. Off `stateQueue`, like every other `systemVolume` write.
+        if mirrorToSystemVolume { systemVolume.setVolume(main) }
+    }
+
+    /// Push `group × the Mac's own fader` to the delayed local sink (W1's
+    /// ``SyncedLocalSink/setGain(_:)``). **Main is deliberately EXCLUDED**: the Mac's
+    /// own system volume already applies Main to that output, so including it here
+    /// would square the master on the Mac path. Reads state on `stateQueue`, then
+    /// hops to `captureControlQueue`, which owns `syncedLocalSink`. A no-op before
+    /// the sink is built — `applySyncedLocalSinkTransition` applies the current gain
+    /// as it starts, so a trim made while "play everywhere" was off is not lost.
+    private func pushSyncedLocalGain() {   // on stateQueue
+        let gain = syncedLocalGain
+        captureControlQueue.async { [weak self] in self?.syncedLocalSink?.setGain(gain) }
+    }
+
+    /// `group × the Mac's own fader` as a 0.0…1.0 `Float`. On `stateQueue`.
+    private var syncedLocalGain: Float {   // on stateQueue
+        let level = known[Self.localDeviceID]?.volume ?? 100
+        return Float(Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
     }
 
     /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
@@ -1731,7 +1862,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that mechanism is entirely independent of this sink's own on/off state,
     /// so disabling "play everywhere" while AirPlay devices stay selected
     /// correctly leaves the raw system mix muted.
-    private func applySyncedLocalSinkTransition(enable: Bool) {
+    ///
+    /// `gain` is the `group × Mac's-own-fader` product captured in the SAME
+    /// `stateQueue` critical section that decided this transition — applied here so a
+    /// trim made while "play everywhere" was off (or before the sink was ever built)
+    /// is in force from the first rendered buffer instead of starting at unity.
+    private func applySyncedLocalSinkTransition(enable: Bool, gain: Float) {
         if enable {
             let sink: SyncedLocalSinkControlling
             if let existing = syncedLocalSink {
@@ -1742,6 +1878,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             } else {
                 return   // no factory wired (tests / UI-only smoke) — inert
             }
+            sink.setGain(gain)
             attachSyncedLocalSink(sink)
             try? sink.start()
             sink.startObservingLifecycleEvents()
@@ -1778,6 +1915,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let coalesced = self.syncedLocalCoalescedCount
         self.syncedLocalCoalescedCount = 0
         let desired = self.syncedLocalSinkEnabled
+        let gain = self.syncedLocalGain
 
         // Net no-op: a burst that collapsed back to the currently-applied state
         // (e.g. on→off→on while already on, or on→off while already off) never
@@ -1800,7 +1938,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // capture-gate start/stop for the same tap.
         self.captureControlQueue.async { [weak self] in
             guard let self else { return }
-            self.applySyncedLocalSinkTransition(enable: desired)
+            self.applySyncedLocalSinkTransition(enable: desired, gain: gain)
             if churned {
                 // Rapid toggling drove many tap rebuilds with NO receiver-session
                 // reset (an `.exclusionChange` rebuild deliberately skips it),
@@ -3516,7 +3654,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Add the current local output device to the model and emit `deviceAdded`.
     /// On `stateQueue`. Idempotent-ish: only appended once per `start()` (cleared
     /// on `stop()` with everything else).
-    private func surfaceLocalDevice(name: String, volume: Int?, muted: Bool?) {
+    private func surfaceLocalDevice(name: String, muted: Bool?) {
         let id = Self.localDeviceID
         guard known[id] == nil else { return }
         let device = Device(
@@ -3525,14 +3663,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             kind: .localMac,
             isAvailable: true,
             supportsAirPlay2: false,       // mirrors MockBackend's local fixture
-            // Seed from the HARDWARE, not a fixture: the row must open showing where
-            // the Mac's volume actually is, or the first slider touch would jump it.
-            // The reads happen in `start()` BEFORE the `stateQueue` hop (B3) — off the
-            // queue so a blocking HAL read can't stall the main-thread `devices`
-            // getter — and are passed in here. The fallbacks cover outputs with no
-            // readable volume/mute control (many aggregate + digital/HDMI devices),
-            // where `nil` means "unreadable".
-            volume: volume ?? 65,
+            // UNITY, deliberately NOT the HAL volume read. This row now means "the
+            // Mac's own fader" — a trim under Main Out, which is what owns the Mac's
+            // hardware level. 100 is the only sensible default: it makes
+            // `Main × 100% == Main`, so a user who never trims the Mac hears exactly
+            // what Main says. (Main itself adopts the hardware level at launch; see
+            // `systemOutputVolume`.)
+            volume: 100,
+            // Mute still comes from the HARDWARE — the local row's mute IS real
+            // hardware mute. The read happens in `start()` BEFORE the `stateQueue`
+            // hop (B3), off the queue so a blocking HAL read can't stall the
+            // main-thread `devices` getter, and is passed in here; `nil` means the
+            // output has no readable mute control (many aggregate/digital devices).
             isMuted: muted ?? false,
             isLocalDevice: true
         )
@@ -4603,21 +4745,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// stale level. So: move the slider AND push the level to the engine.
     ///
     /// The same-value guard is what keeps this loop-safe: a receiver reflecting
-    /// our own write back arrives equal to `known` and dies here, and the
-    /// −30…0 dB ↔ 0…100 map is linear both ways so a round-trip is
-    /// rounding-stable. Swipe bursts are absorbed by ``pushVolume``'s
-    /// in-flight coalescing (latest wins), never dropped.
+    /// our own write back arrives equal to the level we last put ON THE WIRE and
+    /// dies here, and the −30…0 dB ↔ 0…100 map is linear both ways so a round-trip
+    /// is rounding-stable. Swipe bursts are absorbed by ``pushVolume``'s in-flight
+    /// coalescing (latest wins), never dropped.
+    ///
+    /// ## `level` is a WIRE level; `Device.volume` is not (do not conflate them)
+    /// The two are the same number only while the master gain is 100. The moment any
+    /// gain exists, `level` carries `stored × gain` — so:
+    ///
+    /// - the loop-breaking guard compares against ``effectiveVolume(of:)``, not the
+    ///   stored level. Comparing a wire value against a stored value would mistake
+    ///   our OWN reflected write for a knob turn, overwrite the user's setting with
+    ///   the attenuated value, and then re-push THAT through the gain again — a
+    ///   ratchet toward silence that also destroys what the user dialled in.
+    /// - a genuine change is stored with the gain INVERTED, so `known[id].volume`
+    ///   stays the user's own setting for that device, exactly as it does on every
+    ///   other path.
+    ///
+    /// A gain of 0 is ignored outright: every device is being sent silence, so a
+    /// reported level says nothing about what the user wants, and the inverse is
+    /// undefined there anyway.
     private func setSpeakerVolume(id: String, outputID: OutputID, level: Double) {   // on stateQueue
-        let pct = Int((level * 100).rounded()).clampedToVolume
+        let gain = masterGainFraction
+        guard gain > 0 else { return }
+        let wirePct = Int((level * 100).rounded()).clampedToVolume
+        let stored = Int((Double(wirePct) / gain).rounded()).clampedToVolume
         if muted.contains(id) {
             // Don't un-mute from a knob turn; record the intended level so a later
             // unmute restores what the user dialed in on the speaker.
-            stashedVolume[id] = pct
+            stashedVolume[id] = stored
             return
         }
-        guard pct != known[id]?.volume else { return }
-        applyLocal(id) { $0.volume = pct }
-        pushVolume(outputID, engineValue: Self.engineVolume(pct))
+        guard wirePct != effectiveVolume(of: id) else { return }
+        applyLocal(id) { $0.volume = stored }
+        // Per-device (AP1 curve or AP2 linear) rather than the AP2-only static map —
+        // a pre-existing inconsistency, since every other push here is per-device.
+        pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: stored))
     }
 
     /// A relative `volumeup`/`volumedown` DACP verb from the speaker
@@ -4636,9 +4800,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let current = self.muted.contains(id)
                 ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
                 : (self.known[id]?.volume ?? 0)
-            let target = current + direction.signum() * Self.speakerVolumeStep
+            let target = (current + direction.signum() * Self.speakerVolumeStep).clampedToVolume
+            // Step in the STORED domain (so consecutive presses move the user's own
+            // level by a fixed amount, as before) but hand `setSpeakerVolume` a WIRE
+            // level, which is its contract — it inverts the gain back out.
             self.setSpeakerVolume(id: id, outputID: match.value,
-                                  level: Double(target.clampedToVolume) / 100.0)
+                                  level: Double(target) * self.masterGainFraction / 100.0)
         }
     }
 
@@ -4747,7 +4914,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// 0–100 percent → −30…0 dB internally, per `AirPlayEngine.setVolume`). `.level`
     /// / perceptual-curve fidelity is a gated real-hardware A/B (D7), not headless.
     static func engineVolume(_ uiVolume: Int) -> Double {
-        Double(uiVolume.clampedToVolume) / 100.0
+        engineVolume(fraction: Double(uiVolume.clampedToVolume) / 100.0)
+    }
+
+    /// The same AP2 map taking an already-normalized 0.0…1.0 fraction (the identity,
+    /// clamped). Exists so the master gain can be folded in without round-tripping
+    /// through an intermediate integer — see ``engineVolume(forID:uiVolume:)``.
+    static func engineVolume(fraction: Double) -> Double {
+        min(max(fraction, 0.0), 1.0)
     }
 
     /// Perceptual floor for AirPlay-1 (RAOP) receivers, in dB of the AirPlay
@@ -4767,19 +4941,71 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// slider audible on wide-mixer RAOP receivers. AP1 only; AP2/Sonos stays on
     /// the by-ear-verified linear ``engineVolume(_:)``.
     static func engineVolumeAP1(_ uiVolume: Int) -> Double {
-        let x = Double(uiVolume.clampedToVolume) / 100.0
+        engineVolumeAP1(fraction: Double(uiVolume.clampedToVolume) / 100.0)
+    }
+
+    /// The AP1 curve taking an already-normalized 0.0…1.0 fraction. The gain-folding
+    /// counterpart of ``engineVolume(fraction:)``.
+    static func engineVolumeAP1(fraction: Double) -> Double {
+        let x = min(max(fraction, 0.0), 1.0)
         let shaped = pow(x, 0.6)                        // mild perceptual taper
         let dB = airPlay1MinVolumeDB * (1.0 - shaped)  // x=1 → 0 dB, x=0 → MIN_DB
         let pct = (dB + 30.0) / 0.3                     // invert the C map → device->volume pct
         return max(0.0, min(1.0, pct / 100.0))
     }
 
-    /// Pick the AP1 perceptual curve or the AP2 linear map by device. MUST be
-    /// called on `stateQueue` (reads `known`). Unknown id falls back to linear.
+    /// Pick the AP1 perceptual curve or the AP2 linear map by device, **and fold in
+    /// the master gain** — this is the ONE place `Main × Group × Device` is formed.
+    /// MUST be called on `stateQueue` (reads `known` plus both gain stages). Unknown
+    /// id falls back to linear.
+    ///
+    /// Every real level push routes through here (`setVolume`, `applyStartBuffer`'s
+    /// re-push, `restoreEffectiveVolume`, `connectVolumeSeed`, `setSpeakerVolume`,
+    /// `setMasterGain`'s re-push), which is why the multiply belongs here and nowhere
+    /// else — and why the effective value never needs to be stored to exist.
+    ///
+    /// Two deliberate properties:
+    /// - **Double domain throughout.** The product is built as
+    ///   `uiVolume/100 × main/100 × group/100` with no intermediate integer, so
+    ///   nothing compounds rounding across the three stages.
+    /// - **Before the curve, not after.** The gain scales the UI-domain fraction that
+    ///   is then handed to either map, so "Main at 40" means 40% of the fader's travel
+    ///   on AP1 and AP2 alike. Applying it after the AP1 curve would instead attenuate
+    ///   an already-compressed dB value, and the same Main setting would mean two
+    ///   different things on the two protocols.
     private func engineVolume(forID id: String, uiVolume: Int) -> Double {
-        (known[id]?.supportsAirPlay2 ?? true)
-            ? Self.engineVolume(uiVolume)
-            : Self.engineVolumeAP1(uiVolume)
+        let fraction = Double(uiVolume.clampedToVolume) / 100.0 * masterGainFraction
+        let isAirPlay2 = known[id]?.supportsAirPlay2 ?? true
+        // ZERO MEANS SILENT, from whichever stage produced it — Main, the group, or
+        // the device's own fader. Without this an AP1 receiver floors at
+        // `airPlay1MinVolumeDB` (−12 dB), which is plainly audible: pulling Main to
+        // 0 would duck the room but not silence it. Reuses the true-mute sentinel
+        // the mute path already sends (`setMuted`, ~1548) so "muted" and "turned all
+        // the way down" reach an AP1 receiver as the same −144 dB, instead of
+        // disagreeing by 12 dB.
+        //
+        // Deliberately EXACT zero, not an epsilon: the inputs are integer percents,
+        // so `0/100` is exactly 0.0 and any audible-but-tiny value must still take
+        // the curve. And deliberately only the zero case — whether −12 dB is the
+        // right floor for the AUDIBLE range is a by-ear question against real
+        // hardware (see ``airPlay1MinVolumeDB``), untouched here.
+        if fraction == 0 { return isAirPlay2 ? Self.engineVolume(fraction: 0) : -1.0 }
+        return isAirPlay2
+            ? Self.engineVolume(fraction: fraction)
+            : Self.engineVolumeAP1(fraction: fraction)
+    }
+
+    /// `Main × Group` as a 0.0…1.0 fraction. On `stateQueue`.
+    private var masterGainFraction: Double {   // on stateQueue
+        Double(mainOutGain) / 100.0 * Double(groupGain) / 100.0
+    }
+
+    /// The wire level currently in force for `id`: the user's stored level scaled by
+    /// the master gain, in the UI's 0–100 domain. COMPUTED, never stored — it exists
+    /// only to be compared against a level a receiver reports back to us (see
+    /// ``setSpeakerVolume(id:outputID:level:)``). On `stateQueue`.
+    private func effectiveVolume(of id: String) -> Int {   // on stateQueue
+        Int((Double(known[id]?.volume ?? 0) * masterGainFraction).rounded()).clampedToVolume
     }
 
     /// Ids with a `setVolume` op currently in flight against the engine. Guards
@@ -4971,8 +5197,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
+            // Via `engineVolume(forID:)` rather than the static AP2-only map, so a
+            // muted AP1 receiver that drops and reconnects comes back TRULY silent
+            // (−144 dB) instead of at the curve's −30 dB floor — quietly audible,
+            // which is not what "muted" means. `setMuted` already sends the sentinel
+            // on this device; this path had been missing it.
             stashedVolume[id] = seed
-            pushVolume(outputID, engineValue: Self.engineVolume(0))
+            pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: 0))
         } else {
             pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: seed))
         }
@@ -5562,6 +5793,17 @@ public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
     func stop()
     func startObservingLifecycleEvents()
     func stopObservingLifecycleEvents()
+
+    /// Level this sink's output by `group × the Mac's own fader` (W1). Main is
+    /// deliberately excluded — see ``NativeBackend``'s `pushSyncedLocalGain`.
+    func setGain(_ gain: Float)
+}
+
+extension SyncedLocalSinkControlling {
+    /// Default no-op so a spy that only exercises the enable/disable lifecycle
+    /// compiles unchanged; ``SyncedLocalSink`` provides the real one. (Same posture
+    /// as ``CaptureControlling``'s defaults above.)
+    public func setGain(_ gain: Float) {}
 }
 
 extension SyncedLocalSink: SyncedLocalSinkControlling {}

@@ -44,11 +44,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never `device.isSelected`. Redirect targets stay excluded from
   `selectedDeviceIDs`/`mainOutMemberIDs` so a redirect can't move the Main Out
   master or pollute group identity — group matching keys off `mainOutMemberIDs`,
-  never the live output set. The volume-key mirror (`mirrorMemberIDs`) follows
-  the same rule: it drives Main Out only, never a per-app redirect target — a
-  redirect no longer opens its session through the whole-system output set (see
-  below), so there's nothing left for the volume keys to unstick there, and each
-  redirected app already has its own independent volume control.
+  never the live output set. The volume keys drive Main Out and nothing else:
+  Main is a stored master GAIN (`Main × Group × Device`, formed once at the write
+  boundary in `NativeBackend.engineVolume(forID:uiVolume:)` and never stored), so
+  a key press moves one number and every device follows. Per-app redirect targets
+  are exempt by design — each redirected app owns its volume.
+  `applyExternalSystemVolume(_:)` is the read-back arm and writes no hardware;
+  the only hardware write is `setMasterGain`'s `mirrorToSystemVolume` on the
+  user-drag arm. One direction writes, the other never does — that, not a
+  membership guard, is what makes the loop impossible.
 - **A redirected app streams to its target device via the per-app capture path,
   NOT the whole-system output set (T7).** `GroupController.applyRouting` no
   longer unions app-route targets into `backend.setOutputSet` — that union was
@@ -114,15 +118,18 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   into the capture. If no safe default exists, it falls back to built-in speakers.
   Don't hardcode built-in (wrong when Bluetooth is selected), but don't blindly
   follow any default (creates feedback loops).
-- **Every real (re)connect must reseed the engine volume from the Mac's current
-  system level** (0% when unreadable): the engine's volume field is
-  zero-initialized and 0 maps to ≈ −30 dB (silent), so a connect that pushes no
-  volume streams INAUDIBLY until the first slider touch — the −30 dB trap. The one
-  exception is `applyStartBuffer`'s internal teardown/re-add (a buffer-size change,
-  *not* a reconnect), which preserves the in-session level instead. That is why the
-  seed is gated on `bufferReAdding`, not fired unconditionally in the shared add
-  path — remove the gate and a plain buffer change resets the user's level to the
-  system volume. The seed (`connectVolumeSeed`) is reachable from TWO independent
+- **Every real (re)connect must reseed the engine volume** from
+  `connectVolumeProvider()` (an `AppSettings.connectVolume` read, clamped to
+  min/max — NOT the Mac's system level, which is what this said before): the
+  engine's volume field is zero-initialized and 0 maps to ≈ −30 dB (silent), so a
+  connect that pushes no volume streams INAUDIBLY until the first slider touch —
+  the −30 dB trap. The clamp keeps the seed audible on its own; note that Main is
+  a separate stage, so a seed of 35 with Main at 0 is still silent, correctly.
+  The one exception is `applyStartBuffer`'s internal teardown/re-add (a
+  buffer-size change, *not* a reconnect), which preserves the in-session level
+  instead. That is why the seed is gated on `bufferReAdding`, not fired
+  unconditionally in the shared add path — remove the gate and a plain buffer
+  change resets the user's level. The seed (`connectVolumeSeed`) is reachable from TWO independent
   add-success sites — `convergeDevice`'s post-`addOutput` write (ordinary
   user-initiated connects) and `applyEngineState`'s `.connected`/`.streaming`
   branch (out-of-band auto-recovery reconnects that never go through

@@ -21,17 +21,22 @@ import AirPlayEngine
     private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _calls: [String] = []
+        private var _gains: [Float] = []
         private(set) var enqueueCount = 0
 
         func start() throws { lock.withLock { _calls.append("start") } }
         func stop() { lock.withLock { _calls.append("stop") } }
         func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
         func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
+        // Recorded in `_gains` only, deliberately NOT in `_calls`: the lifecycle
+        // call-order assertions (start/observe/stop) must not see gain pushes.
+        func setGain(_ gain: Float) { lock.withLock { _gains.append(gain) } }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
             lock.withLock { enqueueCount += 1 }
         }
 
         var calls: [String] { lock.withLock { _calls } }
+        var gains: [Float] { lock.withLock { _gains } }
     }
 
     /// A minimal no-op `EngineControlling` — `setOutputSet` with ids that were
@@ -133,6 +138,45 @@ import AirPlayEngine
         #expect(sink.calls == ["start", "startObserving"],
                 "enabling must start the sink and begin lifecycle observation, in order")
         _ = macSelected   // silence unused-var warning if the compiler flags it
+    }
+
+    /// The Mac's sink gain carries the GROUP stage but NOT Main — Main already
+    /// reaches the Mac through its system volume, so folding it in here would
+    /// square the master. The review found this caller path (`syncedLocalGain` →
+    /// `sink.setGain`) had no test at all; only the sink's `setGain` was tested in
+    /// isolation. With the Mac's own fader at its default 100, the sink gain is just
+    /// `group/100`.
+    @Test func syncedLocalSinkGainCarriesGroupButExcludesMain() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])   // Mac + AirPlay ⇒ sink armed
+        waitFor { !sink.gains.isEmpty }
+
+        // A GROUP change moves the sink gain: group 50 × Mac 100% = 0.50.
+        backend.setMasterGain(mainOut: 100, group: 50, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false,
+                "the group stage multiplies into the Mac's sink gain (group 50 → 0.50)")
+
+        // A MAIN-only change doesn't re-push the sink gain (only `groupChanged` does).
+        // NOTE: count-unchanged alone would hold even if Main WERE in the formula —
+        // it only proves the short-circuit. The real exclusion proof is the next step,
+        // where the gain lands at group-only (0.80) with Main pinned at 20.
+        let gainCountBeforeMainChange = sink.gains.count
+        backend.setMasterGain(mainOut: 20, group: 50, mirrorToSystemVolume: false)
+        waitFor { true }
+        #expect(sink.gains.count == gainCountBeforeMainChange,
+                "a Main-only change does not re-push the Mac's sink gain")
+        #expect(sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false,
+                "the sink gain is still 0.50, unchanged by the Main move")
+
+        // THE EXCLUSION PROOF: group 80 with Main STILL at 20. If Main were in the
+        // formula the gain would be 0.20×0.80 = 0.16; group-only it is 0.80.
+        backend.setMasterGain(mainOut: 20, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false,
+                "group 80 with Main pinned at 20 → 0.80, not 0.16 — Main is not in the sink gain")
     }
 
     /// Mac + AirPlay → AirPlay-only (Mac deselected): the sink turns OFF — in
@@ -242,6 +286,11 @@ import AirPlayEngine
         let controller = GroupController(backend: router,
                                          store: GroupStore(directory: scratchDir),
                                          routingStore: RoutingStore(directory: scratchDir),
+                                         // Isolated too: ensureDefaultSelection reads
+                                         // settings.mainOutVolume, so the default
+                                         // AppSettings() (.standard) would make the seed
+                                         // depend on the dev's real defaults domain.
+                                         settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
                                          loadPersisted: false)
         return (controller, router)
     }

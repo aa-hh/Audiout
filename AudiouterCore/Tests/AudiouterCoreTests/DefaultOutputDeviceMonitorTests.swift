@@ -274,4 +274,32 @@ import CoreAudio
         #expect(hal.liveListenerCount == 0)
         #expect(hal.removeCount == 2)
     }
+
+    /// LIVE CRASH (2026-07-26): a real subscriber's `onChange` (a tap rebuild)
+    /// resubscribes, and resubscribing unconditionally calls `start()`.
+    /// `handleNotification()` — which calls `onChange` — runs ON `queue` (the
+    /// fake fires listener handlers on the queue it was handed, matching the
+    /// real HAL's contract per this file's header doc), so `start()` here is
+    /// REENTRANT: called from a stack already executing on `queue`. Before the
+    /// fix this deadlocked `queue.sync` onto itself — which libdispatch detects
+    /// and traps on, rather than hanging. This test simply must return.
+    @Test func startCalledReentrantlyFromOnChangeDoesNotDeadlock() {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        _ = monitor.subscribe(
+            label: "reentrant",
+            tracked: { recorder.tracked },
+            onChange: { snapshot in
+                recorder.record(snapshot)
+                monitor.start()  // the exact call subscribeToDefaultOutput makes
+            })
+        monitor.start()
+
+        hal.deviceID = 99
+        hal.fire(deviceSelector)  // must return, not deadlock/trap
+
+        #expect(recorder.received.count == 1)
+        #expect(monitor.current.deviceID == 99)
+    }
 }

@@ -96,6 +96,30 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     private let hal: DefaultOutputHAL
     private let queue = DispatchQueue(label: "com.audiouter.defaultoutput.monitor")
 
+    /// Tags `queue` so `runOnQueue(_:)` can tell whether it's already executing
+    /// there — see that method's doc for why this matters.
+    private static let queueKey = DispatchSpecificKey<Void>()
+
+    /// Run `body` on `queue`, synchronously, exactly once — WITHOUT a nested
+    /// `dispatch_sync` if we're already running on `queue`.
+    ///
+    /// LIVE DEADLOCK (found 2026-07-26): `handleNotification()` runs ON `queue`
+    /// (the HAL listener block is installed with `queue:` below) and calls a
+    /// diverged subscriber's `onChange` SYNCHRONOUSLY, still on `queue`. A
+    /// subscriber's `onChange` can synchronously trigger a tap rebuild whose
+    /// completion resubscribes — and `subscribeToDefaultOutput` unconditionally
+    /// calls `start()`, which was a bare `queue.sync { ... }`. Calling
+    /// `dispatch_sync` on the queue currently executing IS a deadlock; libdispatch
+    /// detects this specific case and traps immediately (`SIGTRAP`) rather than
+    /// hanging, which is exactly the crash this fixes. `start()`/`stop()`/`current`
+    /// all go through this so none of them can reintroduce the same trap.
+    private func runOnQueue<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return body()
+        }
+        return queue.sync(execute: body)
+    }
+
     private struct Subscriber {
         let label: String
         let tracked: @Sendable () -> Tracked
@@ -120,6 +144,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
 
     public init(hal: DefaultOutputHAL) {
         self.hal = hal
+        queue.setSpecific(key: Self.queueKey, value: ())
     }
 
     /// Live HAL-backed monitor. Gated at 14.2 only because it reuses
@@ -132,13 +157,14 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     }
 
     deinit {
-        queue.sync { removeListeners() }
+        runOnQueue { removeListeners() }
     }
 
     /// Take the initial reading and install the two process-wide listeners.
-    /// Idempotent.
+    /// Idempotent — including when called REENTRANTLY from a subscriber's
+    /// `onChange` (see ``runOnQueue(_:)``).
     public func start() {
-        queue.sync {
+        runOnQueue {
             guard !started else { return }
             started = true
             latest = readLive()
@@ -154,7 +180,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// Remove both listeners. Subscribers stay registered, so a later
     /// ``start()`` resumes delivering to them.
     public func stop() {
-        queue.sync {
+        runOnQueue {
             guard started else { return }
             started = false
             removeListeners()
@@ -165,7 +191,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// deliberately NOT what the fan-out compares against; see the per-subscriber
     /// note in this type's documentation.
     public var current: Snapshot {
-        queue.sync { latest }
+        runOnQueue { latest }
     }
 
     // MARK: - Subscription

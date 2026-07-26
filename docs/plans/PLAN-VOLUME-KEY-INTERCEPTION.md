@@ -1,9 +1,13 @@
 # PLAN — Volume-key interception on the aggregate device
 
-**Status:** not started. Self-contained handoff — an agent should be able to execute
-this without the originating conversation. Everything it needs is below or cited by
-`file:line`. Verify each citation against current source before relying on it (docs
-orient, code decides); line numbers drift.
+**Status:** not started — **QUEUED BEHIND the Sound-settings aggregate (coexistence
+Wave 3), Alec's call 2026-07-26.** Do not start this until the aggregate is built: its
+trigger IS the aggregate being the default output, so it can only be fully live-tested
+once the aggregate is real (the `aggtool` spike reproduces the dead-keys state for
+build-time work, but not the shipped path). Self-contained handoff otherwise — an agent
+should be able to execute this without the originating conversation; everything it needs
+is below or cited by `file:line`. Verify each citation against current source before
+relying on it (docs orient, code decides); line numbers drift.
 
 **Origin:** follow-up owed by the volume-decoupling workstream (branch
 `claude/audio-volume-device-caps-f4ece7`, commits `7a3ed14..a85cc43`). Alec chose

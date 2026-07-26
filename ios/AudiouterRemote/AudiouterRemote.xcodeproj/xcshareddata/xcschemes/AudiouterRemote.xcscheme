@@ -35,6 +35,20 @@
                ReferencedContainer = "container:AudiouterRemote.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5CF0837A9F92791F85E6E223"
+               BuildableName = "AudiouterRemoteUITests.xctest"
+               BlueprintName = "AudiouterRemoteUITests"
+               ReferencedContainer = "container:AudiouterRemote.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -50,6 +64,16 @@
                BlueprintIdentifier = "E3706CCE03AD3B6886578334"
                BuildableName = "AudiouterRemoteTests.xctest"
                BlueprintName = "AudiouterRemoteTests"
+               ReferencedContainer = "container:AudiouterRemote.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5CF0837A9F92791F85E6E223"
+               BuildableName = "AudiouterRemoteUITests.xctest"
+               BlueprintName = "AudiouterRemoteUITests"
                ReferencedContainer = "container:AudiouterRemote.xcodeproj">
             </BuildableReference>
          </TestableReference>

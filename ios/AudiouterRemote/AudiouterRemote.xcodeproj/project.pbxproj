@@ -19,11 +19,19 @@
 			remoteGlobalIDString = FBDD81276DB3CA5A485A6745;
 			remoteInfo = AudiouterRemote;
 		};
+		BA325A6F5623BE4B3A872E6D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9AB00D5793708BDCC5C29BC2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FBDD81276DB3CA5A485A6745;
+			remoteInfo = AudiouterRemote;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		B42E81F15DA4019ABE458AFB /* AudiouterRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AudiouterRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F49FCC8A9A0E9BBD74073829 /* AudiouterRemoteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AudiouterRemoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		47213B88BEFE9C2E1C4FECF2 /* AudiouterRemoteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AudiouterRemoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -50,6 +58,11 @@
 			path = AudiouterRemoteTests;
 			sourceTree = "<group>";
 		};
+		1BA67F44D79EF8ECE52610A9 /* AudiouterRemoteUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AudiouterRemoteUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,6 +82,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1F66D7769C93D8DC2ACCCC6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -77,6 +97,7 @@
 			children = (
 				EAFBE360AEB22FCF15FC8950 /* AudiouterRemote */,
 				2530C15372723FBE3D1F68C0 /* AudiouterRemoteTests */,
+				1BA67F44D79EF8ECE52610A9 /* AudiouterRemoteUITests */,
 				DDD90B53E4C5AC880D93350C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -86,6 +107,7 @@
 			children = (
 				B42E81F15DA4019ABE458AFB /* AudiouterRemote.app */,
 				F49FCC8A9A0E9BBD74073829 /* AudiouterRemoteTests.xctest */,
+				47213B88BEFE9C2E1C4FECF2 /* AudiouterRemoteUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -140,6 +162,27 @@
 			productReference = F49FCC8A9A0E9BBD74073829 /* AudiouterRemoteTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		5CF0837A9F92791F85E6E223 /* AudiouterRemoteUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BD13582D5932B5D06EBEF884 /* Build configuration list for PBXNativeTarget "AudiouterRemoteUITests" */;
+			buildPhases = (
+				3003C28FA56D6B89560955EA /* Sources */,
+				C1F66D7769C93D8DC2ACCCC6 /* Frameworks */,
+				643014A86C95B49DA5AD6E3D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C288D454904E803234B2D635 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1BA67F44D79EF8ECE52610A9 /* AudiouterRemoteUITests */,
+			);
+			name = AudiouterRemoteUITests;
+			productName = AudiouterRemoteUITests;
+			productReference = 47213B88BEFE9C2E1C4FECF2 /* AudiouterRemoteUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -154,6 +197,10 @@
 						CreatedOnToolsVersion = 16.0;
 					};
 					E3706CCE03AD3B6886578334 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = FBDD81276DB3CA5A485A6745;
+					};
+					5CF0837A9F92791F85E6E223 = {
 						CreatedOnToolsVersion = 16.0;
 						TestTargetID = FBDD81276DB3CA5A485A6745;
 					};
@@ -177,6 +224,7 @@
 			targets = (
 				FBDD81276DB3CA5A485A6745 /* AudiouterRemote */,
 				E3706CCE03AD3B6886578334 /* AudiouterRemoteTests */,
+				5CF0837A9F92791F85E6E223 /* AudiouterRemoteUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -190,6 +238,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		1E4C62811153A51138BAB2E4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		643014A86C95B49DA5AD6E3D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -213,6 +268,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		3003C28FA56D6B89560955EA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -220,6 +282,11 @@
 			isa = PBXTargetDependency;
 			target = FBDD81276DB3CA5A485A6745 /* AudiouterRemote */;
 			targetProxy = 58AF128590FEDC30798EC7DC /* PBXContainerItemProxy */;
+		};
+		C288D454904E803234B2D635 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FBDD81276DB3CA5A485A6745 /* AudiouterRemote */;
+			targetProxy = BA325A6F5623BE4B3A872E6D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -445,6 +512,46 @@
 			};
 			name = Release;
 		};
+		463D5A70982709EF05AABC59 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.audiouter.remote.UITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = AudiouterRemote;
+			};
+			name = Debug;
+		};
+		337A388D775A5887CEAB5BD3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.audiouter.remote.UITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = AudiouterRemote;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -471,6 +578,15 @@
 			buildConfigurations = (
 				45E6ED38072B12D196A4FF37 /* Debug */,
 				4DE803D86A3F6E7538BA2A93 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BD13582D5932B5D06EBEF884 /* Build configuration list for PBXNativeTarget "AudiouterRemoteUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				463D5A70982709EF05AABC59 /* Debug */,
+				337A388D775A5887CEAB5BD3 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

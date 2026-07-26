@@ -219,6 +219,17 @@ extension SerializedSharedState {
             }
         }
 
+        /// What `writeCadenceSnapshot()` reports next (T-ENG-CADENCE-1 test
+        /// seam) — this spy has no real per-write cadence tracker underneath
+        /// it, so a test dials in whatever the "engine" currently reports.
+        /// Defaults to an all-zero (healthy) snapshot, matching
+        /// `EngineControlling`'s own protocol-extension default.
+        private var cadenceSnapshotToReturn = WriteCadenceSnapshot()
+        func scriptCadenceSnapshot(_ snapshot: WriteCadenceSnapshot) {
+            lock.withLock { cadenceSnapshotToReturn = snapshot }
+        }
+        func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
+
         /// Run a device op, tracking concurrent-in-flight-per-device (to catch
         /// overlapping ops) and applying the artificial latency.
         private func runOp(_ id: OutputID, _ body: () throws -> Void) async throws {
@@ -2940,6 +2951,207 @@ extension SerializedSharedState {
         // Past the original backoff deadline: no stray start() must land.
         try? await Task.sleep(nanoseconds: 350_000_000)
         #expect(capture.startCount == startsBefore, "a retry must never restart the whole-system tap once capture is no longer desired — it would mute the Mac with the audio going nowhere")
+    }
+
+    // MARK: Scheduling snapshot poll re-arm (T2, send_sched dead-code fix —
+    // whole-system-dropout investigation, docs/plans/
+    // PLAN-WHOLE-SYSTEM-AUDIO-DROPOUT-JUDDER-INVESTIGATION.md)
+    //
+    // `pollSchedulingSnapshot()` used to be armed exactly ONCE, at `start()`,
+    // before any device is ever selected (`captureRunning` is always false
+    // there) — so `send_sched` telemetry had never fired once, on any
+    // machine, in this app's history. The fix re-arms/cancels the poll from
+    // `reconcileCaptureGate()` itself, on the SAME `captureRunning` edges the
+    // gate already decides every selection change on. These tests prove the
+    // three properties the fix must have: it arms on the false->true edge
+    // (and that arm has an observable effect — `send_sched` actually logs);
+    // it's cancelled on the true->false edge, both via a plain deselect (the
+    // new code, in `reconcileCaptureGate`'s `else` branch) and via `stop()`
+    // (pre-existing code, re-asserted as a regression guard now that arming
+    // actually happens); and re-deciding "still true" never re-arms.
+
+    /// Selecting a device (the gate's false->true edge) must re-arm the poll —
+    /// and the poll's own immediate synchronous call (inside
+    /// `startSchedulingSnapshotPolling()`) must actually log `send_sched`,
+    /// proving this isn't just bookkeeping with no observable effect.
+    @Test func wholeSystemCaptureStartArmsSchedulingPollAndLogsSendSched() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // At launch (no device selected yet), `captureRunning` is false, so
+        // the poll must NOT be armed — the exact dead shape the investigation
+        // found; still correct after the fix, since it's the RE-arm on later
+        // selection that was missing, not this launch-time no-op.
+        #expect(!backend.test_hasPendingSchedulingPoll(), "the poll must not arm before any device is ever selected")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Scheduling Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+        #expect(backend.test_hasPendingSchedulingPoll(), "selecting a device (captureRunning false->true) must re-arm the scheduling poll")
+
+        func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
+        await pollUntil { !sendSchedLines().isEmpty }
+        #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
+    }
+
+    /// A plain deselect (the gate's true->false edge via `setOutputSet([])`,
+    /// NOT `stop()`) must ALSO cancel the poll — this exercises the actual NEW
+    /// code added to `reconcileCaptureGate()`'s `else` branch.
+    @Test func wholeSystemCaptureDeselectCancelsSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A3", name: "Deselect Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+
+        backend.setOutputSet([])
+        await pollUntil { capture.ops.last == "stop" }
+        #expect(!backend.test_hasPendingSchedulingPoll(), "deselecting (captureRunning true->false via reconcileCaptureGate, not stop()) must cancel the scheduling poll")
+    }
+
+    /// `stop()` (full backend teardown) must also cancel the poll —
+    /// pre-existing behavior (the cancel already lived in `stop()`), re-
+    /// asserted as a regression guard now that arming actually happens.
+    @Test func wholeSystemCaptureStopCancelsSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A2", name: "Stop Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+
+        backend.stop()
+        await pollUntil { !backend.test_hasPendingSchedulingPoll() }
+        #expect(!backend.test_hasPendingSchedulingPoll(), "stop() must cancel the scheduling poll's pending work item")
+    }
+
+    /// Selecting a SECOND device while already capturing (captureRunning
+    /// stays true->true) must NOT re-arm the poll a second time —
+    /// `reconcileCaptureGate`'s own `want != captureRunning` guard must
+    /// short-circuit before reaching the new arm/cancel code, so at most one
+    /// immediate `send_sched` line lands per capture-start episode, not one
+    /// per device added while already streaming (which would double the log
+    /// rate every time a second speaker joins an already-playing session).
+    @Test func wholeSystemCaptureSelectingSecondDeviceDoesNotDoubleArmSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let deviceA = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "First Poll Speaker")
+        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Second Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceA.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceA)) }
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceB)) }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        func sendSchedCount() -> Int { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") }.count }
+
+        backend.setOutputSet([deviceA.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { sendSchedCount() == 1 }
+
+        // Adding a second already-streaming device: captureRunning stays
+        // true->true, so `reconcileCaptureGate`'s own guard must return before
+        // ever reaching the arm/cancel code — no second immediate poll.
+        backend.setOutputSet([deviceA.id, deviceB.id])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(sendSchedCount() == 1, "selecting an additional device while already capturing must not re-arm (double-log) the scheduling poll")
+    }
+
+    // MARK: Write-cadence drift sampling (T-ENG-CADENCE-1, whole-system-
+    // dropout investigation) — `AirPlayEngine.writeCadenceSnapshot()` was
+    // previously referenced nowhere in `AudiouterCore`. `sampleWriteCadenceIfDue()`
+    // wires it in on the per-app mixer's write path (`onMixedBuffer`), same
+    // throttled/delta-gated shape as the sibling `sampleWriteBacklogIfDue()`.
+
+    /// The delta-gate's core property: an unchanging (healthy) cadence
+    /// snapshot must never log `write_cadence_drift`, no matter how much real
+    /// per-buffer traffic flows through the sampler's trigger — this is NOT
+    /// "we never got around to sampling", it holds whether or not the
+    /// sample interval was crossed, since an unchanged snapshot reads equal to
+    /// the zero-initialized last-reported baseline either way. Then, scripting
+    /// the engine to report genuine degradation and pushing enough buffers to
+    /// cross the sample interval proves the sampler is actually wired up and
+    /// CAN log when there is something worth logging.
+    @Test func writeCadenceDriftStaysSilentWhileHealthyThenLogsOnDegradation() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.cadence"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A6", name: "Cadence Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.cadence", name: "Cadence App", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.cadence") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.cadence") else {
+            Issue.record("the routed app's per-app tap must have registered")
+            return
+        }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        func driftLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") } }
+
+        // Healthy (the spy's zeroed default `writeCadenceSnapshot()`): must
+        // stay silent under real per-buffer traffic through the full pipeline.
+        for i in 0..<10 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(driftLines().isEmpty, "an unchanging (healthy) cadence snapshot must never log write_cadence_drift")
+
+        // Script real degradation, then push well past the sample interval
+        // (`backlogSampleInterval`, reused by design). Each push is a
+        // single-contributor-stream buffer, which `AppRouteMixer.handleBuffer`
+        // passes straight through as exactly ONE `onMixedBuffer` emission (no
+        // hold-window accumulation on that path), so N pushes reliably cross
+        // an N-buffer sampling threshold.
+        engine.scriptCadenceSnapshot(WriteCadenceSnapshot(
+            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 0.05))
+        for i in 10..<520 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+
+        await pollUntil(timeout: 5) { !driftLines().isEmpty }
+        #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
     }
 
     // MARK: Sleep/wake (B6b)

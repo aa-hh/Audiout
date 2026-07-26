@@ -557,6 +557,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// on change instead of once per sample. Same queue confinement as above.
     private var lastReportedDroppedWrites: UInt64 = 0
 
+    /// Mixed-buffer counter driving the rate-limited write-CADENCE sampling
+    /// (see `sampleWriteCadenceIfDue`) — its OWN counter, independent of
+    /// `backlogSampleCounter` above, mirroring how `EngineSink`'s own backlog
+    /// sampler (`NativeCaptureCoordinator.swift`, commit `9965bd9`) keeps its
+    /// own counter rather than sharing one across samplers. Confined to the
+    /// mixer's `onMixedBuffer` queue.
+    private var cadenceSampleCounter = 0
+    /// Last cumulative deficit/overrun seconds reported to Telemetry, so the
+    /// sampler emits only when the cadence has actually degraded further
+    /// since the last sample, not once per sample. Same queue confinement.
+    private var lastReportedCadenceDeficitSeconds: Double = 0
+    private var lastReportedCadenceOverrunSeconds: Double = 0
+
     /// deviceID → the sorted app display names last published via `.routedApps`, so
     /// the event fires only when a device's live app mapping actually changes.
     private var routedAppNames: [String: [String]] = [:]
@@ -727,6 +740,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// recovery (`.capturing`) or a deliberate deselect.
     func test_hasPendingCaptureRetry() -> Bool {
         stateQueue.sync { pendingCaptureRetry != nil }
+    }
+
+    /// Test-only (`@testable`): whether the scheduling-snapshot poll (T2,
+    /// `send_sched` telemetry) currently has a work item scheduled in
+    /// `schedulingSnapshotPollWork` — lets a test prove the poll (re-)arms on
+    /// the `captureRunning` false→true edge and is cancelled on the true→false
+    /// edge, mirroring `test_hasPendingCaptureRetry()` above.
+    func test_hasPendingSchedulingPoll() -> Bool {
+        stateQueue.sync { schedulingSnapshotPollWork != nil }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -977,6 +999,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // counter increment per buffer; a snapshot read + possible log only
             // once every `backlogSampleInterval` buffers.
             self?.sampleWriteBacklogIfDue()
+            // CADENCE VISIBILITY (T-ENG-CADENCE-1, whole-system-dropout
+            // investigation): same rationale and throttling as the backlog
+            // sample above, for the engine's write-cadence deficit/overrun
+            // counters instead of its backpressure-drop counter — see
+            // `sampleWriteCadenceIfDue()`'s doc for why this call site (per-app
+            // only) rather than the whole-system path.
+            self?.sampleWriteCadenceIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -2923,6 +2952,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             "droppedDelta": String(delta),
             "maxInFlightSeconds": String(format: "%.3f", snap.maxInFlightSeconds),
             "streamsTracked": String(snap.streamsTracked),
+        ])
+    }
+
+    /// Sample the engine's write-CADENCE deficit/overrun counters
+    /// (T-ENG-CADENCE-1, whole-system-dropout investigation) on the identical
+    /// throttled/delta-gated shape as `sampleWriteBacklogIfDue()` above (own
+    /// counter, own last-reported baseline, same `backlogSampleInterval` —
+    /// reused rather than duplicated as a second constant, since the
+    /// instruction behind this sampler is explicitly to reuse that cadence,
+    /// not invent a new one). Emits a NEW event, `write_cadence_drift`, only
+    /// when the cumulative deficit OR overrun has grown since the last sample
+    /// — `writeCadenceSnapshot()` was previously referenced nowhere in
+    /// `AudiouterCore`, so this is the first time it is ever read outside the
+    /// engine's own package.
+    ///
+    /// `writeCadenceSnapshot()` is engine-wide (fed by every `write` call —
+    /// whole-system stream 0 AND per-app streams alike, see
+    /// `AirPlayEngine.write(streams:pts:)`), but this sampler's own TRIGGER is
+    /// the per-app mixer's buffer arrivals (`onMixedBuffer`, the only
+    /// per-buffer-adjacent hook available inside `NativeBackend.swift` — the
+    /// whole-system tap writes straight to `EngineSink` in
+    /// `NativeCaptureCoordinator.swift`, out of this file's reach). So a
+    /// session with no active `.device` route never fires this sampler at
+    /// all — the same shape of blind spot `write_backlog_drop` had for the
+    /// whole-system path before `9965bd9` closed it there. Closing it here too
+    /// would mean mirroring this same sampler into `EngineSink.write`, which
+    /// is out of scope for this change (see the file-ownership note at the top
+    /// of this investigation's task).
+    private func sampleWriteCadenceIfDue() {
+        cadenceSampleCounter &+= 1
+        guard cadenceSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeCadenceSnapshot()
+        guard snap.deficitSeconds != lastReportedCadenceDeficitSeconds
+            || snap.overrunSeconds != lastReportedCadenceOverrunSeconds else { return }
+        let deficitDelta = snap.deficitSeconds - lastReportedCadenceDeficitSeconds
+        let overrunDelta = snap.overrunSeconds - lastReportedCadenceOverrunSeconds
+        lastReportedCadenceDeficitSeconds = snap.deficitSeconds
+        lastReportedCadenceOverrunSeconds = snap.overrunSeconds
+        Telemetry.log(.airplay, "write_cadence_drift", [
+            "writeCount": String(snap.writeCount),
+            "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
+            "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
+            "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
+            "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
+            "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
         ])
     }
 
@@ -4881,7 +4955,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
-        if !want {
+        if want {
+            // T2 (send_sched dead-code fix, whole-system-dropout investigation):
+            // capture just started — (re-)arm the scheduling snapshot poll HERE,
+            // on every true edge, not just once at `start()` (before any device
+            // is ever selected, when this gate's `want` is always still false —
+            // the exact reason `send_sched` never fired in production).
+            // `startSchedulingSnapshotPolling()` is idempotent on its own (it
+            // cancels any previously-scheduled work item before arming a fresh
+            // one), and this call site is additionally guarded by the
+            // `want != captureRunning` check above, so a second selection while
+            // already capturing never reaches here to re-arm a second time.
+            startSchedulingSnapshotPolling()
+        } else {
             // T16/E10 hygiene: capture is no longer desired — cancel any
             // pending whole-system-tap retry rather than let it fire later.
             // `scheduleCaptureRetry`'s own fire-time `captureRunning` re-check
@@ -4891,6 +4977,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // let a stale timer linger past the moment its outcome is decided.
             pendingCaptureRetry?.cancel()
             pendingCaptureRetry = nil
+            // T2: same hygiene for the scheduling poll — capture just stopped,
+            // so cancel its pending work item rather than let it fire once more
+            // (harmlessly, since `pollSchedulingSnapshot`'s own guard re-checks
+            // `captureRunning`) 5s from now.
+            schedulingSnapshotPollWork?.cancel()
+            schedulingSnapshotPollWork = nil
         }
         // W3-T3: streaming just started or stopped — re-evaluate the double-path
         // guard (it also depends on the system default output, which didn't
@@ -5236,6 +5328,16 @@ protocol EngineControlling: Sendable {
     /// a conformer that predates this (e.g., a test spy) compiles unchanged.
     /// Called by T2 polling every ~5s to log to telemetry while capture is active.
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot
+
+    /// Snapshot of the write-cadence deficit/overrun counters (T-ENG-CADENCE-1
+    /// — mirrors `AirPlayEngine/writeCadenceSnapshot()`). `nonisolated` and
+    /// cheap to read from any thread, same rationale as
+    /// `writeSchedulingSnapshot()`. Returns an empty (zeroed) snapshot by
+    /// default so a conformer that predates this (e.g., a test spy) compiles
+    /// unchanged. Sampled by `sampleWriteCadenceIfDue()` on the per-app
+    /// mixer's write path, same throttled/delta-gated cadence as
+    /// `writeBacklogSnapshot()`/`write_backlog_drop`.
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot
 }
 
 extension EngineControlling {
@@ -5283,6 +5385,14 @@ extension EngineControlling {
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         WriteSchedulingSnapshot()
     }
+
+    /// Default: empty snapshot (T-ENG-CADENCE-1). ``EngineAdapter`` overrides
+    /// this to forward to the real engine's `writeCadenceSnapshot()`; a
+    /// conformer that predates this (existing `NativeBackendTests` spies)
+    /// compiles unchanged and reports no metrics.
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
+        WriteCadenceSnapshot()
+    }
 }
 
 /// Adapts the concrete ``AirPlayEngine`` actor to ``EngineControlling``. Thin —
@@ -5323,6 +5433,9 @@ struct EngineAdapter: EngineControlling {
     }
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         engine.writeSchedulingSnapshot()
+    }
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
+        engine.writeCadenceSnapshot()
     }
 }
 

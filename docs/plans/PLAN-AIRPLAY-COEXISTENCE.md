@@ -87,7 +87,13 @@ Fresh boot →
 
 **Why the auto-heal is NOT a one-liner (design notes for whoever picks this up):** the naive "on timeout, unregister→register→retry" fix has two problems that make it worse than the manual toggle: (1) a timeout does not distinguish the zombie case (no launchd job, ports FREE) from *legitimate contention* (helper fine, macOS/another app holds the ports — the "Known asymmetry" case above, which is EXPECTED and unfixable). The naive fix would tear down and re-register the ROOT daemon on every normal failed-takeover. (2) It is unverified whether `SMAppService.unregister()`+`register()` bounces an already-approved daemon back to `.requiresApproval`, which would re-prompt the user in Login Items on every heal. A correct version must fire ONLY in the true zombie case (needs a zombie-vs-contention signal — e.g. a one-shot reconcile at launch rather than in the per-connect `activate()` hot path) and must first confirm re-registration preserves approval. Real task, not a patch.
 
-**Not yet covered live:** takeover from an active system-AirPlay session (banner + auto-switch under real contention), idle-exit yield-back timing, Login-Items approval persistence across a plist change for the ORIGINAL bundle id (untestable on the Coexist id), regression sweep. Also note the live session repeatedly demonstrated why per-machine hygiene matters: THREE different stale always-on daemons from old dev builds blocked testing in sequence — 16 registrations were purged. A `dev/notes` cleanup script may be worth keeping.
+**Also covered live, same session:**
+- **Yield-back** — stopped the stream, waited ~1 min, macOS's own AirPlay dropdown worked again. Confirmed.
+- **Takeover under real contention** — macOS playing to the Sonos via its own AirPlay, then clicked the speaker in Audiouter Coexist: takeover succeeded, audio moved over. Confirmed.
+
+**Not yet covered live:** Login-Items approval persistence across a plist change for the ORIGINAL bundle id (untestable on the Coexist id, which has never had a prior approval), regression sweep (per-app routing, excluded apps, volume keys, groups, rapid toggle). Also note the live session repeatedly demonstrated why per-machine hygiene matters: THREE different stale always-on daemons from old dev builds blocked testing in sequence — 16 registrations were purged. A `dev/notes` cleanup script may be worth keeping.
+
+**VERDICT: every core mechanism (demand-start, audio, yield-back, takeover-under-contention) is LIVE-VERIFIED on real hardware against a real Sonos, 2026-07-26. Remaining items are approval-persistence (needs the original bundle id) and the regression sweep — neither blocks merge readiness in principle, both are Alec's call on timing.**
 
 ## Risks
 

@@ -19,12 +19,20 @@ is the RAOP/AirPlay-1 sender port's vendored diff — originally the single
 ffmpeg-encoder guard, extended 2026-07-19 with the multi-stream `stream_id`
 surgery (the exact mirror of Entry 2's airplay.c change), which is the
 root-cause fix for per-app routing not working on AirPlay-1 receivers.
-**Total vendored files touched: 3** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`);
-`raop.c` (Entry 3) now carries two distinct diffs. (Note: the sibling `stream_id` additions to `shims/outputs.h` and
-`shims/engine_bridge.h`, and T3's `shims/misc.{h,c}` / `shims/conffile.c` /
-`shims/engine_bridge.h` additions, are in `shims/`, which is engine-owned code,
-NOT the byte-identical vendored set — so they are documented in Entries 2 and 3
-for context but do not themselves count as vendored diffs.)
+Entry 5 (T1, 2026-07-26) adds a daemon-side active-peer-count publish to
+`libairptp/src/airptp.c` / `airptp_internal.h` / `daemon.c` and the public
+`libairptp/airptp.h`; Entry 6 (T1b, 2026-07-26) is the loopback peer-control
+delivery fix in `ptp_msg_handle.c` that Entry 5's own new test assertions
+surfaced as red.
+**Total vendored files touched: 7** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`,
+`libairptp/airptp.h`, `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
+`libairptp/src/daemon.c`); `raop.c` (Entry 3) and `ptp_msg_handle.c` (Entries 1
+and 6) each now carry two distinct diffs. (Note: the sibling `stream_id`
+additions to `shims/outputs.h` and `shims/engine_bridge.h`, and T3's
+`shims/misc.{h,c}` / `shims/conffile.c` / `shims/engine_bridge.h` additions, are
+in `shims/`, which is engine-owned code, NOT the byte-identical vendored set —
+so they are documented in Entries 2 and 3 for context but do not themselves
+count as vendored diffs.)
 
 How to keep this ledger honest going forward: before adding an entry, run
 
@@ -413,6 +421,146 @@ the "Total vendored diffs to date" count at the top of this file.
   `git diff -U3 -- AirPlayEngine/Sources/CAirPlayEngine/sender/` shows exactly
   two hunks, matching the quotes above verbatim.
 
-**Total vendored files touched: 3** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`);
-`airplay.c` and `raop.c` each now carry more than one distinct diff (Entries
-2/4 and 3a/3b/4 respectively).
+---
+
+## Entry 5 — `libairptp`: publish a cross-thread daemon-side active-peer count (`airptp_peer_active_count()`) (T1, 2026-07-26)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/libairptp/airptp.h`,
+  `AirPlayEngine/Sources/CAirPlayEngine/libairptp/src/airptp.c`,
+  `AirPlayEngine/Sources/CAirPlayEngine/libairptp/src/airptp_internal.h`,
+  `AirPlayEngine/Sources/CAirPlayEngine/libairptp/src/daemon.c`
+- **License**: MIT (`AirPlayEngine/Sources/CAirPlayEngine/libairptp/LICENSE`)
+- **Landed in**: this worktree, 2026-07-26 (T1,
+  `docs/plans/PLAN-AIRPLAY-COEXISTENCE.md`).
+- **Rationale**: An on-demand PTP helper needs to know when it can safely
+  idle-exit and release ports 319/320 — that decision requires knowing
+  whether any peer is still actively using the daemon, and `peers[]`/
+  `num_peers` are daemon-thread-only state with no existing cross-thread read
+  path. This adds a `_Atomic int active_peers_published` to
+  `struct airptp_daemon` (`airptp_internal.h`), a `static void
+  active_peers_publish()` in `daemon.c` that walks `peers[]` and counts
+  entries seen within `AIRPTP_STALE_SECS`, called after every peer-table
+  mutation (`peers_prune`, `daemon_peer_add`, `daemon_peer_del`) plus on the
+  5 s shm heartbeat (`shm_update_cb`) so the count also **decays** while peers
+  age out without any add/del arriving, and a public `int
+  airptp_peer_active_count(struct airptp_handle *hdl)` (`airptp.h`/`airptp.c`)
+  that returns `-1` for a non-daemon (client/`find()`'d) handle and the
+  published count otherwise. This cannot live in a shim: the atomic has to sit
+  inside `struct airptp_daemon` itself (vendored, in `airptp_internal.h`) so
+  the daemon thread's existing peer-table mutation sites can update it
+  in-place, and the new public accessor has to sit in `airptp.h`/`airptp.c`
+  alongside the rest of the client-visible API. Purely additive: no existing
+  field, function signature, or behavior changed; the atomic is initialized to
+  0 by `calloc` and only ever written by the daemon thread via
+  `atomic_store`, read by any thread via `atomic_load`.
+- **Exact changes** (each marked in-file with a dated
+  `[AirPlayEngine vendored change 2026-07-26]` comment is not present here —
+  T1 predates this ledger backfill and used plain comments instead; see the
+  hunks below for the actual diff):
+  1. `airptp.h`: new public declaration `int airptp_peer_active_count(struct
+     airptp_handle *hdl);` with a doc comment explaining the -1/daemon-only
+     contract and the decay behavior.
+  2. `airptp_internal.h`: `#include <stdatomic.h>`; `struct airptp_daemon`
+     gains `_Atomic int active_peers_published;`.
+  3. `airptp.c`: new `airptp_peer_active_count()` definition — returns `-1`
+     if `!hdl || !hdl->is_daemon || hdl->state != AIRPTP_STATE_RUNNING`,
+     else `atomic_load(&hdl->daemon.active_peers_published)`.
+  4. `daemon.c`: new `static void active_peers_publish(struct airptp_daemon
+     *daemon)` that counts `peers[i].last_seen + AIRPTP_STALE_SECS > now`
+     across `0..num_peers`, `atomic_store`s the result; called at the end of
+     `peers_prune()`, `daemon_peer_add()`, `daemon_peer_del()`, and
+     `shm_update_cb()`.
+- **Sibling non-vendored additions (NOT vendored, listed for context)**:
+  `Sources/PTPHelperTestSupport/include/ptp_test_support.h` /
+  `ptp_test_support.c` gained a pass-through `ptp_test_peer_active_count()`
+  forwarder (this target's whole purpose is forwarding, see its own
+  `AGENTS.md`); `Tests/AirPlayEngineTests/PTPHelperIPCTests.swift` gained the
+  assertions that exercise the new API end to end. Neither is vendored source.
+- **Verification**: `swift build` clean. At the time T1's code was written,
+  its own two new poll-based assertions ("active peer count should reach 1
+  after peer_add" / "should return to 0 after peer_remove") were **red** —
+  see Entry 6, the T1b fix that makes them pass. `airptp_peer_active_count()`
+  itself and the -1-on-client-handle assertion were green from the start.
+
+---
+
+## Entry 6 — `libairptp/src/ptp_msg_handle.c`: send loopback peer-control messages to the family the daemon actually bound, not resolver order (T1b, 2026-07-26)
+
+- **File**: `AirPlayEngine/Sources/CAirPlayEngine/libairptp/src/ptp_msg_handle.c`
+- **License**: MIT (`AirPlayEngine/Sources/CAirPlayEngine/libairptp/LICENSE`)
+- **Landed in**: this worktree, 2026-07-26 (T1b,
+  `docs/plans/PLAN-AIRPLAY-COEXISTENCE.md`), same commit as Entry 5's backfill.
+- **Rationale**: `localhost_msg_send()` resolved `"localhost"` with
+  `AF_UNSPEC` and sent only to the *first* `getaddrinfo()` result. On this
+  machine (and macOS generally) that result is `::1` (AF_INET6) — verified
+  directly. `ptp_msg_peer_add_send()`/`ptp_msg_peer_del_send()` are the only
+  callers, used for `airptp_peer_add()`/`airptp_peer_remove()`'s loopback
+  control channel to the daemon. Whenever the daemon bound IPv4-only (exactly
+  what `PTPHelperIPCTests.swift`'s test daemon does, binding `127.0.0.1`
+  explicitly rather than `NULL`/`INADDR_ANY` to avoid re-triggering macOS's
+  Application Firewall prompt on every `swift test` run — see that file's own
+  comment, ~line 128), every peer add/remove message was silently sent to a
+  family the daemon never listens on. `sendto()` on a UDP socket still
+  returns success in that case, so callers saw no error at all — this is
+  exactly the bug Entry 5's new poll-based test assertions caught (red before
+  this fix, per Entry 5's Verification note). This cannot live in a shim: the
+  resolution happens inside the vendored `localhost_msg_send()` itself, and
+  the fix needs the daemon's actual bound-family state
+  (`hdl->daemon_info.ipv4_enabled`/`.ipv6_enabled`, published by the daemon
+  into shm and copied into every handle — Entry 5's neighbor, unrelated to
+  the active-peer-count feature but already present in the same struct),
+  which only the caller (already holding `hdl`) has. The fix does **not**
+  broadcast to every resolved loopback candidate — it sends to the ONE family
+  the daemon reports enabled, preferring IPv4 when both are (dual-stack
+  `NULL`/`INADDR_ANY` binds can enable both `ipv4_enabled` and
+  `ipv6_enabled` simultaneously, per `daemon.c`'s `daemon_info_fill()`) —
+  keeping exactly one control message per call and the diff to vendored code
+  minimal.
+- **Exact changes** (marked in-file with dated
+  `[AirPlayEngine vendored change 2026-07-26]` comments):
+  1. `localhost_msg_send()` gained a fourth parameter, `sa_family_t family`,
+     used as `hints.ai_family` in place of the hard-coded `AF_UNSPEC`.
+  2. `ptp_msg_peer_add_send()` / `ptp_msg_peer_del_send()`: pass
+     `hdl->daemon_info.ipv4_enabled ? AF_INET : AF_INET6` as the new
+     argument.
+
+  ```c
+   static int
+  -localhost_msg_send(void *msg, size_t msg_len, unsigned short port)
+  +localhost_msg_send(void *msg, size_t msg_len, unsigned short port, sa_family_t family)
+   {
+  -  struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
+  +  struct addrinfo hints = { .ai_family = family, .ai_socktype = SOCK_DGRAM };
+     struct addrinfo *info = NULL;
+  ```
+
+  ```c
+     msg_peer_add_make(&msg, peer, hdl->daemon_info.clock_id);
+  -  return localhost_msg_send(&msg, sizeof(msg), port);
+  +  return localhost_msg_send(&msg, sizeof(msg), port, hdl->daemon_info.ipv4_enabled ? AF_INET : AF_INET6);
+  ```
+
+  ```c
+     msg_peer_del_make(&msg, peer, hdl->daemon_info.clock_id);
+  -  return localhost_msg_send(&msg, sizeof(msg), port);
+  +  return localhost_msg_send(&msg, sizeof(msg), port, hdl->daemon_info.ipv4_enabled ? AF_INET : AF_INET6);
+  ```
+
+  Confirmed via `git diff -U3 -- AirPlayEngine/Sources/CAirPlayEngine/libairptp/src/ptp_msg_handle.c`:
+  exactly these hunks, nothing else in the file touched.
+- **NOT changed**: `Tests/AirPlayEngineTests/PTPHelperIPCTests.swift`'s
+  loopback-only test-daemon bind (~line 139) — that constraint is load-bearing
+  (avoids the firewall prompt) and this fix works with it, not around it: the
+  test daemon binds `127.0.0.1` only, so `ipv4_enabled` is true and
+  `ipv6_enabled` false, and the fixed `ptp_msg_peer_add_send`/`_del_send` now
+  correctly target `AF_INET`.
+- **Verification**: `swift test --filter PTPHelperIPCTests` — both previously
+  red assertions ("active peer count should reach 1 after peer_add" /
+  "should return to 0 after peer_remove") pass. Full `swift test`: 173/173
+  pass.
+
+**Total vendored files touched: 7** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`,
+`libairptp/airptp.h`, `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
+`libairptp/src/daemon.c`); `airplay.c` and `raop.c` each carry more than one
+distinct diff (Entries 2/4 and 3a/3b/4 respectively), and `ptp_msg_handle.c`
+now carries two (Entries 1 and 6).

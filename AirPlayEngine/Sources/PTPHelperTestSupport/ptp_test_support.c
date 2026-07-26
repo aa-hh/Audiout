@@ -52,6 +52,12 @@ ptp_test_peer_remove(uint32_t peer_id, struct airptp_handle *hdl)
   airptp_peer_remove(peer_id, hdl);
 }
 
+int
+ptp_test_peer_active_count(struct airptp_handle *hdl)
+{
+  return airptp_peer_active_count(hdl);
+}
+
 void
 ptp_test_end(struct airptp_handle *hdl)
 {

@@ -49,6 +49,9 @@ ptp_test_peer_add(uint32_t *peer_id, const char *addr, struct airptp_handle *hdl
 void
 ptp_test_peer_remove(uint32_t peer_id, struct airptp_handle *hdl);
 
+int
+ptp_test_peer_active_count(struct airptp_handle *hdl);
+
 void
 ptp_test_end(struct airptp_handle *hdl);
 

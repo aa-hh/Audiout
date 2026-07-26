@@ -5,6 +5,7 @@
 #include <event2/event.h>
 #include <pthread.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #include "../airptp.h"
 #include "utils.h"
@@ -127,6 +128,13 @@ struct airptp_daemon
 
   struct airptp_peer peers[AIRPTP_MAX_PEERS];
   int num_peers;
+
+  // Cross-thread mirror of "peers seen within AIRPTP_STALE_SECS", published
+  // by the daemon thread (daemon.c active_peers_publish()) and read by
+  // airptp_peer_active_count() from any thread. peers[]/num_peers themselves
+  // are daemon-thread-only; this atomic is the ONLY peer state another
+  // thread may read.
+  _Atomic int active_peers_published;
 };
 
 struct airptp_handle

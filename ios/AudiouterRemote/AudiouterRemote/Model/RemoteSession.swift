@@ -34,11 +34,9 @@ import AudiouterProtocol
 ///   the one the Mac must end up applying; dropping it would leave the
 ///   speaker holding a stale in-between volume.
 ///
-/// Main Out's master slider additionally brackets the whole gesture with
-/// `beginMainOutDrag()` / `endMainOutDrag()` (sent uncoalesced, exactly like
-/// every other one-shot command) around that same `setMainOutMasterVolume`
-/// stream — mirroring the Mac popover's own drag brackets. No other slider
-/// has a server-side bracket to wrap.
+/// Main Out's master slider follows the exact same policy — since the Mac's
+/// volume decoupling, Main is its own stored gain and `setMainOutMasterVolume`
+/// is a stateless set, so there is no drag bracket anywhere.
 ///
 /// No phone-side persistence of any routing state (house rule): this type
 /// holds only the in-memory latest ``Snapshot`` handed to it by the
@@ -186,16 +184,8 @@ final class RemoteSession: MacSessionProtocol {
 
     // MARK: Main Out master
 
-    func beginMainOutDrag() {
-        track(sender.send(.beginMainOutDrag))
-    }
-
     func setMainOutMasterVolume(_ volume: Int, isFinal: Bool) {
         sendSlider(.setMainOutMasterVolume(volume: volume), key: "mainOut.master", isFinal: isFinal)
-    }
-
-    func endMainOutDrag() {
-        track(sender.send(.endMainOutDrag))
     }
 
     func setMainOutMuted(_ muted: Bool) {

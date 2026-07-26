@@ -2,9 +2,10 @@
 
 /// Every command the phone can send, 1:1 with an existing Mac controller
 /// method (`CompanionCommandDispatcher`, T4, calls the exact method the
-/// popover already calls — no new business logic). `beginMainOutDrag` /
-/// `setMainOutMasterVolume` / `endMainOutDrag` bracket a Main Out master-drag
-/// exactly like the popover's own drag brackets.
+/// popover already calls — no new business logic). `setMainOutMasterVolume`
+/// is a plain stateless set: Main Out is its own stored gain on the Mac
+/// (`Main × Group × Device`, formed at the backend write boundary), so no
+/// drag bracket exists anywhere in the protocol.
 ///
 /// ## Wire format
 ///
@@ -38,9 +39,7 @@ public enum CompanionCommand: Equatable, Sendable {
     case setMainOut(MainOutState)
     case setDeviceVolume(id: String, volume: Int)
     case setDeviceMuted(id: String, muted: Bool)
-    case beginMainOutDrag
     case setMainOutMasterVolume(volume: Int)
-    case endMainOutDrag
     case setMainOutMuted(muted: Bool)
     case createGroup(name: String, memberIDs: [String], iconSymbolName: String?)
     case updateGroup(GroupState)
@@ -72,7 +71,7 @@ extension CompanionCommand: Codable {
 
     private enum Name: String {
         case setDeviceSelected, retryConnection, setMainOut, setDeviceVolume, setDeviceMuted
-        case beginMainOutDrag, setMainOutMasterVolume, endMainOutDrag, setMainOutMuted
+        case setMainOutMasterVolume, setMainOutMuted
         case createGroup, updateGroup, deleteGroup, setGroupMuted
         case addAppRoute, removeAppRoute, setAppDestination, setAppVolume
         case setConnectVolume, setStartBufferMs
@@ -96,12 +95,8 @@ extension CompanionCommand: Codable {
             self = .setDeviceVolume(id: try c.decode(String.self, forKey: .id), volume: try c.decode(Int.self, forKey: .volume))
         case .setDeviceMuted:
             self = .setDeviceMuted(id: try c.decode(String.self, forKey: .id), muted: try c.decode(Bool.self, forKey: .muted))
-        case .beginMainOutDrag:
-            self = .beginMainOutDrag
         case .setMainOutMasterVolume:
             self = .setMainOutMasterVolume(volume: try c.decode(Int.self, forKey: .volume))
-        case .endMainOutDrag:
-            self = .endMainOutDrag
         case .setMainOutMuted:
             self = .setMainOutMuted(muted: try c.decode(Bool.self, forKey: .muted))
         case .createGroup:
@@ -156,13 +151,9 @@ extension CompanionCommand: Codable {
             try c.encode(Name.setDeviceMuted.rawValue, forKey: .command)
             try c.encode(id, forKey: .id)
             try c.encode(muted, forKey: .muted)
-        case .beginMainOutDrag:
-            try c.encode(Name.beginMainOutDrag.rawValue, forKey: .command)
         case .setMainOutMasterVolume(let volume):
             try c.encode(Name.setMainOutMasterVolume.rawValue, forKey: .command)
             try c.encode(volume, forKey: .volume)
-        case .endMainOutDrag:
-            try c.encode(Name.endMainOutDrag.rawValue, forKey: .command)
         case .setMainOutMuted(let muted):
             try c.encode(Name.setMainOutMuted.rawValue, forKey: .command)
             try c.encode(muted, forKey: .muted)

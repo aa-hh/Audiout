@@ -14,10 +14,9 @@ import AudiouterProtocol
 /// master, app volume, connect volume) take an `isFinal` flag instead of a
 /// separate method: `false` while dragging (subject to the ≤20 Hz
 /// coalescing throttle), `true` on release (always sent — see
-/// ``RemoteSession``'s doc comment for the full slider policy). Main Out's
-/// master slider additionally brackets its drag with `beginMainOutDrag()` /
-/// `endMainOutDrag()`, mirroring the Mac popover's own drag brackets — no
-/// other control has a server-side bracket.
+/// ``RemoteSession``'s doc comment for the full slider policy). All four
+/// are plain stateless sets — no slider has a server-side drag bracket
+/// (Main Out is its own stored gain on the Mac since the volume decoupling).
 ///
 /// No phone-side persistence of any routing state (house rule) — a
 /// conformer may cache nothing beyond what's needed to answer these calls
@@ -48,9 +47,7 @@ protocol MacSessionProtocol: AnyObject {
 
     // MARK: Main Out master
 
-    func beginMainOutDrag()
     func setMainOutMasterVolume(_ volume: Int, isFinal: Bool)
-    func endMainOutDrag()
     func setMainOutMuted(_ muted: Bool)
 
     // MARK: Groups

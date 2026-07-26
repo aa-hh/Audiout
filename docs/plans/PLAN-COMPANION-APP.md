@@ -9,7 +9,9 @@ All paths relative to the repo root. Everything cited was verified in source dur
 planning: `GroupController` publishes nothing and exposes every needed command
 (`GroupController.swift:274` setDeviceSelected→SelectionResult, `:351` retryConnection,
 `:408` setMainOut, `:539` createGroup, `:507` saveGroup, `:577` deleteGroup, `:710`
-setMemberVolume, `:780-787` Main Out drag brackets, `:977-1008` mute at all levels);
+setMemberVolume, `setMainOutMasterVolume` (a stateless set since the volume
+decoupling — the drag brackets this plan originally cited are deleted), `:977-1008`
+mute at all levels);
 `AppRoutingController.onRoutesDidChange` is single-assignment, claimed at
 `AppDelegate.swift:393`; `DeviceIconController.onChange` claimed at
 `PopoverController.swift:242`, chain-wrapped at `MixerWindowController.swift:214-215`;
@@ -120,10 +122,13 @@ MainOutState { kind: "selected"|"group", groupID? }  // RoutingStore.State:31-51
 Settings ranges/options ship in the snapshot so the Mac stays authoritative; a future
 option change needs no phone update.
 
-**Commands** (`CompanionCommand.swift`) — 18, all 1:1 with existing paths:
+**Commands** (`CompanionCommand.swift`) — all 1:1 with existing paths
+(`beginMainOutDrag`/`endMainOutDrag` were later DELETED with the Mac's volume
+decoupling — Main is a stored gain, so `setMainOutMasterVolume` is a plain
+stateless set and no drag bracket exists):
 `setDeviceSelected(id, selected)` · `retryConnection(id)` · `setMainOut(MainOutState)` ·
-`setDeviceVolume(id, v)` · `setDeviceMuted(id, muted)` · `beginMainOutDrag` /
-`setMainOutMasterVolume(v)` / `endMainOutDrag` · `setMainOutMuted(muted)` ·
+`setDeviceVolume(id, v)` · `setDeviceMuted(id, muted)` ·
+`setMainOutMasterVolume(v)` · `setMainOutMuted(muted)` ·
 `createGroup(name, memberIDs, iconSymbolName?)` · `updateGroup(GroupState)` ·
 `deleteGroup(id)` · `setGroupMuted(id, muted)` · `addAppRoute(bundleID, displayName)` ·
 `removeAppRoute(bundleID)` · `setAppDestination(bundleID, kind, deviceID?)` ·
@@ -155,7 +160,7 @@ setDeviceSelected both branches (:289-292/:312-314), setMainOut (:411), saveGrou
 (:514), deleteGroup (:581), activateGroup (:609), deactivateGroup (:629),
 setMuted/applySilence edge (:981), syncActiveGroupToSelection when changed (:490-495),
 ensureDefaultSelection (:169). NOT on no-op early returns; NOT on pure-backend-write
-paths (setMemberVolume, master-drag scaling, mirror) — those echo back as
+paths (setMemberVolume, setMainOutMasterVolume) — those echo back as
 `deviceUpdated` events. Same `onChange` on ExcludedAppsController (exclude/remove;
 `git grep` all mutation call sites first — risk R3). Verify: fire-on-change +
 no-fire-on-no-op tests per method.
@@ -182,8 +187,7 @@ existing methods; round-trips SelectionResult (:203-217); maps
 `GroupError.emptyMembership` (:508) to a refusal string; refuses addAppRoute for
 excluded bundles and `.device` destinations for unknown device IDs; validates
 setStartBufferMs against options; setAppVolume also calls setLocalPlaybackVolume for
-`.currentDevice` routes; drag brackets call begin/endMainOutMasterDrag (:780-783);
-unknown command → applied:false. Verify: one test per command incl. refusal cases,
+`.currentDevice` routes; unknown command → applied:false. Verify: one test per command incl. refusal cases,
 MockBackend-backed real controllers, temp-dir stores.
 
 **T5 — `CompanionServer`** · new-code · deps: T1 · **opus 4.8, high**
@@ -228,8 +232,9 @@ on main (icons from `deviceIconController.symbolName(for:)`, addable apps from
 liveRoutedAppNames from routedAppNamesByDeviceID, fallback/takeover cached from
 apply(event:), settings from AppSettings), suppresses identical snapshots, JSON →
 `server.broadcast`. (4) Command path: `server.onCommand` → main hop →
-dispatcher.execute → reply + immediate uncoalesced broadcast. (5) Drag safety: client
-holding an open Main Out drag disconnects → `endMainOutMasterDrag()`. (6) Server stops
+dispatcher.execute → reply + immediate uncoalesced broadcast. (5) Drag safety:
+OBSOLETE — the drag bracket was deleted with the volume decoupling; a disconnecting
+client only drops its rate-limiter bucket. (6) Server stops
 in the terminate path next to `backend.stop()`. Verify: full suite via
 `scripts/run-tests.sh`; manual `AIRPLAY_BACKEND=mock` + websocat poke.
 
@@ -290,8 +295,9 @@ Files: NEW `ios/…/Model/{MacSessionProtocol,RemoteSession,CommandSender}.swift
 `MacSessionProtocol` (snapshot publisher + typed command methods) implemented by both
 live and demo sessions — UI depends only on this. RemoteSession (@Observable): latest
 Snapshot; requestID correlation → toasts for refusalReason/autoSwap; slider policy:
-local echo while dragging, ≤20 Hz coalesced sends, always send release value; Main Out
-slider wraps begin/endMainOutDrag around the gesture; no phone-side persistence of
+local echo while dragging, ≤20 Hz coalesced sends, always send release value; the Main
+Out slider is the same shape as every other slider (no drag bracket — Main is a
+stateless set since the volume decoupling); no phone-side persistence of
 routing state. Any shared UI components (colors, toast view) are created HERE or T13 —
 Wave C tasks may not create shared files. Verify: scripted fake-transport tests:
 cadence, release-value guarantee, correlation, toast surfacing.
@@ -412,10 +418,11 @@ AGENTS.md files).
 
 ## Open risks (execution must confirm)
 
-1. **R1 — concurrent master drags share one state slot** (`dragRatios`,
-   `GroupController.swift:109`): phone drag + Mac drag fight over it. Mitigation:
-   server auto-ends a disconnecting client's drag (T7); confirm failure mode is only
-   cosmetic ratio drift; note in T20.
+1. **R1 — concurrent master drags share one state slot** — **MOOT.** The volume
+   decoupling deleted `dragRatios` and the whole drag-bracket machinery from
+   `GroupController`: Main Out is now its own stored gain and
+   `setMainOutMasterVolume` is stateless, so there is no shared drag state for a
+   phone and the Mac to fight over, and nothing for a vanished client to strand.
 2. **R2 — onChange chaining order** (popover assigns, mixer window chain-wraps): T7
    chains after popover configuration; if fragile, fall back to broadcasting from the
    popover's repaint path.

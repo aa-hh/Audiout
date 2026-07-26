@@ -33,9 +33,7 @@ public final class MainOutRowView: NSView {
 
     public protocol Delegate: AnyObject {
         func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget)
-        func mainOutRowBeginMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int)
-        func mainOutRowEndMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool)
     }
 
@@ -168,7 +166,8 @@ public final class MainOutRowView: NSView {
     // MARK: Model
 
     /// Repopulate the selector, set the master slider + readout, and check the
-    /// current target. `master` is the proportional master of the current target.
+    /// current target. `master` is Main Out's own stored gain — NOT an average of
+    /// the target's members, which is what it used to be.
     ///
     /// `connectionState` is the AGGREGATE lifecycle of the active target's
     /// members (spec §3.2 Main Out note): `.off` → no ring; `.connecting` /
@@ -579,19 +578,23 @@ public final class MainOutRowView: NSView {
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
-    // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
-        let event = NSApp.currentEvent
-        if !isDraggingMaster {
+        // `isDraggingMaster` exists so `apply(...)` won't yank the thumb out from
+        // under a live MOUSE drag. Set it from whether a drag is actually in flight,
+        // NOT "set on first change, clear only on .leftMouseUp": a keyboard or
+        // VoiceOver change arrives as a single event that is never a `.leftMouseUp`,
+        // so the old logic set the flag and never cleared it — the thumb then stopped
+        // tracking the model forever (stability-audit-2026-07-18 §D4). A keyboard
+        // change has no drag in flight, so it leaves the flag false and repaints stay
+        // live.
+        switch NSApp.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged:
             isDraggingMaster = true
-            delegate?.mainOutRowBeginMasterDrag(self)
+        default:
+            isDraggingMaster = false
         }
         delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
         readoutLabel.stringValue = "\(sender.integerValue)%"
-        if event?.type == .leftMouseUp {
-            isDraggingMaster = false
-            delegate?.mainOutRowEndMasterDrag(self)
-        }
     }
 
     // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill
@@ -724,9 +727,7 @@ public final class MainOutRowView: NSView {
 
     /// Simulate a master drag to `value`.
     public func test_dragMaster(to value: Int) {
-        delegate?.mainOutRowBeginMasterDrag(self)
         delegate?.mainOutRow(self, didSetMaster: value)
-        delegate?.mainOutRowEndMasterDrag(self)
     }
 }
 

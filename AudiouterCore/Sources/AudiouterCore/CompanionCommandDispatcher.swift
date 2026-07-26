@@ -123,15 +123,8 @@ public final class CompanionCommandDispatcher {
     /// unknown-id `updateGroup`, duplicate-member-set `createGroup`, device
     /// writes on a device that can't accept them, and store failures (which
     /// roll back so the reply matches the state the next snapshot shows).
-    ///
-    /// - Parameter isDragOwner: the CALLER's ownership decision for the Main
-    ///   Out drag bracket (AppDelegate tracks which client opened it). A stray
-    ///   `endMainOutDrag` from a non-owner must not clobber another client's —
-    ///   or the Mac user's own — in-flight drag, so the bracket is only closed
-    ///   when the caller says this client owns it. Defaults to `true` so
-    ///   single-owner callers (and every non-drag command) are unaffected.
     @discardableResult
-    public func execute(_ command: CompanionCommand, isDragOwner: Bool = true) -> Result {
+    public func execute(_ command: CompanionCommand) -> Result {
         switch command {
         case .setDeviceSelected(let id, let selected):
             return Result(groupController.setDeviceSelected(id, selected))
@@ -156,19 +149,10 @@ public final class CompanionCommandDispatcher {
             groupController.setMuted(muted, for: id)
             return .ok
 
-        case .beginMainOutDrag:
-            groupController.beginMainOutMasterDrag()
-            return .ok
-
         case .setMainOutMasterVolume(let volume):
+            // Stateless by design: Main is its own stored gain (volume
+            // decoupling) — no drag bracket, no shared drag state to guard.
             groupController.setMainOutMasterVolume(volume)
-            return .ok
-
-        case .endMainOutDrag:
-            // A non-owner's end is a stale bracket close — accepted (the end
-            // of a drag is idempotent) but it must not end someone else's.
-            guard isDragOwner else { return .ok }
-            groupController.endMainOutMasterDrag()
             return .ok
 
         case .setMainOutMuted(let muted):
@@ -301,7 +285,12 @@ public final class CompanionCommandDispatcher {
                 name: trimmedName,
                 memberIDs: state.memberIDs,
                 memberVolumes: volumes,
-                iconSymbolName: state.iconSymbolName
+                iconSymbolName: state.iconSymbolName,
+                // The group's own gain stage rides along when the phone sent it
+                // (a snapshot round-trip does), otherwise the Mac's value is
+                // preserved — `Group.init`'s default of 100 must never clobber
+                // it on an unrelated rename/member edit.
+                masterVolume: state.masterVolume ?? existing.masterVolume
             ))
         } catch {
             // Restore the pre-edit group in memory (the failed store write left

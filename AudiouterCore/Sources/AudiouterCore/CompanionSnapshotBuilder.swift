@@ -126,7 +126,10 @@ public enum CompanionSnapshotBuilder {
                 // known name at all is simply absent from the map.
                 memberNames: Dictionary(uniqueKeysWithValues: group.memberIDs.compactMap { id in
                     deviceNames[id].map { (id, $0) }
-                })
+                }),
+                // The group's own gain stage (volume decoupling): a stored
+                // value, not derived from members.
+                masterVolume: group.masterVolume
             )
         }
 

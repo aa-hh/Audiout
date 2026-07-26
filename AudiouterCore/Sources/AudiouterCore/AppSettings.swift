@@ -70,6 +70,7 @@ public struct AppSettings {
         static let hasCompletedSetup = "setup.hasCompleted"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
+        static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let allowRemoteControl = "companion.allowRemoteControl"
     }
@@ -179,6 +180,16 @@ public struct AppSettings {
     /// The highest connect volume the setting can hold.
     public static let maxConnectVolume = 100
 
+    /// The default main-out volume (percent). Used when the setting is unset or
+    /// during initialization of a new routing session.
+    public static let defaultMainOutVolume = 100
+
+    /// The lowest main-out volume the setting can hold.
+    public static let minMainOutVolume = 0
+
+    /// The highest main-out volume the setting can hold.
+    public static let maxMainOutVolume = 100
+
     /// The persisted connect-time seed volume (percent), clamped to
     /// ``minConnectVolume``…``maxConnectVolume`` on both read and write so no
     /// stored value — unset (0), a newer build's out-of-range value, or a hand-
@@ -195,6 +206,25 @@ public struct AppSettings {
         }
         nonmutating set {
             defaults.set(min(max(newValue, Self.minConnectVolume), Self.maxConnectVolume), forKey: Keys.connectVolume)
+        }
+    }
+
+    /// The persisted main-out volume (percent), clamped to
+    /// ``minMainOutVolume``…``maxMainOutVolume`` on both read and write so no
+    /// stored value — unset (0), a newer build's out-of-range value, or a hand-
+    /// edited default — can ever escape the valid range. Unset resolves to
+    /// ``defaultMainOutVolume`` (distinguished from a stored 0 via `object(forKey:)`,
+    /// then clamped regardless).
+    public var mainOutVolume: Int {
+        get {
+            guard defaults.object(forKey: Keys.mainOutVolume) != nil else {
+                return Self.defaultMainOutVolume
+            }
+            let stored = defaults.integer(forKey: Keys.mainOutVolume)
+            return min(max(stored, Self.minMainOutVolume), Self.maxMainOutVolume)
+        }
+        nonmutating set {
+            defaults.set(min(max(newValue, Self.minMainOutVolume), Self.maxMainOutVolume), forKey: Keys.mainOutVolume)
         }
     }
 

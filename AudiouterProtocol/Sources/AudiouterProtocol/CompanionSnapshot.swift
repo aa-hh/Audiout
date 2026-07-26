@@ -97,6 +97,12 @@ public struct GroupState: Codable, Equatable, Sendable {
     /// so a peer built before this field decodes cleanly (additive change,
     /// no protocol break).
     public var memberNames: [String: String]?
+    /// The group's own gain stage (0–100) in the Mac's `Main × Group ×
+    /// Device` volume model — a value of its own, NOT derived from members.
+    /// Optional so a peer built before this field decodes cleanly (additive
+    /// change, no protocol break); `nil` means "not reported" — treat as
+    /// 100 (the identity).
+    public var masterVolume: Int?
 
     public init(
         id: String,
@@ -105,7 +111,8 @@ public struct GroupState: Codable, Equatable, Sendable {
         memberVolumes: [String: Int],
         iconSymbolName: String? = nil,
         isMuted: Bool,
-        memberNames: [String: String]? = nil
+        memberNames: [String: String]? = nil,
+        masterVolume: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -114,6 +121,7 @@ public struct GroupState: Codable, Equatable, Sendable {
         self.iconSymbolName = iconSymbolName
         self.isMuted = isMuted
         self.memberNames = memberNames
+        self.masterVolume = masterVolume
     }
 }
 

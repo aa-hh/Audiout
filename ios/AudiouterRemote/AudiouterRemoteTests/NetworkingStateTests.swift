@@ -333,12 +333,12 @@ import AudiouterProtocol
 
     @Test func commandsAreOnlySentWhileLive() throws {
         let (conn, transport, queue, _) = makeConnection()
-        conn.send(command: .beginMainOutDrag, requestID: "early")
+        conn.send(command: .setMainOutMuted(muted: true), requestID: "early")
         queue.sync {}
         #expect(transport.sentFrames.isEmpty, "no frames before the transport is even ready")
 
         queue.sync { transport.events?(.ready) } // hello goes out
-        conn.send(command: .beginMainOutDrag, requestID: "handshaking")
+        conn.send(command: .setMainOutMuted(muted: true), requestID: "handshaking")
         queue.sync {}
         #expect(transport.sentFrames.count == 1, "commands must not be sent before welcome")
 

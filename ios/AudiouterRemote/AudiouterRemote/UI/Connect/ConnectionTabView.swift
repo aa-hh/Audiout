@@ -234,9 +234,7 @@ private final class PreviewConnectionSession: MacSessionProtocol {
     func setMainOut(_ state: MainOutState) {}
     func setDeviceVolume(id: String, volume: Int, isFinal: Bool) {}
     func setDeviceMuted(id: String, muted: Bool) {}
-    func beginMainOutDrag() {}
     func setMainOutMasterVolume(_ volume: Int, isFinal: Bool) {}
-    func endMainOutDrag() {}
     func setMainOutMuted(_ muted: Bool) {}
     func createGroup(name: String, memberIDs: [String], iconSymbolName: String?) {}
     func updateGroup(_ group: GroupState) {}

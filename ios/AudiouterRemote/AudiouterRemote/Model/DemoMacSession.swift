@@ -7,11 +7,12 @@ import AudiouterProtocol
 /// An in-memory simulated Mac, standing in for a real ``RemoteSession`` when
 /// no Mac is reachable. Re-implements the visually-significant slice of
 /// `GroupController`/`AppRoutingController`/`AppSettings` (AudiouterCore,
-/// Mac-side) small enough to fit here — selection floor + auto-swap,
-/// proportional master scaling, mute stash/restore, group CRUD with the
-/// delete-while-active Main Out fallback, and the buffer/device-id refusals
-/// `CompanionCommandDispatcher` surfaces. No network, no persistence, no real
-/// audio.
+/// Mac-side) small enough to fit here — selection floor + auto-swap, Main
+/// Out as its own stored gain (the volume-decoupling model: `Main × Group ×
+/// Device`, so moving Main never rewrites a member's level), mute
+/// stash/restore, group CRUD with the delete-while-active Main Out fallback,
+/// and the buffer/device-id refusals `CompanionCommandDispatcher` surfaces.
+/// No network, no persistence, no real audio.
 ///
 /// **Reachable ONLY by explicit construction.** This type is never a
 /// fallback for a failed/absent connection — the "Demo system" row (T17a) is
@@ -65,10 +66,9 @@ final class DemoMacSession: MacSessionProtocol {
     private var appRoutes: [AppRouteState]
     private var addableApps: [Snapshot.AddableApp]
     private var muteState: [String: MemberMute] = [:]
-    /// Ratio snapshot for an in-progress Main Out master drag — mirrors
-    /// `GroupController.dragRatios`. `nil` between `beginMainOutDrag()` and
-    /// `endMainOutDrag()`.
-    private var dragRatios: [String: Double]?
+    /// The Main Out master gain — its OWN value, mirroring
+    /// `GroupController.mainOutMasterVolume` (never an average of members).
+    private var mainOutMasterVolume: Int
 
     private var connectVolume: Int
     private let connectVolumeMin: Int
@@ -80,6 +80,9 @@ final class DemoMacSession: MacSessionProtocol {
         devices = Self.seedFleet()
         // Out-of-the-box default (GroupController.ensureDefaultSelection):
         // Current Device only, Main Out = Selected Devices ⇒ passthrough.
+        // Main seeds from the Mac's system output volume, like the real
+        // controller's launch adoption.
+        mainOutMasterVolume = 65
         selectedDeviceIDs = ["local-mac"]
         mainOut = MainOutState(kind: "selected")
         groups = [
@@ -202,6 +205,14 @@ final class DemoMacSession: MacSessionProtocol {
     }
 
     func setDeviceVolume(id: String, volume: Int, isFinal: Bool) {
+        // localRowDrivesMain parity (GroupController.setMemberVolume): with no
+        // non-local Main Out member, the Mac's own row IS Main — the write
+        // moves Main and leaves the Mac's stored fader untouched.
+        if devices.first(where: { $0.id == id })?.isLocalDevice == true,
+           !mainOutMemberIDs.contains(where: { $0 != localDeviceID }) {
+            setMainOutMasterVolume(volume, isFinal: isFinal)
+            return
+        }
         setVolumeInternal(id, volume)
         rebuildSnapshot()
     }
@@ -213,22 +224,11 @@ final class DemoMacSession: MacSessionProtocol {
 
     // MARK: Main Out master
 
-    func beginMainOutDrag() {
-        dragRatios = mainOutRatios()
-    }
-
+    /// Stateless, like the real `GroupController.setMainOutMasterVolume`:
+    /// Main is its own gain stage, so no member's stored level moves.
     func setMainOutMasterVolume(_ volume: Int, isFinal: Bool) {
-        let ratios = dragRatios ?? mainOutRatios()
-        let target = clampVolume(volume)
-        for id in mainOutMemberIDs {
-            guard let ratio = ratios[id] else { continue }
-            setVolumeInternal(id, Int((Double(target) * ratio).rounded()))
-        }
+        mainOutMasterVolume = clampVolume(volume)
         rebuildSnapshot()
-    }
-
-    func endMainOutDrag() {
-        dragRatios = nil
     }
 
     func setMainOutMuted(_ muted: Bool) {
@@ -376,23 +376,6 @@ final class DemoMacSession: MacSessionProtocol {
         }
     }
 
-    private func averageVolume(of ids: [String]) -> Int {
-        let volumes = ids.compactMap(volume(for:))
-        guard !volumes.isEmpty else { return 0 }
-        return Int((Double(volumes.reduce(0, +)) / Double(volumes.count)).rounded())
-    }
-
-    private func mainOutRatios() -> [String: Double] {
-        let ids = mainOutMemberIDs
-        let master = averageVolume(of: ids)
-        var ratios: [String: Double] = [:]
-        for id in ids {
-            guard let vol = volume(for: id) else { continue }
-            ratios[id] = master > 0 ? Double(vol) / Double(master) : 1.0
-        }
-        return ratios
-    }
-
     /// Applies a group's remembered per-member volumes on activation
     /// (GroupController.activateGroup), skipping the local device — its
     /// "volume" is the Mac's own system output, never replayed from a group.
@@ -470,14 +453,15 @@ final class DemoMacSession: MacSessionProtocol {
                 memberIDs: group.memberIDs,
                 memberVolumes: group.memberVolumes,
                 iconSymbolName: group.iconSymbolName,
-                isMuted: !group.memberIDs.isEmpty && group.memberIDs.allSatisfy { muteState[$0]?.explicitMute ?? false }
+                isMuted: !group.memberIDs.isEmpty && group.memberIDs.allSatisfy { muteState[$0]?.explicitMute ?? false },
+                masterVolume: group.masterVolume
             )
         }
         snapshot = Snapshot(
             serverName: "Demo Mac",
             devices: deviceStates,
             mainOut: mainOut,
-            mainOutMasterVolume: averageVolume(of: memberIDs),
+            mainOutMasterVolume: mainOutMasterVolume,
             mainOutMuted: !memberIDs.isEmpty && memberIDs.allSatisfy { muteState[$0]?.explicitMute ?? false },
             groups: groupStates,
             activeGroupID: activeGroupID,

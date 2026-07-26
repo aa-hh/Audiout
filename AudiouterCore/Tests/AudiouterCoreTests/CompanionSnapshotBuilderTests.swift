@@ -369,6 +369,27 @@ import Testing
         #expect(after.groups.first { $0.id == "g1" }?.isMuted == true)
     }
 
+    /// The group's own gain stage (volume decoupling) rides the snapshot as a
+    /// stored value — never derived from members.
+    @Test func groupStateCarriesTheGroupsOwnMasterVolume() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        try controller.saveGroup(Group(id: "g1", name: "Group 1", memberIDs: ["speaker-b"],
+                                       memberVolumes: ["speaker-b": 20], masterVolume: 70))
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(snapshot.groups.first { $0.id == "g1" }?.masterVolume == 70)
+    }
+
     // MARK: addableApps ordering (FIX-B2 finding 3 — array order is part of
     // Snapshot's Equatable, and `runningApplications` order is unspecified,
     // so an unsorted list defeats identical-snapshot suppression)

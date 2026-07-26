@@ -634,7 +634,7 @@ import AudiouterProtocol
                      "the client was never welcomed")
 
         let envelope = CompanionEnvelope(
-            message: .command(requestID: "r-newer", command: .beginMainOutDrag),
+            message: .command(requestID: "r-newer", command: .setMainOutMuted(muted: true)),
             v: CompanionProto.version + 1
         )
         sendText(try envelope.encoded(), over: client)
@@ -662,13 +662,13 @@ import AudiouterProtocol
 
         let (client, log) = try connectClient(via: hub, to: server)
         try sendHello(over: client)
-        sendText(try CompanionEnvelope(message: .command(requestID: "r1", command: .beginMainOutDrag)).encoded(), over: client)
+        sendText(try CompanionEnvelope(message: .command(requestID: "r1", command: .setMainOutMuted(muted: true))).encoded(), over: client)
         try #require(waitUntil { log.contains(.commandResult(requestID: "r1", applied: true, refusalReason: nil, autoSwappedCurrentDevice: false)) },
                      "the command never completed")
         let observedID = try #require(commandClientID.value)
 
-        // The mid-drag phone walks away — the wiring layer needs to learn
-        // WHICH client died so it can end that client's orphaned drag.
+        // The phone walks away — the wiring layer needs to learn WHICH
+        // client died so it can drop that client's rate-limiter bucket.
         client.cancel()
         #expect(waitUntil { disconnectedIDs.value.contains(observedID) },
                 "the disconnect never reported the client's ID (or reported a different one)")

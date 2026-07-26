@@ -93,8 +93,8 @@ import AudiouterProtocol
             counter += 1
             return "id-\(counter)"
         })
-        _ = sender.send(.beginMainOutDrag)
-        _ = sender.send(.beginMainOutDrag)
+        _ = sender.send(.setMainOutMuted(muted: true))
+        _ = sender.send(.setMainOutMuted(muted: true))
         #expect(log.sent.count == 2)
         #expect(log.sent[0].requestID != log.sent[1].requestID)
     }
@@ -332,32 +332,24 @@ import AudiouterProtocol
     }
 
     @MainActor
-    @Test func mainOutDragBracketsWrapTheCoalescedVolumeStream() async throws {
+    @Test func mainOutMasterSliderCoalescesLikeEveryOtherSliderAndAlwaysSendsTheRelease() async throws {
         let clock = FakeClock()
         let (session, _, transport, _) = try makeLiveSession(clock: clock)
         #expect(await waitUntilMain { session.connectionStatus == .live })
 
-        session.beginMainOutDrag()
         session.setMainOutMasterVolume(10, isFinal: false)
         clock.advance(by: CommandSender.minInterval + 0.001)
         session.setMainOutMasterVolume(20, isFinal: false)
         session.setMainOutMasterVolume(30, isFinal: true)
-        session.endMainOutDrag()
 
-        #expect(await waitUntilMain { try! commandMessages(transport.sentFrames).count == 5 })
+        // No drag bracket exists (Main is a stateless set): the wire carries
+        // exactly the coalesced interior sets plus the always-sent release.
+        #expect(await waitUntilMain { try! commandMessages(transport.sentFrames).count == 3 })
         let commands = try commandMessages(transport.sentFrames).map(\.command)
 
-        guard case .beginMainOutDrag = commands.first! else {
-            Issue.record("begin must be sent before any set"); return
+        guard case .setMainOutMasterVolume(30) = commands.last! else {
+            Issue.record("the release value must be the last thing on the wire"); return
         }
-        guard case .endMainOutDrag = commands.last! else {
-            Issue.record("end must be sent after every set"); return
-        }
-        let releaseLanded = commands.dropFirst().dropLast().contains {
-            if case .setMainOutMasterVolume(30) = $0 { return true }
-            return false
-        }
-        #expect(releaseLanded, "the release value must reach the wire between begin and end")
     }
 
     // MARK: - No phone-side persistence
@@ -377,9 +369,7 @@ import AudiouterProtocol
         session.setDeviceVolume(id: "d1", volume: 40, isFinal: true)
         session.setDeviceMuted(id: "d1", muted: true)
         session.setMainOut(MainOutState(kind: "group", groupID: "g1"))
-        session.beginMainOutDrag()
         session.setMainOutMasterVolume(60, isFinal: true)
-        session.endMainOutDrag()
         session.setMainOutMuted(false)
         session.createGroup(name: "Living Room", memberIDs: ["d1"], iconSymbolName: nil)
         session.updateGroup(GroupState(id: "g1", name: "Living Room", memberIDs: ["d1"], memberVolumes: ["d1": 40], isMuted: false))

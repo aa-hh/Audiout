@@ -142,12 +142,6 @@ verifiable with a real device; each bullet says what would be broken if it fails
   master slider slowly on the phone while it's live. Expected: the thumb tracks your
   finger continuously; it must not jump or stutter back toward a stale server value
   mid-drag (local echo during the drag, real value only reconciled on release).
-- [ ] **A vanished phone mid-drag doesn't miscalibrate the Mac's own slider.** Start
-  dragging the Main Out master slider on the phone, then flip the phone to Airplane
-  Mode mid-drag (simulating a dropped connection). Expected: the Mac's own Main Out
-  slider keeps working normally afterward — no stuck "drag in progress" state, no
-  frozen or offset slider. (The Mac ends the drag bracket itself when the client
-  disconnects.)
 - [ ] **Unticking the Mac's companion checkbox settles the phone quietly.** With the
   phone connected, go to the Mac's Settings › General and untick "Allow control from
   iPhone on this network". Expected: the phone transitions to a calm waiting state

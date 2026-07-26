@@ -205,25 +205,33 @@ import AudiouterProtocol
 
     @Test func setDeviceVolumeOnLocalDeviceAppliesWithoutConnection() async throws {
         let ctx = try await makeContext()
-        // The Mac itself has no engine output — its volume is the system output
-        // level and is always writable, connected or not.
+        // The Mac itself has no engine output, so its write is always accepted,
+        // connected or not. With nothing else in Main Out this is passthrough,
+        // where `localRowDrivesMain`: the write moves MAIN (the row and Main
+        // are the same physical control) and the Mac's own stored fader is
+        // deliberately left untouched (GroupController.setMemberVolume).
+        let storedBefore = ctx.backend.devices.first { $0.id == "local-mac" }?.volume
         let result = ctx.dispatcher.execute(.setDeviceVolume(id: "local-mac", volume: 33))
         #expect(result.applied)
-        #expect(ctx.backend.devices.first { $0.id == "local-mac" }?.volume == 33)
+        #expect(ctx.groupController.mainOutMasterVolume == 33)
+        #expect(ctx.backend.devices.first { $0.id == "local-mac" }?.volume == storedBefore)
     }
 
-    // MARK: Main Out master drag brackets
+    // MARK: Main Out master — a stateless set (volume decoupling)
 
-    @Test func mainOutDragBracketsCallBeginSetEnd() async throws {
+    @Test func setMainOutMasterVolumeIsAStatelessSetThatNeverTouchesMemberLevels() async throws {
         let ctx = try await makeContext()
         _ = ctx.dispatcher.execute(.setDeviceSelected(id: "office", selected: true))
         _ = ctx.dispatcher.execute(.setDeviceSelected(id: "sonos-move", selected: true))
+        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "office", volume: 50))
+        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "sonos-move", volume: 40))
 
-        #expect(ctx.dispatcher.execute(.beginMainOutDrag).applied)
         #expect(ctx.dispatcher.execute(.setMainOutMasterVolume(volume: 60)).applied)
-        #expect(ctx.dispatcher.execute(.endMainOutDrag).applied)
-        // Proportional scaling actually reached the backend.
+
         #expect(ctx.groupController.mainOutMasterVolume == 60)
+        // Main is its own gain stage — no member level is rewritten.
+        #expect(ctx.backend.devices.first { $0.id == "office" }?.volume == 50)
+        #expect(ctx.backend.devices.first { $0.id == "sonos-move" }?.volume == 40)
     }
 
     // MARK: setMainOutMuted
@@ -267,6 +275,26 @@ import AudiouterProtocol
         let saved = ctx.groupController.groups.first { $0.id == "g1" }
         #expect(saved?.name == "New Name")
         #expect(saved?.memberIDs == ["office", "sonos-move"])
+    }
+
+    /// The group's own gain stage (volume decoupling) must survive a phone
+    /// edit that doesn't send it — `Group.init`'s default of 100 must never
+    /// clobber it — and must apply when the phone does send one.
+    @Test func updateGroupPreservesMasterVolumeWhenAbsentAndAppliesItWhenSent() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"],
+                                                memberVolumes: [:], masterVolume: 70))
+
+        _ = ctx.dispatcher.execute(.updateGroup(GroupState(
+            id: "g1", name: "Renamed", memberIDs: ["office"], memberVolumes: [:], isMuted: false)))
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.masterVolume == 70,
+                "an edit that doesn't send masterVolume preserves the Mac's value")
+
+        _ = ctx.dispatcher.execute(.updateGroup(GroupState(
+            id: "g1", name: "Renamed", memberIDs: ["office"], memberVolumes: [:], isMuted: false,
+            masterVolume: 55)))
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.masterVolume == 55,
+                "a sent masterVolume is applied")
     }
 
     @Test func updateGroupWithEmptyMembershipIsRefused() async throws {
@@ -703,42 +731,6 @@ import AudiouterProtocol
         #expect(ctx.groupController.groups.contains { $0.id == "g1" }, "the group survived the refused delete")
         #expect(ctx.groupController.mainOut == .group(id: "g1"), "Main Out was not left re-targeted")
         #expect(result.refusalReason == Self.sanitizedStoreRefusal)
-    }
-
-    // MARK: endMainOutDrag — ownership gating (finding 11)
-
-    @Test func endMainOutDragFromNonOwnerLeavesBracketOpen() async throws {
-        let ctx = try await makeContext()
-        _ = ctx.dispatcher.execute(.setDeviceSelected(id: "office", selected: true))
-        _ = ctx.dispatcher.execute(.setDeviceSelected(id: "sonos-move", selected: true))
-        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "office", volume: 50))
-        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "sonos-move", volume: 40))
-
-        #expect(ctx.dispatcher.execute(.beginMainOutDrag).applied)
-        // Clamping at 100 distorts the LIVE ratios, so bracket-vs-no-bracket
-        // becomes observable on the next scale.
-        _ = ctx.dispatcher.execute(.setMainOutMasterVolume(volume: 100))
-        #expect(ctx.dispatcher.execute(.endMainOutDrag, isDragOwner: false).applied, "a stale end is accepted")
-        _ = ctx.dispatcher.execute(.setMainOutMasterVolume(volume: 45))
-        // The owner's bracket survived: the original 50/40 snapshot still drives scaling.
-        #expect(ctx.backend.devices.first { $0.id == "office" }?.volume == 50)
-        #expect(ctx.backend.devices.first { $0.id == "sonos-move" }?.volume == 40)
-    }
-
-    @Test func endMainOutDragFromOwnerClosesBracket() async throws {
-        let ctx = try await makeContext()
-        _ = ctx.dispatcher.execute(.setDeviceSelected(id: "office", selected: true))
-        _ = ctx.dispatcher.execute(.setDeviceSelected(id: "sonos-move", selected: true))
-        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "office", volume: 50))
-        _ = ctx.dispatcher.execute(.setDeviceVolume(id: "sonos-move", volume: 40))
-
-        #expect(ctx.dispatcher.execute(.beginMainOutDrag).applied)
-        _ = ctx.dispatcher.execute(.setMainOutMasterVolume(volume: 100)) // office clamps to 100, sonos-move → 89
-        #expect(ctx.dispatcher.execute(.endMainOutDrag).applied) // default: caller owns the drag
-        _ = ctx.dispatcher.execute(.setMainOutMasterVolume(volume: 45))
-        // Live post-clamp ratios (100/89) drive scaling now — not the 50/40 snapshot.
-        #expect(ctx.backend.devices.first { $0.id == "office" }?.volume != 50)
-        #expect(ctx.backend.devices.first { $0.id == "sonos-move" }?.volume != 40)
     }
 
     // MARK: unknown

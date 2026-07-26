@@ -107,7 +107,7 @@ private final class ApplicationsFooterView: NSView {
 ///
 /// Structure, top to bottom:
 /// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
-///    icon · "Main Out" · proportional master slider + `%` · a trailing
+///    icon · "Main Out" · master gain slider + `%` · a trailing
 ///    `NSPopUpButton` device selector. The selector is THE routing decision, with
 ///    two sections: "Selected Devices" and each saved Output Group.
 /// 2. **"Selected Devices" section** — every discovered device, split into
@@ -1359,6 +1359,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // revert on the first model repaint after a mute click.
         var device = device
         device.isMuted = device.isMuted || controller.isMuted(device.id)
+        // Same overlay pattern, for the passthrough exception: with no real output
+        // in the current target, the Mac's row IS Main — `setMemberVolume` redirects
+        // a local-row write to `setMainOutMasterVolume`, because in passthrough the
+        // Mac's audible level is the system volume and the two are physically one
+        // control. A row that WRITES Main must also READ it, or the slider would
+        // show the Mac's own remembered fader while dragging it moved Main, and the
+        // thumb would jump on the first repaint. The Mac's stored fader is
+        // deliberately left untouched underneath — it is what the row goes back to
+        // showing the moment an AirPlay device joins.
+        if device.isLocalDevice, controller.localRowDrivesMain {
+            device.volume = controller.mainOutMasterVolume
+        }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — `canSelectLocalSpeaker`
         // is unconditionally `true` now (T-GROUPCTL / Q5, synced local sink), so
         // the Mac row is never blocked/greyed any more. This no longer computes
@@ -2358,9 +2370,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     public func test_dragMainOutMaster(to value: Int) {
-        groupController?.beginMainOutMasterDrag()
         groupController?.setMainOutMasterVolume(value)
-        groupController?.endMainOutMasterDrag()
         refreshMainOutRow()
     }
 
@@ -2368,9 +2378,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if groupController?.activeGroupID != groupID {
             groupController?.setMainOut(.group(id: groupID))
         }
-        groupController?.beginMasterDrag()
-        groupController?.setMasterVolume(value)
-        groupController?.endMasterDrag()
+        groupController?.setMainOutMasterVolume(value)
     }
 }
 
@@ -2437,17 +2445,9 @@ extension PopoverController: MainOutRowView.Delegate {
         rebuild()
     }
 
-    public func mainOutRowBeginMasterDrag(_ row: MainOutRowView) {
-        groupController?.beginMainOutMasterDrag()
-    }
-
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
-    }
-
-    public func mainOutRowEndMasterDrag(_ row: MainOutRowView) {
-        groupController?.endMainOutMasterDrag()
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool) {

@@ -55,7 +55,8 @@ import Testing
                     memberIDs: ["device-1", "device-2"],
                     memberVolumes: ["device-1": 80, "device-2": 40],
                     iconSymbolName: "house.fill",
-                    isMuted: false
+                    isMuted: false,
+                    masterVolume: 85
                 ),
             ],
             activeGroupID: "group-1",
@@ -149,9 +150,7 @@ import Testing
         .setMainOut(MainOutState(kind: "group", groupID: "group-1")),
         .setDeviceVolume(id: "device-1", volume: 42),
         .setDeviceMuted(id: "device-1", muted: true),
-        .beginMainOutDrag,
         .setMainOutMasterVolume(volume: 33),
-        .endMainOutDrag,
         .setMainOutMuted(muted: false),
         .createGroup(name: "Upstairs", memberIDs: ["device-1", "device-2"], iconSymbolName: "bed.double.fill"),
         .createGroup(name: "Upstairs", memberIDs: ["device-1"], iconSymbolName: nil),

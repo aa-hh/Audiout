@@ -78,38 +78,39 @@ import AudiouterProtocol
         #expect(session.toasts.current == nil, "no further auto-swap once the Mac is already out of the set")
     }
 
-    // MARK: - Proportional master volume
+    // MARK: - Main Out master — its own gain stage (volume decoupling)
 
     @MainActor
-    @Test func mainOutMasterScalesMembersProportionally() {
+    @Test func mainOutMasterIsItsOwnValueAndNeverRewritesMemberLevels() {
         let session = DemoMacSession()
+        session.setDeviceSelected(id: "demo-homepod", selected: true)     // volume 40, local auto-swapped off
         session.setDeviceSelected(id: "demo-sonos-left", selected: true)  // volume 55
-        session.setDeviceSelected(id: "demo-sonos-right", selected: true) // volume 55, local auto-swapped off
-        // Selected set is now {sonos-left@55, sonos-right@55} at equal ratio.
 
-        session.beginMainOutDrag()
         session.setMainOutMasterVolume(20, isFinal: false)
         session.setMainOutMasterVolume(80, isFinal: true)
-        session.endMainOutDrag()
 
         let after = try! #require(session.snapshot)
-        #expect(device(after, "demo-sonos-left").volume == 80)
-        #expect(device(after, "demo-sonos-right").volume == 80)
-        #expect(after.mainOutMasterVolume == 80)
+        #expect(after.mainOutMasterVolume == 80, "Main is a stored value of its own")
+        #expect(device(after, "demo-homepod").volume == 40,
+                "moving Main never touches a member's own level")
+        #expect(device(after, "demo-sonos-left").volume == 55,
+                "moving Main never touches a member's own level")
     }
 
     @MainActor
-    @Test func masterScalingPreservesAnUnequalBalance() {
+    @Test func localRowDrivesMainInPassthrough() {
         let session = DemoMacSession()
-        session.setDeviceSelected(id: "demo-homepod", selected: true) // volume 40, local auto-swapped off
-        session.setDeviceSelected(id: "demo-sonos-left", selected: true) // volume 55
+        // Out-of-the-box state: Selected Devices = {local-mac} = passthrough,
+        // so the Mac's own row IS Main (GroupController.setMemberVolume's one
+        // documented exception).
+        let macVolumeBefore = device(try! #require(session.snapshot), "local-mac").volume
 
-        session.setMainOutMasterVolume(50, isFinal: true) // no drag open: snapshots fresh ratios each call
+        session.setDeviceVolume(id: "local-mac", volume: 30, isFinal: true)
 
         let after = try! #require(session.snapshot)
-        // Average before scaling was (40+55)/2 = 47.5; homepod's ratio 40/47.5, sonos' 55/47.5.
-        #expect(device(after, "demo-homepod").volume < device(after, "demo-sonos-left").volume,
-                "the quieter member must stay quieter — proportional, not uniform")
+        #expect(after.mainOutMasterVolume == 30, "in passthrough the Mac's row moves Main")
+        #expect(device(after, "local-mac").volume == macVolumeBefore,
+                "the Mac's own stored fader survives untouched")
     }
 
     // MARK: - Mute stash/restore
@@ -318,10 +319,8 @@ import AudiouterProtocol
         session.setDeviceSelected(id: "demo-homepod", selected: true)
         session.setDeviceSelected(id: "demo-sonos-left", selected: true)
         session.setDeviceMuted(id: "demo-homepod", muted: true)
-        session.beginMainOutDrag()
         session.setMainOutMasterVolume(70, isFinal: false)
         session.setMainOutMasterVolume(90, isFinal: true)
-        session.endMainOutDrag()
         session.createGroup(name: "Burst Group", memberIDs: ["demo-homepod", "demo-sonos-left"], iconSymbolName: "star.fill")
         session.addAppRoute(bundleID: "com.demo.video", displayName: "Demo Video")
         session.setAppDestination(bundleID: "com.demo.video", kind: "device", deviceID: "demo-sonos-left")
@@ -331,12 +330,9 @@ import AudiouterProtocol
 
         let snapshot = try! #require(session.snapshot)
 
-        // mainOutMasterVolume must be the live average of the actual current members.
-        let memberVolumes = snapshot.devices
-            .filter(\.isMainOutMember)
-            .map(\.volume)
-        let expectedAverage = Int((Double(memberVolumes.reduce(0, +)) / Double(memberVolumes.count)).rounded())
-        #expect(snapshot.mainOutMasterVolume == expectedAverage)
+        // Main is its own stored value (volume decoupling): the last set
+        // sticks, independent of any member's level.
+        #expect(snapshot.mainOutMasterVolume == 90)
 
         // Every device referenced by a group/appRoute must exist in `devices`.
         let deviceIDs = Set(snapshot.devices.map(\.id))

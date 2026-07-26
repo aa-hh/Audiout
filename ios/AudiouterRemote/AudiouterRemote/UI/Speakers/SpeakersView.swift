@@ -131,14 +131,13 @@ struct SpeakersView: View {
                 in: 0...100,
                 step: 1,
                 onEditingChanged: { editing in
-                    if editing {
-                        session.beginMainOutDrag()
-                    } else {
-                        let final = Int((localMasterVolume ?? Double(snapshot.mainOutMasterVolume)).rounded())
-                        session.setMainOutMasterVolume(final, isFinal: true)
-                        session.endMainOutDrag()
-                        localMasterVolume = nil
-                    }
+                    // Same shape as every other slider: local echo while
+                    // dragging, coalesced sends, always send the release
+                    // value — no drag bracket (Main is a stateless set).
+                    guard !editing else { return }
+                    let final = Int((localMasterVolume ?? Double(snapshot.mainOutMasterVolume)).rounded())
+                    session.setMainOutMasterVolume(final, isFinal: true)
+                    localMasterVolume = nil
                 }
             )
             .accessibilityLabel("Main Out volume")
@@ -171,9 +170,7 @@ private final class PreviewSession: MacSessionProtocol {
     func setMainOut(_ state: MainOutState) {}
     func setDeviceVolume(id: String, volume: Int, isFinal: Bool) {}
     func setDeviceMuted(id: String, muted: Bool) {}
-    func beginMainOutDrag() {}
     func setMainOutMasterVolume(_ volume: Int, isFinal: Bool) {}
-    func endMainOutDrag() {}
     func setMainOutMuted(_ muted: Bool) {}
     func createGroup(name: String, memberIDs: [String], iconSymbolName: String?) {}
     func updateGroup(_ group: GroupState) {}

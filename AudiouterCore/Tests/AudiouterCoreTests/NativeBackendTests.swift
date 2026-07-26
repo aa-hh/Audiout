@@ -663,6 +663,14 @@ extension SerializedSharedState {
                 group.addTask { _ = await task.value }
                 group.addTask { try await Task.sleep(for: timeout) }
                 try await group.next()
+                // Cancel the STREAM task, not just the group's children. `cancelAll()`
+                // cancels the child that is `await task.value`, but `Task.value` does
+                // not observe its awaiter's cancellation — it waits for `task` itself.
+                // Without this the group's implicit scope-exit await never returns when
+                // the timeout wins, and the `defer { task.cancel() }` that would free it
+                // can't run because we are still inside this closure: a test whose
+                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+                task.cancel()
                 group.cancelAll()
             }
         }
@@ -914,16 +922,22 @@ extension SerializedSharedState {
 
     // MARK: Current (local) device — volume/mute (SystemVolumeControlling)
     //
-    // The local row's slider/mute drive `SystemVolumeControlling` directly
-    // (`NativeBackend.setVolume`/`setMuted`'s `id == localDeviceID` branch),
-    // never the engine. `FakeSystemVolume` (MARK: Doubles, above) keeps every
-    // one of these hermetic — no Core Audio HAL read/write, no property
-    // listener, ever touches the developer's real Mac.
+    // Only the local row's MUTE still drives `SystemVolumeControlling` directly
+    // (`NativeBackend.setMuted`'s `id == localDeviceID` branch) — real hardware
+    // mute. Its VOLUME no longer does: the row is the Mac's own fader now, a trim
+    // under Main Out, and the hardware write belongs solely to
+    // `setMasterGain(mirrorToSystemVolume: true)`. Neither ever reaches the
+    // engine. `FakeSystemVolume` (MARK: Doubles, above) keeps every one of these
+    // hermetic — no Core Audio HAL read/write, no property listener, ever
+    // touches the developer's real Mac.
 
-    /// `setVolume` on the local id writes through the fake's hardware seam
-    /// (recorded) and optimistically echoes the model — and never touches the
-    /// engine (the local id has no `outputIDs` entry).
-    @Test func setVolumeOnLocalDeviceWritesHardwareAndEchoesModel() async {
+    /// `setVolume` on the local id optimistically echoes the model — and now
+    /// touches NEITHER the engine (no `outputIDs` entry) NOR the system-volume
+    /// hardware seam: the local row is the Mac's own fader (a trim under Main),
+    /// and the hardware write belongs solely to
+    /// `setMasterGain(mirrorToSystemVolume: true)`. What it DOES drive is the
+    /// synced-local-sink gain (W1), which this hermetic double doesn't observe.
+    @Test func setVolumeOnLocalDeviceEchoesModelWithoutWritingHardware() async {
         let volume = FakeSystemVolume()
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
@@ -941,7 +955,7 @@ extension SerializedSharedState {
             if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 70 }
             return false
         }, "setVolume on the local id must echo the model")
-        #expect(volume.volumeCalls == [70], "setVolume on the local id must write through the hardware seam")
+        #expect(volume.volumeCalls.isEmpty, "the local fader must never write the system volume — that write belongs solely to Main Out")
         #expect(engine.volumeCalls.isEmpty, "local volume must never reach the engine")
     }
 
@@ -950,11 +964,11 @@ extension SerializedSharedState {
     /// engine never sees a `setVolume` call, and the model's `volume` field is
     /// untouched by the mute (the shim would have forced it to 0).
     @Test func setMutedOnLocalDeviceUsesRealHardwareMuteNotVolumeShim() async {
-        let volume = FakeSystemVolume(volume: 55, muted: false)
+        let volume = FakeSystemVolume(muted: false)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 55 }
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == false }
 
         backend.setMuted(true, for: NativeBackend.localDeviceID)
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
@@ -962,14 +976,17 @@ extension SerializedSharedState {
         #expect(volume.mutedCalls == [true], "local mute must go through the real hardware mute path")
         let d = backend.devices.first { $0.isLocalDevice }
         #expect(d?.isMuted == true)
-        #expect(d?.volume == 55, "local mute must NOT run the engine's volume-0 shim — the slider position is untouched")
+        #expect(d?.volume == 100, "local mute must NOT run the engine's volume-0 shim — the row stays at its unity seed, untouched")
         #expect(engine.volumeCalls.isEmpty, "local mute must never push a volume to the engine (no outputIDs entry for local-mac)")
     }
 
-    /// The local row seeds its volume/isMuted from `currentVolume()`/
-    /// `currentMuted()` (scripted here), not a fabricated default — the row must
-    /// open showing where the Mac's volume actually is.
-    @Test func localDeviceSeedsFromScriptedHardwareState() async {
+    /// The local row seeds MUTE from `currentMuted()` (scripted here), not a
+    /// fabricated default — but its VOLUME seeds at UNITY (100) regardless of
+    /// whatever the hardware currently reads. The row is the Mac's own fader
+    /// under Main Out now, not a mirror of the system volume, so `currentVolume()`
+    /// is deliberately never consulted for the seed any more (Main itself adopts
+    /// the hardware level at launch via `systemOutputVolume`, not this row).
+    @Test func localDeviceSeedsMuteFromHardwareButVolumeAtUnity() async {
         let volume = FakeSystemVolume(volume: 42, muted: true)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
@@ -977,14 +994,15 @@ extension SerializedSharedState {
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         let local = backend.devices.first { $0.isLocalDevice }
-        #expect(local?.volume == 42, "the local row must seed from currentVolume(), not a fabricated default")
-        #expect(local?.isMuted == true, "the local row must seed from currentMuted(), not a fabricated default")
+        #expect(local?.volume == 100, "the local row must seed at UNITY, not the hardware's current level")
+        #expect(local?.isMuted == true, "the local row must still seed its mute from currentMuted()")
     }
 
-    /// When the hardware read is unreadable (`nil` — many aggregate/HDMI
-    /// outputs), the local row falls back to 65/false rather than propagating
-    /// `nil` (which would either crash or render as a fabricated 0).
-    @Test func localDeviceSeedFallsBackWhenHardwareUnreadable() async {
+    /// Even when the hardware read is unreadable (`nil` — many aggregate/HDMI
+    /// outputs), the local row's volume is unaffected: it never consulted
+    /// `currentVolume()` in the first place, so there is nothing to fall back
+    /// from. Mute still falls back to `false` rather than propagating `nil`.
+    @Test func localDeviceMuteFallsBackWhenUnreadableVolumeStaysUnity() async {
         let volume = FakeSystemVolume(volume: nil, muted: nil)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
@@ -992,13 +1010,14 @@ extension SerializedSharedState {
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         let local = backend.devices.first { $0.isLocalDevice }
-        #expect(local?.volume == 65, "an unreadable currentVolume() must fall back to 65")
+        #expect(local?.volume == 100, "an unreadable currentVolume() is moot — the row seeds at unity regardless")
         #expect(local?.isMuted == false, "an unreadable currentMuted() must fall back to false")
     }
 
     /// The local id's volume clamps 0–100 exactly like the AirPlay path
-    /// (`Int.clampedToVolume`), and the fake receives the CLAMPED value, not the
-    /// raw input.
+    /// (`Int.clampedToVolume`) — that part of the contract is unchanged. What
+    /// changed is the destination: the clamped value only ever lands in the
+    /// model, never on the hardware seam (that write belongs solely to Main Out).
     @Test func localDeviceVolumeClampingMatchesAirPlayPath() async {
         let volume = FakeSystemVolume()
         let (backend, engine, _) = makeBackend(systemVolume: volume)
@@ -1009,65 +1028,64 @@ extension SerializedSharedState {
         backend.setVolume(150, for: NativeBackend.localDeviceID)
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 100 }
         #expect(backend.devices.first { $0.isLocalDevice }?.volume == 100, "150 must clamp to 100")
-        #expect(volume.volumeCalls.last == 100, "the fake must receive the CLAMPED value, matching the AirPlay path")
 
         backend.setVolume(-5, for: NativeBackend.localDeviceID)
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 0 }
         #expect(backend.devices.first { $0.isLocalDevice }?.volume == 0, "-5 must clamp to 0")
-        #expect(volume.volumeCalls.last == 0)
+
+        #expect(volume.volumeCalls.isEmpty, "the local row's own fader must never write the system volume, clamped or not")
     }
 
     /// TWO-WAY SYNC: a change made outside the app (media keys, Sound menu, a
-    /// default-device switch) flows back in as a `local-mac` `deviceUpdated`
-    /// carrying both fresh values.
-    @Test func localDeviceExternalChangeEmitsDeviceUpdated() async {
+    /// default-device switch) flows back in as a `local-mac` `deviceUpdated` —
+    /// but only MUTE syncs any more. The row's volume is the Mac's own fader
+    /// under Main Out now, so `onExternalChange`'s handler never touches
+    /// `Device.volume` at all, and the row stays pinned at its unity seed.
+    @Test func localDeviceExternalChangeSyncsMuteButNotVolume() async {
         let volume = FakeSystemVolume(volume: 50, muted: true)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil {
-            let d = backend.devices.first { $0.isLocalDevice }
-            return d?.volume == 50 && d?.isMuted == true
-        }
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
 
         let events = await collect(from: backend) { events in
             events.contains {
-                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 30 && d.isMuted == false }
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.isMuted == false }
                 return false
             }
         } after: { volume.fireExternalChange(volume: 30, muted: false) }
 
         #expect(events.contains {
-            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 30 && d.isMuted == false }
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.isMuted == false && d.volume == 100 }
             return false
-        }, "an external hardware change must sync back to the local row as a deviceUpdated")
+        }, "an external hardware change must sync mute back to the local row, but its volume stays at unity — it no longer tracks the system level")
     }
 
-    /// A `nil` field in `onExternalChange` (a control that's unreadable at that
-    /// instant) must be SKIPPED, not applied — a nil volume must not zero the
-    /// row, and symmetrically a nil mute must not reset the last-known mute.
-    @Test func localDeviceExternalChangeSkipsNilFields() async {
+    /// A `nil` MUTE in `onExternalChange` (a control that's unreadable at that
+    /// instant) must be SKIPPED, not applied — it must not reset the last-known
+    /// mute. Volume is a stronger claim now: ANY volume report, `nil` or a real
+    /// number, must never move the row at all, since the handler stopped
+    /// touching `Device.volume` entirely.
+    @Test func localDeviceExternalChangeNeverTouchesVolumeAndSkipsNilMute() async {
         let volume = FakeSystemVolume(volume: 55, muted: false)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil {
-            let d = backend.devices.first { $0.isLocalDevice }
-            return d?.volume == 55 && d?.isMuted == false
-        }
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == false }
 
-        // nil VOLUME must not zero the row.
+        // A nil volume must not move the row (nothing to zero any more).
         volume.fireExternalChange(volume: nil, muted: true)
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
         var d = backend.devices.first { $0.isLocalDevice }
         #expect(d?.isMuted == true)
-        #expect(d?.volume == 55, "a nil volume in onExternalChange must not zero the row")
+        #expect(d?.volume == 100, "the local row's volume must never be touched by onExternalChange")
 
-        // nil MUTE must not reset the last-known mute state.
+        // A REAL (non-nil) volume must ALSO be ignored — this is the new part of
+        // the contract: it isn't just nil-safety any more, volume tracking is gone.
         volume.fireExternalChange(volume: 99, muted: nil)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 99 }
+        try? await Task.sleep(nanoseconds: 100_000_000)
         d = backend.devices.first { $0.isLocalDevice }
-        #expect(d?.volume == 99)
+        #expect(d?.volume == 100, "a non-nil volume in onExternalChange must not move the row either — Main Out owns that level")
         #expect(d?.isMuted == true, "a nil mute in onExternalChange must not reset the last-known mute state")
     }
 
@@ -1080,8 +1098,7 @@ extension SerializedSharedState {
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
         await pollUntil {
-            let d = backend.devices.first { $0.isLocalDevice }
-            return d?.volume == 42 && d?.isMuted == false
+            backend.devices.first { $0.isLocalDevice }?.isMuted == false
         }
 
         // Subscribe BEFORE firing so the (absence of an) emit is actually observed.
@@ -1112,7 +1129,7 @@ extension SerializedSharedState {
     // capture tap MUTES while streaming — so they adjusted a device nobody could hear
     // (ahh, live session 2026-07-17). This backend republishes a genuine external
     // change as `.systemVolumeChanged` and `AppDelegate` hands it to
-    // `GroupController.mirrorSystemVolumeToMainOut(_:)`. The backend must NOT know
+    // `GroupController.applyExternalSystemVolume(_:)`. The backend must NOT know
     // `GroupController` exists — it only states the fact.
     //
     // What these pin down is WHICH facts qualify: the filters are the whole safety
@@ -1129,7 +1146,7 @@ extension SerializedSharedState {
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         let events = await collect(from: backend) { events in
             events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
@@ -1139,30 +1156,33 @@ extension SerializedSharedState {
                        "an external volume change must republish for the Main Out mirror")
     }
 
-    /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume, but
-    /// that's the new device's pre-existing level — not a user gesture. It must
-    /// relabel/sync the row and emit NOTHING for the mirror: mirroring it would slam
-    /// every AirPlay speaker to whatever the headphones happened to be set to.
-    @Test func defaultDeviceSwitchSyncsRowButDoesNotEmitSystemVolumeChanged() async {
+    /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume/mute,
+    /// but that's the new device's pre-existing state — not a user gesture. It must
+    /// still sync the row's MUTE (and relabel its name), but never its volume — that
+    /// stopped tracking the system entirely — and it must emit NOTHING for the
+    /// mirror: mirroring a volume would slam every AirPlay speaker to whatever the
+    /// headphones happened to be set to.
+    @Test func defaultDeviceSwitchSyncsMuteButNotVolumeOrSystemVolumeChanged() async {
         let volume = FakeSystemVolume(volume: 50, muted: false)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+        await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == false }
 
-        // The row still syncs (that's the two-way sync's job) — wait on THAT, so the
-        // absence of the mirror event below is observed after the work is done.
+        // The row still syncs its MUTE (that's the two-way sync's remaining job) —
+        // wait on THAT, so the absence of the mirror event below is observed after
+        // the work is done.
         let events = await collect(from: backend) { events in
             events.contains {
-                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 90 }
+                if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.isMuted == true }
                 return false
             }
-        } after: { volume.fireExternalChange(volume: 90, muted: false, defaultDeviceChanged: true) }
+        } after: { volume.fireExternalChange(volume: 90, muted: true, defaultDeviceChanged: true) }
 
         #expect(events.contains {
-            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.volume == 90 }
+            if case .deviceUpdated(let d) = $0 { return d.isLocalDevice && d.isMuted == true && d.volume == 100 }
             return false
-        }, "a default-device switch must still sync the local row")
+        }, "a default-device switch must still sync the local row's mute, but its volume stays at unity even across a device switch")
         #expect(systemVolumeEvents(in: events) == [],
                        "a device switch is NOT a volume gesture — it must never drive the mirror")
     }
@@ -1175,7 +1195,7 @@ extension SerializedSharedState {
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         let events = await collect(from: backend) { events in
             events.contains {
@@ -1188,20 +1208,18 @@ extension SerializedSharedState {
                        "a mute-only change must not republish an unmoved volume")
     }
 
-    /// OUR OWN WRITES MUST NOT MIRROR. Dragging the Current Device slider goes through
-    /// `setVolume(_:for:)` on the local id; that must never come back as an external
-    /// change, or the slider would scale the AirPlay speakers too.
-    ///
-    /// On real hardware `SystemOutputVolume` is what guarantees it — its echo
-    /// suppression compares a fresh read against its last-known state (updated on
-    /// every write), so `onExternalChange` never fires for a value we set. This pins
-    /// the other half: the backend doesn't manufacture the event on its own.
-    @Test func ownLocalVolumeWriteDoesNotEmitSystemVolumeChanged() async {
+    /// OUR OWN WRITES MUST NOT MIRROR. Dragging the local row's own fader goes
+    /// through `setVolume(_:for:)` on the local id; that must never come back as
+    /// an external change, or the slider would scale the AirPlay speakers too.
+    /// Now doubly true: the local write doesn't even reach the hardware seam any
+    /// more (that write belongs solely to Main Out's `mirrorToSystemVolume` arm),
+    /// so there is structurally nothing for `onExternalChange` to echo back.
+    @Test func ownLocalVolumeWriteNeverWritesSystemVolumeOrEmitsMirror() async {
         let volume = FakeSystemVolume(volume: 50, muted: false)
         let (backend, engine, _) = makeBackend(systemVolume: volume)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
-        await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 50 }
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         let events = await collect(from: backend) { events in
             events.contains {
@@ -1210,17 +1228,26 @@ extension SerializedSharedState {
             }
         } after: { backend.setVolume(70, for: NativeBackend.localDeviceID) }
 
-        #expect(volume.volumeCalls == [70], "precondition: the write did reach the hardware seam")
+        #expect(volume.volumeCalls.isEmpty, "the local row's own fader must never write the system volume — that belongs solely to Main Out")
         #expect(systemVolumeEvents(in: events) == [],
                        "our own local write must not be republished as an external change")
     }
 
     /// END-TO-END NO-FEEDBACK PROOF, across the real seam rather than by inspection:
-    /// backend event → `AppDelegate`'s one-line wiring → `GroupController` mirror →
-    /// `backend.setVolume`. A volume key while streaming must move the AirPlay
-    /// device's volume and write NOTHING back to the system volume — if it did, the
-    /// listener that started this would re-fire and the loop would spin.
-    @Test func volumeKeyMirrorDrivesAirPlayAndNeverWritesBackToSystemVolume() async throws {
+    /// backend event → `AppDelegate`'s one-line wiring → `GroupController`'s
+    /// `applyExternalSystemVolume` → `OutputBackend.setMasterGain`. A volume key
+    /// while streaming must RE-PUSH `Main × Group × the speaker's own stored
+    /// level` to the engine and write NOTHING back to the system volume — if it
+    /// did, the listener that started this would re-fire and the loop would spin.
+    ///
+    /// Renamed from `…DrivesAirPlayAndNeverWritesBackToSystemVolume`: under the
+    /// old ratio design the speaker's `Device.volume` itself WAS the wire level, so
+    /// asserting it moved to 25 proved the mirror worked. Now `Device.volume` is
+    /// the user's own per-device setting and Main multiplies in at the write
+    /// boundary WITHOUT ever storing the product — so the speaker's OWN stored
+    /// level must stay put, and only the wire push (`engine.volumeCalls`) carries
+    /// the new gain. The local row no longer tracks the system volume either way.
+    @Test func volumeKeyMirrorRePushesEngineGainAndNeverWritesBackToSystemVolume() async throws {
         let systemVolume = FakeSystemVolume(volume: 50, muted: false)
         let (backend, engine, discovery) = makeBackend(systemVolume: systemVolume)
         backend.start(); defer { backend.stop() }
@@ -1232,14 +1259,31 @@ extension SerializedSharedState {
         } after: { discovery.fire(.appeared(speaker)) }
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
+        let isolatedDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let controller = GroupController(
             backend: backend,
-            store: GroupStore(directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+            store: GroupStore(directory: isolatedDir),
+            // Isolate BOTH persistence sinks. `ensureDefaultSelection`/`setDeviceSelected`
+            // call persistRouting() → routingStore.save(), and the default RoutingStore()
+            // targets the real ~/Library/Application Support/Audiouter — clobbering a
+            // dev's actual routing.json every run. And this controller writes
+            // settings.mainOutVolume, so the default AppSettings() (UserDefaults.standard)
+            // would pollute the real defaults domain. Both go to a per-test temp/suite.
+            routingStore: RoutingStore(directory: isolatedDir),
+            settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
             loadPersisted: false)
         controller.ensureDefaultSelection()                     // {local} — passthrough
         _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming
         #expect(!(controller.isPassthrough), "precondition: streaming to the AirPlay speaker")
+
+        // Let the connect settle (add + connect-volume seed) before capturing the
+        // speaker's OWN stored level — the baseline the gain math below multiplies.
+        await pollUntil {
+            engine.addedIDs.contains(speaker.outputID) &&
+            backend.devices.first { $0.id == speaker.id }?.isSelected == true
+        }
+        let speakerStoredVolumeBefore = backend.devices.first { $0.id == speaker.id }?.volume ?? 0
 
         // Exactly what AppDelegate.apply(_:) does with this event, and nothing more.
         let stream = backend.makeEventStream()
@@ -1247,7 +1291,7 @@ extension SerializedSharedState {
             let task = Task {
                 for await event in stream {
                     if case .systemVolumeChanged(let v) = event {
-                        controller.mirrorSystemVolumeToMainOut(v)
+                        controller.applyExternalSystemVolume(v)
                         mirrored()
                         break
                     }
@@ -1264,14 +1308,282 @@ extension SerializedSharedState {
                 group.cancelAll()
             }
         }
-        await pollUntil { backend.devices.first { $0.id == speaker.id }?.volume == 25 }
 
-        #expect(backend.devices.first { $0.id == speaker.id }?.volume == 25,
-                       "the volume key drove the speaker that is actually playing")
+        // Main is now 25, Group is the identity (100) under a Selected-Devices
+        // target — so the wire carries `storedBefore × 25%`, a single Double
+        // product, never stored back onto the speaker.
+        let expectedWire = Double(speakerStoredVolumeBefore) / 100.0 * 0.25
+        await pollUntil {
+            engine.volumeCalls.contains { $0.0 == speaker.outputID && abs($0.1 - expectedWire) < 0.001 }
+        }
+
+        #expect(engine.volumeCalls.contains { $0.0 == speaker.outputID && abs($0.1 - expectedWire) < 0.001 },
+                       "the volume key must re-push Main's new gain × the speaker's own stored level to the engine")
         #expect(systemVolume.volumeCalls.isEmpty,
                       "THE NO-FEEDBACK PROOF: the mirror wrote nothing back to the system volume, so the listener cannot re-fire")
-        #expect(backend.devices.first { $0.isLocalDevice }?.volume == 25,
-                       "the local row still tracks the system volume via the two-way sync — it just isn't written TO")
+        #expect(backend.devices.first { $0.id == speaker.id }?.volume == speakerStoredVolumeBefore,
+                       "the speaker's OWN stored level must be untouched by a Main Out change — only the wire push carries the product")
+        #expect(backend.devices.first { $0.isLocalDevice }?.volume == 100,
+                       "the local row no longer tracks the system volume at all — it stays at its unity seed regardless of Main's level")
+    }
+
+    // MARK: `Main × Group × Device` — formed once at the write boundary, never stored
+
+    /// The product that reaches the engine is built as ONE Double, in
+    /// `engineVolume(forID:uiVolume:)` — `uiVolume/100 × main/100 × group/100` —
+    /// with no intermediate integer stage to round. Main 40 × the device's own
+    /// stored 50 must land on the wire at ~0.20.
+    @Test func gainAndDeviceVolumeFormOneDoubleProductAtTheWriteBoundary() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()   // discovers with a stored default volume of 50
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 50, "precondition: the discovered default")
+
+        backend.setMasterGain(mainOut: 40, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.20) < 0.0001 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.20) < 0.0001 },
+                       "Main 40 × device 50 must reach the engine as ONE Double product (0.40 × 0.50 = 0.20), with no intermediate rounding")
+    }
+
+    /// The GROUP stage actually multiplies into the wire — not just Main × Device.
+    /// Every other `setMasterGain` in these tests passes `group: 100`, so a
+    /// regression dropping the group term from `masterGainFraction` would ship
+    /// green. 0.10 is unreachable unless all three stages multiply.
+    @Test func groupGainMultipliesIntoTheWireProductAllThreeStages() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()   // stored volume settles at 50
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Main 50 × Group 40 × Device 50 = 0.5 × 0.4 × 0.5 = 0.10.
+        backend.setMasterGain(mainOut: 50, group: 40, mirrorToSystemVolume: false)
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.10) < 0.0001 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.10) < 0.0001 },
+                       "all three stages multiply: Main 50 × Group 40 × Device 50 → 0.10 (0.25 would mean the group term was dropped)")
+    }
+
+    // MARK: Zero means silent — on AirPlay 1 too
+
+    /// Pulling MAIN to 0 must silence an AirPlay-1 receiver, not merely duck it.
+    /// The AP1 perceptual curve floors at `airPlay1MinVolumeDB` (−12 dB) so that
+    /// the whole slider stays usable on wide-mixer RAOP hardware — but that floor
+    /// applied at zero too, leaving an AirPort Express plainly audible with the
+    /// master all the way down. Effective zero now takes the same true-mute
+    /// sentinel the mute path sends (−1.0 ⇒ −144 dB).
+    @Test func mainAtZeroTrulySilencesAnAirPlay1Receiver() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "Main at 0 must send AP1's true-mute sentinel, not the curve's −12 dB floor")
+        #expect(!engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.6) < 0.0001 },
+                       "0.6 is what the curve returns at zero — exactly the audible floor this fixes")
+    }
+
+    /// The same guarantee reached from the OTHER stage: the device's own fader at 0
+    /// with Main wide open. Zero is zero whichever stage produced it, because the
+    /// check is on the formed product rather than on any single input.
+    @Test func deviceFaderAtZeroTrulySilencesAnAirPlay1Receiver() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setVolume(0, for: device.id)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "a device's own fader at 0 silences AP1 too — the check is on the product, not on Main")
+    }
+
+    /// An AP2 receiver keeps taking plain 0.0 at effective zero: the sentinel is an
+    /// AirPlay-1 protocol affordance, and sending a negative value to AP2 would be
+    /// meaningless. Guards against "fixing" zero by making it protocol-blind.
+    @Test func effectiveZeroStaysPlainZeroOnAirPlay2() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
+        #expect(!engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 },
+                       "the true-mute sentinel is AP1-only; AP2 takes plain 0.0")
+    }
+
+    /// A Main/Group gain change RE-PUSHES every currently-added output's wire
+    /// level — and, the other half of the same invariant, leaves every one of
+    /// their OWN stored `Device.volume`s exactly where the user left them. This is
+    /// the whole point of the decoupling: a gain change re-pushes, it never
+    /// re-stores.
+    @Test func setMasterGainRePushesEveryAddedOutputAndLeavesStoredDeviceVolumesUnchanged() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let deviceA = ap2Device()
+        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Sonos Two")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
+        } after: {
+            discovery.fire(.appeared(deviceA))
+            discovery.fire(.appeared(deviceB))
+        }
+
+        backend.setOutputSet([deviceA.id, deviceB.id])
+        await pollUntil { engine.addedIDs.contains(deviceA.outputID) && engine.addedIDs.contains(deviceB.outputID) }
+
+        // Give each device its OWN distinct setting, post-connect (so the
+        // connect-volume seed can't clobber it).
+        backend.setVolume(80, for: deviceA.id)
+        backend.setVolume(30, for: deviceB.id)
+        await pollUntil {
+            backend.devices.first { $0.id == deviceA.id }?.volume == 80 &&
+            backend.devices.first { $0.id == deviceB.id }?.volume == 30
+        }
+
+        backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil {
+            engine.volumeCalls.contains { $0.0 == deviceA.outputID && abs($0.1 - 0.40) < 0.001 } &&
+            engine.volumeCalls.contains { $0.0 == deviceB.outputID && abs($0.1 - 0.15) < 0.001 }
+        }
+
+        #expect(engine.volumeCalls.contains { $0.0 == deviceA.outputID && abs($0.1 - 0.40) < 0.001 },
+                       "a gain change must re-push EVERY added output — device A at 80 × 50% gain = 0.40")
+        #expect(engine.volumeCalls.contains { $0.0 == deviceB.outputID && abs($0.1 - 0.15) < 0.001 },
+                       "a gain change must re-push EVERY added output — device B at 30 × 50% gain = 0.15")
+        #expect(backend.devices.first { $0.id == deviceA.id }?.volume == 80,
+                       "the gain change must RE-PUSH, never RE-STORE — device A's own setting is untouched")
+        #expect(backend.devices.first { $0.id == deviceB.id }?.volume == 30,
+                       "the gain change must RE-PUSH, never RE-STORE — device B's own setting is untouched")
+    }
+
+    /// A muted device is SKIPPED by the gain re-push entirely (`setMasterGain`'s
+    /// loop filters `!self.muted.contains(id)`) — a mute must not be blown away by
+    /// the next Main/Group move re-pushing an audible level underneath it.
+    @Test func setMasterGainSkipsAMutedDevicesRePush() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMuted(true, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == true }
+        let callsBeforeGainChange = engine.volumeCalls.filter { $0.0 == device.outputID }.count
+
+        backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
+        try? await Task.sleep(nanoseconds: 200_000_000)   // give a (wrong) push time to land
+
+        #expect(engine.volumeCalls.filter { $0.0 == device.outputID }.count == callsBeforeGainChange,
+                       "a muted device must be SKIPPED by the gain re-push — no new volume call for it")
+    }
+
+    /// THE ANTI-RATCHET. `setSpeakerVolume` compares a receiver's reported WIRE
+    /// level against `effectiveVolume(of:)` (stored × gain), never the stored
+    /// level directly. Prove both halves:
+    /// - a receiver echoing back exactly what WE just wrote (our own attenuated
+    ///   value) must be a no-op: no store, no re-push. Comparing against the
+    ///   stored value instead (the bug) would misread the echo as a knob turn,
+    ///   overwrite the user's real setting with the attenuated wire value, and
+    ///   re-push THAT through the gain again — a ratchet toward silence.
+    /// - a genuinely different report from the speaker must still store the
+    ///   correctly INVERSE-gain-mapped level.
+    @Test func speakerEchoOfOwnAttenuatedWriteIsNoOpButGenuineKnobTurnInvertsTheGain() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()   // stored volume defaults to 50
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Main at 50% — the wire now carries HALF of whatever the device's own
+        // stored setting is: stored 50 → effective (wire) 25%.
+        backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } }
+        let callsBeforeEcho = engine.volumeCalls.count
+
+        // THE ECHO: the receiver reflects back exactly what we just put on the
+        // wire (0.25 = 25%).
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        backend.applyDacpVolume(activeRemote: token, level: 0.25)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 50,
+                       "an echo of our own attenuated write must NOT overwrite the user's stored setting")
+        #expect(engine.volumeCalls.count == callsBeforeEcho,
+                       "an echo of our own attenuated write must NOT trigger a re-push")
+
+        // A GENUINE knob turn: the speaker reports a DIFFERENT level (0.40, not
+        // our 0.25). It must be inverse-gain-mapped back into the stored domain
+        // (0.40 wire / 50% gain = 0.80 → stored 80) and pushed back out at that
+        // same wire level — AirPlay volume is sender-owned, so the receiver's
+        // audible level only moves once we write it back (SET_PARAMETER).
+        backend.applyDacpVolume(activeRemote: token, level: 0.40)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 80,
+                       "a genuine speaker knob turn must store the correctly INVERSE-mapped level (0.40 wire / 50% gain = 80 stored)")
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.40) < 0.001 },
+                       "the genuine turn must be pushed back out at the same wire level")
+    }
+
+    /// THE EMIT-BASIS REGRESSION. Under the old basis (compare a fresh system
+    /// read against the local row's `Device.volume`), the local row's volume now
+    /// sitting fixed at unity (100) would make the check compare against a
+    /// constant — so a genuine system-volume change that happened to land on
+    /// exactly 100 would look unchanged and be silently swallowed, and Main would
+    /// miss it. The fix compares against `lastSeenSystemVolume` (the last SYSTEM
+    /// level actually seen) instead, so this must still fire.
+    @Test func systemVolumeChangedFiresEvenWhenNewLevelCoincidesWithMacsOwnFaderLevel() async {
+        let volume = FakeSystemVolume(volume: 60, muted: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+        #expect(backend.devices.first { $0.isLocalDevice }?.volume == 100,
+                       "precondition: the Mac's own fader sits at unity — coincidentally the same value the system is about to report")
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
+        } after: { volume.fireExternalChange(volume: 100, muted: false) }   // coincides with the local row's 100
+
+        #expect(systemVolumeEvents(in: events) == [100],
+                       "a genuine system volume change must fire even when it happens to coincide with the Mac's own (unrelated) fader level")
     }
 
     /// INVARIANT: the local id is NEVER fed to the engine and never added as an
@@ -1601,6 +1913,44 @@ extension SerializedSharedState {
                        "an auto-recovery reconnect must reseed from the connect default (35), not preserve the pre-drop in-session level (75)")
         #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 } ?? false,
                       "the auto-recovery reconnect must push the connect default to the engine, not skip the seed")
+    }
+
+    /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
+    /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
+    /// `connectVolumeSeed`'s muted branch used to push the AP2-only
+    /// `Self.engineVolume(0)` = 0.0, which on AP1 maps to an audible ~−30 dB; it now
+    /// routes through `engineVolume(forID:)`, so AP1 gets its −1.0 true-mute
+    /// sentinel. On an AP2 device both map to 0.0, so this can ONLY be caught on AP1.
+    @Test func mutedAirPlay1ReconnectSeedsTrueSilenceSentinelNotTheCurveFloor() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+
+        // Mute it, then drop it out of band (the RTSP session died, not a user toggle).
+        backend.setMuted(true, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == true }
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        // Reconnect: the muted-reconnect seed fires.
+        let callsBefore = engine.volumeCalls.count
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { engine.volumeCalls.count > callsBefore }
+
+        let afterReconnect = engine.volumeCalls.dropFirst(callsBefore)
+        #expect(afterReconnect.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "a muted AP1 reconnect must push the −144 dB true-mute sentinel (−1.0)")
+        #expect(!afterReconnect.contains { $0.0 == device.outputID && $0.1 == 0.0 },
+                       "...and must NOT push 0.0 — the AP2-only map, audible ~−30 dB on an AP1 receiver")
     }
 
     /// Regression (live Sonos Move test, 2026-07-17): the vendored C dispatcher
@@ -6919,6 +7269,14 @@ private extension SerializedSharedState.NativeBackendTests {
                 group.addTask { _ = await task.value }
                 group.addTask { try await Task.sleep(for: timeout) }
                 try await group.next()
+                // Cancel the STREAM task, not just the group's children. `cancelAll()`
+                // cancels the child that is `await task.value`, but `Task.value` does
+                // not observe its awaiter's cancellation — it waits for `task` itself.
+                // Without this the group's implicit scope-exit await never returns when
+                // the timeout wins, and the `defer { task.cancel() }` that would free it
+                // can't run because we are still inside this closure: a test whose
+                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+                task.cancel()
                 group.cancelAll()
             }
         }

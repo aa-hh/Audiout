@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// persist to Application Support (T-11).
     private var popoverController: PopoverController!
 
-    /// UI-agnostic mixer model (groups, proportional master, mute) shared
+    /// UI-agnostic mixer model (groups, master gain, mute) shared
     /// by the menu and the mixer window (T-U4). Built lazily in
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
@@ -283,12 +283,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launch notification is missed until the next launch/quit edge; upgrade
     /// path = KVO on `NSWorkspace.runningApplications` if that ever matters.
     private var companionRunningAppsCache: [(bundleID: String, displayName: String)]?
-
-    /// The companion client currently holding a phone-initiated Main Out drag
-    /// (plan T7 item 5): set on `beginMainOutDrag`, cleared on `endMainOutDrag`.
-    /// If that client disconnects mid-drag, `onClientDisconnected` ends the
-    /// drag so `GroupController`'s drag slot can't stay latched forever.
-    private var companionDragClientID: UUID?
 
     /// One name for both the Bonjour advertisement (`start(name:)`) and
     /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
@@ -1415,30 +1409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         refusalReason: "Too many commands — slow down and try again."))
                     return
                 }
-                // Drag ownership (item 5 + FIX-B2 finding 5): one client owns
-                // the Main Out drag bracket at a time. A second client's
-                // `begin` is refused (an overwrite would orphan the owner's
-                // cleanup AND re-snapshot ratios mid-drag); a non-owner's
-                // `end` flows through as `isDragOwner: false`, which the
-                // dispatcher accepts as an idempotent no-op — this is the
-                // caller's half of the dispatcher's ownership contract.
-                var isDragOwner = true
-                switch command {
-                case .beginMainOutDrag:
-                    if let owner = self.companionDragClientID, owner != clientID {
-                        reply(CompanionServer.CommandResult(
-                            applied: false,
-                            refusalReason: "Another remote is adjusting Main Out right now."))
-                        return
-                    }
-                    self.companionDragClientID = clientID
-                case .endMainOutDrag:
-                    isDragOwner = self.companionDragClientID == clientID
-                    if isDragOwner { self.companionDragClientID = nil }
-                default:
-                    break
-                }
-                let result = self.companionDispatcher.execute(command, isDragOwner: isDragOwner)
+                let result = self.companionDispatcher.execute(command)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,
                     refusalReason: result.refusalReason,
@@ -1453,13 +1424,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // snapshot-bound phone slider would fight the finger mid-drag
                 // — those ride the coalescer, which the backend echo (and
                 // `onStateDidChange` for mutes) re-arms with settled values.
+                // `setMainOutMasterVolume` is in the SYNCHRONOUS set since the
+                // volume decoupling: Main is `GroupController`'s own stored
+                // value, written before `execute` returns, and moving it
+                // rewrites no device level — the immediate snapshot is exact.
                 // `setStartBufferMs` is async too; finding 1's post-apply
                 // schedule carries it.
                 let effectIsAsynchronous: Bool
                 switch command {
-                case .setDeviceVolume, .setDeviceMuted, .setMainOutMasterVolume,
-                     .setMainOutMuted, .setGroupMuted, .beginMainOutDrag,
-                     .endMainOutDrag, .setStartBufferMs:
+                case .setDeviceVolume, .setDeviceMuted,
+                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs:
                     effectIsAsynchronous = true
                 default:
                     effectIsAsynchronous = false
@@ -1472,19 +1446,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // A client that vanished mid-drag would otherwise leave
-        // `GroupController`'s drag bracket open forever (R1). Also drops the
-        // client's rate-limiter bucket. FIX-B2 finding 4: gated on
-        // `isTerminating` like the command path — the terminate path already
-        // ends every stream, so a late disconnect must not enqueue more
-        // backend work.
+        // A vanished client only needs its rate-limiter bucket dropped —
+        // there is no per-client server-side state left to strand (the Main
+        // Out drag bracket this used to close is gone with the volume
+        // decoupling; Main is a stateless set now). FIX-B2 finding 4: gated
+        // on `isTerminating` like the command path.
         companionServer.onClientDisconnected = { [weak self] clientID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.companionRateLimiter.forgetClient(clientID)
-                guard self.companionDragClientID == clientID else { return }
-                self.companionDragClientID = nil
-                self.groupController.endMainOutMasterDrag()
             }
         }
 
@@ -1700,21 +1670,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.updateAppLevel(rms, for: bundleID)
             return
         case .systemVolumeChanged(let volume):
-            // The volume keys move the system output = the local "Current Device",
-            // which the capture tap mutes while streaming — so they were adjusting a
-            // device the user couldn't hear. Hand the fact to the routing brain, which
-            // mirrors it onto the Main Out master so the keys drive what's actually
-            // playing (and no-ops in passthrough, where the keys already did the job).
+            // The volume keys moved the system output, which IS Main Out's own value.
+            // Nothing is redistributed: Main is a stored master gain, and every device
+            // picks the change up because `Main × Group × Device` is formed at the
+            // write boundary. So the keys drive whatever is actually playing without
+            // any device's own level being touched.
+            //
+            // The system hardware is ALREADY at `volume` — this only brings Main into
+            // agreement and re-pushes the dependent gains. It deliberately writes no
+            // hardware, which is what keeps the keys from feeding back on themselves.
             //
             // This delegate is the whole reason the backend can stay below the routing
             // brain: `NativeBackend` owns the system-volume listener but must not know
             // `GroupController` exists, so it publishes the fact and this — already the
             // place backend events meet app-level controllers — does the wiring.
-            groupController.mirrorSystemVolumeToMainOut(volume)
+            groupController.applyExternalSystemVolume(volume)
             log("event: \(describe(event))")
-            // Falls through to the repaint below. The mirror's own `setVolume` calls
-            // echo back as `deviceUpdated`s and repaint again with the settled values;
-            // this pass just keeps the master readout honest in the meantime.
+            // Falls through to the repaint below, to keep the master readout honest.
         case .routedApps(let deviceID, let appNames):
             // The live "which app streams here now" map (T6). T9: store it on the
             // popover so the device row's routing sublabel can prefer this
@@ -1828,7 +1800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .appLevel(let bundleID, let rms):
             return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
-            return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
+            return "systemVolumeChanged(\(volume)) — syncing Main Out"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):

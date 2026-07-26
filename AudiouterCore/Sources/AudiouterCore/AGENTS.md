@@ -90,6 +90,7 @@ Redirecting one app to a specific device:
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore` |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
+| Public aggregate device (Wave 3) | `AggregateOutputDevice` — lifecycle owner (adopt-or-create/off-switch classification/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate; distinct from the PRIVATE tap-capture aggregate `NativeCaptureCoordinator.createAggregate()` builds. Not yet wired into `NativeBackend`/UI (T1 only — see `AggregateOutputDevice.swift` header). |
 | Discovery/diagnostics | `NativeDiscovery`, `ConnectionDiagnostics`, `Telemetry`, `AudioDiag` |
 | Setup/permissions | `SetupModel`, `AudioCapturePermissionProbe`, `LocalNetworkPrimer`, `RemoteControlPrimer`, `PTPHelperService`, `SystemAudioCaptureTCC` |
 | Misc infra | `DACPServer`, `FIFOManager`, `AppRelaunchCommand`, `HeadlessRuntime`, `ObjCExceptionCatching` |

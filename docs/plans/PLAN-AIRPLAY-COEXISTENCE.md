@@ -79,6 +79,15 @@ Fresh boot →
 5. Regression: per-app routing, excluded apps, volume keys, group connect, rapid toggle.
 6. Approval persistence: Login Items still shows the helper approved after the plist change (no re-approval trap).
 
+## Live-test findings (2026-07-26, first end-to-end pass)
+
+**PASSED live:** click → launchd demand-starts `com.audiouter.coexist.ptphelper` → bind → clock → audio on the speaker, verified by process/label/port inspection (helper PID age matched the click; no other clock source existed on the machine — every stale daemon had been purged first). T5's switch-away had also been observed working earlier in the session.
+
+**REAL BUG FOUND — T-ZOMBIE (follow-up task, this branch, before merge):** `launchctl bootout` of the registered daemon + relaunch produces a **zombie registration**: the SMAppService DB still says `.enabled`, so (a) `register()` no-ops per its documented idempotency and never re-bootstraps the job, and (b) the T4 status pre-check reads `.enabled` and proceeds — the app then shows "Taking audio back…" for the full 10 s and fails on every speaker, because launchd has no job to demand-start. Confirmed live (launchd's loaded-jobs list empty while the approval DB showed enabled). **This is R2's app-update failure mode made concrete:** shipping a changed plist will no-op the same way and keep the OLD daemon config loaded. Recovery that worked live: Login Items toggle off→on.
+**Fix shape (small, T4's activator has the seam):** when `activate()` times out with status `.enabled`, attempt `unregister()` → `register()` once, then retry the touch+wait once, before surfacing `.timingPortsUnavailable`. Idempotent, self-healing on both the bootout case and the plist-upgrade case.
+
+**Not yet covered live:** takeover from an active system-AirPlay session (banner + auto-switch under real contention), idle-exit yield-back timing, Login-Items approval persistence across a plist change for the ORIGINAL bundle id (untestable on the Coexist id), regression sweep. Also note the live session repeatedly demonstrated why per-machine hygiene matters: THREE different stale always-on daemons from old dev builds blocked testing in sequence — 16 registrations were purged. A `dev/notes` cleanup script may be worth keeping.
+
 ## Risks
 
 - **R1 — RESOLVED by G1 (2026-07-26):** default-output switch-away alone frees the ports in ~1–3 s. T6's guided message stays as a timeout backstop only (third-party PTP holders, R6, can still trigger it).

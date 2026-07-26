@@ -1,0 +1,11 @@
+Target dependency graph (4 targets)
+Target 'AllIncludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'AudiouterProtocolTests-product' in project 'AudiouterProtocol'
+➜ Dependency on target 'AudiouterProtocolTests-product' in project 'AudiouterProtocol' via transitive dependency through 'AudiouterProtocolTests-test-runner'
+➜ Explicit dependency on target 'AudiouterProtocol-product' in project 'AudiouterProtocol'
+➜ Explicit dependency on target 'AudiouterProtocol' in project 'AudiouterProtocol'
+Target 'AudiouterProtocol-product' in project 'AudiouterProtocol'
+➜ Explicit dependency on target 'AudiouterProtocol' in project 'AudiouterProtocol'
+Target 'AudiouterProtocolTests-product' in project 'AudiouterProtocol'
+➜ Explicit dependency on target 'AudiouterProtocol' in project 'AudiouterProtocol'
+Target 'AudiouterProtocol' in project 'AudiouterProtocol' (no dependencies)

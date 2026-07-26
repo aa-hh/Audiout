@@ -123,6 +123,11 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
+        // The companion (iPhone app) wire protocol — sibling package, zero
+        // deps, no shell-outs (PLAN-COMPANION-APP.md T1). CompanionServer /
+        // CompanionSnapshotBuilder / CompanionCommandDispatcher are the
+        // consumers.
+        .package(path: "../AudiouterProtocol"),
     ],
     targets: [
         // Block-based Objective-C exception catcher. Swift's `catch` cannot
@@ -138,6 +143,7 @@ let package = Package(
             name: "AudiouterCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                .product(name: "AudiouterProtocol", package: "AudiouterProtocol"),
                 "ObjCExceptionShim",
             ],
             swiftSettings: [

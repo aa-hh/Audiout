@@ -41,8 +41,14 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [AudiouterCore/](AudiouterCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
+- [AudiouterProtocol/](AudiouterProtocol/AGENTS.md) — dependency-free Swift
+  package: the wire contract for the Mac↔iPhone companion app (messages,
+  commands, snapshot schema). macOS 14+ and iOS 18+.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
+- [ios/](ios/AGENTS.md) — native SwiftUI iPhone app: discovery, connection,
+  remote control UI (speakers, apps, groups, settings). Depends only on
+  `AudiouterProtocol`.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real

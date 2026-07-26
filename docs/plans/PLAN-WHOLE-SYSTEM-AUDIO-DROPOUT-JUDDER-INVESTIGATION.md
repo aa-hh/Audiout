@@ -258,8 +258,19 @@ flipping 0/1+ is the HFP↔A2DP handoff, confirmed rather than inferred.
    ```
    find ~ /Applications -maxdepth 9 -iname "Audiouter.app" 2>/dev/null
    ```
-   Use the same copy for Run B and Run C — whichever one you'd normally use
-   is fine, it just needs to be consistent across those two runs.
+   **Runs B and C MUST use the build from THIS worktree — not your everyday
+   copy in `/Applications`.** The whole in-app half of this measurement is
+   the new `aggregate_create` / `aggregate_create_rate_delayed` /
+   `aggregate_destroy` telemetry, which exists ONLY on this branch. Launching
+   any other copy produces a log with none of it, and the run tells you
+   nothing about whether the app's own aggregate churn moved the rate — which
+   is the entire question. Build and launch it with:
+   ```
+   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-dropout-investigation-5c2a1f"
+   scripts/make-app.sh ./build && open ./build/Audiouter.app
+   ```
+   Use that same freshly-built copy for both Run B and Run C. Quit it between
+   runs (Run A needs nothing running at all).
 3. **Have a Terminal window ready in the repo folder** (wherever this
    project is checked out) — that's where `dev/bt-rate-observer.swift`
    lives, and it's what you'll run for all three (or four) parts below.

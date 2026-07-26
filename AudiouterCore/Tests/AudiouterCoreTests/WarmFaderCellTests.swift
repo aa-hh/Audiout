@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
@@ -15,7 +15,8 @@ import AppKit
 /// BEHAVIOR stays stock after the cell swap — `isContinuous`, min/max, and
 /// the target/action dispatch all survive; (4) the drawing is deterministic
 /// under `cacheDisplay` (byte-identical double render, both appearances).
-final class WarmFaderCellTests: XCTestCase {
+@MainActor
+@Suite struct WarmFaderCellTests {
 
     // MARK: Helpers
 
@@ -50,116 +51,105 @@ final class WarmFaderCellTests: XCTestCase {
 
     // MARK: Skin installed (structural)
 
-    func testAllThreeRowsWearTheWarmFaderSkin() {
-        XCTAssertTrue(DeviceRowView(device: makeDevice()).test_hasWarmFaderSkin,
-                      "DeviceRowView's slider wears WarmFaderCell")
-        XCTAssertTrue(MainOutRowView().test_hasWarmFaderSkin,
-                      "MainOutRowView's master slider wears WarmFaderCell")
-        XCTAssertTrue(AppRowView().test_hasWarmFaderSkin,
-                      "AppRowView's slider wears WarmFaderCell")
+    @Test func allThreeRowsWearTheWarmFaderSkin() {
+        #expect(DeviceRowView(device: makeDevice()).test_hasWarmFaderSkin, "DeviceRowView's slider wears WarmFaderCell")
+        #expect(MainOutRowView().test_hasWarmFaderSkin, "MainOutRowView's master slider wears WarmFaderCell")
+        #expect(AppRowView().test_hasWarmFaderSkin, "AppRowView's slider wears WarmFaderCell")
     }
 
     // MARK: Device row — engaged fill tracks the §3.3 armed predicate
 
-    func testDeviceFaderEngagedWhenRouteArmed() {
+    @Test func deviceFaderEngagedWhenRouteArmed() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertTrue(row.test_routeArmed)
-        XCTAssertTrue(row.test_isFaderEngaged,
-                      "armed ∧ enabled ⇒ the gold gradient fill renders")
+        #expect(row.test_routeArmed)
+        #expect(row.test_isFaderEngaged, "armed ∧ enabled ⇒ the gold gradient fill renders")
     }
 
-    func testDeviceFaderNeutralWhenNotMember() {
+    @Test func deviceFaderNeutralWhenNotMember() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false, controllable: true)
-        XCTAssertFalse(row.test_isFaderEngaged,
-                       "a non-member's fader keeps the neutral warm fill")
+        #expect(!(row.test_isFaderEngaged), "a non-member's fader keeps the neutral warm fill")
     }
 
-    func testDeviceFaderNeutralWhenNotConnected() {
+    @Test func deviceFaderNeutralWhenNotConnected() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connecting))
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
-        XCTAssertFalse(row.test_isFaderEngaged,
-                       "not yet connected ⇒ no gold fill (same truth as the dot)")
+        #expect(!(row.test_isFaderEngaged), "not yet connected ⇒ no gold fill (same truth as the dot)")
     }
 
-    func testDeviceFaderNeutralWhenRowMuted() {
+    @Test func deviceFaderNeutralWhenRowMuted() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        XCTAssertFalse(row.test_isFaderEngaged, "row mute disarms the gold fill")
-        XCTAssertTrue(row.test_isSliderEnabled,
-                      "…but the slider stays live (A5 — mute ≠ frozen volume)")
+        #expect(!(row.test_isFaderEngaged), "row mute disarms the gold fill")
+        #expect(row.test_isSliderEnabled, "…but the slider stays live (A5 — mute ≠ frozen volume)")
     }
 
-    func testDeviceFaderNeutralWhenMasterMuted() {
+    @Test func deviceFaderNeutralWhenMasterMuted() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true, masterMuted: true)
-        XCTAssertFalse(row.test_isFaderEngaged, "master mute drains every device fader")
+        #expect(!(row.test_isFaderEngaged), "master mute drains every device fader")
     }
 
-    func testDeviceFaderEngagedByLiveFeedEvenWhenMuted() {
+    @Test func deviceFaderEngagedByLiveFeedEvenWhenMuted() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(isMuted: true), selected: false, controllable: true,
                   liveAppNames: ["Music"])
-        XCTAssertTrue(row.test_routeArmed)
-        XCTAssertTrue(row.test_isFaderEngaged,
-                      "a confirmed live per-app feed arms the fader (redirects bypass the mutes)")
+        #expect(row.test_routeArmed)
+        #expect(row.test_isFaderEngaged, "a confirmed live per-app feed arms the fader (redirects bypass the mutes)")
     }
 
-    func testDeviceFaderNeverEngagedWhileSliderDisabled() {
+    @Test func deviceFaderNeverEngagedWhileSliderDisabled() {
         // A live-feed row that is NOT controllable: armed predicate true, but
         // the slider is disabled — the engaged gate requires BOTH.
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: false, liveAppNames: ["Music"])
-        XCTAssertTrue(row.test_routeArmed)
-        XCTAssertFalse(row.test_isSliderEnabled)
-        XCTAssertFalse(row.test_isFaderEngaged,
-                       "a disabled slider never renders the engaged fill")
+        #expect(row.test_routeArmed)
+        #expect(!(row.test_isSliderEnabled))
+        #expect(!(row.test_isFaderEngaged), "a disabled slider never renders the engaged fill")
     }
 
     // MARK: Main Out row — engaged = connected ∧ !muted (the dot's predicate)
 
-    func testMainOutFaderEngagedWhenTargetLiveAndUnmuted() {
+    @Test func mainOutFaderEngagedWhenTargetLiveAndUnmuted() {
         let row = MainOutRowView()
         row.apply(options: makeMainOutOptions(), current: .selectedDevices, master: 50,
                   isMuted: false, connectionState: .connected)
-        XCTAssertTrue(row.test_routeArmed)
-        XCTAssertTrue(row.test_isFaderEngaged)
+        #expect(row.test_routeArmed)
+        #expect(row.test_isFaderEngaged)
     }
 
-    func testMainOutFaderNeutralWhenIdleOrMuted() {
+    @Test func mainOutFaderNeutralWhenIdleOrMuted() {
         let idle = MainOutRowView()
         idle.apply(options: makeMainOutOptions(), current: .selectedDevices, master: 50,
                    connectionState: .off)
-        XCTAssertFalse(idle.test_isFaderEngaged, "idle Main Out keeps the neutral fill")
+        #expect(!(idle.test_isFaderEngaged), "idle Main Out keeps the neutral fill")
 
         let muted = MainOutRowView()
         muted.apply(options: makeMainOutOptions(), current: .selectedDevices, master: 50,
                     isMuted: true, connectionState: .connected)
-        XCTAssertFalse(muted.test_isFaderEngaged, "master mute disarms the master fader")
+        #expect(!(muted.test_isFaderEngaged), "master mute disarms the master fader")
     }
 
     // MARK: App row — engaged = routed ∧ running (spec §5.1's app predicate)
 
-    func testAppFaderEngagedWhenRoutedAndRunning() {
+    @Test func appFaderEngagedWhenRoutedAndRunning() {
         let row = AppRowView()
         row.apply(makeAppConfiguration(selected: "device-1", isRunning: true))
-        XCTAssertTrue(row.test_isFaderEngaged)
+        #expect(row.test_isFaderEngaged)
     }
 
-    func testAppFaderNeutralWhenRoutedButIdle() {
+    @Test func appFaderNeutralWhenRoutedButIdle() {
         let row = AppRowView()
         row.apply(makeAppConfiguration(selected: "device-1", isRunning: false))
-        XCTAssertFalse(row.test_isFaderEngaged,
-                       "a routed-but-idle app keeps the neutral fill (calm, not live)")
+        #expect(!(row.test_isFaderEngaged), "a routed-but-idle app keeps the neutral fill (calm, not live)")
     }
 
-    func testAppFaderNeutralAndDisabledOnNoRedirect() {
+    @Test func appFaderNeutralAndDisabledOnNoRedirect() {
         let row = AppRowView()
         row.apply(makeAppConfiguration(selected: "no-redirect", isRunning: true))
-        XCTAssertTrue(row.test_isSliderDimmed)
-        XCTAssertFalse(row.test_isFaderEngaged,
-                       "the standalone follows-main-output state is never gold")
+        #expect(row.test_isSliderDimmed)
+        #expect(!(row.test_isFaderEngaged), "the standalone follows-main-output state is never gold")
     }
 
     // MARK: Behavior stays stock after the cell swap
@@ -172,7 +162,7 @@ final class WarmFaderCellTests: XCTestCase {
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
     }
 
-    func testSliderTargetActionSurvivesCellSwap() {
+    @Test func sliderTargetActionSurvivesCellSwap() {
         // Fire the slider's OWN target/action with the slider as sender —
         // the same dispatch AppKit performs during a drag — proving the cell
         // swap preserved the control's wiring (the AppKit-dispatch seam the
@@ -183,23 +173,21 @@ final class WarmFaderCellTests: XCTestCase {
         row.delegate = delegate
         row.apply(makeDevice(), selected: true, controllable: true)
         row.test_fireSliderAction(settingValueTo: 73)
-        XCTAssertEqual(delegate.lastVolume?.volume, 73,
-                       "the slider's target/action still reaches the delegate after the cell swap")
-        XCTAssertEqual(delegate.lastVolume?.id, "dev-1")
+        #expect(delegate.lastVolume?.volume == 73, "the slider's target/action still reaches the delegate after the cell swap")
+        #expect(delegate.lastVolume?.id == "dev-1")
     }
 
-    func testSliderConfigurationSurvivesCellSwap() {
+    @Test func sliderConfigurationSurvivesCellSwap() {
         let config = DeviceRowView(device: makeDevice()).test_sliderConfiguration
-        XCTAssertEqual(config.min, 0)
-        XCTAssertEqual(config.max, 100)
-        XCTAssertTrue(config.isContinuous,
-                      "isContinuous survives (the drag fires throughout — brief §2)")
-        XCTAssertEqual(config.type, .linear)
+        #expect(config.min == 0)
+        #expect(config.max == 100)
+        #expect(config.isContinuous, "isContinuous survives (the drag fires throughout — brief §2)")
+        #expect(config.type == .linear)
     }
 
     // MARK: Deterministic drawing (cacheDisplay double-render, both looks)
 
-    func testFaderRenderIsByteDeterministic() throws {
+    @Test func faderRenderIsByteDeterministic() throws {
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             for engaged in [false, true] {
                 let row = DeviceRowView(device: makeDevice())
@@ -209,14 +197,13 @@ final class WarmFaderCellTests: XCTestCase {
                 row.layoutSubtreeIfNeeded()
 
                 func render() throws -> Data {
-                    let rep = try XCTUnwrap(row.bitmapImageRepForCachingDisplay(in: row.bounds))
+                    let rep = try #require(row.bitmapImageRepForCachingDisplay(in: row.bounds))
                     row.cacheDisplay(in: row.bounds, to: rep)
-                    return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+                    return try #require(rep.representation(using: .png, properties: [:]))
                 }
                 let first = try render()
                 let second = try render()
-                XCTAssertEqual(first, second,
-                               "\(appearanceName.rawValue) engaged=\(engaged): fader drawing must be byte-deterministic under cacheDisplay")
+                #expect(first == second, "\(appearanceName.rawValue) engaged=\(engaged): fader drawing must be byte-deterministic under cacheDisplay")
             }
         }
     }

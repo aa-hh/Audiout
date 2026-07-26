@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
 import AppKit
+import Testing
 import AudiouterCore
 @testable import AudiouterSharedUI
 @testable import AudiouterPopoverUI
@@ -14,7 +14,7 @@ import AudiouterCore
 /// only. Assert no tether colour reaches a ring or meter — a future change that
 /// tints them MUST fail this guard.
 @MainActor
-final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
+@Suite final class NoTintOnRingsOrMetersGuardTests: IsolatedSuite {
 
     private func makeDevice(
         id: String = "dev-1",
@@ -36,58 +36,59 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         _ a: NSColor?,
         _ b: NSColor?,
         _ message: String,
-        file: StaticString = #filePath,
-        line: UInt = #line
+        sourceLocation: SourceLocation = #_sourceLocation
     ) {
         guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else {
-            return XCTFail("nil color: \(message)", file: file, line: line)
+            Issue.record("nil color: \(message)", sourceLocation: sourceLocation)
+            return
         }
-        XCTAssertEqual(a.redComponent, b.redComponent, accuracy: 0.01, message, file: file, line: line)
-        XCTAssertEqual(a.greenComponent, b.greenComponent, accuracy: 0.01, message, file: file, line: line)
-        XCTAssertEqual(a.blueComponent, b.blueComponent, accuracy: 0.01, message, file: file, line: line)
+        #expect(abs(a.redComponent - b.redComponent) <= 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.greenComponent - b.greenComponent) <= 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.blueComponent - b.blueComponent) <= 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
     // MARK: - Meter gradient foundation — must stay warm only
 
-    func testLevelMeterGradientIsEmberGoldCaution() {
+    @Test func levelMeterGradientIsEmberGoldCaution() {
         let meter = LevelMeterView()
         let colors = meter.test_gradientColors
-        XCTAssertEqual(colors.count, 3, "Meter gradient must have exactly 3 stops")
+        #expect(colors.count == 3, "Meter gradient must have exactly 3 stops")
         assertSameHue(colors[0], Tokens.Color.ember, "Stop 0 is ember")
         assertSameHue(colors[1], Tokens.Color.gold, "Stop 1 is gold")
         assertSameHue(colors[2], Tokens.Color.caution, "Stop 2 is caution ceiling")
     }
 
-    func testMeterGradientNeverContainsFailureRed() {
+    @Test func meterGradientNeverContainsFailureRed() {
         // House rule 8: failure red is failure-exclusive. This guard verifies
         // no meter gradient stop can land on failure red through bad changes.
         let meter = LevelMeterView()
         guard let failureColor = Tokens.Color.failure.usingColorSpace(.sRGB) else {
-            return XCTFail("failure token did not resolve")
+            Issue.record("failure token did not resolve")
+            return
         }
         for color in meter.test_gradientColors {
             guard let c = color.usingColorSpace(.sRGB) else { continue }
             let distance = abs(c.redComponent - failureColor.redComponent)
                 + abs(c.greenComponent - failureColor.greenComponent)
                 + abs(c.blueComponent - failureColor.blueComponent)
-            XCTAssertGreaterThan(distance, 0.1, "no meter stop may be failure red")
+            #expect(distance > 0.1, "no meter stop may be failure red")
         }
     }
 
     // MARK: - Device row meter — inherits warm-only base
 
-    func testDeviceRowMeterKeepsWarmGradient() {
+    @Test func deviceRowMeterKeepsWarmGradient() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: true)
         row.apply(makeDevice(), selected: true, controllable: true)
         row.setLevel(0.5)
 
         // Row's meter target stays numeric (warm gradient inherited from LevelMeterView)
-        XCTAssertGreaterThanOrEqual(row.test_meterTarget, 0)
+        #expect(row.test_meterTarget >= 0)
     }
 
     // MARK: - Halo ring — connection-state only, never tether tinted
 
-    func testRingStrokeNeverWearsTetherColor() {
+    @Test func ringStrokeNeverWearsTetherColor() {
         let row = DeviceRowView(device: makeDevice(), showsBus: true)
         let tetherTint = NSColor(srgbRed: 0.8, green: 0.4, blue: 0.2, alpha: 1)
 
@@ -102,11 +103,11 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         if let ringColor = row.test_ringStrokeColor {
             // Ring must be connection-state only
             let isRingColor = isConnectionStateColor(ringColor)
-            XCTAssertTrue(isRingColor, "Ring stroke must stay connection-only, never tether tinted")
+            #expect(isRingColor, "Ring stroke must stay connection-only, never tether tinted")
         }
     }
 
-    func testConnectedRingIsRingConnectedHue() {
+    @Test func connectedRingIsRingConnectedHue() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connected), showsBus: true)
         row.apply(makeDevice(connectionState: .connected), selected: true)
 
@@ -115,7 +116,7 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         }
     }
 
-    func testFailedRingIsFailureRed() {
+    @Test func failedRingIsFailureRed() {
         let failed = makeDevice(connectionState: .failed(.init(cause: .notResponding)))
         let row = DeviceRowView(device: failed, showsBus: true)
         row.apply(failed, selected: true)
@@ -127,7 +128,7 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
 
     // MARK: - FEED column is the ONLY allowed tether-color location
 
-    func testFeedColumnAppSegmentColorIsTheTetherTint() {
+    @Test func feedColumnAppSegmentColorIsTheTetherTint() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: true, showsBus: true)
         let tetherTint = NSColor(srgbRed: 0.5, green: 0.7, blue: 0.4, alpha: 1)
 
@@ -144,17 +145,17 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         assertSameHue(feedColor, tetherTint, "FEED column app segment wears tether tint")
     }
 
-    func testFeedColumnNeutralSegmentDoesNotWearTether() {
+    @Test func feedColumnNeutralSegmentDoesNotWearTether() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: true, showsBus: true)
         row.apply(makeDevice(), selected: true, controllable: true)
 
-        XCTAssertNotNil(row.test_feedText)
-        XCTAssertTrue(row.test_feedText?.contains("System") ?? false, "Neutral segment is System")
+        #expect(row.test_feedText != nil)
+        #expect(row.test_feedText?.contains("System") ?? false, "Neutral segment is System")
     }
 
     // MARK: - Multi-app: meters stay warm, feed shows tints
 
-    func testMultipleAppRedirectsKeepWarmMeters() {
+    @Test func multipleAppRedirectsKeepWarmMeters() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: true, showsBus: true)
         let tints = [
             "Music": NSColor(srgbRed: 0.5, green: 0.3, blue: 0.1, alpha: 1),
@@ -171,7 +172,7 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         row.setLevel(0.6)
 
         // Meter stays warm despite multiple app tints
-        XCTAssertGreaterThanOrEqual(row.test_meterTarget, 0)
+        #expect(row.test_meterTarget >= 0)
 
         // But FEED column shows the tether tints
         for (appName, tint) in tints {
@@ -182,7 +183,7 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
 
     // MARK: - Membership bus node stays connection-only
 
-    func testMembershipBusNodeStateEnumOnly() {
+    @Test func membershipBusNodeStateEnumOnly() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: true, showsBus: true)
         let tetherTint = NSColor(srgbRed: 0.3, green: 0.5, blue: 0.7, alpha: 1)
 
@@ -196,8 +197,8 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
 
         // Bus node must be connection-state enum, not a tether color
         let node = row.test_busNode
-        XCTAssertNotNil(node)
-        XCTAssertTrue(
+        #expect(node != nil)
+        #expect(
             [.member, .connecting, .pending, .failed, .nonMember, .blocked, .origin]
                 .contains(node ?? .nonMember)
         )
@@ -205,7 +206,7 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
 
     // MARK: - Master Out meter stays warm
 
-    func testMainOutMeterKeepsWarmGradient() {
+    @Test func mainOutMeterKeepsWarmGradient() {
         let master = MainOutRowView()
         master.apply(
             options: [.init(title: "Selected Devices", target: .selectedDevices)],
@@ -216,12 +217,12 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         )
         master.setLevel(0.7)
 
-        XCTAssertGreaterThanOrEqual(master.test_meterTarget, 0, "Master meter target is numeric")
+        #expect(master.test_meterTarget >= 0, "Master meter target is numeric")
     }
 
     // MARK: - Edge cases
 
-    func testMutedDeviceKeepsWarmMeterWithAppRedirect() {
+    @Test func mutedDeviceKeepsWarmMeterWithAppRedirect() {
         var muted = makeDevice()
         muted.isMuted = true
 
@@ -237,10 +238,10 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         )
 
         // Meter target is readable (drains, not tints)
-        XCTAssertGreaterThanOrEqual(row.test_meterTarget, 0)
+        #expect(row.test_meterTarget >= 0)
     }
 
-    func testConnectingDeviceKeepsWarmMetricAndConnectionRing() {
+    @Test func connectingDeviceKeepsWarmMetricAndConnectionRing() {
         let row = DeviceRowView(
             device: makeDevice(connectionState: .connecting),
             showsMeter: true,
@@ -257,12 +258,12 @@ final class NoTintOnRingsOrMetersGuardTests: IsolatedTestCase {
         )
 
         // Meter stays warm
-        XCTAssertGreaterThanOrEqual(row.test_meterTarget, 0)
+        #expect(row.test_meterTarget >= 0)
 
         // Ring stays connection-only
         if let ringColor = row.test_ringStrokeColor {
             let isRingColor = isConnectionStateColor(ringColor)
-            XCTAssertTrue(isRingColor, "Connecting ring stays connection-state")
+            #expect(isRingColor, "Connecting ring stays connection-state")
         }
     }
 

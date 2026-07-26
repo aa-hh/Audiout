@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 import AppKit
 @testable import AudiouterPopoverUI
 
@@ -10,7 +11,7 @@ import AppKit
 /// must surface a complete-phrase hover tooltip — the product owner's fixes
 /// for "I can't tell what these buttons do."
 @MainActor
-final class PopoverHeaderViewTests: XCTestCase {
+@Suite struct PopoverHeaderViewTests {
 
     private func makeHeader() -> PopoverHeaderView {
         let header = PopoverHeaderView()
@@ -22,24 +23,24 @@ final class PopoverHeaderViewTests: XCTestCase {
 
     // MARK: Sizing — square, evenly padded, "slightly larger"
 
-    func testIconButtonSideIsLargerThanThePreviousSizeAndSquare() {
+    @Test func iconButtonSideIsLargerThanThePreviousSizeAndSquare() {
         // Previous shipped box was 26×22 (non-square). The new box must be
         // strictly bigger on both axes and square (width == height), per the
         // "bigger" + "perfectly even padding... square buttons" ask.
-        XCTAssertGreaterThan(PopoverHeaderView.iconButtonSide, 26)
-        XCTAssertGreaterThan(PopoverHeaderView.iconButtonSide, 22)
+        #expect(PopoverHeaderView.iconButtonSide > 26)
+        #expect(PopoverHeaderView.iconButtonSide > 22)
     }
 
-    func testBarHeightGivesEvenVerticalClearanceAroundTheButtonSquare() {
+    @Test func barHeightGivesEvenVerticalClearanceAroundTheButtonSquare() {
         let clearance = PopoverHeaderView.barHeight - PopoverHeaderView.iconButtonSide
-        XCTAssertGreaterThan(clearance, 0, "the bar must be taller than the button square")
-        XCTAssertEqual(clearance.truncatingRemainder(dividingBy: 2), 0,
-                       "an even total clearance splits into equal top/bottom padding")
+        #expect(clearance > 0, "the bar must be taller than the button square")
+        #expect(clearance.truncatingRemainder(dividingBy: 2) == 0,
+                "an even total clearance splits into equal top/bottom padding")
     }
 
-    func testAllThreeIconButtonsRenderAtTheSameMatchedSize() {
+    @Test func allThreeIconButtonsRenderAtTheSameMatchedSize() {
         // The Auto Layout constraints (asserted as authored in
-        // `testIconButtonSideIsLargerThanThePreviousSizeAndSquare`) bind to
+        // `iconButtonSideIsLargerThanThePreviousSizeAndSquare`) bind to
         // each accessoryBar button's *alignment rect*, not its raw `.frame` —
         // an `NSButton` bezel can carry a small asymmetric shadow/padding
         // inset between the two, verified empirically here (a 28pt-square
@@ -51,35 +52,35 @@ final class PopoverHeaderViewTests: XCTestCase {
         let header = makeHeader()
         let frames = header.test_iconButtonFrames()
 
-        XCTAssertEqual(frames.groups.size, frames.settings.size,
-                       "groups and settings must render at the same size")
-        XCTAssertEqual(frames.settings.size, frames.quit.size,
-                       "settings and quit must render at the same size")
-        XCTAssertEqual(frames.groups.width, PopoverHeaderView.iconButtonSide, accuracy: 1.5)
-        XCTAssertEqual(frames.groups.height, PopoverHeaderView.iconButtonSide, accuracy: 1.5)
+        #expect(frames.groups.size == frames.settings.size,
+                "groups and settings must render at the same size")
+        #expect(frames.settings.size == frames.quit.size,
+                "settings and quit must render at the same size")
+        #expect(abs(frames.groups.width - PopoverHeaderView.iconButtonSide) <= 1.5)
+        #expect(abs(frames.groups.height - PopoverHeaderView.iconButtonSide) <= 1.5)
     }
 
     // MARK: Glyphs resolve non-nil (matched proportions still needs an image)
 
-    func testAllThreeIconButtonsResolveANonNilImage() {
+    @Test func allThreeIconButtonsResolveANonNilImage() {
         let header = makeHeader()
-        XCTAssertTrue(header.test_groupsButtonHasImage)
-        XCTAssertTrue(header.test_settingsButtonHasImage)
-        XCTAssertTrue(header.test_quitButtonHasImage)
+        #expect(header.test_groupsButtonHasImage)
+        #expect(header.test_settingsButtonHasImage)
+        #expect(header.test_quitButtonHasImage)
     }
 
     // MARK: Hover tooltips — the other half of the legibility fix
 
-    func testHoverTooltipsAreCompletePhrasesNotBareLabels() {
+    @Test func hoverTooltipsAreCompletePhrasesNotBareLabels() {
         let header = makeHeader()
-        XCTAssertEqual(header.test_groupsButtonToolTip, "Open Groups editor")
-        XCTAssertEqual(header.test_settingsButtonToolTip, "Settings")
-        XCTAssertEqual(header.test_quitButtonToolTip, "Quit")
+        #expect(header.test_groupsButtonToolTip == "Open Groups editor")
+        #expect(header.test_settingsButtonToolTip == "Settings")
+        #expect(header.test_quitButtonToolTip == "Quit")
     }
 
     // MARK: Taps still route to the right callback (unaffected by the restyle)
 
-    func testTapsStillFireTheirCallbacks() {
+    @Test func tapsStillFireTheirCallbacks() {
         let header = makeHeader()
         var openedGroups = false
         var openedSettings = false
@@ -92,8 +93,8 @@ final class PopoverHeaderViewTests: XCTestCase {
         header.test_tapSettings()
         header.test_tapQuit()
 
-        XCTAssertTrue(openedGroups)
-        XCTAssertTrue(openedSettings)
-        XCTAssertTrue(quit)
+        #expect(openedGroups)
+        #expect(openedSettings)
+        #expect(quit)
     }
 }

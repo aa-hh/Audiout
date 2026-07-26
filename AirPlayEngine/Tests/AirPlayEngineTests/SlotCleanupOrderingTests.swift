@@ -29,144 +29,147 @@
 // would hang to its own timeout. testReusedSlotAfterTimeoutIsNotClobbered turns
 // that into a hard failure.
 
-import XCTest
+import Foundation
+import Testing
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class SlotCleanupOrderingTests: XCTestCase {
+// `shims/outputs.c`'s device/callback registry is process-global C state, so
+// this suite nests into the package's one `.serialized` parent (see
+// SerializedEngineStateSuite.swift). Do NOT repeat `.serialized` here.
+extension SerializedEngineState {
 
-    override func setUp() {
-        super.setUp()
-        outputs_dispatcher_reset()
-        drainRegistry()
-    }
+    // setUp/tearDown were symmetric (both reset the dispatcher + drain the
+    // registry), so per the cookbook's §11(a) guidance the reset folds into
+    // `init` alone — no `deinit` needed, so this stays a `struct`.
+    @Suite struct SlotCleanupOrderingTests {
 
-    override func tearDown() {
-        outputs_dispatcher_reset()
-        drainRegistry()
-        super.tearDown()
-    }
+        init() {
+            outputs_dispatcher_reset()
+            drainRegistry()
+        }
 
-    // MARK: helpers (local copies of the AirPlayEngineAPITests seams)
+        // MARK: helpers (local copies of the AirPlayEngineAPITests seams)
 
-    @discardableResult
-    private func makeRegistryDevice(id: UInt64, state: output_device_state = OUTPUT_STATE_STOPPED) -> UInt64 {
-        let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
-        dev.initialize(to: output_device())
-        dev.pointee.id = id
-        let canonical = outputs_device_add(dev, false)!
-        canonical.pointee.advertised = 1 // survive the deferred drain
-        canonical.pointee.state = state
-        return id
-    }
+        @discardableResult
+        private func makeRegistryDevice(id: UInt64, state: output_device_state = OUTPUT_STATE_STOPPED) -> UInt64 {
+            let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            dev.initialize(to: output_device())
+            dev.pointee.id = id
+            let canonical = outputs_device_add(dev, false)!
+            canonical.pointee.advertised = 1 // survive the deferred drain
+            canonical.pointee.state = state
+            return id
+        }
 
-    private func drainRegistry() {
-        while let head = outputs_list() { outputs_device_remove(head) }
-    }
+        private func drainRegistry() {
+            while let head = outputs_list() { outputs_device_remove(head) }
+        }
 
-    /// Fire a synthetic backend completion for `id` on slot `cbIdSlot` through the
-    /// REAL dispatcher (what the RTSP state machine does at device_start's end).
-    private func fireCompletion(id: UInt64, cbIdSlot: Int32, state: output_device_state) {
-        outputs_cb(cbIdSlot, id, state)
-        outputs_cb_deferred_run()
-    }
+        /// Fire a synthetic backend completion for `id` on slot `cbIdSlot` through the
+        /// REAL dispatcher (what the RTSP state machine does at device_start's end).
+        private func fireCompletion(id: UInt64, cbIdSlot: Int32, state: output_device_state) {
+            outputs_cb(cbIdSlot, id, state)
+            outputs_cb_deferred_run()
+        }
 
-    /// Fire slot 0's completion once its REGISTRY waiter is armed (not merely once
-    /// the C callback slot is filled — the wrapper arms the C slot before the
-    /// registry waiter, and a completion into that window would be dropped).
-    private func fireSlot0WhenArmed(
-        id: UInt64,
-        state: output_device_state,
-        engine: AirPlayEngine
-    ) async throws {
-        for _ in 0..<500 {
-            if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                fireCompletion(id: id, cbIdSlot: 0, state: state)
-                return
+        /// Fire slot 0's completion once its REGISTRY waiter is armed (not merely once
+        /// the C callback slot is filled — the wrapper arms the C slot before the
+        /// registry waiter, and a completion into that window would be dropped).
+        private func fireSlot0WhenArmed(
+            id: UInt64,
+            state: output_device_state,
+            engine: AirPlayEngine
+        ) async throws {
+            for _ in 0..<500 {
+                if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                    fireCompletion(id: id, cbIdSlot: 0, state: state)
+                    return
+                }
+                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
             }
-            try await Task.sleep(nanoseconds: 1_000_000) // 1ms
-        }
-        XCTFail("waiter was never armed for device \(String(format: "0x%llX", id))")
-    }
-
-    /// Whether the C callback register has ANY armed slot for this device.
-    private func deviceHasArmedSlot(_ id: UInt64) -> Bool {
-        guard let device = outputs_device_get(id) else { return false }
-        return outputs_callback_get(device) != nil
-    }
-
-    // MARK: - A timed-out op frees its C slot BEFORE startOp returns.
-    //
-    // Proves facts (1)+(2): in headless mode the slot cleanup runs inline inside
-    // `onTimeout` BEFORE the continuation is resumed, so by the time the awaiting
-    // `addOutput` observes the `.opTimedOut` throw the leaked slot is already
-    // cleared — the cleanup is strictly ordered before startOp returns (and thus
-    // before its `defer releaseOp`, and thus before any next op can arm).
-    func testTimedOutOpCleansItsSlotBeforeReturning() async throws {
-        let id = OutputID(rawValue: 0xA9F4_0001)
-        makeRegistryDevice(id: id.rawValue)
-
-        let engine = AirPlayEngine()
-        // N=1 arms a real waiter; short injected timeout; never deliver -> only the
-        // timeout can resolve it.
-        await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.2)
-        await engine.registerKnownOutputForTest(id)
-
-        do {
-            try await engine.addOutput(id)
-            XCTFail("a stalled op must throw opTimedOut")
-        } catch AirPlayEngineError.opTimedOut {
-            // expected
-        } catch {
-            XCTFail("wrong error: \(error)")
+            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
         }
 
-        // The load-bearing assertion: the timed-out op's slot is ALREADY cleared
-        // the instant its throw is observed. If cleanup were deferred past the
-        // resume, this slot would still be armed here.
-        XCTAssertFalse(deviceHasArmedSlot(id.rawValue),
+        /// Whether the C callback register has ANY armed slot for this device.
+        private func deviceHasArmedSlot(_ id: UInt64) -> Bool {
+            guard let device = outputs_device_get(id) else { return false }
+            return outputs_callback_get(device) != nil
+        }
+
+        // MARK: - A timed-out op frees its C slot BEFORE startOp returns.
+        //
+        // Proves facts (1)+(2): in headless mode the slot cleanup runs inline inside
+        // `onTimeout` BEFORE the continuation is resumed, so by the time the awaiting
+        // `addOutput` observes the `.opTimedOut` throw the leaked slot is already
+        // cleared — the cleanup is strictly ordered before startOp returns (and thus
+        // before its `defer releaseOp`, and thus before any next op can arm).
+        @Test func timedOutOpCleansItsSlotBeforeReturning() async throws {
+            let id = OutputID(rawValue: 0xA9F4_0001)
+            makeRegistryDevice(id: id.rawValue)
+
+            let engine = AirPlayEngine()
+            // N=1 arms a real waiter; short injected timeout; never deliver -> only the
+            // timeout can resolve it.
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.2)
+            await engine.registerKnownOutputForTest(id)
+
+            do {
+                try await engine.addOutput(id)
+                Issue.record("a stalled op must throw opTimedOut")
+            } catch AirPlayEngineError.opTimedOut {
+                // expected
+            } catch {
+                Issue.record("wrong error: \(error)")
+            }
+
+            // The load-bearing assertion: the timed-out op's slot is ALREADY cleared
+            // the instant its throw is observed. If cleanup were deferred past the
+            // resume, this slot would still be armed here.
+            #expect(!deviceHasArmedSlot(id.rawValue),
                        "timed-out op must free its callback slot before startOp returns")
 
-        await engine.stop()
-    }
-
-    // MARK: - The NEXT op reusing the timed-out op's slot is NOT clobbered.
-    //
-    // A on `id` times out (cleanup clears slot 0). B on the SAME `id` then reuses
-    // slot 0, its completion is delivered, and it resolves STREAMING. A late/mis-
-    // ordered cleanup would have wiped B's freshly-armed slot 0, so its delivered
-    // completion would find no waiter and B would hang to its own timeout instead.
-    func testReusedSlotAfterTimeoutIsNotClobbered() async throws {
-        let id = OutputID(rawValue: 0xA9F4_0002)
-        makeRegistryDevice(id: id.rawValue)
-
-        let engine = AirPlayEngine()
-        await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.25)
-        await engine.registerKnownOutputForTest(id)
-
-        // Op A: never delivered -> times out. Its cleanup clears slot 0.
-        do {
-            try await engine.addOutput(id)
-            XCTFail("op A must time out")
-        } catch AirPlayEngineError.opTimedOut {
-            // expected
+            await engine.stop()
         }
-        XCTAssertFalse(deviceHasArmedSlot(id.rawValue),
+
+        // MARK: - The NEXT op reusing the timed-out op's slot is NOT clobbered.
+        //
+        // A on `id` times out (cleanup clears slot 0). B on the SAME `id` then reuses
+        // slot 0, its completion is delivered, and it resolves STREAMING. A late/mis-
+        // ordered cleanup would have wiped B's freshly-armed slot 0, so its delivered
+        // completion would find no waiter and B would hang to its own timeout instead.
+        @Test func reusedSlotAfterTimeoutIsNotClobbered() async throws {
+            let id = OutputID(rawValue: 0xA9F4_0002)
+            makeRegistryDevice(id: id.rawValue)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.25)
+            await engine.registerKnownOutputForTest(id)
+
+            // Op A: never delivered -> times out. Its cleanup clears slot 0.
+            do {
+                try await engine.addOutput(id)
+                Issue.record("op A must time out")
+            } catch AirPlayEngineError.opTimedOut {
+                // expected
+            }
+            #expect(!deviceHasArmedSlot(id.rawValue),
                        "op A's slot must be cleared before op B arms")
 
-        // Op B: same id, reuses slot 0, delivered promptly -> must succeed.
-        async let opB: Void = engine.addOutput(id)
-        try await fireSlot0WhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
-        do {
-            try await opB
-        } catch {
-            XCTFail("op B reusing the timed-out slot must resolve, not fail/hang: \(error)")
-        }
+            // Op B: same id, reuses slot 0, delivered promptly -> must succeed.
+            async let opB: Void = engine.addOutput(id)
+            try await fireSlot0WhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+            do {
+                try await opB
+            } catch {
+                Issue.record("op B reusing the timed-out slot must resolve, not fail/hang: \(error)")
+            }
 
-        let state = await engine.stateOf(id)
-        XCTAssertEqual(state, .streaming,
+            let state = await engine.stateOf(id)
+            #expect(state == .streaming,
                        "op B on the reused slot must complete normally (not clobbered by A's cleanup)")
 
-        await engine.stop()
+            await engine.stop()
+        }
     }
 }

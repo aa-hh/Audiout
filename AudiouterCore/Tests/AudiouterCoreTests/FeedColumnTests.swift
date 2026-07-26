@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 import AudiouterCore
 @testable import AudiouterSharedUI
@@ -13,7 +13,7 @@ import AudiouterCore
 /// column at all — see `MembershipBusTests`/`DeviceRowConnectionStateTests`
 /// for the non-bus host's unchanged legacy sublabel behavior.
 @MainActor
-final class FeedColumnTests: IsolatedTestCase {
+@Suite final class FeedColumnTests: IsolatedSuite {
 
     private func makeDevice(connectionState: ConnectionState = .connected,
                             isAvailable: Bool = true,
@@ -30,40 +30,39 @@ final class FeedColumnTests: IsolatedTestCase {
 
     // MARK: Multi-source composite — never collapses to one reason
 
-    func testManualMemberAloneShowsSystem() {
+    @Test func manualMemberAloneShowsSystem() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertEqual(row.test_feedText, "System")
+        #expect(row.test_feedText == "System")
     }
 
-    func testGroupMemberShowsTheGroupNameInsteadOfSystem() {
+    @Test func groupMemberShowsTheGroupNameInsteadOfSystem() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, inActiveTarget: true,
                   mainOutTargetsGroupName: "Downstairs")
-        XCTAssertEqual(row.test_feedText, "Downstairs",
-                       "the neutral segment's WORD carries manual-vs-group, no extra glyph")
+        #expect(row.test_feedText == "Downstairs", "the neutral segment's WORD carries manual-vs-group, no extra glyph")
     }
 
-    func testAppRedirectAloneWithNoMainMixMembership() {
+    @Test func appRedirectAloneWithNoMainMixMembership() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"])
-        XCTAssertEqual(row.test_feedText, "Safari", "app-only: no main-mix segment at all")
+        #expect(row.test_feedText == "Safari", "app-only: no main-mix segment at all")
     }
 
-    func testManualMemberPlusOneApp() {
+    @Test func manualMemberPlusOneApp() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertEqual(row.test_feedText, "System · Music")
+        #expect(row.test_feedText == "System · Music")
     }
 
-    func testGroupMemberPlusOneApp() {
+    @Test func groupMemberPlusOneApp() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, routedAppNames: ["Music"],
                   inActiveTarget: true, mainOutTargetsGroupName: "Downstairs")
-        XCTAssertEqual(row.test_feedText, "Downstairs · Music")
+        #expect(row.test_feedText == "Downstairs · Music")
     }
 
-    func testManualMemberPlusTwoApps() {
+    @Test func manualMemberPlusTwoApps() {
         // Pre-pill this fit at the same `feedColumnWidth` as one packed
         // string; each value now carries its own bordered-pill chrome
         // (padding + border + inter-pill gap), so three short values plus
@@ -76,138 +75,132 @@ final class FeedColumnTests: IsolatedTestCase {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"])
-        XCTAssertEqual(row.test_feedText, "System · Music · +1")
-        XCTAssertTrue(row.test_feedHasOverflow)
+        #expect(row.test_feedText == "System · Music · +1")
+        #expect(row.test_feedHasOverflow)
     }
 
-    func testNeitherMainMixNorAppsShowsNothing() {
+    @Test func neitherMainMixNorAppsShowsNothing() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false)
-        XCTAssertNil(row.test_feedText)
+        #expect(row.test_feedText == nil)
     }
 
-    func testLiveAppNamesTakePrecedenceOverRoutedAppNamesInFeed() {
+    @Test func liveAppNamesTakePrecedenceOverRoutedAppNamesInFeed() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true,
                   routedAppNames: ["Spotify"], liveAppNames: ["Music"])
-        XCTAssertEqual(row.test_feedText, "Music",
-                       "the FEED column mirrors the same T9 live-over-intent precedence")
+        #expect(row.test_feedText == "Music", "the FEED column mirrors the same T9 live-over-intent precedence")
     }
 
     // MARK: Error overrides the feed (failure-red words)
 
-    func testFailedOverridesTheFeedWithCouldntConnect() {
+    @Test func failedOverridesTheFeedWithCouldntConnect() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertEqual(row.test_feedText, "Couldn't connect",
-                       "failure overrides the composite entirely — never both")
-        XCTAssertTrue(row.test_feedIsErrorColored)
-        XCTAssertNil(row.test_statusText, "the sublabel carries no words for a failed bus row")
+        #expect(row.test_feedText == "Couldn't connect", "failure overrides the composite entirely — never both")
+        #expect(row.test_feedIsErrorColored)
+        #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
     }
 
-    func testUnavailableOverridesTheFeed() {
+    @Test func unavailableOverridesTheFeed() {
         let row = makeBusRow()
         row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
-        XCTAssertEqual(row.test_feedText, "Unavailable")
-        XCTAssertTrue(row.test_feedIsErrorColored)
+        #expect(row.test_feedText == "Unavailable")
+        #expect(row.test_feedIsErrorColored)
     }
 
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
 
-    func testConnectingShowsTheMultiSourceCompositeNotAConnectingWord() {
+    @Test func connectingShowsTheMultiSourceCompositeNotAConnectingWord() {
         // The halo ring owns transient connection state; the muted-unconnected
         // rule greys the whole row, but the FEED column itself still composes
         // normally (no "connecting…" word duplicated here).
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
-        XCTAssertEqual(row.test_feedText, "System")
-        XCTAssertFalse(row.test_feedIsErrorColored)
+        #expect(row.test_feedText == "System")
+        #expect(!(row.test_feedIsErrorColored))
     }
 
-    func testMutedRowsFeedStillShowsTheCompositeMuteLivesOnTheControl() {
+    @Test func mutedRowsFeedStillShowsTheCompositeMuteLivesOnTheControl() {
         var muted = makeDevice()
         muted.isMuted = true
         let row = makeBusRow()
         row.apply(muted, selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertEqual(row.test_feedText, "System · Music",
-                       "muted is not represented in the FEED column at all")
-        XCTAssertEqual(row.test_statusText, "MUTED", "…it lives on the sublabel/mute-pill instead")
+        #expect(row.test_feedText == "System · Music", "muted is not represented in the FEED column at all")
+        #expect(row.test_statusText == "MUTED", "…it lives on the sublabel/mute-pill instead")
     }
 
     // MARK: AP1 micro-tag — the one true exception, AP2 never badged
 
-    func testAP1DeviceGetsTheMicroTagPrefix() {
+    @Test func aP1DeviceGetsTheMicroTagPrefix() {
         let row = makeBusRow()
         row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
-        XCTAssertTrue(row.test_feedHasAP1Tag)
-        XCTAssertEqual(row.test_feedText, "AP1 System")
+        #expect(row.test_feedHasAP1Tag)
+        #expect(row.test_feedText == "AP1 System")
     }
 
-    func testAP2DeviceNeverGetsATag() {
+    @Test func aP2DeviceNeverGetsATag() {
         let row = makeBusRow()
         row.apply(makeDevice(supportsAirPlay2: true), selected: true, controllable: true)
-        XCTAssertFalse(row.test_feedHasAP1Tag)
+        #expect(!(row.test_feedHasAP1Tag))
     }
 
-    func testFailedAP1DeviceShowsTheErrorWithNoTag() {
+    @Test func failedAP1DeviceShowsTheErrorWithNoTag() {
         // The error override takes the WHOLE column — no tag mixed in.
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
-        XCTAssertEqual(row.test_feedText, "Couldn't connect")
-        XCTAssertFalse(row.test_feedHasAP1Tag)
+        #expect(row.test_feedText == "Couldn't connect")
+        #expect(!(row.test_feedHasAP1Tag))
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal
 
-    func testManySegmentsOverflowToAStaticPlusN() {
+    @Test func manySegmentsOverflowToAStaticPlusN() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Alpha Streaming App", "Bravo Streaming App",
                                    "Charlie Streaming App", "Delta Streaming App",
                                    "Echo Streaming App"])
-        XCTAssertTrue(row.test_feedHasOverflow, "a long composite caps visible segments with +N")
+        #expect(row.test_feedHasOverflow, "a long composite caps visible segments with +N")
         // Never a mid-string ellipsis — a "+N" suffix, not a truncated segment.
-        XCTAssertFalse(row.test_feedText?.hasSuffix("…") ?? true)
+        #expect(!(row.test_feedText?.hasSuffix("…") ?? true))
     }
 
-    func testShortCompositeNeverOverflows() {
+    @Test func shortCompositeNeverOverflows() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertFalse(row.test_feedHasOverflow)
+        #expect(!(row.test_feedHasOverflow))
     }
 
     // MARK: Non-bus host — no FEED column at all (mirrors production reality:
     // only the Selected Devices bus rows mount one)
 
-    func testNonBusRowNeverShowsFeedText() {
+    @Test func nonBusRowNeverShowsFeedText() {
         let row = DeviceRowView(device: makeDevice())   // default showsBus: false
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertNil(row.test_feedText, "a non-bus host has no free trailing slot to draw into")
+        #expect(row.test_feedText == nil, "a non-bus host has no free trailing slot to draw into")
     }
 
     // MARK: Tether-tint + chip (T7, Warm Signal v4.1 CORRECTIONS)
 
-    func testAppSegmentColorUsesTheHostSuppliedTetherTintNotFlatSecondaryLabel() {
+    @Test func appSegmentColorUsesTheHostSuppliedTetherTintNotFlatSecondaryLabel() {
         let row = makeBusRow()
         let tint = NSColor(srgbRed: 0.42, green: 0.58, blue: 0.47, alpha: 1)
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"],
                   appTintColors: ["Music": tint])
-        XCTAssertEqual(row.test_feedAppSegmentColor(for: "Music"), tint,
-                       "T7 rewired this seam to the host-supplied AppTetherColor tint")
-        XCTAssertNotEqual(row.test_feedAppSegmentColor(for: "Music"), Tokens.Color.secondaryLabel,
-                          "no longer the flat secondaryLabel it was before T7")
+        #expect(row.test_feedAppSegmentColor(for: "Music") == tint, "T7 rewired this seam to the host-supplied AppTetherColor tint")
+        #expect(row.test_feedAppSegmentColor(for: "Music") != Tokens.Color.secondaryLabel, "no longer the flat secondaryLabel it was before T7")
     }
 
-    func testAppSegmentColorFallsBackToNeutralTetherWhenUnmapped() {
+    @Test func appSegmentColorFallsBackToNeutralTetherWhenUnmapped() {
         let row = makeBusRow()
-        XCTAssertEqual(row.test_feedAppSegmentColor(for: "Music"), AppTetherColor.neutralFallback,
-                       "an app the host never mapped still reads as a tether tone, not the "
-                       + "neutral main-mix secondaryLabel")
+        #expect(row.test_feedAppSegmentColor(for: "Music") == AppTetherColor.neutralFallback,
+                "an app the host never mapped still reads as a tether tone, not the neutral main-mix secondaryLabel")
     }
 
-    func testAppRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
+    @Test func appRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
         // Three pills' worth of bordered chrome (System + 2 app pills, 2 of
         // them chipped) no longer fits `feedColumnWidth` at this exact width
         // — see the note on `testManualMemberPlusTwoApps` — so Safari's pill
@@ -219,54 +212,49 @@ final class FeedColumnTests: IsolatedTestCase {
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"],
                   appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
-        XCTAssertEqual(row.test_feedText, "System · Music · +1")
-        XCTAssertEqual(row.test_feedChipCount, 1,
-                       "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
+        #expect(row.test_feedText == "System · Music · +1")
+        #expect(row.test_feedChipCount == 1, "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
     }
 
-    func testAppOnlyRedirectFeedStillWearsItsChip() {
+    @Test func appOnlyRedirectFeedStillWearsItsChip() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"],
                   appTintColors: ["Safari": .systemTeal])
-        XCTAssertEqual(row.test_feedText, "Safari")
-        XCTAssertEqual(row.test_feedChipCount, 1)
+        #expect(row.test_feedText == "Safari")
+        #expect(row.test_feedChipCount == 1)
     }
 
-    func testErrorOverrideFeedNeverWearsAChip() {
+    @Test func errorOverrideFeedNeverWearsAChip() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"],
                   appTintColors: ["Music": .systemGreen])
-        XCTAssertEqual(row.test_feedText, "Couldn't connect")
-        XCTAssertEqual(row.test_feedChipCount, 0)
+        #expect(row.test_feedText == "Couldn't connect")
+        #expect(row.test_feedChipCount == 0)
     }
 
     // MARK: VoiceOver — one composed announcement, no double-speaking
 
-    func testAccessibilityLabelSpeaksTheFeedAsATrailingClause() {
+    @Test func accessibilityLabelSpeaksTheFeedAsATrailingClause() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        XCTAssertTrue(label.hasSuffix(", feeding System, Music"),
-                      "the feed clause trails the rest of the composed announcement")
-        XCTAssertEqual(label.components(separatedBy: "feeding").count - 1, 1,
-                       "spoken exactly once")
+        #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
+        #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
     }
 
-    func testFailedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
+    @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        XCTAssertTrue(label.hasSuffix(", couldn't connect"),
-                      "no trailing feed clause — the connection clause already spoke the failure")
-        XCTAssertFalse(label.contains("feeding"))
+        #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
+        #expect(!(label.contains("feeding")))
     }
 
-    func testNonBusRowNeverSpeaksAFeedClauseEither() {
+    @Test func nonBusRowNeverSpeaksAFeedClauseEither() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        XCTAssertFalse((row.test_accessibilityLabel ?? "").contains("feeding"),
-                       "a non-bus host has no FEED column, so nothing new to speak")
+        #expect(!((row.test_accessibilityLabel ?? "").contains("feeding")), "a non-bus host has no FEED column, so nothing new to speak")
     }
 }

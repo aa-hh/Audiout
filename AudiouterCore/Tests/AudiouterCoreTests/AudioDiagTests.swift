@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 ahh and contributors.
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
 /// Focused unit tests for ``AudioDiag``'s live-handle counter API:
@@ -21,45 +22,45 @@ import XCTest
 /// (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) are a true no-op
 /// against the shared process-wide counters under the ambient `isEnabled ==
 /// false` every `swift test` run actually has.
-final class AudioDiagTests: XCTestCase {
+@Suite struct AudioDiagTests {
 
     // MARK: HandleCounter mechanism — construction
 
-    func test_construction_freshCounterDumpsEmptySentinel() {
+    @Test func construction_freshCounterDumpsEmptySentinel() {
         let counter = AudioDiag.HandleCounter()
-        XCTAssertEqual(counter.dump(), "(no live handles)")
+        #expect(counter.dump() == "(no live handles)")
     }
 
     // MARK: increment
 
-    func test_increment_addsToNamedKind() {
+    @Test func increment_addsToNamedKind() {
         let counter = AudioDiag.HandleCounter()
         counter.increment("processTap")
-        XCTAssertEqual(counter.dump(), "processTap=1")
+        #expect(counter.dump() == "processTap=1")
         counter.increment("processTap")
-        XCTAssertEqual(counter.dump(), "processTap=2")
+        #expect(counter.dump() == "processTap=2")
     }
 
-    func test_increment_tracksDistinctKindsIndependently() {
+    @Test func increment_tracksDistinctKindsIndependently() {
         let counter = AudioDiag.HandleCounter()
         counter.increment("processTap")
         counter.increment("aggregateDevice")
         counter.increment("aggregateDevice")
         counter.increment("ioProc")
-        XCTAssertEqual(counter.dump(), "aggregateDevice=2 ioProc=1 processTap=1")
+        #expect(counter.dump() == "aggregateDevice=2 ioProc=1 processTap=1")
     }
 
     // MARK: decrement
 
-    func test_decrement_netsAgainstIncrement() {
+    @Test func decrement_netsAgainstIncrement() {
         let counter = AudioDiag.HandleCounter()
         counter.increment("processTap")
         counter.increment("processTap")
         counter.decrement("processTap")
-        XCTAssertEqual(counter.dump(), "processTap=1")
+        #expect(counter.dump() == "processTap=1")
     }
 
-    func test_decrement_toZero_staysVisibleInDump() {
+    @Test func decrement_toZero_staysVisibleInDump() {
         // A kind that nets back to 0 (created, then cleanly destroyed) is
         // still reported explicitly — "0 outstanding" is meaningful signal,
         // distinct from "this kind was never tracked at all" (the empty-dump
@@ -67,37 +68,37 @@ final class AudioDiagTests: XCTestCase {
         let counter = AudioDiag.HandleCounter()
         counter.increment("ioProc")
         counter.decrement("ioProc")
-        XCTAssertEqual(counter.dump(), "ioProc=0")
+        #expect(counter.dump() == "ioProc=0")
     }
 
-    func test_decrement_withoutMatchingIncrement_goesNegativeUnclamped() {
+    @Test func decrement_withoutMatchingIncrement_goesNegativeUnclamped() {
         // Deliberately unclamped at zero: an unmatched decrement is itself a
         // bookkeeping bug worth surfacing (e.g. double-teardown), not one to
         // hide by flooring at 0.
         let counter = AudioDiag.HandleCounter()
         counter.decrement("aggregateDevice")
-        XCTAssertEqual(counter.dump(), "aggregateDevice=-1")
+        #expect(counter.dump() == "aggregateDevice=-1")
     }
 
     // MARK: dump-format
 
-    func test_dump_sortsKindsAlphabetically() {
+    @Test func dump_sortsKindsAlphabetically() {
         let counter = AudioDiag.HandleCounter()
         counter.increment("processTap")
         counter.increment("aggregateDevice")
         counter.increment("ioProc")
-        XCTAssertEqual(counter.dump(), "aggregateDevice=1 ioProc=1 processTap=1")
+        #expect(counter.dump() == "aggregateDevice=1 ioProc=1 processTap=1")
     }
 
     // MARK: isEnabled == false no-op case (the real gated API, ambient default)
 
-    func test_gatedAPI_isNoOpWhenDiagnosticsDisabled() {
+    @Test func gatedAPI_isNoOpWhenDiagnosticsDisabled() {
         // No suite in this package sets $AIRPLAY_AUDIO_DIAG, so this is the
         // real ambient state `swift test` runs under — not a mock.
-        XCTAssertFalse(AudioDiag.isEnabled, "test assumes diagnostics are off in the test process")
+        #expect(!AudioDiag.isEnabled, "test assumes diagnostics are off in the test process")
 
         let before = AudioDiag.dumpLiveHandles()
-        XCTAssertEqual(before, "(no live handles)", "nothing in this package calls handleCreated/handleDestroyed outside the live Core Audio path, which hermetic tests never exercise")
+        #expect(before == "(no live handles)", "nothing in this package calls handleCreated/handleDestroyed outside the live Core Audio path, which hermetic tests never exercise")
 
         AudioDiag.handleCreated("processTap")
         AudioDiag.handleCreated("aggregateDevice")
@@ -107,6 +108,6 @@ final class AudioDiagTests: XCTestCase {
         // A true no-op: the shared process-wide counters are byte-for-byte
         // unchanged by calls made while disabled — no lock taken, no
         // dictionary write, on the hot audio path this models.
-        XCTAssertEqual(AudioDiag.dumpLiveHandles(), before)
+        #expect(AudioDiag.dumpLiveHandles() == before)
     }
 }

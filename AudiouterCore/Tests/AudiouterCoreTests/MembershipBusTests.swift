@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
 import AppKit
+import Testing
 import AudiouterCore
 @testable import AudiouterSharedUI
 
@@ -16,7 +16,7 @@ import AudiouterCore
 /// the real checkbox action path under the node skin (§4.8), and the checkbox's
 /// stable VoiceOver label.
 @MainActor
-final class MembershipBusTests: XCTestCase {
+@Suite struct MembershipBusTests {
 
     private func makeDevice(id: String = "dev-1",
                             connectionState: ConnectionState = .connected,
@@ -32,71 +32,71 @@ final class MembershipBusTests: XCTestCase {
 
     // MARK: Node ↦ state mapping (§4.3/§4.4/§4.6, matrix §3.6)
 
-    func testMemberRendersFilledNode() {
+    @Test func memberRendersFilledNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertEqual(row.test_busNode, .member, "a member's node is the filled gold disc ON the line")
+        #expect(row.test_busNode == .member, "a member's node is the filled gold disc ON the line")
     }
 
-    func testNonMemberRendersHollowDetouredNode() {
+    @Test func nonMemberRendersHollowDetouredNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false)
-        XCTAssertEqual(row.test_busNode, .nonMember,
+        #expect(row.test_busNode == .nonMember,
                        "a non-member's node is hollow — the line detours around it")
     }
 
-    func testBlockedLocalMixRendersBlockedNode() {
+    @Test func blockedLocalMixRendersBlockedNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, blocked: true, blockReason: "no mixed set")
-        XCTAssertEqual(row.test_busNode, .blocked,
+        #expect(row.test_busNode == .blocked,
                        "the local-mix blocked row renders the distinct greyed hollow node (§4.6)")
     }
 
-    func testUnavailableRendersHollowTintedNode() {
+    @Test func unavailableRendersHollowTintedNode() {
         let row = makeBusRow()
         // Even a held (selected) membership renders hollow while unavailable —
         // the device is not currently in the mix (matrix §3.6 "Unavailable").
         row.apply(makeDevice(isAvailable: false), selected: true)
-        XCTAssertEqual(row.test_busNode, .nonMember, "an unavailable device's node is hollow")
-        XCTAssertEqual(row.test_busNodeDimmed, true, "…and tinted (the unavailable signature)")
+        #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
+        #expect(row.test_busNodeDimmed == true, "…and tinted (the unavailable signature)")
         // Distinct from blocked (R5): blocked is `.blocked`, unavailable is a
         // tinted `.nonMember` + the "Unavailable" FEED override (v4.1 item 3
         // moved this word off the sublabel and onto the FEED column, since
         // this row is a bus row).
-        XCTAssertEqual(row.test_feedText, "Unavailable")
-        XCTAssertTrue(row.test_feedIsErrorColored)
-        XCTAssertNil(row.test_statusText, "the sublabel carries no words on a bus row's unavailable state")
+        #expect(row.test_feedText == "Unavailable")
+        #expect(row.test_feedIsErrorColored)
+        #expect(row.test_statusText == nil, "the sublabel carries no words on a bus row's unavailable state")
     }
 
-    func testMuteKeepsTheNodeFilled() {
+    @Test func muteKeepsTheNodeFilled() {
         // §3.4: membership ≠ mute — a muted member is still in the mix set.
         var device = makeDevice()
         device.isMuted = true
         let row = makeBusRow()
         row.apply(device, selected: true, controllable: true)
-        XCTAssertEqual(row.test_busNode, .member, "a muted member's node stays FILLED (§3.4)")
+        #expect(row.test_busNode == .member, "a muted member's node stays FILLED (§3.4)")
     }
 
     // MARK: No-bus rows
 
-    func testNonBusRowHasNoBusNode() {
+    @Test func nonBusRowHasNoBusNode() {
         let row = DeviceRowView(device: makeDevice())   // mixer-window style, no bus
-        XCTAssertNil(row.test_busNode, "a non-bus host row draws no node")
-        XCTAssertNil(row.test_busNodeCenterX())
+        #expect(row.test_busNode == nil, "a non-bus host row draws no node")
+        #expect(row.test_busNodeCenterX() == nil)
     }
 
-    func testGroupMemberRowKeepsNoBusNode() {
+    @Test func groupMemberRowKeepsNoBusNode() {
         // §4.6 group members: showsToggle == false rows carry no membership
         // control, so they keep NO bus node even under a bus host.
         let row = DeviceRowView(device: makeDevice(), indented: true, showsToggle: false,
                                 paintsSelectionBackground: false, showsMeter: true,
                                 showsBus: true)
-        XCTAssertNil(row.test_busNode, "a showsToggle=false (group-member) row keeps no bus node")
+        #expect(row.test_busNode == nil, "a showsToggle=false (group-member) row keeps no bus node")
     }
 
     // MARK: Fixed node column — zero layout shift (§4.1 / R7)
 
-    func testNodeColumnXIsFixedAcrossToggles() {
+    @Test func nodeColumnXIsFixedAcrossToggles() {
         let row = makeBusRow()
 
         row.apply(makeDevice(), selected: true, controllable: true)
@@ -107,44 +107,44 @@ final class MembershipBusTests: XCTestCase {
         row.apply(makeDevice(), selected: false)
         let deselectedX = row.test_busNodeCenterX()
 
-        XCTAssertEqual(selectedX ?? -1, expectedX, accuracy: 0.5,
+        #expect(abs((selectedX ?? -1) - expectedX) <= 0.5,
                        "the node sits on the left-gutter rail centreline")
-        XCTAssertEqual(deselectedX ?? -1, expectedX, accuracy: 0.5,
+        #expect(abs((deselectedX ?? -1) - expectedX) <= 0.5,
                        "…whether tapped in or out — toggling changes only fill and line path")
-        XCTAssertEqual(selectedX ?? -1, deselectedX ?? -2, accuracy: 0.001,
+        #expect(abs((selectedX ?? -1) - (deselectedX ?? -2)) <= 0.001,
                        "zero layout shift across a membership toggle (R7)")
     }
 
     // MARK: Terminating rail (§4.1 "runs to the last device row's node")
 
-    func testTerminatingRowDrawsNoRailBelow() {
+    @Test func terminatingRowDrawsNoRailBelow() {
         let row = makeBusRow()
-        XCTAssertEqual(row.test_busRailBelow, true, "an ordinary row rails below its node")
+        #expect(row.test_busRailBelow == true, "an ordinary row rails below its node")
         row.setBusTerminates(true)
-        XCTAssertEqual(row.test_busRailBelow, false, "the last node terminates the line")
+        #expect(row.test_busRailBelow == false, "the last node terminates the line")
         // Terminate-state is structural: it survives an in-place repaint.
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertEqual(row.test_busRailBelow, false, "termination survives a model re-apply")
+        #expect(row.test_busRailBelow == false, "termination survives a model re-apply")
     }
 
     // MARK: Dormant de-emphasis — tint, never alpha (§4.7; the host scopes WHO dims)
 
-    func testDormantDimIsANodeTintWithTheCheckboxAtFullAlpha() {
+    @Test func dormantDimIsANodeTintWithTheCheckboxAtFullAlpha() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, selectionDimmed: true)
-        XCTAssertEqual(row.test_isSelectionDimmed, true, "the dormancy dim reads out")
-        XCTAssertEqual(row.test_busNodeDimmed, true, "…as the node TINT")
+        #expect(row.test_isSelectionDimmed == true, "the dormancy dim reads out")
+        #expect(row.test_busNodeDimmed == true, "…as the node TINT")
         // The control stays fully interactive under the tint.
-        XCTAssertEqual(row.test_isEnabledOn, true)
+        #expect(row.test_isEnabledOn == true)
     }
 
-    func testFailedMemberNodeIsFailureRedAndNeverDimmed() {
+    @Test func failedMemberNodeIsFailureRedAndNeverDimmed() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, selectionDimmed: true)
-        XCTAssertEqual(row.test_busNodeDimmed, false,
+        #expect(row.test_busNodeDimmed == false,
                        "a failed member renders at full failure emphasis even in a dormant card")
-        XCTAssertEqual(row.test_busNode, .failed,
+        #expect(row.test_busNode == .failed,
                        "…in the failure-red ring node form (v4 §Call-1 node vocabulary)")
     }
 
@@ -159,7 +159,7 @@ final class MembershipBusTests: XCTestCase {
         }
     }
 
-    func testCheckboxActionDispatchStillDrivesTheDelegateUnderTheNodeSkin() {
+    @Test func checkboxActionDispatchStillDrivesTheDelegateUnderTheNodeSkin() {
         // Drives the checkbox's OWN target/action with the checkbox as sender —
         // the real AppKit click path, not the delegate shortcut — proving the
         // invisible-cell skin left the control's action wiring intact (§4.8).
@@ -168,29 +168,29 @@ final class MembershipBusTests: XCTestCase {
         row.delegate = spy
         row.apply(makeDevice(), selected: false)
         row.test_fireCheckboxAction(settingStateTo: true)
-        XCTAssertEqual(spy.toggled.count, 1, "the node's click path fires the delegate")
-        XCTAssertEqual(spy.toggled.first?.on, true)
-        XCTAssertEqual(spy.toggled.first?.id, "dev-1")
+        #expect(spy.toggled.count == 1, "the node's click path fires the delegate")
+        #expect(spy.toggled.first?.on == true)
+        #expect(spy.toggled.first?.id == "dev-1")
     }
 
-    func testBusMembershipVoiceOverLabelIsStable() {
+    @Test func busMembershipVoiceOverLabelIsStable() {
         // §4.8: the node speaks as the checkbox — a STABLE "include … in main
         // audio" label; the checked/unchecked VALUE (from the untouched NSButton
         // state) carries the membership, so the label must not flip per state.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false)
-        XCTAssertEqual(row.test_membershipAXLabel, "Include Test Speaker in main audio")
+        #expect(row.test_membershipAXLabel == "Include Test Speaker in main audio")
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertEqual(row.test_membershipAXLabel, "Include Test Speaker in main audio",
+        #expect(row.test_membershipAXLabel == "Include Test Speaker in main audio",
                        "the label is identical checked and unchecked — the value carries the state")
     }
 
-    func testNonBusCheckboxKeepsItsLegacyVoiceOverLabel() {
+    @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {
         // Non-bus hosts (mixer window) are byte-for-byte unchanged.
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false)
-        XCTAssertEqual(row.test_membershipAXLabel, "Add Test Speaker to Selected Devices")
+        #expect(row.test_membershipAXLabel == "Add Test Speaker to Selected Devices")
         row.apply(makeDevice(), selected: true, controllable: true)
-        XCTAssertEqual(row.test_membershipAXLabel, "Remove Test Speaker from Selected Devices")
+        #expect(row.test_membershipAXLabel == "Remove Test Speaker from Selected Devices")
     }
 }

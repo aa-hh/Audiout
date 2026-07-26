@@ -279,21 +279,29 @@ extension SerializedSharedState {
     /// exactly one Mach touch per connect attempt.
     private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked Sendable {
         let willWaitForClock: Bool
-        private let outcome: PTPHelperActivationOutcome
         private let lock = NSLock()
+        private var _outcome: PTPHelperActivationOutcome
         private var _callCount = 0
 
         init(willWaitForClock: Bool, outcome: PTPHelperActivationOutcome) {
             self.willWaitForClock = willWaitForClock
-            self.outcome = outcome
+            self._outcome = outcome
         }
 
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
-            lock.withLock { _callCount += 1 }
-            return outcome
+            lock.withLock {
+                _callCount += 1
+                return _outcome
+            }
         }
 
         var callCount: Int { lock.withLock { _callCount } }
+
+        /// Re-script the outcome mid-test — how the clock-recovery tests flip
+        /// the world from "no clock" to "ready" between two connect attempts.
+        func setOutcome(_ outcome: PTPHelperActivationOutcome) {
+            lock.withLock { _outcome = outcome }
+        }
     }
 
     /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
@@ -3651,6 +3659,118 @@ extension SerializedSharedState {
         #expect(binds.count == 1, "device should be bound exactly once")
         #expect(binds.first?.1 ?? 0 >= 1,
                                     "per-app stream id must be >= 1 (0 is the legacy whole-system path)")
+    }
+
+    // MARK: Per-app PTP takeover gate (redirect-order bug, PLAN-AIRPLAY-COEXISTENCE.md)
+    //
+    // The T5+T4 takeover gate originally ran only in `convergeDevice`, which made
+    // a redirect ORDER-DEPENDENT: redirect-first (or a redirect right after
+    // launch) bound its per-app stream to a clockless receiver — session
+    // accepted, audio silent — while select-then-redirect worked because the
+    // select had already woken the helper. These pin the fix: every per-app bind
+    // runs the same gate, a clockless bind is refused (not silently issued), and
+    // a refused redirect self-heals on the next successful takeover.
+
+    /// A per-app capture that actually reaches `.capturing` for `com.foo.player`
+    /// — these tests are about the BIND gate, and a capture left failing (the
+    /// default `NoAudioProcesses` resolver) would mark the app dead and
+    /// republish an EMPTY topology mid-test, racing every assertion about the
+    /// bind itself.
+    private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: { FlakyThenSucceedsTap(failuresBeforeSuccess: 0) },
+            processResolver: singleProcessResolver(["com.foo.player": 4242]),
+            muteBehavior: .mutedWhenTapped)
+    }
+
+    /// Redirect-FIRST (nothing selected, the launch/path-1+3 shape): the per-app
+    /// bind itself must run the takeover gate — the helper activation must not
+    /// depend on a prior Selected-Devices connect.
+    @Test func appRouteBindRunsThePTPTakeoverGateItself() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // No setOutputSet — the redirect is the FIRST routing action.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 },
+                "the redirect must bind without any prior Selected-Devices connect")
+        #expect(activator.callCount >= 1,
+                "the per-app bind must have woken/checked the PTP helper itself")
+    }
+
+    /// A clockless verdict must REFUSE the per-app bind — a receiver accepts a
+    /// clockless session and plays silence, which is exactly the live bug — and
+    /// walk the `.routedApps` claim back so the UI never asserts a stream that
+    /// was never established.
+    @Test func appRouteBindWithoutClockIsRefusedAndClaimWalkedBack() async {
+        let activator = ScriptedPTPHelperActivator(
+            willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        }
+
+        #expect(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "the refused bind must clear the .routedApps claim")
+        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
+                "no per-app stream may be established while the clock is unavailable")
+    }
+
+    /// Path 3 end-to-end (redirect, THEN select): a redirect refused clockless
+    /// must re-bind BY ITSELF the moment a later Selected-Devices connect wins
+    /// the takeover — no route re-pick, no topology change.
+    @Test func refusedAppRouteRebindsAfterClockRecovery() async {
+        let activator = ScriptedPTPHelperActivator(
+            willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let target = ap2Device()
+        await startAndDiscover(backend, engine, discovery, target)
+        let selected = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Era 100")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == selected.id } else { return false } }
+        } after: { discovery.fire(.appeared(selected)) }
+        await pollUntil { engine.fedIDs.contains(selected.outputID) }
+
+        // 1. Redirect while clockless: refused (claim walked back, binding cleared).
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == target.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: target.id)])
+        }
+        #expect(engine.streamAddCalls.filter { $0.0 == target.outputID }.isEmpty)
+
+        // 2. The clock comes up and the user selects a DIFFERENT main-out device.
+        activator.setOutcome(.ready)
+        backend.setOutputSet([selected.id])
+
+        // 3. The refused redirect re-binds on its own — the not-ready → ready
+        //    edge replays the cached per-app topology.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == target.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == target.outputID && $0.1 >= 1 },
+                "the redirect must re-establish itself once the takeover succeeds, with no user action")
     }
 
     /// T4b defensive guard: a per-app route that targets an AirPlay-1-only

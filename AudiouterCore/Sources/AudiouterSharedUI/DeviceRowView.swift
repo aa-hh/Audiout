@@ -1583,6 +1583,11 @@ public final class DeviceRowView: NSView {
         (slider.isContinuous, slider.minValue, slider.maxValue, slider.sliderType)
     }
 
+    /// The value the slider is actually SHOWING — read from the control, not from
+    /// the model that was handed to `apply`. That distinction is the point: it
+    /// catches a row whose displayed level has drifted from what was painted.
+    public var test_sliderValue: Int { slider.integerValue }
+
     /// Simulate the user toggling this row's mute button — flips
     /// `muteButton.state` and lands the V1 tint via `updateMuteTint()` exactly
     /// as a real click does (AppKit flips the `pushOnPushOff` state before

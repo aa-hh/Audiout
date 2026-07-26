@@ -369,6 +369,40 @@ extension SerializedSharedState {
         #expect(coordinator.state(for: "com.example.silent") == .capturing(tap.format))
     }
 
+    // MARK: - Degenerate format (architecture review 2026-07-26, defect A):
+    // a tap that hands back a non-positive sample rate must be rejected
+    // BEFORE the coordinator commits it to `.capturing`, not left to trap
+    // downstream — ported from NativeCaptureCoordinator's equivalent guard.
+
+    @Test func degenerateSampleRateIsRejectedBeforeCapturing() {
+        let tap = FakeProcessTap()
+        tap.format = TapFormat(sampleRate: 0, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        let (resolver, _) = makeResolver(bundleID: "com.example.degenerate", objectID: 1, pid: 555)
+        let coordinator = makeCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.degenerate")
+        waitFor {
+            if case .failed = coordinator.state(for: "com.example.degenerate") { return true }
+            return false
+        }
+        #expect(coordinator.state(for: "com.example.degenerate") ==
+                       .failed(.formatReadFailed(reason: "invalid tap sample rate 0")))
+        #expect(tap.teardowns >= 1, "a rejected format must still tear the tap down (no leak)")
+
+        // A negative rate is rejected the same way.
+        tap.format = TapFormat(sampleRate: -1, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        coordinator.start(bundleID: "com.example.degenerate")
+        waitFor {
+            if case .failed(.formatReadFailed(let reason)) = coordinator.state(for: "com.example.degenerate") {
+                return reason == "invalid tap sample rate -1"
+            }
+            return false
+        }
+    }
+
     // MARK: - UnavailableProcessTap (macOS < 14.2) surfaces .osUnsupported, not retryable.
 
     #if canImport(AudioToolbox)

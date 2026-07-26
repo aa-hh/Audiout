@@ -377,6 +377,21 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // tearing the just-created tap back down instead of resurrecting a stopped
     // slot.
 
+    /// Reject a tap format the converter/aggregate can't safely consume before
+    /// it commits to `.capturing` — ported verbatim from
+    /// `NativeCaptureCoordinator.validate(_:)` (architecture review
+    /// 2026-07-26, defect A). A non-positive sample rate makes a downstream
+    /// resample ratio infinite and an `AVAudioFrameCount` conversion trap; the
+    /// real tap's `createTapAndReadFormat` already guards the raw ASBD, but
+    /// validating here also covers an injected/degenerate format and keeps
+    /// the failure on the `.failed` state path rather than a crash.
+    static func validate(_ format: TapFormat) throws {
+        guard format.sampleRate > 0 else {
+            throw PerAppCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(format.sampleRate)")
+        }
+    }
+
     private func beginStart(bundleID: String) {
         let processes = processResolver.resolve(bundleID: bundleID)
         guard !processes.isEmpty else {
@@ -400,6 +415,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try tap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
+            try Self.validate(format)
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     tap.teardown() // a stop() (or a second start()) raced in — don't leak this tap
@@ -480,6 +496,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try newTap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
+            try Self.validate(format)
             // The subsequent .capturing(format) transition below already carries
             // the new format in its "transition"/"format" telemetry field.
             // The single highest-value event in PLAN-TELEMETRY-SYSTEM.md's T3:
@@ -941,6 +958,18 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     private let monitor: DefaultOutputDeviceMonitor
     private var monitorToken: DefaultOutputDeviceMonitor.SubscriptionToken?
 
+    /// Per-instance mach→CLOCK_MONOTONIC rebase offset — ported from
+    /// `CoreAudioSystemTap.machToMonotonicOffsetNanos` (architecture review
+    /// 2026-07-26, defect A: this tap previously called the always-resample
+    /// `CoreAudioSystemTap.timespec(fromHostTime:)` on every buffer, which
+    /// that helper's own doc comment says production code must avoid — "not
+    /// something we want to pay for on every real captured buffer"). Resampled
+    /// once at `startIOProc()` (every tap create/recreate, not once per
+    /// process) and thereafter mutated ONLY from inside the IOProc block,
+    /// which Core Audio dispatches serially onto `queue` in `startIOProc()` —
+    /// so no lock is needed on this RT-adjacent path.
+    private var machToMonotonicOffsetNanos: Int64 = 0
+
     /// `monitor` defaults to the process-wide ``SharedDefaultOutputMonitor`` —
     /// the parameter exists so the hermetic suite can hand in a monitor built
     /// over a fake HAL.
@@ -1023,6 +1052,17 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         guard fErr == noErr else {
             throw PerAppCaptureError.formatReadFailed(reason: "read kAudioTapPropertyFormat \(fErr)")
         }
+        // Guard the sample rate before it reaches `Int(mSampleRate.rounded())`:
+        // a misbehaving driver can hand back NaN/±inf, and `Int(Float.nan)`
+        // TRAPS in Swift — ported from `NativeCaptureCoordinator.createTapAndReadFormat`'s
+        // identical guard (architecture review 2026-07-26, defect A). A
+        // zero/negative rate is just as poisonous downstream (infinite resample
+        // ratio, trapping `AVAudioFrameCount` conversion); fail loud into
+        // `.formatReadFailed` instead.
+        guard readASBD.mSampleRate.isFinite, readASBD.mSampleRate > 0 else {
+            throw PerAppCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(readASBD.mSampleRate)")
+        }
         self.asbd = readASBD
         self.format = TapFormat(
             sampleRate: Int(readASBD.mSampleRate.rounded()),
@@ -1103,24 +1143,49 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let onBuffer = self.onBuffer
 
+        // Seed the rebase offset fresh for THIS tap instance (not a
+        // process-wide one-time sample) — see `machToMonotonicOffsetNanos`
+        // doc. This write happens-before `AudioDeviceStart` below, which
+        // happens-before the IOProc block below ever runs, so no lock is
+        // needed for this initial handoff either.
+        self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(
             label: "com.airplaycontroller.native.perapp.\(name)", qos: .userInitiated)
 
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
-        ) { _, inInputData, inInputTime, _, _ in
+        ) { [weak self] _, inInputData, inInputTime, _, _ in
             // ---- REALTIME THREAD ----
+            guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
             let bufCount = listPtr.count
             if bufCount == 0 { return }
 
-            // pts from the IOProc's own capture clock, rebased onto
-            // CLOCK_MONOTONIC via the shared helper (reused, not duplicated —
-            // see the file-level doc comment).
+            // pts from the IOProc's own capture clock (host time → timespec).
+            // Cached, self-healing per-instance offset — ported from
+            // `CoreAudioSystemTap`'s identical RT path rather than calling
+            // the always-resample `CoreAudioSystemTap.timespec(fromHostTime:)`
+            // helper on every buffer (see `machToMonotonicOffsetNanos` doc).
+            // Drift self-heal: if the cached offset has fallen out of step
+            // with reality (e.g. the box slept mid-tap), resample it before
+            // use — two clock reads, cheap, and confined to this same serial
+            // queue so no lock is needed. `machToMonotonicOffsetNanos` is
+            // only ever touched from this block after the initial seed in
+            // `startIOProc`.
             let hostTime = inInputTime.pointee.mHostTime
-            let pts = CoreAudioSystemTap.timespec(fromHostTime: hostTime)
+            let machNanos = Self.machNanoseconds(fromHostTime: hostTime)
+            if CoreAudioSystemTap.shouldResample(
+                machNanos: machNanos,
+                offset: self.machToMonotonicOffsetNanos,
+                monotonicNowNanos: Self.currentMonotonicNanos()
+            ) {
+                self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+            }
+            let pts = CoreAudioSystemTap.timespec(
+                machNanos: machNanos, offset: self.machToMonotonicOffsetNanos)
 
             var channelData: [Data] = []
             var frameCount = 0
@@ -1153,6 +1218,45 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         guard startErr == noErr else {
             throw PerAppCaptureError.aggregateDeviceFailed(reason: "AudioDeviceStart \(startErr)")
         }
+    }
+
+    // MARK: mHostTime → CLOCK_MONOTONIC offset (cached, self-healing)
+    //
+    // Ported from `CoreAudioSystemTap`'s identical trio (architecture review
+    // 2026-07-26, defect A). Duplicated rather than shared because the
+    // originals are `private` to that file; `CoreAudioSystemTap.timespec(
+    // machNanos:offset:)` and `.shouldResample(...)` — the pure arithmetic —
+    // ARE internal and reused directly above, so only the two raw clock reads
+    // and the timebase conversion are repeated here.
+
+    /// mach host ticks → nanoseconds on the mach-absolute timescale.
+    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
+        let timebase = cachedTimebase
+        return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
+    }
+
+    /// The mach timebase, read once (it never changes for the life of a process).
+    private static let cachedTimebase: mach_timebase_info_data_t = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return tb
+    }()
+
+    /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
+    private static func currentMonotonicNanos() -> UInt64 {
+        var ts = Darwin.timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+
+    /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled fresh by reading
+    /// both clocks back-to-back. See `machToMonotonicOffsetNanos`'s doc for
+    /// why callers cache this instead of calling it on every buffer.
+    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+        // Sample both clocks as close together as possible.
+        let mach = machNanoseconds(fromHostTime: mach_absolute_time())
+        let monotonic = currentMonotonicNanos()
+        return Int64(monotonic) &- Int64(mach)
     }
 
     // MARK: Default-output subscription (device identity + nominal sample rate)

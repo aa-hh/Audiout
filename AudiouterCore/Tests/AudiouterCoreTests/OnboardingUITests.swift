@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 @testable import AudiouterOnboardingUI
 
@@ -10,7 +11,7 @@ import XCTest
 /// headless test, so these assert via the `test_` hooks — the same approach the
 /// popover/settings UI tests use.
 @MainActor
-final class OnboardingUITests: XCTestCase {
+@Suite final class OnboardingUITests {
 
     private struct CannedAudioProbe: AudioCapturePermissionProbing {
         let result: PermissionStatus
@@ -35,20 +36,17 @@ final class OnboardingUITests: XCTestCase {
     }
     private final class ChangeCounter { var count = 0 }
 
-    private var suiteName: String!
+    private var suiteName: String
     private var defaults: UserDefaults!
 
-    override func setUp() {
-        super.setUp()
-        suiteName = "OnboardingUITests.\(name).\(ObjectIdentifier(self).hashValue)"
+    init() {
+        suiteName = "OnboardingUITests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    override func tearDown() {
+    deinit {
         defaults.removePersistentDomain(forName: suiteName)
-        defaults = nil; suiteName = nil
-        super.tearDown()
     }
 
     private func makeModel(audio: PermissionStatus,
@@ -62,51 +60,51 @@ final class OnboardingUITests: XCTestCase {
 
     // MARK: View controller structure
 
-    func testInitialRowsOfferAllow() {
+    @Test func initialRowsOfferAllow() {
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           onOpenSettings: { _ in }, onDone: {})
-        XCTAssertEqual(vc.test_audioRowButtonTitles, ["Allow…"])
-        XCTAssertEqual(vc.test_networkRowButtonTitles, ["Allow…"])
-        XCTAssertEqual(vc.test_remoteControlRowButtonTitles, ["Allow…"])
+        #expect(vc.test_audioRowButtonTitles == ["Allow…"])
+        #expect(vc.test_networkRowButtonTitles == ["Allow…"])
+        #expect(vc.test_remoteControlRowButtonTitles == ["Allow…"])
     }
 
-    func testGrantingAudioReplacesButtonWithAllowedStatus() async {
+    @Test func grantingAudioReplacesButtonWithAllowedStatus() async {
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           onOpenSettings: { _ in }, onDone: {})
         await vc.test_allowAudio()
         // Granted shows a status chip, no button.
-        XCTAssertEqual(vc.test_audioRowButtonTitles, [])
-        XCTAssertEqual(vc.test_audioRow.lastStatus, .granted)
+        #expect(vc.test_audioRowButtonTitles == [])
+        #expect(vc.test_audioRow.lastStatus == .granted)
     }
 
-    func testDeniedAudioOffersOpenSettings() {
+    @Test func deniedAudioOffersOpenSettings() {
         let vc = OnboardingViewController(model: makeModel(audio: .denied),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .denied, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown)
-        XCTAssertEqual(vc.test_audioRowButtonTitles, ["Open Settings"])
+        #expect(vc.test_audioRowButtonTitles == ["Open Settings"])
     }
 
-    func testPrimingNetworkShowsRequestedAndOpenSettings() async {
+    @Test func primingNetworkShowsRequestedAndOpenSettings() async {
         // NoopLocalNetwork reports unreachable, so priming lands on .requested.
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           onOpenSettings: { _ in }, onDone: {})
         await vc.test_allowNetwork()
-        XCTAssertEqual(vc.test_networkRow.lastStatus, .requested)
-        XCTAssertEqual(vc.test_networkRowButtonTitles, ["Open Settings"])
+        #expect(vc.test_networkRow.lastStatus == .requested)
+        #expect(vc.test_networkRowButtonTitles == ["Open Settings"])
     }
 
-    func testPrimingRemoteControlShowsRequestedAndOpenSettings() {
+    @Test func primingRemoteControlShowsRequestedAndOpenSettings() {
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_allowRemoteControl()
-        XCTAssertEqual(vc.test_remoteControlRow.lastStatus, .requested)
-        XCTAssertEqual(vc.test_remoteControlRowButtonTitles, ["Open Settings"])
+        #expect(vc.test_remoteControlRow.lastStatus == .requested)
+        #expect(vc.test_remoteControlRowButtonTitles == ["Open Settings"])
     }
 
     // MARK: Deep-link routing
 
-    func testOpenSettingsRoutesCorrectPanePerRow() {
+    @Test func openSettingsRoutesCorrectPanePerRow() {
         var opened: [SystemSettingsPane] = []
         let vc = OnboardingViewController(model: makeModel(audio: .denied),
                                           onOpenSettings: { opened.append($0) }, onDone: {})
@@ -120,171 +118,171 @@ final class OnboardingUITests: XCTestCase {
         // Audio + Local Network deep-link to their panes. Remote Control does NOT —
         // its "Open Settings" re-fires the macOS Accessibility prompt (whose own
         // button highlights the app), so it never routes through the deep-link opener.
-        XCTAssertEqual(opened, [.screenAndSystemAudioRecording, .localNetwork])
+        #expect(opened == [.screenAndSystemAudioRecording, .localNetwork])
     }
 
     // MARK: Probing state
 
-    func testUnsupportedAudioShowsNoButton() {
+    @Test func unsupportedAudioShowsNoButton() {
         let vc = OnboardingViewController(model: makeModel(audio: .unsupported),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .unsupported, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown)
         // Unsupported is not a user-fixable state — no button, just a message.
-        XCTAssertEqual(vc.test_audioRowButtonTitles, [])
+        #expect(vc.test_audioRowButtonTitles == [])
     }
 
     // MARK: PTP helper row (T6)
 
-    func testNotRegisteredShowsNoButton() {
+    @Test func notRegisteredShowsNoButton() {
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notRegistered)),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown, ptpHelper: .notRegistered)
-        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .notRegistered)
-        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [],
+        #expect(vc.test_ptpHelperRow.lastStatus == .notRegistered)
+        #expect(vc.test_ptpHelperRowButtonTitles == [],
                        "notRegistered: registration is automatic, nothing to tap")
     }
 
-    func testRequiresApprovalShowsTheExplainerAndOpenLoginItemsButton() {
+    @Test func requiresApprovalShowsTheExplainerAndOpenLoginItemsButton() {
         // requiresApproval → the explainer row is showing, with the deep-link
         // button that opens Login Items.
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .requiresApproval)),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown, ptpHelper: .requiresApproval)
-        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .requiresApproval)
-        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, ["Open Login Items…"])
+        #expect(vc.test_ptpHelperRow.lastStatus == .requiresApproval)
+        #expect(vc.test_ptpHelperRowButtonTitles == ["Open Login Items…"])
     }
 
-    func testEnabledShowsNoButtonAndIsAvailable() {
+    @Test func enabledShowsNoButtonAndIsAvailable() {
         // enabled → available: a plain "Enabled" chip, no button.
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .enabled)),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown, ptpHelper: .enabled)
-        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .enabled)
-        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [])
+        #expect(vc.test_ptpHelperRow.lastStatus == .enabled)
+        #expect(vc.test_ptpHelperRowButtonTitles == [])
     }
 
-    func testNotFoundShowsNoButton() {
+    @Test func notFoundShowsNoButton() {
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notFound)),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown, ptpHelper: .notFound)
-        XCTAssertEqual(vc.test_ptpHelperRow.lastStatus, .notFound)
-        XCTAssertEqual(vc.test_ptpHelperRowButtonTitles, [],
+        #expect(vc.test_ptpHelperRow.lastStatus == .notFound)
+        #expect(vc.test_ptpHelperRowButtonTitles == [],
                        "notFound is a packaging bug, not user-fixable")
     }
 
-    func testOpenLoginItemsButtonRoutesToTheModelSeam() {
+    @Test func openLoginItemsButtonRoutesToTheModelSeam() {
         let ptpHelper = FakePTPHelper(status: .requiresApproval)
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_refresh()   // bind the row to the real (requiresApproval) model state
         vc.test_ptpHelperRow.test_tapOpenLoginItems()
-        XCTAssertEqual(ptpHelper.openSettingsCount, 1)
+        #expect(ptpHelper.openSettingsCount == 1)
     }
 
-    func testViewDidLoadRegistersThePTPHelper() {
+    @Test func viewDidLoadRegistersThePTPHelper() {
         let ptpHelper = FakePTPHelper(status: .notRegistered)
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
                                           onOpenSettings: { _ in }, onDone: {})
         _ = vc.test_rootView   // forces loadView + viewDidLoad
-        XCTAssertEqual(ptpHelper.registerCount, 1)
+        #expect(ptpHelper.registerCount == 1)
     }
 
     // MARK: Presentation reason (`.permissionLost` banner)
 
-    func testFirstRunRendersNoBanner() {
+    @Test func firstRunRendersNoBanner() {
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           reason: .firstRun,
                                           onOpenSettings: { _ in }, onDone: {})
-        XCTAssertFalse(vc.test_showsPermissionLostBanner)
-        XCTAssertNil(vc.test_permissionLostBannerText)
+        #expect(!vc.test_showsPermissionLostBanner)
+        #expect(vc.test_permissionLostBannerText == nil)
     }
 
-    func testPermissionLostRendersBannerNamingTheUnmetPermission() {
+    @Test func permissionLostRendersBannerNamingTheUnmetPermission() {
         let vc = OnboardingViewController(model: makeModel(audio: .denied),
                                           reason: .permissionLost([.audioCapture]),
                                           onOpenSettings: { _ in }, onDone: {})
-        XCTAssertTrue(vc.test_showsPermissionLostBanner)
+        #expect(vc.test_showsPermissionLostBanner)
         let text = vc.test_permissionLostBannerText
-        XCTAssertNotNil(text)
-        XCTAssertTrue(text?.contains("System Audio") ?? false,
+        #expect(text != nil)
+        #expect(text?.contains("System Audio") ?? false,
                       "banner names the specific unmet permission: \(text ?? "nil")")
     }
 
-    func testPermissionLostBannerNamesMultipleUnmetPermissions() {
+    @Test func permissionLostBannerNamesMultipleUnmetPermissions() {
         let vc = OnboardingViewController(model: makeModel(audio: .denied),
                                           reason: .permissionLost([.audioCapture, .ptpHelper]),
                                           onOpenSettings: { _ in }, onDone: {})
         let text = vc.test_permissionLostBannerText ?? ""
-        XCTAssertTrue(text.contains("System Audio"), text)
-        XCTAssertTrue(text.contains("PTP helper"), text)
+        #expect(text.contains("System Audio"), "\(text)")
+        #expect(text.contains("PTP helper"), "\(text)")
     }
 
-    func testPermissionLostBannerClearsOnceItsFlaggedPermissionIsGranted() async {
+    @Test func permissionLostBannerClearsOnceItsFlaggedPermissionIsGranted() async {
         let vc = OnboardingViewController(model: makeModel(audio: .granted),
                                           reason: .permissionLost([.audioCapture]),
                                           onOpenSettings: { _ in }, onDone: {})
         _ = vc.test_rootView
-        XCTAssertTrue(vc.test_permissionLostBannerIsVisible,
+        #expect(vc.test_permissionLostBannerIsVisible,
                       "banner shows while the flagged permission is still ungranted")
 
         await vc.test_allowAudio()   // a successful probe flips model.audioStatus to .granted
 
-        XCTAssertFalse(vc.test_permissionLostBannerIsVisible,
+        #expect(!vc.test_permissionLostBannerIsVisible,
                        "the banner must clear once the permission it warned about is granted")
-        XCTAssertTrue(vc.test_showsPermissionLostBanner,
+        #expect(vc.test_showsPermissionLostBanner,
                       "it's hidden, not never-built")
     }
 
-    func testWindowControllerThreadsReasonThroughToTheContentViewController() {
+    @Test func windowControllerThreadsReasonThroughToTheContentViewController() {
         let wc = OnboardingWindowController(model: makeModel(audio: .denied),
                                             reason: .permissionLost([.localNetwork]),
                                             openSettings: { _ in },
                                             onFinished: {})
-        XCTAssertTrue(wc.test_contentViewController.test_showsPermissionLostBanner)
+        #expect(wc.test_contentViewController.test_showsPermissionLostBanner)
     }
 
-    func testWindowControllerDefaultsToFirstRun() {
+    @Test func windowControllerDefaultsToFirstRun() {
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
-        XCTAssertFalse(wc.test_contentViewController.test_showsPermissionLostBanner)
+        #expect(!wc.test_contentViewController.test_showsPermissionLostBanner)
     }
 
     // MARK: Window controller dismissal contract
 
-    func testDoneFinishesOnceAndPersistsCompletion() {
+    @Test func doneFinishesOnceAndPersistsCompletion() {
         let counter = ChangeCounter()
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: { counter.count += 1 })
-        XCTAssertFalse(AppSettings(defaults: defaults).hasCompletedSetup)
+        #expect(!AppSettings(defaults: defaults).hasCompletedSetup)
 
         wc.test_finishWithDone()
 
-        XCTAssertTrue(wc.test_didFinish)
-        XCTAssertTrue(AppSettings(defaults: defaults).hasCompletedSetup, "Done persists completion")
-        XCTAssertEqual(counter.count, 1)
+        #expect(wc.test_didFinish)
+        #expect(AppSettings(defaults: defaults).hasCompletedSetup, "Done persists completion")
+        #expect(counter.count == 1)
     }
 
-    func testCloseWithoutDoneFinishesButDoesNotPersist() {
+    @Test func closeWithoutDoneFinishesButDoesNotPersist() {
         let counter = ChangeCounter()
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: { counter.count += 1 })
         wc.test_closeWithoutDone()
 
-        XCTAssertTrue(wc.test_didFinish)
-        XCTAssertFalse(AppSettings(defaults: defaults).hasCompletedSetup,
+        #expect(wc.test_didFinish)
+        #expect(!AppSettings(defaults: defaults).hasCompletedSetup,
                        "Closing with ✕ leaves setup to reappear next launch")
-        XCTAssertEqual(counter.count, 1)
+        #expect(counter.count == 1)
     }
 
-    func testFinishIsSingleFire() {
+    @Test func finishIsSingleFire() {
         let counter = ChangeCounter()
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
@@ -292,7 +290,7 @@ final class OnboardingUITests: XCTestCase {
         wc.test_finishWithDone()
         wc.test_closeWithoutDone()   // second dismissal path
         wc.test_finishWithDone()     // and again
-        XCTAssertEqual(counter.count, 1, "onFinished fires exactly once")
+        #expect(counter.count == 1, "onFinished fires exactly once")
     }
 
     // MARK: Done-tap confirmation gate (ONBOARD-GATE)
@@ -312,7 +310,7 @@ final class OnboardingUITests: XCTestCase {
         func probe() async -> Bool { true }
     }
 
-    func testDoneAsksForConfirmationWhenNothingWasEverGranted() {
+    @Test func doneAsksForConfirmationWhenNothingWasEverGranted() {
         // A fresh model: every required permission is still at its untouched
         // initial state (.unknown / .notRegistered) — exactly the scenario
         // that used to complete silently.
@@ -320,12 +318,12 @@ final class OnboardingUITests: XCTestCase {
         let vc = OnboardingViewController(model: makeModel(audio: .unknown),
                                           onOpenSettings: { _ in }, onDone: { doneFired = true })
         vc.test_tapDone()
-        XCTAssertFalse(doneFired, "must not finish silently with nothing granted")
-        XCTAssertEqual(Set(vc.test_pendingConfirmationPermissions ?? []),
+        #expect(!doneFired, "must not finish silently with nothing granted")
+        #expect(Set(vc.test_pendingConfirmationPermissions ?? []) ==
                        Set([.audioCapture, .localNetwork, .ptpHelper]))
     }
 
-    func testDoneAsksOnlyAboutPermissionsStillMissing() async {
+    @Test func doneAsksOnlyAboutPermissionsStillMissing() async {
         let ptpHelper = FakePTPHelper(status: .enabled)
         let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
                                           onOpenSettings: { _ in }, onDone: {})
@@ -337,11 +335,11 @@ final class OnboardingUITests: XCTestCase {
 
         vc.test_tapDone()
 
-        XCTAssertEqual(vc.test_pendingConfirmationPermissions, [.localNetwork],
+        #expect(vc.test_pendingConfirmationPermissions == [.localNetwork],
                        "audio + PTP helper are already granted; only Local Network is still missing")
     }
 
-    func testDoneFinishesImmediatelyWhenEveryRequiredPermissionIsGranted() async {
+    @Test func doneFinishesImmediatelyWhenEveryRequiredPermissionIsGranted() async {
         let ptpHelper = FakePTPHelper(status: .enabled)
         let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
                                localNetwork: ReachableLocalNetwork(),
@@ -352,28 +350,28 @@ final class OnboardingUITests: XCTestCase {
         let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
         await vc.test_allowAudio()
         await vc.test_allowNetwork()
-        XCTAssertEqual(model.requiredPermissionsNotGranted(), [])
+        #expect(model.requiredPermissionsNotGranted() == [])
 
         vc.test_tapDone()
 
-        XCTAssertTrue(doneFired, "Done finishes immediately once every required permission is granted")
-        XCTAssertNil(vc.test_pendingConfirmationPermissions)
+        #expect(doneFired, "Done finishes immediately once every required permission is granted")
+        #expect(vc.test_pendingConfirmationPermissions == nil)
     }
 
-    func testContinueAnywayStillFinishesDespiteUngrantedPermissions() {
+    @Test func continueAnywayStillFinishesDespiteUngrantedPermissions() {
         var doneFired = false
         let vc = OnboardingViewController(model: makeModel(audio: .unknown),
                                           onOpenSettings: { _ in }, onDone: { doneFired = true })
         vc.test_tapDone()
-        XCTAssertFalse(doneFired)
+        #expect(!doneFired)
 
         vc.test_resolvePendingConfirmation(continueAnyway: true)
 
-        XCTAssertTrue(doneFired, "Continue Anyway still finishes — setup is guidance, not a hard gate")
-        XCTAssertNil(vc.test_pendingConfirmationPermissions)
+        #expect(doneFired, "Continue Anyway still finishes — setup is guidance, not a hard gate")
+        #expect(vc.test_pendingConfirmationPermissions == nil)
     }
 
-    func testGoBackLeavesOnboardingOpenWithoutFinishing() {
+    @Test func goBackLeavesOnboardingOpenWithoutFinishing() {
         var doneFired = false
         let vc = OnboardingViewController(model: makeModel(audio: .unknown),
                                           onOpenSettings: { _ in }, onDone: { doneFired = true })
@@ -381,11 +379,11 @@ final class OnboardingUITests: XCTestCase {
 
         vc.test_resolvePendingConfirmation(continueAnyway: false)
 
-        XCTAssertFalse(doneFired, "Go Back must not finish setup")
-        XCTAssertNil(vc.test_pendingConfirmationPermissions, "the pending confirmation clears either way")
+        #expect(!doneFired, "Go Back must not finish setup")
+        #expect(vc.test_pendingConfirmationPermissions == nil, "the pending confirmation clears either way")
     }
 
-    func testDoneCanBeRetriedAfterGoingBackAndThenGranting() async {
+    @Test func doneCanBeRetriedAfterGoingBackAndThenGranting() async {
         // Go Back, grant the missing permissions, tap Done again — the second
         // tap must re-evaluate rather than being stuck.
         let ptpHelper = FakePTPHelper(status: .enabled)
@@ -398,13 +396,13 @@ final class OnboardingUITests: XCTestCase {
         let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
 
         vc.test_tapDone()   // nothing granted yet → asks
-        XCTAssertFalse(doneFired)
+        #expect(!doneFired)
         vc.test_resolvePendingConfirmation(continueAnyway: false)   // Go Back
 
         await vc.test_allowAudio()
         await vc.test_allowNetwork()
         vc.test_tapDone()   // now everything is granted → finishes immediately
 
-        XCTAssertTrue(doneFired)
+        #expect(doneFired)
     }
 }

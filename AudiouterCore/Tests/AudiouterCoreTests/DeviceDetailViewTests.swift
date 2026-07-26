@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
@@ -14,7 +14,7 @@ import AppKit
 /// separately in `MixerWindowControllerTests`; these cases construct the
 /// controller directly and drive it through its `test_*` hooks, since a
 /// headless run can't synthesize the real hover/click gestures.
-final class DeviceDetailViewTests: XCTestCase {
+@Suite struct DeviceDetailViewTests {
 
     private func tempDirectory() -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -41,81 +41,81 @@ final class DeviceDetailViewTests: XCTestCase {
 
     // MARK: show(device:) basics
 
-    func testShowSetsShownDeviceID() {
+    @Test func showSetsShownDeviceID() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(id: "sonos-move"))
-        XCTAssertEqual(detail.test_shownDeviceID, "sonos-move")
+        #expect(detail.test_shownDeviceID == "sonos-move")
     }
 
-    func testShownDeviceIDIsNilBeforeFirstShow() {
+    @Test func shownDeviceIDIsNilBeforeFirstShow() {
         let detail = DeviceDetailViewController(groupController: makeController())
-        XCTAssertNil(detail.test_shownDeviceID)
+        #expect(detail.test_shownDeviceID == nil)
     }
 
-    func testRefreshUpdatesFieldsForTheSameDevice() {
+    @Test func refreshUpdatesFieldsForTheSameDevice() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(volume: 20))
-        XCTAssertEqual(detail.test_metadataStrings["volume"], "20%")
+        #expect(detail.test_metadataStrings["volume"] == "20%")
 
         detail.refresh(device: makeDevice(volume: 75))
-        XCTAssertEqual(detail.test_metadataStrings["volume"], "75%")
-        XCTAssertEqual(detail.test_shownDeviceID, "d1")
+        #expect(detail.test_metadataStrings["volume"] == "75%")
+        #expect(detail.test_shownDeviceID == "d1")
     }
 
     // MARK: Metadata form — status wording
 
-    func testStatusTextOff() {
+    @Test func statusTextOff() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(connectionState: .off))
-        XCTAssertEqual(detail.test_metadataStrings["status"], "Not connected")
+        #expect(detail.test_metadataStrings["status"] == "Not connected")
     }
 
-    func testStatusTextConnecting() {
+    @Test func statusTextConnecting() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(connectionState: .connecting))
-        XCTAssertEqual(detail.test_metadataStrings["status"], "Connecting")
+        #expect(detail.test_metadataStrings["status"] == "Connecting")
     }
 
-    func testStatusTextReconnecting() {
+    @Test func statusTextReconnecting() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(connectionState: .reconnecting))
-        XCTAssertEqual(detail.test_metadataStrings["status"], "Reconnecting")
+        #expect(detail.test_metadataStrings["status"] == "Reconnecting")
     }
 
-    func testStatusTextConnected() {
+    @Test func statusTextConnected() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(connectionState: .connected))
-        XCTAssertEqual(detail.test_metadataStrings["status"], "Connected")
+        #expect(detail.test_metadataStrings["status"] == "Connected")
     }
 
-    func testStatusTextFailed() {
+    @Test func statusTextFailed() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
-        XCTAssertEqual(detail.test_metadataStrings["status"], "Couldn't connect",
+        #expect(detail.test_metadataStrings["status"] == "Couldn't connect",
                        "matches DeviceRowView's existing failed vocabulary")
     }
 
     // MARK: Metadata form — available / volume / kind
 
-    func testAvailableYesAndNo() {
+    @Test func availableYesAndNo() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(isAvailable: true))
-        XCTAssertEqual(detail.test_metadataStrings["available"], "Yes")
+        #expect(detail.test_metadataStrings["available"] == "Yes")
 
         detail.show(device: makeDevice(isAvailable: false))
-        XCTAssertEqual(detail.test_metadataStrings["available"], "No")
+        #expect(detail.test_metadataStrings["available"] == "No")
     }
 
-    func testVolumePercentFormatting() {
+    @Test func volumePercentFormatting() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(volume: 0))
-        XCTAssertEqual(detail.test_metadataStrings["volume"], "0%")
+        #expect(detail.test_metadataStrings["volume"] == "0%")
 
         detail.show(device: makeDevice(volume: 100))
-        XCTAssertEqual(detail.test_metadataStrings["volume"], "100%")
+        #expect(detail.test_metadataStrings["volume"] == "100%")
     }
 
-    func testKindTextForEveryKind() {
+    @Test func kindTextForEveryKind() {
         let detail = DeviceDetailViewController(groupController: makeController())
         let expectations: [(Device.Kind, String)] = [
             (.localMac, "This Mac"),
@@ -127,19 +127,19 @@ final class DeviceDetailViewTests: XCTestCase {
         ]
         for (kind, expected) in expectations {
             detail.show(device: makeDevice(kind: kind))
-            XCTAssertEqual(detail.test_metadataStrings["kind"], expected, "kind: \(kind)")
+            #expect(detail.test_metadataStrings["kind"] == expected, "kind: \(kind)")
         }
     }
 
     // MARK: "In groups:" membership text
 
-    func testGroupMembershipTextIsNoneWhenDeviceIsInNoGroup() {
+    @Test func groupMembershipTextIsNoneWhenDeviceIsInNoGroup() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(id: "office"))
-        XCTAssertEqual(detail.test_groupMembershipText, "None")
+        #expect(detail.test_groupMembershipText == "None")
     }
 
-    func testGroupMembershipTextListsEverySavedGroupContainingTheDevice() throws {
+    @Test func groupMembershipTextListsEverySavedGroupContainingTheDevice() throws {
         let controller = makeController()
         try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office", "appletv-lr"],
                                        memberVolumes: ["office": 50, "appletv-lr": 60]))
@@ -150,11 +150,11 @@ final class DeviceDetailViewTests: XCTestCase {
 
         let detail = DeviceDetailViewController(groupController: controller)
         detail.show(device: makeDevice(id: "office"))
-        XCTAssertEqual(detail.test_groupMembershipText, "Kitchen, Whole House",
+        #expect(detail.test_groupMembershipText == "Kitchen, Whole House",
                        "only groups this device is a member of, in groupController.groups order")
     }
 
-    func testGroupMembershipTextUpdatesOnRefreshAfterAMembershipChange() throws {
+    @Test func groupMembershipTextUpdatesOnRefreshAfterAMembershipChange() throws {
         let controller = makeController()
         // Seed with a DIFFERENT member so "office" starts as a non-member while
         // the group stays non-empty (an empty group is now rejected).
@@ -162,37 +162,37 @@ final class DeviceDetailViewTests: XCTestCase {
                                        memberVolumes: ["living-room": 50]))
         let detail = DeviceDetailViewController(groupController: controller)
         detail.show(device: makeDevice(id: "office"))
-        XCTAssertEqual(detail.test_groupMembershipText, "None")
+        #expect(detail.test_groupMembershipText == "None")
 
-        var group = try XCTUnwrap(controller.groups.first { $0.id == "g1" })
+        var group = try #require(controller.groups.first { $0.id == "g1" })
         group.memberIDs = ["office"]
         group.memberVolumes["office"] = 50
         try controller.saveGroup(group)
 
         detail.refresh(device: makeDevice(id: "office"))
-        XCTAssertEqual(detail.test_groupMembershipText, "Kitchen")
+        #expect(detail.test_groupMembershipText == "Kitchen")
     }
 
     // MARK: Icon resolution — no injected controller
 
-    func testIconSymbolNameFallsBackToKindDefaultWithNoInjectedController() {
+    @Test func iconSymbolNameFallsBackToKindDefaultWithNoInjectedController() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice(kind: .homePod))
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.homePod.symbolName)
+        #expect(detail.test_iconSymbolName == Device.Kind.homePod.symbolName)
     }
 
     // MARK: Icon resolution — injected controller with/without an override
 
-    func testIconSymbolNameUsesKindDefaultWhenControllerHasNoOverride() {
+    @Test func iconSymbolNameUsesKindDefaultWhenControllerHasNoOverride() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.deviceIconController = iconController
 
         detail.show(device: makeDevice(kind: .sonos))
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.sonos.symbolName)
+        #expect(detail.test_iconSymbolName == Device.Kind.sonos.symbolName)
     }
 
-    func testIconSymbolNameUsesOverrideWhenControllerHasOneSet() {
+    @Test func iconSymbolNameUsesOverrideWhenControllerHasOneSet() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let device = makeDevice(kind: .sonos)
         iconController.setSymbolName("airpods", for: device.id)
@@ -201,10 +201,10 @@ final class DeviceDetailViewTests: XCTestCase {
         detail.deviceIconController = iconController
         detail.show(device: device)
 
-        XCTAssertEqual(detail.test_iconSymbolName, "airpods")
+        #expect(detail.test_iconSymbolName == "airpods")
     }
 
-    func testIconSymbolNameFallsBackToDefaultForAStaleOverride() {
+    @Test func iconSymbolNameFallsBackToDefaultForAStaleOverride() {
         // The controller only ever persists a valid name (`setSymbolName` is a
         // no-op for an invalid one — DeviceIconResolverTests), so a "stale"
         // override is simulated by writing the store's raw file directly, the
@@ -218,13 +218,13 @@ final class DeviceDetailViewTests: XCTestCase {
         detail.deviceIconController = iconController
         detail.show(device: makeDevice(id: "d1", kind: .appleTV))
 
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.appleTV.symbolName,
+        #expect(detail.test_iconSymbolName == Device.Kind.appleTV.symbolName,
                        "a stale override still falls back to the kind default, never a blank glyph")
     }
 
     // MARK: Icon picker flow — instant-apply through DeviceIconController
 
-    func testClickEditIconBuildsAPickerConfiguredWithCurrentOverrideAndKindDefault() {
+    @Test func clickEditIconBuildsAPickerConfiguredWithCurrentOverrideAndKindDefault() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let device = makeDevice(kind: .homePod)
         iconController.setSymbolName("airpods", for: device.id)
@@ -234,27 +234,27 @@ final class DeviceDetailViewTests: XCTestCase {
         detail.show(device: device)
 
         let picker = detail.test_clickEditIcon()
-        XCTAssertNotNil(picker)
-        XCTAssertTrue(detail.test_picker === picker, "the most recently built picker is retained for further driving")
+        #expect(picker != nil)
+        #expect(detail.test_picker === picker, "the most recently built picker is retained for further driving")
     }
 
-    func testPickingACuratedIconPersistsThroughControllerAndUpdatesTheWell() {
+    @Test func pickingACuratedIconPersistsThroughControllerAndUpdatesTheWell() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let device = makeDevice(kind: .homePod)
 
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.deviceIconController = iconController
         detail.show(device: device)
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.homePod.symbolName)
+        #expect(detail.test_iconSymbolName == Device.Kind.homePod.symbolName)
 
         let picker = detail.test_clickEditIcon()
         picker.test_pickCurated("airpods")
 
-        XCTAssertEqual(detail.test_iconSymbolName, "airpods", "instant-apply — no separate Save step")
-        XCTAssertEqual(iconController.overrides[device.id], "airpods")
+        #expect(detail.test_iconSymbolName == "airpods", "instant-apply — no separate Save step")
+        #expect(iconController.overrides[device.id] == "airpods")
     }
 
-    func testUseDefaultResetsTheOverride() {
+    @Test func useDefaultResetsTheOverride() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let device = makeDevice(kind: .homePod)
         iconController.setSymbolName("airpods", for: device.id)
@@ -262,16 +262,16 @@ final class DeviceDetailViewTests: XCTestCase {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.deviceIconController = iconController
         detail.show(device: device)
-        XCTAssertEqual(detail.test_iconSymbolName, "airpods")
+        #expect(detail.test_iconSymbolName == "airpods")
 
         let picker = detail.test_clickEditIcon()
         picker.test_useDefault()
 
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.homePod.symbolName)
-        XCTAssertNil(iconController.overrides[device.id])
+        #expect(detail.test_iconSymbolName == Device.Kind.homePod.symbolName)
+        #expect(iconController.overrides[device.id] == nil)
     }
 
-    func testPickingAnIconWithNoInjectedControllerIsANoOp() {
+    @Test func pickingAnIconWithNoInjectedControllerIsANoOp() {
         let device = makeDevice(kind: .sonos)
         let detail = DeviceDetailViewController(groupController: makeController())
         // No `deviceIconController` assigned — nil-tolerant per `../../AGENTS.md`.
@@ -280,22 +280,22 @@ final class DeviceDetailViewTests: XCTestCase {
         let picker = detail.test_clickEditIcon()
         picker.test_pickCurated("airpods")
 
-        XCTAssertEqual(detail.test_iconSymbolName, Device.Kind.sonos.symbolName,
+        #expect(detail.test_iconSymbolName == Device.Kind.sonos.symbolName,
                        "nothing to write through — the glyph stays at the kind default")
     }
 
     // MARK: View-only hint
 
-    func testHintIsAMinimalSingleLineViewOnlyNotice() {
+    @Test func hintIsAMinimalSingleLineViewOnlyNotice() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice())
-        XCTAssertEqual(detail.test_hintText, "View-only — control playback from the menu-bar popover.")
-        XCTAssertFalse(detail.test_hintText.contains("\n"), "stays a single line")
+        #expect(detail.test_hintText == "View-only — control playback from the menu-bar popover.")
+        #expect(!detail.test_hintText.contains("\n"), "stays a single line")
     }
 
     // MARK: Hover scrim headless test hook
 
-    func testSetOverlayVisibleDoesNotCrashHeadless() {
+    @Test func setOverlayVisibleDoesNotCrashHeadless() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice())
         detail.test_setOverlayVisible(true)

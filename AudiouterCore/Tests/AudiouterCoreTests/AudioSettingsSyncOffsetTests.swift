@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSettingsUI
@@ -13,7 +14,7 @@ import AppKit
 /// the value label is a bare "±N ms" (no named preset), and a slider move
 /// persists immediately with no CTA.
 @MainActor
-final class AudioSettingsSyncOffsetTests: XCTestCase {
+@Suite struct AudioSettingsSyncOffsetTests {
 
     private func makeExcluded() -> ExcludedAppsController {
         let dir = FileManager.default.temporaryDirectory
@@ -22,7 +23,7 @@ final class AudioSettingsSyncOffsetTests: XCTestCase {
     }
 
     private func makeSettings() -> AppSettings {
-        let suite = "AudiouterTests.\(name).\(UUID().uuidString)"
+        let suite = "AudiouterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         return AppSettings(defaults: defaults)
@@ -38,35 +39,35 @@ final class AudioSettingsSyncOffsetTests: XCTestCase {
             excluded: makeExcluded(), runningAppsProvider: { [] }, settings: settings, latency: latency)
     }
 
-    func testNoLatencyModelMeansNoSyncOffsetSection() {
+    @Test func noLatencyModelMeansNoSyncOffsetSection() {
         // Mirrors the Advanced buffer control's own gate — a backend without
         // `LatencyConfigurable` has no `SyncedLocalSink` either, so the offset
         // control (which only feeds that sink) has nothing to do.
         let pane = makePane(settings: makeSettings(), withLatencyModel: false)
-        XCTAssertFalse(pane.test_hasSyncOffsetSection)
+        #expect(!pane.test_hasSyncOffsetSection)
     }
 
-    func testSectionMountsAlongsideAdvancedBufferControl() {
+    @Test func sectionMountsAlongsideAdvancedBufferControl() {
         let pane = makePane(settings: makeSettings())
-        XCTAssertTrue(pane.test_hasLatencySection)
-        XCTAssertTrue(pane.test_hasSyncOffsetSection)
+        #expect(pane.test_hasLatencySection)
+        #expect(pane.test_hasSyncOffsetSection)
     }
 
-    func testInitialValueReflectsPersistedSetting() {
+    @Test func initialValueReflectsPersistedSetting() {
         let settings = makeSettings()
         settings.syncOffsetMs = 60
         let pane = makePane(settings: settings)
-        XCTAssertEqual(pane.test_syncOffsetMs, 60)
-        XCTAssertEqual(pane.test_syncOffsetValueLabel, "+60 ms")
+        #expect(pane.test_syncOffsetMs == 60)
+        #expect(pane.test_syncOffsetValueLabel == "+60 ms")
     }
 
-    func testDefaultsToZeroWhenUnset() {
+    @Test func defaultsToZeroWhenUnset() {
         let pane = makePane(settings: makeSettings())
-        XCTAssertEqual(pane.test_syncOffsetMs, 0)
-        XCTAssertEqual(pane.test_syncOffsetValueLabel, "0 ms")
+        #expect(pane.test_syncOffsetMs == 0)
+        #expect(pane.test_syncOffsetValueLabel == "0 ms")
     }
 
-    func testValueLabelIsBareNumberAndUnit() {
+    @Test func valueLabelIsBareNumberAndUnit() {
         // House rule (numeric localization): bare number + unit, never a named
         // preset with embedded description. Assert the label is exactly a
         // (optional sign) + digits + " ms" — no other letters, no other words.
@@ -75,40 +76,40 @@ final class AudioSettingsSyncOffsetTests: XCTestCase {
         for ms in [0, 1, -1, 50, -50, 500, -500] {
             pane.test_setSyncOffset(ms: ms)
             let label = pane.test_syncOffsetValueLabel
-            XCTAssertTrue(label.hasSuffix(" ms"), "expected bare numeric label, got \"\(label)\"")
+            #expect(label.hasSuffix(" ms"), "expected bare numeric label, got \"\(label)\"")
             let lettersOtherThanMs = label.rangeOfCharacter(from: .letters.subtracting(CharacterSet(charactersIn: "ms")))
-            XCTAssertNil(lettersOtherThanMs, "no words in the label, got \"\(label)\"")
+            #expect(lettersOtherThanMs == nil, "no words in the label, got \"\(label)\"")
         }
     }
 
-    func testMovingTheSliderPersistsImmediately() {
+    @Test func movingTheSliderPersistsImmediately() {
         let settings = makeSettings()
         let pane = makePane(settings: settings)
 
         pane.test_setSyncOffset(ms: 75)
-        XCTAssertEqual(settings.syncOffsetMs, 75, "no CTA — the slider persists on the spot")
-        XCTAssertEqual(pane.test_syncOffsetValueLabel, "+75 ms")
+        #expect(settings.syncOffsetMs == 75, "no CTA — the slider persists on the spot")
+        #expect(pane.test_syncOffsetValueLabel == "+75 ms")
 
         pane.test_setSyncOffset(ms: -40)
-        XCTAssertEqual(settings.syncOffsetMs, -40)
-        XCTAssertEqual(pane.test_syncOffsetValueLabel, "\u{2212}40 ms")
+        #expect(settings.syncOffsetMs == -40)
+        #expect(pane.test_syncOffsetValueLabel == "\u{2212}40 ms")
     }
 
-    func testSliderBoundsMatchAppSettingsRange() {
+    @Test func sliderBoundsMatchAppSettingsRange() {
         let pane = makePane(settings: makeSettings())
         let bounds = pane.test_syncOffsetBounds
-        XCTAssertEqual(bounds.min, AppSettings.minSyncOffsetMs)
-        XCTAssertEqual(bounds.max, AppSettings.maxSyncOffsetMs)
+        #expect(bounds.min == AppSettings.minSyncOffsetMs)
+        #expect(bounds.max == AppSettings.maxSyncOffsetMs)
     }
 
-    func testWindowControllerMountsSyncOffsetSection() {
+    @Test func windowControllerMountsSyncOffsetSection() {
         // `SettingsWindowController` doesn't currently thread its own `settings`
         // parameter into `AudioSettingsViewController` (pre-existing — the same
         // is true of the connect-volume control; both panes fall back to their
         // own `AppSettings()` default, which is the real store in production,
         // same as every other call site). So this only asserts structural
         // presence via the `latency` gate, mirroring
-        // `AudioSettingsLatencyTests.testWindowControllerPassesModelThrough`
+        // `AudioSettingsLatencyTests.windowControllerPassesModelThrough`
         // rather than a value round-trip through this particular path.
         let latency = LatencySettingModel(
             optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
@@ -119,7 +120,7 @@ final class AudioSettingsSyncOffsetTests: XCTestCase {
             excludedApps: makeExcluded(),
             runningAppsProvider: { [] },
             latency: latency)
-        XCTAssertTrue(controller.test_audio.test_hasSyncOffsetSection)
+        #expect(controller.test_audio.test_hasSyncOffsetSection)
     }
 
     private final class NoopLoginItem: LoginItemManaging {

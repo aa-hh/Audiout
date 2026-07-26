@@ -1,4 +1,5 @@
-import XCTest
+import Testing
+import Foundation
 @testable import AudiouterCore
 
 /// Security regression tests for the real (`mkfifo`-backed) ``FIFOManager``. The
@@ -8,72 +9,83 @@ import XCTest
 /// Locks in the fix for the world-readable-FIFO finding: the pipe is created
 /// owner-only (`0o600`, never `0o644`), reuse is refused unless the existing node
 /// is a FIFO we own, and an over-permissive leftover pipe is tightened on reuse.
-final class FIFOManagerSecurityTests: XCTestCase {
+@Suite final class FIFOManagerSecurityTests {
 
-    private var dir: URL!
+    private let dir: URL
 
-    override func setUpWithError() throws {
+    init() throws {
         dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("fifo-sec-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    deinit {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// The original XCTest form skipped the test with `throw XCTSkip(...)` when
+    /// `lstat` failed on a path we had just created/expect to exist — a defensive
+    /// fallback for filesystem-probe failure, not an intentional condition anyone
+    /// wants to exercise. swift-testing traits are evaluated before the test body
+    /// runs (cookbook §9) so a mid-body dynamic "skip" has no equivalent — this
+    /// path, if ever hit, now fails the test loudly via `#require` instead of
+    /// silently skipping it. Flagged per the migration's ambiguity protocol: this
+    /// is a deliberate one-site behavior change (skip → fail), not a mechanical
+    /// translation, because there is no dynamic-skip primitive in swift-testing.
     private func mode(of path: String) throws -> mode_t {
         var st = stat()
-        guard lstat(path, &st) == 0 else {
-            throw XCTSkip("could not stat \(path)")
-        }
+        try #require(lstat(path, &st) == 0, "could not stat \(path)")
         return st.st_mode & 0o777
     }
 
     /// A freshly created FIFO is owner-only — no group/other bits.
-    func testCreatedFIFOIsOwnerOnly() throws {
+    @Test func createdFIFOIsOwnerOnly() throws {
         let mgr = FIFOManager(libraryDirectory: dir.path)
         try mgr.create()
         defer { mgr.cleanup() }
 
         var st = stat()
-        XCTAssertEqual(lstat(mgr.fifoPath, &st), 0)
-        XCTAssertEqual(st.st_mode & S_IFMT, S_IFIFO, "must be a real FIFO")
-        XCTAssertEqual(try mode(of: mgr.fifoPath), 0o600, "FIFO must be owner-only (no world/group read)")
+        #expect(lstat(mgr.fifoPath, &st) == 0)
+        #expect(st.st_mode & S_IFMT == S_IFIFO, "must be a real FIFO")
+        #expect(try mode(of: mgr.fifoPath) == 0o600, "FIFO must be owner-only (no world/group read)")
         // The whole point: 'other' must have no access to the captured audio.
-        XCTAssertEqual(st.st_mode & 0o007, 0, "world bits must be clear")
-        XCTAssertEqual(st.st_mode & 0o070, 0, "group bits must be clear")
+        #expect(st.st_mode & 0o007 == 0, "world bits must be clear")
+        #expect(st.st_mode & 0o070 == 0, "group bits must be clear")
     }
 
     /// Reusing a pipe left behind with wide permissions tightens it back to 0o600.
-    func testReuseTightensPermissiveLeftover() throws {
+    @Test func reuseTightensPermissiveLeftover() throws {
         let mgr = FIFOManager(libraryDirectory: dir.path)
         // Simulate an old-build pipe that was created world-readable.
-        XCTAssertEqual(mgr.fifoPath.withCString { mkfifo($0, 0o644) }, 0)
-        XCTAssertEqual(try mode(of: mgr.fifoPath), 0o644)
+        #expect(mgr.fifoPath.withCString { mkfifo($0, 0o644) } == 0)
+        #expect(try mode(of: mgr.fifoPath) == 0o644)
 
         try mgr.create() // reuse path
         defer { mgr.cleanup() }
-        XCTAssertEqual(try mode(of: mgr.fifoPath), 0o600, "reuse must strip the world-readable bits")
+        #expect(try mode(of: mgr.fifoPath) == 0o600, "reuse must strip the world-readable bits")
     }
 
     /// A non-FIFO squatting at the path is refused, not overwritten or streamed to.
-    func testRefusesNonFIFOAtPath() throws {
+    @Test func refusesNonFIFOAtPath() throws {
         let mgr = FIFOManager(libraryDirectory: dir.path)
         FileManager.default.createFile(atPath: mgr.fifoPath, contents: Data("not a pipe".utf8))
 
-        XCTAssertThrowsError(try mgr.create(), "must refuse to reuse a regular file at the FIFO path")
+        #expect(throws: CaptureCoordinatorError.self, "must refuse to reuse a regular file at the FIFO path") {
+            try mgr.create()
+        }
         // The squatting file is left intact (we never clobber unknown files).
-        XCTAssertTrue(FileManager.default.fileExists(atPath: mgr.fifoPath))
+        #expect(FileManager.default.fileExists(atPath: mgr.fifoPath))
     }
 
     /// A symlink planted at the path is not followed and not reused.
-    func testRefusesSymlinkAtPath() throws {
+    @Test func refusesSymlinkAtPath() throws {
         let mgr = FIFOManager(libraryDirectory: dir.path)
         let target = dir.appendingPathComponent("elsewhere.fifo")
-        XCTAssertEqual(target.path.withCString { mkfifo($0, 0o600) }, 0)
+        #expect(target.path.withCString { mkfifo($0, 0o600) } == 0)
         try FileManager.default.createSymbolicLink(atPath: mgr.fifoPath, withDestinationPath: target.path)
 
-        XCTAssertThrowsError(try mgr.create(), "must not follow a symlink at the FIFO path")
+        #expect(throws: CaptureCoordinatorError.self, "must not follow a symlink at the FIFO path") {
+            try mgr.create()
+        }
     }
 }

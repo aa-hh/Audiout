@@ -3,20 +3,32 @@
 // CAirPlayEngine C cluster. Replaced/extended by real session tests in T-API-1
 // once the shims are implemented (T-SHIM-1).
 
-import XCTest
+import Testing
 @testable import AirPlayEngine
 
-final class AirPlayEngineScaffoldTests: XCTestCase {
-    func testScaffoldStatusIsPresent() {
-        XCTAssertFalse(AirPlayEngine.scaffoldStatus.isEmpty)
+@Suite struct AirPlayEngineScaffoldTests {
+    @Test func scaffoldStatusIsPresent() {
+        #expect(!AirPlayEngine.scaffoldStatus.isEmpty)
     }
+}
 
+// `cClusterLinks` reads `outputs_buffer_duration_ms_get()`, the same
+// process-global `shims/outputs.c` state `StartBufferAndLatencyProbeTests`
+// sets/restores — under swift-testing's in-process concurrency a concurrent
+// setter test can be caught mid-mutation, so this one nests into the shared
+// `SerializedEngineState` parent alongside that file rather than staying
+// unguarded just because it never itself calls the setter.
+extension SerializedEngineState {
+
+@Suite struct AirPlayEngineScaffoldLinkTests {
     // T-BUILD-1: calls into the linked C cluster (shims/outputs.c) through the
     // CAirPlayEngine module. Verifies compile + link + module import all work
     // end to end. The value is the default start-buffer duration (2250 ms) —
     // see shims/outputs.c outputs_buffer_duration_ms_get(). This is NOT a
     // behavioral test of the engine (shim bodies are stubs); it's a link probe.
-    func testCClusterLinks() {
-        XCTAssertEqual(AirPlayEngine.scaffoldBufferDurationMs, 2250)
+    @Test func cClusterLinks() {
+        #expect(AirPlayEngine.scaffoldBufferDurationMs == 2250)
     }
 }
+
+} // extension SerializedEngineState

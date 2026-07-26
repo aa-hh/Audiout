@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 import AirPlayEngine
 @testable import AudiouterCore
 
@@ -11,7 +12,7 @@ import AirPlayEngine
 /// in production via `selectedDevicesQuery`, since `setOutputSet`'s `ids` never
 /// carries the local device — `GroupController.applyRouting` always filters it
 /// out before calling the backend).
-final class NativeBackendSyncedLocalSelectionTests: IsolatedTestCase {
+@Suite final class NativeBackendSyncedLocalSelectionTests: IsolatedSuite {
 
     // MARK: Doubles
 
@@ -118,62 +119,62 @@ final class NativeBackendSyncedLocalSelectionTests: IsolatedTestCase {
 
     /// Mac-only → Mac + AirPlay: the sink turns ON — constructed, attached,
     /// started, and its lifecycle observers installed, in that order.
-    func testMacOnlyToMacPlusAirPlayEnablesSyncedLocalSink() {
+    @Test func macOnlyToMacPlusAirPlayEnablesSyncedLocalSink() {
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
         backend.setOutputSet([])   // Mac-only (passthrough): no AirPlay device selected
         waitFor { true }           // let any (there shouldn't be any) async work settle
-        XCTAssertTrue(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
+        #expect(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
 
         backend.setOutputSet(["airplay-1"])   // now Mac + 1 AirPlay device
         waitFor { !sink.calls.isEmpty }
 
-        XCTAssertEqual(sink.calls, ["start", "startObserving"],
-                       "enabling must start the sink and begin lifecycle observation, in order")
+        #expect(sink.calls == ["start", "startObserving"],
+                "enabling must start the sink and begin lifecycle observation, in order")
         _ = macSelected   // silence unused-var warning if the compiler flags it
     }
 
     /// Mac + AirPlay → AirPlay-only (Mac deselected): the sink turns OFF — in
     /// the mirrored order (stop, then stop observing).
-    func testMacPlusAirPlayToAirPlayOnlyDisablesSyncedLocalSink() {
+    @Test func macPlusAirPlayToAirPlayOnlyDisablesSyncedLocalSink() {
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enabled
         waitFor { !sink.calls.isEmpty }
-        XCTAssertEqual(sink.calls, ["start", "startObserving"])
+        #expect(sink.calls == ["start", "startObserving"])
 
         macSelected.set(false)                // user deselects the Mac row
         backend.setOutputSet(["airplay-1"])   // same AirPlay membership, Mac dropped
         waitFor { sink.calls.count >= 4 }
 
-        XCTAssertEqual(sink.calls, ["start", "startObserving", "stop", "stopObserving"],
-                       "disabling must stop the sink and stop lifecycle observation, in order")
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
+                "disabling must stop the sink and stop lifecycle observation, in order")
     }
 
     /// Mac + AirPlay → Mac + 2×AirPlay: stays enabled, and — critically — does
     /// NOT re-attach/re-start the sink. A second AirPlay device joining a
     /// selection that's already "Mac + AirPlay" is a no-op for this feature.
-    func testMacPlusAirPlayToMacPlusTwoAirPlayStaysEnabledNoRedundantReattach() {
+    @Test func macPlusAirPlayToMacPlusTwoAirPlayStaysEnabledNoRedundantReattach() {
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])
         waitFor { !sink.calls.isEmpty }
-        XCTAssertEqual(sink.calls, ["start", "startObserving"])
+        #expect(sink.calls == ["start", "startObserving"])
 
         backend.setOutputSet(["airplay-1", "airplay-2"])   // a second AirPlay device joins
         // Give any (incorrect) redundant work a moment to show up.
         waitFor(timeout: 0.3) { false }
 
-        XCTAssertEqual(sink.calls, ["start", "startObserving"],
-                       "adding a second AirPlay device to an already-enabled selection must not re-attach/re-start the sink")
+        #expect(sink.calls == ["start", "startObserving"],
+                "adding a second AirPlay device to an already-enabled selection must not re-attach/re-start the sink")
     }
 
     /// AirPlay-only (Mac never selected) never enables the sink, regardless of
     /// how many AirPlay devices are selected.
-    func testAirPlayOnlyNeverEnablesSyncedLocalSink() {
+    @Test func airPlayOnlyNeverEnablesSyncedLocalSink() {
         let (backend, sink, _) = makeBackend(macSelectedByDefault: false)
         defer { backend.stop() }
 
@@ -181,12 +182,12 @@ final class NativeBackendSyncedLocalSelectionTests: IsolatedTestCase {
         backend.setOutputSet(["airplay-1", "airplay-2"])
         waitFor(timeout: 0.3) { false }
 
-        XCTAssertTrue(sink.calls.isEmpty, "AirPlay selected with the Mac NOT selected must never enable the sink")
+        #expect(sink.calls.isEmpty, "AirPlay selected with the Mac NOT selected must never enable the sink")
     }
 
     /// Mac + AirPlay → empty selection (both dropped): disables, same as
     /// dropping just the AirPlay side.
-    func testMacPlusAirPlayToEmptySelectionDisablesSyncedLocalSink() {
+    @Test func macPlusAirPlayToEmptySelectionDisablesSyncedLocalSink() {
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
@@ -197,13 +198,13 @@ final class NativeBackendSyncedLocalSelectionTests: IsolatedTestCase {
         backend.setOutputSet([])
         waitFor { sink.calls.count >= 4 }
 
-        XCTAssertEqual(sink.calls, ["start", "startObserving", "stop", "stopObserving"])
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"])
     }
 
     /// With no factory wired (mirrors the UI-only smoke path / a test that
     /// doesn't care about this feature), a Mac + AirPlay selection is inert —
     /// no crash, nothing to assert against because there's no sink at all.
-    func testNoFactoryWiredIsInert() {
+    @Test func noFactoryWiredIsInert() {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),

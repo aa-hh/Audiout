@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
+import Foundation
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSettingsUI
@@ -12,7 +13,7 @@ import AppKit
 /// section presence, numeric labels, CTA arming, the apply round-trip, and the
 /// env-override disabled state.
 @MainActor
-final class AudioSettingsLatencyTests: XCTestCase {
+@Suite struct AudioSettingsLatencyTests {
 
     private final class ApplyRecorder {
         var applied: [Int] = []
@@ -41,50 +42,50 @@ final class AudioSettingsLatencyTests: XCTestCase {
             excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
     }
 
-    func testNoModelMeansNoAdvancedSection() {
+    @Test func noModelMeansNoAdvancedSection() {
         let pane = AudioSettingsViewController(excluded: makeExcluded(), runningAppsProvider: { [] })
-        XCTAssertFalse(pane.test_hasLatencySection)
+        #expect(!pane.test_hasLatencySection)
     }
 
-    func testOptionsAreNumericMillisecondLabels() {
+    @Test func optionsAreNumericMillisecondLabels() {
         let pane = makePane(recorder: ApplyRecorder())
-        XCTAssertTrue(pane.test_hasLatencySection)
+        #expect(pane.test_hasLatencySection)
         let titles = pane.test_latencyOptionTitles
-        XCTAssertEqual(titles.count, AppSettings.startBufferOptionsMs.count)
+        #expect(titles.count == AppSettings.startBufferOptionsMs.count)
         // Numeric-label contract (localization decision): every item is a bare
         // number + "ms" — no preset names, no embedded delay descriptions.
         for title in titles {
-            XCTAssertTrue(title.hasSuffix(" ms"), "expected bare numeric label, got \"\(title)\"")
-            XCTAssertNil(title.rangeOfCharacter(from: .letters.subtracting(CharacterSet(charactersIn: "ms"))),
+            #expect(title.hasSuffix(" ms"), "expected bare numeric label, got \"\(title)\"")
+            #expect(title.rangeOfCharacter(from: .letters.subtracting(CharacterSet(charactersIn: "ms"))) == nil,
                          "no words in option labels, got \"\(title)\"")
         }
     }
 
-    func testChangingSelectionArmsTheCTAWithContextualTitle() {
+    @Test func changingSelectionArmsTheCTAWithContextualTitle() {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
 
         // Unchanged selection: disarmed "Apply Settings".
-        XCTAssertFalse(pane.test_applyButtonEnabled)
-        XCTAssertEqual(pane.test_applyButtonTitle, "Apply Settings")
+        #expect(!pane.test_applyButtonEnabled)
+        #expect(pane.test_applyButtonTitle == "Apply Settings")
 
         // Changed while idle: armed, still "Apply Settings" (instant, no gap).
         pane.test_selectLatencyOption(ms: 1500)
-        XCTAssertTrue(pane.test_applyButtonEnabled)
-        XCTAssertEqual(pane.test_applyButtonTitle, "Apply Settings")
+        #expect(pane.test_applyButtonEnabled)
+        #expect(pane.test_applyButtonTitle == "Apply Settings")
 
         // Changed while streaming: armed and warns about the reconnect.
         recorder.streaming = true
         pane.test_selectLatencyOption(ms: 2250)
-        XCTAssertTrue(pane.test_applyButtonEnabled)
-        XCTAssertEqual(pane.test_applyButtonTitle, "Apply & Reconnect")
+        #expect(pane.test_applyButtonEnabled)
+        #expect(pane.test_applyButtonTitle == "Apply & Reconnect")
 
         // Back to the applied value: disarmed again.
         pane.test_selectLatencyOption(ms: 1000)
-        XCTAssertFalse(pane.test_applyButtonEnabled)
+        #expect(!pane.test_applyButtonEnabled)
     }
 
-    func testApplyRoundTripInvokesModelAndDisarms() async {
+    @Test func applyRoundTripInvokesModelAndDisarms() async {
         let recorder = ApplyRecorder()
         recorder.streaming = true
         let pane = makePane(recorder: recorder)
@@ -92,35 +93,35 @@ final class AudioSettingsLatencyTests: XCTestCase {
         pane.test_selectLatencyOption(ms: 1500)
         await pane.test_apply()
 
-        XCTAssertEqual(recorder.applied, [1500])
-        XCTAssertFalse(pane.test_applyButtonEnabled, "applied value == pending → disarmed")
-        XCTAssertTrue(pane.test_bufferPopupEnabled, "popup re-enabled after apply")
-        XCTAssertEqual(pane.test_applyStatusText, "Speakers reconnected")
+        #expect(recorder.applied == [1500])
+        #expect(!pane.test_applyButtonEnabled, "applied value == pending → disarmed")
+        #expect(pane.test_bufferPopupEnabled, "popup re-enabled after apply")
+        #expect(pane.test_applyStatusText == "Speakers reconnected")
 
         // A second apply without a new change is a no-op.
         await pane.test_apply()
-        XCTAssertEqual(recorder.applied, [1500])
+        #expect(recorder.applied == [1500])
     }
 
-    func testApplyWhileIdleShowsPlainConfirmation() async {
+    @Test func applyWhileIdleShowsPlainConfirmation() async {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
         pane.test_selectLatencyOption(ms: 2250)
         await pane.test_apply()
-        XCTAssertEqual(recorder.applied, [2250])
-        XCTAssertEqual(pane.test_applyStatusText, "Applied")
+        #expect(recorder.applied == [2250])
+        #expect(pane.test_applyStatusText == "Applied")
     }
 
-    func testEnvOverrideRendersDisabled() {
+    @Test func envOverrideRendersDisabled() {
         let pane = makePane(recorder: ApplyRecorder(), envOverrideMs: 750)
-        XCTAssertTrue(pane.test_hasLatencySection)
-        XCTAssertFalse(pane.test_bufferPopupEnabled)
-        XCTAssertEqual(pane.test_latencyOptionTitles.count, 1, "env mode shows just the env value")
-        XCTAssertFalse(pane.test_applyButtonEnabled, "no armable CTA in env-override mode")
+        #expect(pane.test_hasLatencySection)
+        #expect(!pane.test_bufferPopupEnabled)
+        #expect(pane.test_latencyOptionTitles.count == 1, "env mode shows just the env value")
+        #expect(!pane.test_applyButtonEnabled, "no armable CTA in env-override mode")
     }
 
-    func testWindowControllerPassesModelThrough() {
-        let suite = "AudiouterTests.\(name).\(ObjectIdentifier(self).hashValue)"
+    @Test func windowControllerPassesModelThrough() {
+        let suite = "AudiouterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         let model = LatencySettingModel(
@@ -132,8 +133,8 @@ final class AudioSettingsLatencyTests: XCTestCase {
             excludedApps: makeExcluded(),
             runningAppsProvider: { [] },
             latency: model)
-        XCTAssertTrue(controller.test_audio.test_hasLatencySection)
-        XCTAssertGreaterThan(controller.test_contentFittingSize.height, 100)
+        #expect(controller.test_audio.test_hasLatencySection)
+        #expect(controller.test_contentFittingSize.height > 100)
     }
 
     private final class NoopLoginItem: LoginItemManaging {

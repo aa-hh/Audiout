@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterWindowUI
 
@@ -12,55 +12,55 @@ import AppKit
 /// a real Space/Return `keyDown(with:)` activates it exactly like a click,
 /// and the accessibility "press" action (what VoiceOver / Full Keyboard
 /// Access call instead of a click) reaches the same callback.
-final class DeviceIconWellViewTests: XCTestCase {
+@Suite struct DeviceIconWellViewTests {
 
-    func testAcceptsFirstResponderSoItJoinsTheKeyViewLoop() {
+    @Test func acceptsFirstResponderSoItJoinsTheKeyViewLoop() {
         let well = DeviceIconWellView()
-        XCTAssertTrue(well.acceptsFirstResponder,
+        #expect(well.acceptsFirstResponder,
                        "must opt into the window's Tab key-view loop like a real NSButton")
     }
 
-    func testSpaceKeyActivatesTheWellViaOnClick() {
+    @Test func spaceKeyActivatesTheWellViaOnClick() {
         let well = DeviceIconWellView()
         var fired = false
         well.onClick = { fired = true }
 
         well.test_pressKey(" ")
 
-        XCTAssertTrue(fired, "Space must activate the well, mirroring NSButton's keyboard behavior")
+        #expect(fired, "Space must activate the well, mirroring NSButton's keyboard behavior")
     }
 
-    func testReturnKeyActivatesTheWellViaOnClick() {
+    @Test func returnKeyActivatesTheWellViaOnClick() {
         let well = DeviceIconWellView()
         var fired = false
         well.onClick = { fired = true }
 
         well.test_pressKey("\r")
 
-        XCTAssertTrue(fired, "Return must activate the well, mirroring NSButton's keyboard behavior")
+        #expect(fired, "Return must activate the well, mirroring NSButton's keyboard behavior")
     }
 
-    func testKeypadEnterActivatesTheWellViaOnClick() {
+    @Test func keypadEnterActivatesTheWellViaOnClick() {
         let well = DeviceIconWellView()
         var fired = false
         well.onClick = { fired = true }
 
         well.test_pressKey("\u{3}")
 
-        XCTAssertTrue(fired, "the numeric-keypad Enter must activate the well too")
+        #expect(fired, "the numeric-keypad Enter must activate the well too")
     }
 
-    func testUnrelatedKeyDoesNotActivateTheWell() {
+    @Test func unrelatedKeyDoesNotActivateTheWell() {
         let well = DeviceIconWellView()
         var fired = false
         well.onClick = { fired = true }
 
         well.test_pressKey("a")
 
-        XCTAssertFalse(fired, "only Space/Return/keypad-Enter should activate — not every keystroke")
+        #expect(!fired, "only Space/Return/keypad-Enter should activate — not every keystroke")
     }
 
-    func testAccessibilityPerformPressActivatesTheWell() {
+    @Test func accessibilityPerformPressActivatesTheWell() {
         // The seam VoiceOver's "press" gesture and Full Keyboard Access call
         // instead of synthesizing a real click.
         let well = DeviceIconWellView()
@@ -69,30 +69,30 @@ final class DeviceIconWellViewTests: XCTestCase {
 
         let handled = well.accessibilityPerformPress()
 
-        XCTAssertTrue(handled)
-        XCTAssertTrue(fired, "VoiceOver's press action must reach the same callback a click fires")
+        #expect(handled)
+        #expect(fired, "VoiceOver's press action must reach the same callback a click fires")
     }
 
-    func testAccessibilityRoleAndLabelAreSetForVoiceOver() {
+    @Test func accessibilityRoleAndLabelAreSetForVoiceOver() {
         let well = DeviceIconWellView()
-        XCTAssertTrue(well.isAccessibilityElement())
-        XCTAssertEqual(well.accessibilityRole(), .button)
-        XCTAssertEqual(well.accessibilityLabel(), "Edit icon")
+        #expect(well.isAccessibilityElement())
+        #expect(well.accessibilityRole() == .button)
+        #expect(well.accessibilityLabel() == "Edit icon")
     }
 
-    func testBecomingFirstResponderStepsUpTheBadgeLikeHover() {
+    @Test func becomingFirstResponderStepsUpTheBadgeLikeHover() {
         // Keyboard focus should give the same "this is interactive" cue a
         // mouse hover gives, on top of the system focus ring.
         let well = DeviceIconWellView()
         well.setOverlayVisible(false)
-        XCTAssertEqual(well.test_badgeAlpha, 0.7, accuracy: 0.001, "rest alpha before focus")
+        #expect(abs(well.test_badgeAlpha - 0.7) <= 0.001, "rest alpha before focus")
 
-        XCTAssertTrue(well.becomeFirstResponder())
-        XCTAssertEqual(well.test_badgeAlpha, 1.0, accuracy: 0.001,
+        #expect(well.becomeFirstResponder())
+        #expect(abs(well.test_badgeAlpha - 1.0) <= 0.001,
                        "focus should step the badge up to hover alpha")
 
-        XCTAssertTrue(well.resignFirstResponder())
-        XCTAssertEqual(well.test_badgeAlpha, 0.7, accuracy: 0.001,
+        #expect(well.resignFirstResponder())
+        #expect(abs(well.test_badgeAlpha - 0.7) <= 0.001,
                        "losing focus should drop the badge back to rest alpha")
     }
 }

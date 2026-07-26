@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import AudiouterCore
 @testable import AudiouterSharedUI
 
@@ -9,35 +9,35 @@ import AudiouterCore
 /// accessibility label with no "not yet supported" wording. `supportsAirPlay2`
 /// is purely informational now (NativeBackend/T7 drives AP1 through the same
 /// shared engine as AP2); `DeviceRowView` never reads it at all.
-final class DeviceRowAirPlay1LiveTests: XCTestCase {
+@Suite struct DeviceRowAirPlay1LiveTests {
 
     private func makeAP1Device(isSelected: Bool = false) -> Device {
         Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,
                supportsAirPlay2: false, volume: 20, isSelected: isSelected)
     }
 
-    func testAP1RowRendersFullAlphaNotDimmed() {
+    @Test func ap1RowRendersFullAlphaNotDimmed() {
         let device = makeAP1Device()
         let row = DeviceRowView(device: device)
         row.apply(device, selected: false, controllable: true)
 
-        XCTAssertEqual(row.alphaValue, 1.0, "an AP1 row must render at full alpha, same as AP2 — not the retired dimmed gate")
-        XCTAssertFalse(row.test_isSelectionDimmed, "AP1 alone must not dim the checkbox")
+        #expect(row.alphaValue == 1.0, "an AP1 row must render at full alpha, same as AP2 — not the retired dimmed gate")
+        #expect(!row.test_isSelectionDimmed, "AP1 alone must not dim the checkbox")
     }
 
-    func testAP1RowCheckboxSliderMuteAreEnabled() {
+    @Test func ap1RowCheckboxSliderMuteAreEnabled() {
         let device = makeAP1Device()
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        XCTAssertTrue(row.test_isEnabledOn, "an AP1 device can join Selected Devices like any AP2 device")
-        XCTAssertTrue(row.test_isSliderEnabled, "an AP1 row's volume slider is drivable")
+        #expect(row.test_isEnabledOn, "an AP1 device can join Selected Devices like any AP2 device")
+        #expect(row.test_isSliderEnabled, "an AP1 row's volume slider is drivable")
         // Mute mirrors the slider's enabled state (same `controllable` gate).
         row.test_toggleMute(true)
-        XCTAssertEqual(row.test_muteTintColor, .controlAccentColor, "mute still works live on an AP1 row")
+        #expect(row.test_muteTintColor == .controlAccentColor, "mute still works live on an AP1 row")
     }
 
-    func testAP1RowCanBeToggledOnViaDelegate() {
+    @Test func ap1RowCanBeToggledOnViaDelegate() {
         let device = makeAP1Device()
         let row = DeviceRowView(device: device)
         row.apply(device, selected: false, controllable: false)
@@ -57,19 +57,19 @@ final class DeviceRowAirPlay1LiveTests: XCTestCase {
 
         row.test_clickName()
 
-        XCTAssertEqual(delegate.toggledFor, device.id, "an AP1 row's name-click drives the same enable path as AP2")
-        XCTAssertEqual(delegate.toggledOn, true)
+        #expect(delegate.toggledFor == device.id, "an AP1 row's name-click drives the same enable path as AP2")
+        #expect(delegate.toggledOn == true)
     }
 
-    func testAP1RowAccessibilityLabelHasNoUnsupportedWording() {
+    @Test func ap1RowAccessibilityLabelHasNoUnsupportedWording() {
         let device = makeAP1Device(isSelected: true)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
         let label = row.accessibilityLabel() ?? ""
-        XCTAssertFalse(label.lowercased().contains("not yet supported"), "the retired 'coming soon' wording must never appear on a live AP1 row")
-        XCTAssertFalse(label.lowercased().contains("unsupported"), "AP1 rows carry no 'unsupported' language")
-        XCTAssertTrue(label.contains(device.name), "the label still reads as a normal device row")
-        XCTAssertTrue(label.contains("selected"), "the normal 'selected'/'not selected' membership phrasing, not a disabled explanation")
+        #expect(!label.lowercased().contains("not yet supported"), "the retired 'coming soon' wording must never appear on a live AP1 row")
+        #expect(!label.lowercased().contains("unsupported"), "AP1 rows carry no 'unsupported' language")
+        #expect(label.contains(device.name), "the label still reads as a normal device row")
+        #expect(label.contains("selected"), "the normal 'selected'/'not selected' membership phrasing, not a disabled explanation")
     }
 }

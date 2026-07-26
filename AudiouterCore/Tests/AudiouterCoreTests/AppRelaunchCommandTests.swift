@@ -1,54 +1,55 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 @testable import AudiouterCore
 
-final class AppRelaunchCommandTests: XCTestCase {
+@Suite struct AppRelaunchCommandTests {
 
     // MARK: singleQuoted
 
-    func testSingleQuotedWrapsPlainPath() {
-        XCTAssertEqual(AppRelaunchCommand.singleQuoted("/Applications/Audiouter.app"),
+    @Test func singleQuotedWrapsPlainPath() {
+        #expect(AppRelaunchCommand.singleQuoted("/Applications/Audiouter.app") ==
                        "'/Applications/Audiouter.app'")
     }
 
-    func testSingleQuotedPreservesSpaces() {
+    @Test func singleQuotedPreservesSpaces() {
         // The app's real path contains a space — the quoting must keep it intact
         // as ONE argument through `sh -c`.
-        XCTAssertEqual(
-            AppRelaunchCommand.singleQuoted("/Users/x/AirPlay Controller/build/Audiouter.app"),
+        #expect(
+            AppRelaunchCommand.singleQuoted("/Users/x/AirPlay Controller/build/Audiouter.app") ==
             "'/Users/x/AirPlay Controller/build/Audiouter.app'")
     }
 
-    func testSingleQuotedEscapesEmbeddedSingleQuote() {
+    @Test func singleQuotedEscapesEmbeddedSingleQuote() {
         // A path with a literal apostrophe must use the '\'' close-escape-reopen
         // idiom so the shell sees the exact bytes.
-        XCTAssertEqual(AppRelaunchCommand.singleQuoted("/Users/o'brien/App.app"),
+        #expect(AppRelaunchCommand.singleQuoted("/Users/o'brien/App.app") ==
                        "'/Users/o'\\''brien/App.app'")
     }
 
     // MARK: shellInvocation
 
-    func testShellInvocationShape() {
+    @Test func shellInvocationShape() {
         let argv = AppRelaunchCommand.shellInvocation(pid: 4242, bundlePath: "/tmp/A.app")
-        XCTAssertEqual(argv.count, 3)
-        XCTAssertEqual(argv[0], "/bin/sh")
-        XCTAssertEqual(argv[1], "-c")
+        #expect(argv.count == 3)
+        #expect(argv[0] == "/bin/sh")
+        #expect(argv[1] == "-c")
     }
 
-    func testShellInvocationWaitsOnPidThenOpensQuotedBundle() {
+    @Test func shellInvocationWaitsOnPidThenOpensQuotedBundle() {
         let argv = AppRelaunchCommand.shellInvocation(
             pid: 4242, bundlePath: "/Users/x/AirPlay Controller/build/Audiouter.app")
         let script = argv[2]
         // Waits on the captured pid…
-        XCTAssertTrue(script.contains("/bin/kill -0 4242"), "should poll the captured pid: \(script)")
+        #expect(script.contains("/bin/kill -0 4242"), "should poll the captured pid: \(script)")
         // …then reopens the space-containing path as a single quoted argument.
-        XCTAssertTrue(
+        #expect(
             script.contains("/usr/bin/open '/Users/x/AirPlay Controller/build/Audiouter.app'"),
             "should open the quoted bundle path: \(script)")
         // The open must come AFTER the wait loop, never before it.
         let killIndex = script.range(of: "/bin/kill -0")!.lowerBound
         let openIndex = script.range(of: "/usr/bin/open")!.lowerBound
-        XCTAssertLessThan(killIndex, openIndex, "must wait for exit before reopening")
+        #expect(killIndex < openIndex, "must wait for exit before reopening")
     }
 }

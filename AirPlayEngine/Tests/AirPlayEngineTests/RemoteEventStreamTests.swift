@@ -8,15 +8,33 @@
 // the correctly mapped `RemoteEvent`. This exercises the genuine FFI + enum
 // mapping (`RemoteEventHub.deliver` + `TransportCommand.init(_:)`), not a mock.
 
-import XCTest
+import Testing
+import Foundation
 @testable import AirPlayEngine
 import CAirPlayEngine
 
-final class RemoteEventStreamTests: XCTestCase {
+// `engine.enterHeadlessTestMode()` installs `airplayengine_remote_fire`'s
+// hook into a process-global slot (see `shims/engine_bridge.c`) — the same
+// class of hazard `SerializedEngineStateSuite.swift` documents for the
+// `shims/outputs.c` device registry. Under swift-testing's in-process
+// concurrency, two of this suite's tests running at once install/read that
+// global hook concurrently, so one test's `airplayengine_remote_fire` call
+// can be observed by another test's stream reader (or the hook gets
+// clobbered mid-test), which reproduced as an intermittent
+// `RemoteEventTestTimeout` under full-suite runs (never in isolation).
+// Nesting into the same `.serialized` parent as the outputs.c-registry
+// suites removes the collision — reusing the existing parent rather than a
+// second one because a separate `.serialized` suite would still race
+// against `SerializedEngineState`'s own children, which only a single
+// shared parent actually prevents (see that file's siblings T15/T16 for
+// where this was first found, for the libgcrypt global-init case).
+extension SerializedEngineState {
+
+@Suite struct RemoteEventStreamTests {
 
     // MARK: - Volume: an inbound device-volume change maps to .volume(id, level).
 
-    func testRemoteStreamYieldsVolume() async throws {
+    @Test func remoteStreamYieldsVolume() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode() // installs the remote-control hook
         let reader = RemoteEventReader(engine.makeRemoteEventStream())
@@ -24,14 +42,14 @@ final class RemoteEventStreamTests: XCTestCase {
         airplayengine_remote_fire(0xABCD, AIRPLAYENGINE_REMOTE_VOLUME, 0.75)
 
         let event = try await reader.next(timeout: 2)
-        XCTAssertEqual(event, .volume(OutputID(rawValue: 0xABCD), level: 0.75))
+        #expect(event == .volume(OutputID(rawValue: 0xABCD), level: 0.75))
 
         await engine.stop()
     }
 
     // MARK: - Volume is clamped into 0...1 (a receiver could report out of range).
 
-    func testRemoteVolumeIsClamped() async throws {
+    @Test func remoteVolumeIsClamped() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
         let reader = RemoteEventReader(engine.makeRemoteEventStream())
@@ -41,15 +59,15 @@ final class RemoteEventStreamTests: XCTestCase {
 
         let over = try await reader.next(timeout: 2)
         let under = try await reader.next(timeout: 2)
-        XCTAssertEqual(over, .volume(OutputID(rawValue: 0x1), level: 1.0))
-        XCTAssertEqual(under, .volume(OutputID(rawValue: 0x2), level: 0.0))
+        #expect(over == .volume(OutputID(rawValue: 0x1), level: 1.0))
+        #expect(under == .volume(OutputID(rawValue: 0x2), level: 0.0))
 
         await engine.stop()
     }
 
     // MARK: - Transport: each key maps to the matching .transport(command).
 
-    func testRemoteStreamYieldsTransport() async throws {
+    @Test func remoteStreamYieldsTransport() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
         let reader = RemoteEventReader(engine.makeRemoteEventStream())
@@ -61,9 +79,9 @@ final class RemoteEventStreamTests: XCTestCase {
         let playPause = try await reader.next(timeout: 2)
         let next = try await reader.next(timeout: 2)
         let previous = try await reader.next(timeout: 2)
-        XCTAssertEqual(playPause, .transport(.playPause))
-        XCTAssertEqual(next, .transport(.next))
-        XCTAssertEqual(previous, .transport(.previous))
+        #expect(playPause == .transport(.playPause))
+        #expect(next == .transport(.next))
+        #expect(previous == .transport(.previous))
 
         await engine.stop()
     }
@@ -72,7 +90,7 @@ final class RemoteEventStreamTests: XCTestCase {
     //
     // Fire UNKNOWN then a known transport; only the known one should arrive, in
     // that order (proving UNKNOWN was swallowed rather than mismapped).
-    func testUnknownRemoteEventIsDropped() async throws {
+    @Test func unknownRemoteEventIsDropped() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
         let reader = RemoteEventReader(engine.makeRemoteEventStream())
@@ -81,14 +99,14 @@ final class RemoteEventStreamTests: XCTestCase {
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_NEXT, -1)    // delivered
 
         let first = try await reader.next(timeout: 2)
-        XCTAssertEqual(first, .transport(.next), "UNKNOWN must be swallowed so .next is first")
+        #expect(first == .transport(.next), "UNKNOWN must be swallowed so .next is first")
 
         await engine.stop()
     }
 
     // MARK: - After stop(), the stream finishes and no further events are delivered.
 
-    func testStreamFinishesOnStop() async throws {
+    @Test func streamFinishesOnStop() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
         let reader = RemoteEventReader(engine.makeRemoteEventStream())
@@ -97,9 +115,13 @@ final class RemoteEventStreamTests: XCTestCase {
 
         // A fire after teardown reaches no hub (shared cleared) — nothing delivered.
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PLAYPAUSE, -1)
-        await XCTAssertThrowsErrorAsync(try await reader.next(timeout: 1))
+        await #expect(throws: (any Error).self) {
+            try await reader.next(timeout: 1)
+        }
     }
 }
+
+} // extension SerializedEngineState
 
 /// Drains an `AsyncStream<RemoteEvent>` into a locked FIFO on a background task
 /// and exposes a timeout-guarded `next()` — the remote-event twin of
@@ -137,17 +159,3 @@ private final class RemoteEventReader: @unchecked Sendable {
 }
 
 private struct RemoteEventTestTimeout: Error {}
-
-/// Async XCTAssertThrowsError (XCTest's is sync-only).
-private func XCTAssertThrowsErrorAsync<T>(
-    _ expression: @autoclosure () async throws -> T,
-    file: StaticString = #filePath,
-    line: UInt = #line
-) async {
-    do {
-        _ = try await expression()
-        XCTFail("expected an error but none was thrown", file: file, line: line)
-    } catch {
-        // expected
-    }
-}

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
@@ -13,158 +13,158 @@ import AppKit
 /// a backend or activates anything. These cases build the controller directly
 /// and drive it through its `test_*` hooks — a headless run can't synthesize
 /// the real grid-tap / search-typing / button-click gestures.
-final class IconPickerTests: XCTestCase {
+@Suite struct IconPickerTests {
 
     // MARK: Curated grid
 
-    func testCuratedSymbolNamesAreAllValid() {
+    @Test func curatedSymbolNamesAreAllValid() {
         let picker = IconPickerViewController()
-        XCTAssertFalse(picker.test_curatedSymbolNames.isEmpty)
+        #expect(!picker.test_curatedSymbolNames.isEmpty)
         for name in picker.test_curatedSymbolNames {
-            XCTAssertTrue(DeviceIcon.isValid(name), "\(name) must resolve on this OS — pre-filtered at build time")
+            #expect(DeviceIcon.isValid(name), "\(name) must resolve on this OS — pre-filtered at build time")
         }
     }
 
-    func testPickingACuratedNameReportsItViaOnPick() {
+    @Test func pickingACuratedNameReportsItViaOnPick() throws {
         let picker = IconPickerViewController()
-        let name = try! XCTUnwrap(picker.test_curatedSymbolNames.first)
+        let name = try #require(picker.test_curatedSymbolNames.first)
         var wasCalled = false
         var pickedName: String?
         picker.onPick = { wasCalled = true; pickedName = $0 }
 
         picker.test_pickCurated(name)
 
-        XCTAssertTrue(wasCalled)
-        XCTAssertEqual(pickedName, name)
+        #expect(wasCalled)
+        #expect(pickedName == name)
     }
 
-    func testPickingANameNotInTheCuratedListIsANoOp() {
+    @Test func pickingANameNotInTheCuratedListIsANoOp() {
         let picker = IconPickerViewController()
         var fired = false
         picker.onPick = { _ in fired = true }
 
         picker.test_pickCurated("definitely.not.curated.zzz")
 
-        XCTAssertFalse(fired, "only an actual curated cell tap reports a pick")
+        #expect(!fired, "only an actual curated cell tap reports a pick")
     }
 
     // MARK: Search field — live grid filtering
 
-    func testTypingASubstringNarrowsTheGridToMatchingCuratedNamesOnly() {
+    @Test func typingASubstringNarrowsTheGridToMatchingCuratedNamesOnly() {
         let picker = IconPickerViewController()
         let fullSet = picker.test_curatedSymbolNames
 
         picker.test_setSearchText("pod")
 
         let narrowed = picker.test_curatedSymbolNames
-        XCTAssertFalse(narrowed.isEmpty)
-        XCTAssertLessThan(narrowed.count, fullSet.count)
+        #expect(!narrowed.isEmpty)
+        #expect(narrowed.count < fullSet.count)
         for name in narrowed {
-            XCTAssertTrue(name.range(of: "pod", options: .caseInsensitive) != nil, "\(name) should match the substring")
+            #expect(name.range(of: "pod", options: .caseInsensitive) != nil, "\(name) should match the substring")
         }
         for name in fullSet where name.range(of: "pod", options: .caseInsensitive) != nil {
-            XCTAssertTrue(narrowed.contains(name), "\(name) matches but is missing from the narrowed grid")
+            #expect(narrowed.contains(name), "\(name) matches but is missing from the narrowed grid")
         }
     }
 
-    func testGridFilteringIsCaseInsensitive() {
+    @Test func gridFilteringIsCaseInsensitive() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("POD")
-        XCTAssertFalse(picker.test_curatedSymbolNames.isEmpty)
-        XCTAssertEqual(picker.test_curatedSymbolNames, picker.test_curatedSymbolNames.filter {
+        #expect(!picker.test_curatedSymbolNames.isEmpty)
+        #expect(picker.test_curatedSymbolNames == picker.test_curatedSymbolNames.filter {
             $0.range(of: "pod", options: .caseInsensitive) != nil
         })
     }
 
-    func testClearingSearchRestoresTheFullCuratedSet() {
+    @Test func clearingSearchRestoresTheFullCuratedSet() {
         let picker = IconPickerViewController()
         let fullSet = picker.test_curatedSymbolNames
 
         picker.test_setSearchText("pod")
-        XCTAssertNotEqual(picker.test_curatedSymbolNames, fullSet)
+        #expect(picker.test_curatedSymbolNames != fullSet)
 
         picker.test_setSearchText("")
-        XCTAssertEqual(picker.test_curatedSymbolNames, fullSet)
+        #expect(picker.test_curatedSymbolNames == fullSet)
     }
 
-    func testSearchWithZeroMatchesShowsAnEmptyGridWithoutCrashing() {
+    @Test func searchWithZeroMatchesShowsAnEmptyGridWithoutCrashing() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("definitely.not.curated.zzz")
-        XCTAssertTrue(picker.test_curatedSymbolNames.isEmpty)
+        #expect(picker.test_curatedSymbolNames.isEmpty)
     }
 
-    func testGridFilteringDoesNotAffectTheExactNamePreviewAndApplyPath() {
+    @Test func gridFilteringDoesNotAffectTheExactNamePreviewAndApplyPath() {
         // The narrowed grid and the exact-name preview/Apply gate are
         // independent — a substring that matches multiple curated names
         // (so it's NOT itself a valid, exact SF Symbol name) narrows the
         // grid but leaves Apply disabled, same as before this feature.
         let picker = IconPickerViewController()
         picker.test_setSearchText("pod")
-        XCTAssertFalse(picker.test_curatedSymbolNames.isEmpty)
-        XCTAssertFalse(picker.test_isApplyEnabled)
-        XCTAssertNil(picker.test_previewSymbolName)
+        #expect(!picker.test_curatedSymbolNames.isEmpty)
+        #expect(!picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == nil)
 
         // An exact valid name both narrows the grid to itself/related
         // matches AND enables the preview/Apply path.
         picker.test_setSearchText("airpods")
-        XCTAssertTrue(picker.test_curatedSymbolNames.contains("airpods"))
-        XCTAssertTrue(picker.test_isApplyEnabled)
-        XCTAssertEqual(picker.test_previewSymbolName, "airpods")
+        #expect(picker.test_curatedSymbolNames.contains("airpods"))
+        #expect(picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == "airpods")
     }
 
     // MARK: Search field validation — Apply gating + live preview
 
-    func testApplyIsDisabledWithEmptySearchText() {
+    @Test func applyIsDisabledWithEmptySearchText() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("")
-        XCTAssertFalse(picker.test_isApplyEnabled)
-        XCTAssertNil(picker.test_previewSymbolName)
+        #expect(!picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == nil)
     }
 
-    func testApplyIsDisabledForAnInvalidSymbolName() {
+    @Test func applyIsDisabledForAnInvalidSymbolName() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("definitely.not.a.symbol.zzz")
-        XCTAssertFalse(picker.test_isApplyEnabled)
-        XCTAssertNil(picker.test_previewSymbolName)
+        #expect(!picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == nil)
     }
 
-    func testApplyIsEnabledWithPreviewForAValidSymbolName() {
+    @Test func applyIsEnabledWithPreviewForAValidSymbolName() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("airpods")
-        XCTAssertTrue(picker.test_isApplyEnabled)
-        XCTAssertEqual(picker.test_previewSymbolName, "airpods")
+        #expect(picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == "airpods")
     }
 
-    func testApplyIsDisabledForWhitespaceOnlyText() {
+    @Test func applyIsDisabledForWhitespaceOnlyText() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("   ")
-        XCTAssertFalse(picker.test_isApplyEnabled)
-        XCTAssertNil(picker.test_previewSymbolName)
+        #expect(!picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == nil)
     }
 
-    func testSearchTextIsTrimmedBeforeValidating() {
+    @Test func searchTextIsTrimmedBeforeValidating() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("  airpods  ")
-        XCTAssertTrue(picker.test_isApplyEnabled)
-        XCTAssertEqual(picker.test_previewSymbolName, "airpods")
+        #expect(picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == "airpods")
     }
 
-    func testTypingInvalidThenValidTextUpdatesStateLive() {
+    @Test func typingInvalidThenValidTextUpdatesStateLive() {
         let picker = IconPickerViewController()
         picker.test_setSearchText("not-a-symbol")
-        XCTAssertFalse(picker.test_isApplyEnabled)
+        #expect(!picker.test_isApplyEnabled)
 
         picker.test_setSearchText("airpods")
-        XCTAssertTrue(picker.test_isApplyEnabled)
-        XCTAssertEqual(picker.test_previewSymbolName, "airpods")
+        #expect(picker.test_isApplyEnabled)
+        #expect(picker.test_previewSymbolName == "airpods")
 
         picker.test_setSearchText("not-a-symbol-again")
-        XCTAssertFalse(picker.test_isApplyEnabled, "re-validated live on every keystroke, not sticky")
+        #expect(!picker.test_isApplyEnabled, "re-validated live on every keystroke, not sticky")
     }
 
     // MARK: Apply — reports the validated preview name
 
-    func testApplyReportsThePreviewedSymbolName() {
+    @Test func applyReportsThePreviewedSymbolName() {
         let picker = IconPickerViewController()
         var pickedName: String?
         picker.onPick = { pickedName = $0 }
@@ -172,10 +172,10 @@ final class IconPickerTests: XCTestCase {
 
         picker.test_apply()
 
-        XCTAssertEqual(pickedName, "headphones")
+        #expect(pickedName == "headphones")
     }
 
-    func testApplyIsANoOpWhenDisabled() {
+    @Test func applyIsANoOpWhenDisabled() {
         let picker = IconPickerViewController()
         var fired = false
         picker.onPick = { _ in fired = true }
@@ -183,12 +183,12 @@ final class IconPickerTests: XCTestCase {
 
         picker.test_apply()
 
-        XCTAssertFalse(fired, "Apply no-ops exactly like the disabled real button")
+        #expect(!fired, "Apply no-ops exactly like the disabled real button")
     }
 
     // MARK: Use default — always available, reports nil
 
-    func testUseDefaultReportsNilRegardlessOfSearchState() {
+    @Test func useDefaultReportsNilRegardlessOfSearchState() {
         let picker = IconPickerViewController()
         var wasCalled = false
         var pickedName: String? = "unset"
@@ -197,13 +197,13 @@ final class IconPickerTests: XCTestCase {
 
         picker.test_useDefault()
 
-        XCTAssertTrue(wasCalled)
-        XCTAssertNil(pickedName)
+        #expect(wasCalled)
+        #expect(pickedName == nil)
     }
 
     // MARK: Configuration is accepted without affecting the compact layout's behavior
 
-    func testConfigureDoesNotAffectApplyGatingOrCuratedList() {
+    @Test @MainActor func configureDoesNotAffectApplyGatingOrCuratedList() {
         let picker = IconPickerViewController()
         // Force the view to load (a live presentation always does this before
         // showing the popover) so `applyButton.isEnabled` reflects `loadView`'s
@@ -212,31 +212,31 @@ final class IconPickerTests: XCTestCase {
         let curatedBefore = picker.test_curatedSymbolNames
         picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
 
-        XCTAssertEqual(picker.test_curatedSymbolNames, curatedBefore)
-        XCTAssertFalse(picker.test_isApplyEnabled, "configure() alone doesn't populate the search field")
+        #expect(picker.test_curatedSymbolNames == curatedBefore)
+        #expect(!picker.test_isApplyEnabled, "configure() alone doesn't populate the search field")
     }
 
     // MARK: onPick fires exactly once per use across every path
 
-    func testOnPickFiresExactlyOnceForACuratedTap() {
+    @Test func onPickFiresExactlyOnceForACuratedTap() throws {
         let picker = IconPickerViewController()
         var count = 0
         picker.onPick = { _ in count += 1 }
-        let name = try! XCTUnwrap(picker.test_curatedSymbolNames.first)
+        let name = try #require(picker.test_curatedSymbolNames.first)
 
         picker.test_pickCurated(name)
 
-        XCTAssertEqual(count, 1)
+        #expect(count == 1)
     }
 
-    func testOnPickFiresExactlyOnceForUseDefault() {
+    @Test func onPickFiresExactlyOnceForUseDefault() {
         let picker = IconPickerViewController()
         var count = 0
         picker.onPick = { _ in count += 1 }
 
         picker.test_useDefault()
 
-        XCTAssertEqual(count, 1)
+        #expect(count == 1)
     }
 
     // MARK: Grid cell VoiceOver labels (A11Y-LABELS)
@@ -244,27 +244,27 @@ final class IconPickerTests: XCTestCase {
     /// Every curated symbol gets a plain-language label — never the raw SF
     /// Symbol name, which VoiceOver used to read verbatim ("hifispeaker point
     /// 2 fill").
-    func testEveryCuratedSymbolHasAPlainLanguageAccessibilityLabel() {
+    @Test func everyCuratedSymbolHasAPlainLanguageAccessibilityLabel() {
         for name in DeviceIcon.curated where DeviceIcon.isValid(name) {
             let label = IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: name)
-            XCTAssertFalse(label.isEmpty, "\(name) must have a non-empty label")
-            XCTAssertNotEqual(label, name, "\(name)'s label must not be the raw symbol name")
-            XCTAssertFalse(label.contains("."), "\(name)'s label (\"\(label)\") must read as prose, not a dotted symbol name")
+            #expect(!label.isEmpty, "\(name) must have a non-empty label")
+            #expect(label != name, "\(name)'s label must not be the raw symbol name")
+            #expect(!label.contains("."), "\(name)'s label (\"\(label)\") must read as prose, not a dotted symbol name")
         }
     }
 
     /// A spot check on a few well-known curated names, guarding against the
     /// mapping silently regressing to the raw-name fallback.
-    func testKnownCuratedSymbolsMapToExpectedPlainLanguageLabels() {
-        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "homepod.fill"), "HomePod")
-        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "airpodspro"), "AirPods Pro")
-        XCTAssertEqual(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "laptopcomputer"), "Laptop")
+    @Test func knownCuratedSymbolsMapToExpectedPlainLanguageLabels() {
+        #expect(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "homepod.fill") == "HomePod")
+        #expect(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "airpodspro") == "AirPods Pro")
+        #expect(IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "laptopcomputer") == "Laptop")
     }
 
     /// An uncurated/unmapped name still produces a readable (non-crashing,
     /// non-dotted) fallback label rather than silence.
-    func testUnmappedSymbolFallsBackToAHumanizedName() {
+    @Test func unmappedSymbolFallsBackToAHumanizedName() {
         let label = IconPickerViewController.test_accessibilityLabel(forCuratedSymbol: "some.future-symbol")
-        XCTAssertEqual(label, "some future symbol")
+        #expect(label == "some future symbol")
     }
 }

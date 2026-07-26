@@ -2,15 +2,17 @@
 
 import AppKit
 
-/// The popover's "double-path audio" note (Wave 3 W3-T3,
-/// `BackendEvent.systemDefaultIsAirPlayActive`) — shown when the macOS SYSTEM
-/// default output is itself an AirPlay device WHILE this app is actively
-/// streaming a captured whole-system mix to AirPlay, which risks the same
-/// audio going out twice (echo). A stock system-blue rounded inset card with
-/// an info glyph and a wrapping label — the informational-severity sibling of
-/// `SilenceFallbackBannerView` (which uses system-orange for the more urgent
-/// "speakers unreachable" condition). System colors only; no custom drawing
-/// beyond the layer-backed rounded rect.
+/// The popover's single note-slot banner, originally the "double-path audio"
+/// note (Wave 3 W3-T3, `BackendEvent.systemDefaultIsAirPlayActive`) — shown
+/// when the macOS SYSTEM default output is itself an AirPlay device WHILE this
+/// app is actively streaming a captured whole-system mix to AirPlay, which
+/// risks the same audio going out twice (echo). A stock rounded inset card
+/// with a glyph and a wrapping label, tinted per `Severity`: `.info`
+/// (system-blue, the default) for this and the takeover strip, `.warning`
+/// (system-orange, T-UI's routing-blocked-needs-default note) for the more
+/// urgent tier — the same tint `SilenceFallbackBannerView` uses for "speakers
+/// unreachable", reused here rather than forking a second banner class.
+/// System colors only; no custom drawing beyond the layer-backed rounded rect.
 final class SystemAirPlayNoteBannerView: NSView {
 
     /// An optional trailing call-to-action (T6, takeover status strip state 1:
@@ -24,17 +26,59 @@ final class SystemAirPlayNoteBannerView: NSView {
         let handler: () -> Void
     }
 
+    /// Tint tier (T-UI, routing-blocked-needs-default): the note slot is
+    /// otherwise informational (`.info`, system-blue) — a routing-dead
+    /// condition is urgent enough to reuse `SilenceFallbackBannerView`'s
+    /// system-orange tier instead, without forking a second banner class.
+    enum Severity {
+        case info
+        case warning
+
+        var tintColor: NSColor {
+            switch self {
+            case .info: return .systemBlue
+            case .warning: return .systemOrange
+            }
+        }
+        var backgroundAlpha: CGFloat {
+            switch self {
+            case .info: return 0.12
+            case .warning: return 0.14
+            }
+        }
+        var borderAlpha: CGFloat {
+            switch self {
+            case .info: return 0.35
+            case .warning: return 0.40
+            }
+        }
+        var symbolName: String {
+            switch self {
+            case .info: return "info.circle.fill"
+            case .warning: return "exclamationmark.triangle.fill"
+            }
+        }
+        var accessibilityDescription: String {
+            switch self {
+            case .info: return "Note"
+            case .warning: return "Warning"
+            }
+        }
+    }
+
     /// The copy label, exposed so the panel can read it back for tests.
     let label: NSTextField
     private let actionButton: NSButton?
     private var actionHandler: (() -> Void)?
+    private let severity: Severity
 
-    init(text: String, maxTextWidth: CGFloat, action: Action? = nil) {
+    init(text: String, maxTextWidth: CGFloat, action: Action? = nil, severity: Severity = .info) {
+        self.severity = severity
         let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "info.circle.fill",
-                             accessibilityDescription: "Note")
+        icon.image = NSImage(systemSymbolName: severity.symbolName,
+                             accessibilityDescription: severity.accessibilityDescription)
         icon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
-        icon.contentTintColor = .systemBlue
+        icon.contentTintColor = severity.tintColor
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -72,8 +116,8 @@ final class SystemAirPlayNoteBannerView: NSView {
         layer?.cornerRadius = 11
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
-        layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.35).cgColor
+        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
+        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
 
         var rowViews: [NSView] = [icon, text]
         if let button { rowViews.append(button) }
@@ -115,7 +159,7 @@ final class SystemAirPlayNoteBannerView: NSView {
     /// (layer colors don't auto-resolve dynamic `NSColor`s).
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
-        layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.35).cgColor
+        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
+        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
     }
 }

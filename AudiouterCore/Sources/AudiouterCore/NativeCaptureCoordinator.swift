@@ -1781,6 +1781,45 @@ enum TapRebuildDecision {
     }
 }
 
+/// Pure "effective capture device" resolver — spike caveat A1
+/// (`dev/spikes/aggregate-device/SPIKE-REPORT.md` §3). An aggregate device
+/// cannot nest inside another aggregate: once the PUBLIC "Audiouter" aggregate
+/// (``AggregateOutputDevice/productUID``) is the default output, building the
+/// PRIVATE tap-capture aggregate (`CoreAudioSystemTap.createAggregate`) on top
+/// of it returns `noErr` but yields a ZOMBIE (0 output channels, nominal rate
+/// 0.0) that silently captures nothing — the all-zero-tap family this repo has
+/// been bitten by. So when the default output IS our public aggregate, resolve
+/// THROUGH to the real device it wraps (its main sub-device) and pin the
+/// tap-aggregate there; every other default passes through UNCHANGED, so the
+/// capture topology is byte-identical to today for every non-aggregate default.
+///
+/// This MUST feed BOTH the tap-aggregate build AND the default-device listener's
+/// compare-before-rebuild guard: pin one but compare the other and the guard
+/// reads current=aggregate ≠ tracked=real-device on every notification and
+/// rebuild-storms forever.
+///
+/// Pure (closures for the two CoreAudio reads) so T6 can unit-test both branches
+/// — our-UID → sub-device, normal device → identity — with no CoreAudio, and
+/// kept OUT of `CoreAudioSystemTap`'s `@available(macOS 14.2, *)` gate so it is
+/// testable at the package's macOS 14 floor. If the default is our aggregate but
+/// its main sub-device can't be read, it falls back to the default unchanged —
+/// the same "can't prove otherwise, don't invent a device" safety the rebuild
+/// guards use; the resolver stays deterministic either way, so the two wired
+/// sites still agree and the listener never storms.
+enum EffectiveCaptureDevice {
+    static func resolve(
+        default defaultDevice: AudioObjectID,
+        uidOf: (AudioObjectID) -> String?,
+        mainSubDeviceOf: (AudioObjectID) -> AudioObjectID?
+    ) -> AudioObjectID {
+        guard uidOf(defaultDevice) == AggregateOutputDevice.productUID,
+              let sub = mainSubDeviceOf(defaultDevice) else {
+            return defaultDevice
+        }
+        return sub
+    }
+}
+
 /// The real Core Audio process tap (adapted from `dev/audiocap/TapEngine.swift`,
 /// read-only reference). Creates a whole-system stereo-mixdown `CATapDescription`,
 /// reads its true ASBD, builds a private aggregate device pinned to the default
@@ -1977,7 +2016,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let outputID: AudioObjectID
         let outputUID: String
         do {
-            outputID = try Self.defaultOutputDeviceID()
+            // A1 (spike §3): if the default output is our PUBLIC aggregate, an
+            // aggregate cannot nest in an aggregate — resolve THROUGH to the real
+            // device it wraps and build the tap-aggregate on THAT. Identity
+            // passthrough for every non-aggregate default.
+            let rawDefault = try Self.defaultOutputDeviceID()
+            outputID = EffectiveCaptureDevice.resolve(
+                default: rawDefault,
+                uidOf: { try? Self.readDeviceUID($0) },
+                mainSubDeviceOf: Self.aggregateMainSubDeviceID)
             outputUID = try Self.readDeviceUID(outputID)
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
@@ -2192,7 +2239,19 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             // tap's own rebuild from re-firing a no-op notification that would
             // otherwise cascade a rebuild across every live tap. A failed live read
             // (`nil`) counts as "changed" (fires).
-            let current = try? Self.defaultOutputDeviceID()
+            //
+            // A1 (spike §3): compare against the RESOLVED effective device, the
+            // SAME transform `createAggregate` pins `tappedOutputDeviceID` through.
+            // When the default IS our public aggregate, `tappedOutputDeviceID` is
+            // the wrapped real device, so an un-resolved `current` would read
+            // aggregate ≠ real-device on every notification and rebuild-storm
+            // forever; resolving both sides makes current == tracked and no-ops.
+            let current = (try? Self.defaultOutputDeviceID()).map {
+                EffectiveCaptureDevice.resolve(
+                    default: $0,
+                    uidOf: { try? Self.readDeviceUID($0) },
+                    mainSubDeviceOf: Self.aggregateMainSubDeviceID)
+            }
             guard TapRebuildDecision.shouldRebuild(
                 currentDeviceID: current, trackedDeviceID: self.tappedOutputDeviceID) else { return }
             self.onDefaultDeviceChanged?()
@@ -2442,6 +2501,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             throw NativeCaptureError.deviceLost(reason: "read device UID (\(err))")
         }
         return uid as String
+    }
+
+    /// A1 CoreAudio shell for ``EffectiveCaptureDevice``: the id of `aggregateID`'s
+    /// MAIN sub-device (`kAudioAggregateDevicePropertyMainSubDevice`, a CFString
+    /// UID), translated to an `AudioObjectID`, or `nil` if either read fails.
+    /// Reads the aggregate's ACTUAL main sub-device rather than hardcoding
+    /// built-in speakers, so it stays correct if our public aggregate ever wraps
+    /// a different device (the spike says it always wraps built-in today, but the
+    /// property read costs nothing and removes the assumption).
+    static func aggregateMainSubDeviceID(_ aggregateID: AudioObjectID) -> AudioObjectID? {
+        guard aggregateID != kAudioObjectUnknown else { return nil }
+        var mainAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyMainSubDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var subUID: CFString?
+        let readErr = withUnsafeMutablePointer(to: &subUID) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(aggregateID, &mainAddr, 0, nil, &size, ptr)
+        }
+        guard readErr == noErr, let subUID else { return nil }
+
+        var translateAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var cfUID: CFString? = subUID
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var idSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        let translateErr = withUnsafePointer(to: &cfUID) { qualifier -> OSStatus in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &translateAddr,
+                UInt32(MemoryLayout<CFString?>.size), qualifier, &idSize, &deviceID)
+        }
+        guard translateErr == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
     }
 }
 

@@ -205,6 +205,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// taps into nothing — the app always wires this in practice.
     public var onOpenPTPHelperLoginItems: (() -> Void)?
 
+    /// Called when the user taps the routing-blocked note's "Use
+    /// `AggregateOutputDevice.productName`" button (T-UI) — the app is
+    /// actively routing but the aggregate isn't the Mac's current default
+    /// output, so audio isn't reaching it. The app wires this to whatever
+    /// re-selects the aggregate as the system default output. The user's own
+    /// click is the intent here (Alec's Q6 call), so this does NOT violate
+    /// the "never auto-reselect" rule elsewhere. `nil` (the default) means
+    /// the button, if ever rendered, taps into nothing.
+    public var onReselectAudiouter: (() -> Void)?
+
     /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
     /// (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -602,15 +612,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     var test_localFallbackBannerText: String? { panel.test_bannerText }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3) + takeover status strip (T6)
+    //        + routing-blocked-needs-default warning (T-UI)
     //
-    // Both conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
+    // All three conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
     // — there is only one, never two stacked notes (PLAN-AIRPLAY-COEXISTENCE.md T6).
-    // PRECEDENCE: a takeover status, when present, outranks the double-path guard
-    // note; the double-path note reappears underneath the instant the takeover
-    // status clears. Each condition keeps its own idempotence-check state var
-    // (`systemAirPlayNoteActive` / `takeoverStatus`); `applyNoteSlot()` is the one
-    // place that resolves precedence and actually pushes to the panel, called by
-    // both setters and by the tail of `rebuild()`.
+    // PRECEDENCE, highest first: routing-blocked (T-UI, WARNING severity — audio is
+    // dead right now) outranks the takeover status, which outranks the double-path
+    // guard note; each lower note reappears underneath the instant the one above it
+    // clears. Each condition keeps its own idempotence-check state var
+    // (`routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive`);
+    // `applyNoteSlot()` is the one place that resolves precedence and actually
+    // pushes to the panel, called by every setter and by the tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -628,6 +640,30 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// nothing to explain. Drives the note (see PRECEDENCE above); re-applied on
     /// every `rebuild()` so a rebuild mid-takeover keeps it pinned.
     private var takeoverStatus: TakeoverStatus?
+
+    /// Whether the routing-blocked-needs-default warning (T-UI) is currently
+    /// active: this app is actively routing but `AggregateOutputDevice.productName`
+    /// is NOT the Mac's current default output, so nothing actually reaches it.
+    /// TOP precedence in the note slot (see PRECEDENCE above) — re-applied on
+    /// every `rebuild()` so a rebuild mid-condition keeps it pinned.
+    private var routingBlockedNeedsDefault = false
+
+    /// The routing-blocked warning's exact copy (T-UI, locked design): the
+    /// "Audiouter" token comes from `AggregateOutputDevice.productName` rather
+    /// than a hardcoded string.
+    static var routingBlockedNeedsDefaultText: String {
+        "\(AggregateOutputDevice.productName) isn't your Mac's output device — audio won't play until you switch back."
+    }
+
+    /// Show or clear the routing-blocked-needs-default warning (T-UI). Called
+    /// by the host (`AppDelegate`) directly — a whole-app condition with no
+    /// home on `Device`, same shape as ``setSystemAirPlayNoteActive(_:)``.
+    /// Idempotent: a repeat of the current state is a no-op.
+    public func setRoutingBlockedNeedsDefault(_ active: Bool) {
+        guard active != routingBlockedNeedsDefault else { return }
+        routingBlockedNeedsDefault = active
+        applyNoteSlot()
+    }
 
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
@@ -656,24 +692,40 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private func applyNoteSlot() {
         guard isEffectivelyShown else { return }
         let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action)
+        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
         panel.panelContentDidChangeHeight(animated: true)
         // When not shown, the next `rebuildForOpen()` re-applies this from the
         // tail of `rebuild()`.
     }
 
-    /// What the note slot should currently show: a takeover status (T6) outranks
-    /// the double-path guard (W3-T3); neither active means no note. `action` is
-    /// non-nil only for `.needsApproval` (state 1) — the one state with an actual
-    /// remedy this button can offer.
-    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?) {
+    /// What the note slot should currently show, highest precedence first:
+    /// routing-blocked (T-UI, WARNING — audio is dead right now) outranks a
+    /// takeover status (T6), which outranks the double-path guard (W3-T3);
+    /// none active means no note. `action` is non-nil for routing-blocked (the
+    /// "Use <productName>" button) and for the takeover strip's
+    /// `.needsApproval` (state 1) — the only states with an actual remedy a
+    /// button can offer.
+    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
+        if routingBlockedNeedsDefault {
+            return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
+        }
         if let takeoverStatus {
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus))
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), .info)
         }
         if systemAirPlayNoteActive {
-            return (Self.systemAirPlayNoteText, nil)
+            return (Self.systemAirPlayNoteText, nil, .info)
         }
-        return (nil, nil)
+        return (nil, nil, .info)
+    }
+
+    /// The routing-blocked warning's action button (T-UI, Alec's Q6 — the
+    /// user's own click is their intent, so re-selecting the aggregate here
+    /// does NOT violate "never auto-reselect").
+    private var routingBlockedNeedsDefaultAction: SystemAirPlayNoteBannerView.Action {
+        SystemAirPlayNoteBannerView.Action(
+            title: "Use \(AggregateOutputDevice.productName)",
+            accessibilityLabel: "Use \(AggregateOutputDevice.productName) as the Mac's output device",
+            handler: { [weak self] in self?.onReselectAudiouter?() })
     }
 
     /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
@@ -935,11 +987,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // above dropped it with everything else, so a rebuild that happens WHILE the
         // fallback is active (e.g. a device set change) must restore it.
         panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
-        // Re-pin the note slot (W3-T3 double-path guard / T6 takeover strip) the
-        // same way — resolved through the same PRECEDENCE `applyNoteSlot()` uses,
-        // so a rebuild mid-takeover (or mid-double-path) restores the right one.
+        // Re-pin the note slot (T-UI routing-blocked / T6 takeover strip / W3-T3
+        // double-path guard) the same way — resolved through the same PRECEDENCE
+        // `applyNoteSlot()` uses, so a rebuild mid-condition restores the right one.
         let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action)
+        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
     }
 
     private func orderedDevices() -> [Device] {

@@ -3465,6 +3465,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID)
         guard devErr == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return fallback }
 
+        // Guard against self-referential labeling: if the default output is our
+        // public aggregate, return the wrapped built-in speaker's name instead.
+        // Read the UID inline (the same one-shot HAL read this function already
+        // uses for the name) rather than via `CoreAudioSystemTap.readDeviceUID`,
+        // which is gated `@available(macOS 14.2, *)` and would raise this
+        // function's floor above the package's macOS 14 deployment target.
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var uid: CFString? = nil
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        let uidErr = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &uidAddr, 0, nil, &uidSize, ptr)
+        }
+        if uidErr == noErr, (uid as String?) == AggregateOutputDevice.productUID {
+            if let builtInID = SystemLocalOutputResolver().builtInOutputDevice() {
+                var builtInNameAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioObjectPropertyName,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain)
+                var builtInName: CFString? = nil
+                var builtInNameSize = UInt32(MemoryLayout<CFString?>.size)
+                let builtInNameErr = withUnsafeMutablePointer(to: &builtInName) { ptr -> OSStatus in
+                    AudioObjectGetPropertyData(AudioObjectID(builtInID), &builtInNameAddr, 0, nil, &builtInNameSize, ptr)
+                }
+                if builtInNameErr == noErr, let cf = builtInName {
+                    let str = cf as String
+                    return str.isEmpty ? fallback : str
+                }
+            }
+            return fallback
+        }
+
         var nameAddr = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,

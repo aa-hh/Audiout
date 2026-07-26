@@ -797,8 +797,12 @@ final class PopoverPanelViewController: NSViewController {
     /// takeover status strip state 1 — "needs permission" deep-links to Login
     /// Items & Extensions). Every other note (the double-path guard, and
     /// takeover states 2-4) passes `nil` and gets the plain note this method
-    /// has always rendered.
-    func setSystemAirPlayNote(_ text: String?, action: SystemAirPlayNoteBannerView.Action? = nil) {
+    /// has always rendered. `severity` (T-UI) selects the tint tier — `.info`
+    /// (default) for the double-path guard and takeover strip, `.warning` for
+    /// the routing-blocked-needs-default note.
+    func setSystemAirPlayNote(_ text: String?,
+                               action: SystemAirPlayNoteBannerView.Action? = nil,
+                               severity: SystemAirPlayNoteBannerView.Severity = .info) {
         if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
@@ -809,7 +813,8 @@ final class PopoverPanelViewController: NSViewController {
         let note = SystemAirPlayNoteBannerView(
             text: text,
             maxTextWidth: panelWidth - 28 - 30,
-            action: action)
+            action: action,
+            severity: severity)
         systemAirPlayNoteLabel = note.label
         systemAirPlayNoteView = note
         stackView.insertArrangedSubview(note, at: 0)

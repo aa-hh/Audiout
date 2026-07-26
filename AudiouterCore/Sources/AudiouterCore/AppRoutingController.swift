@@ -198,6 +198,36 @@ public final class AppRoutingController {
         persist()
     }
 
+    /// Revert every route redirecting to a device in `deviceIDs` back to
+    /// `.noRedirect` — a speaker can carry only ONE role at a time (either the
+    /// whole-system "main output" mix OR one app's redirect, never both: the
+    /// AirPlay engine holds one session per receiver, and a second bind is a
+    /// silent no-op). Selecting a speaker into Main Out — or activating a group
+    /// that contains it — is the SENIOR action and wins the speaker, so any
+    /// per-app redirect still pointed at it yields back to "follows main output"
+    /// (where the app rejoins the mix and so still plays on that speaker, now as
+    /// part of the main output rather than a private stream). The coordinating
+    /// layer calls this whenever Main Out membership changes
+    /// (`GroupController.onMainOutMembersChanged`).
+    ///
+    /// Mirrors ``handleDeviceDisappeared(id:)``'s involuntary reset (same
+    /// `.noRedirect` fallback, same batched single `persist()`), generalized to
+    /// a whole set. A no-op — no persist, no `onRoutesDidChange` — when nothing
+    /// currently targets any of `deviceIDs` (including an empty set), so the
+    /// coordinator can call it unconditionally on every selection change.
+    public func clearRoutes(toDevices deviceIDs: Set<String>) {
+        guard !deviceIDs.isEmpty else { return }
+        var changed = false
+        for i in appRoutes.indices {
+            if case .device(let id) = appRoutes[i].destination, deviceIDs.contains(id) {
+                appRoutes[i].destination = .noRedirect
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persist()
+    }
+
     /// Revert EVERY route currently redirecting to a specific AirPlay device
     /// back to `.noRedirect` — called once at Audiouter's own launch, so a
     /// `.device` route never survives a full app restart (a simplification of

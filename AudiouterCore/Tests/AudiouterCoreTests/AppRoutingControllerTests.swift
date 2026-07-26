@@ -112,6 +112,54 @@ import Testing
         #expect(before == after, "a no-op fallback must not rewrite the store")
     }
 
+    // MARK: clearRoutes(toDevices:) — a speaker selected into Main Out wins it
+
+    /// Selecting a speaker into Main Out (or activating a group containing it)
+    /// reverts every redirect pointed at it back to `.noRedirect` — one role per
+    /// speaker, selection is senior — while unrelated routes stay put, and the
+    /// change is persisted. Mirrors `handleDeviceDisappeared`, generalized to a set.
+    @Test func clearRoutesToDevicesRevertsMatchingRoutesAndPersists() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.addRoute(bundleID: "com.spotify.client", displayName: "Spotify")
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.device(id: "living-room"), for: "com.apple.Music")
+        controller.setDestination(.device(id: "living-room"), for: "com.spotify.client")
+        controller.setDestination(.device(id: "office"), for: "com.apple.Safari")
+
+        // "living-room" and (a not-currently-targeted) "kitchen" both join Main Out.
+        controller.clearRoutes(toDevices: ["living-room", "kitchen"])
+
+        #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect)
+        #expect(controller.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination == .noRedirect,
+                "every redirect to a now-Main-Out speaker yields, not just the first")
+        #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination == .device(id: "office"),
+                "a redirect to a speaker NOT in the set is untouched")
+
+        let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
+        #expect(reloaded.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect,
+                "the yield must be persisted")
+    }
+
+    @Test func clearRoutesToDevicesIsNoOpWhenNothingConflicts() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.device(id: "office"), for: "com.apple.Music")
+        var didFire = false
+        controller.onRoutesDidChange = { didFire = true }
+        let fileURL = fileURL(in: dir)
+        let before = try Data(contentsOf: fileURL)
+
+        // Neither an empty set nor a set that matches no route may persist or notify.
+        controller.clearRoutes(toDevices: [])
+        controller.clearRoutes(toDevices: ["living-room"])
+
+        #expect(didFire == false, "a no-op clear must not fire onRoutesDidChange")
+        #expect(try Data(contentsOf: fileURL) == before, "a no-op clear must not rewrite the store")
+    }
+
     // MARK: resetDeviceRoute — a per-app redirect resets when the routed app quits
 
     @Test func resetDeviceRouteRevertsDeviceRedirectToNoRedirectAndPersists() throws {

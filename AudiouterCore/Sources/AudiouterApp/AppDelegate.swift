@@ -391,6 +391,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // no-op mutations never reach the backend. Fired synchronously from a UI
         // mutation (no lock held) → no deadlock with the backend's internal queues.
         appRouting.onRoutesDidChange = { [weak self] in self?.pushAppRoutesToBackend() }
+        // One role per speaker: when Main Out membership changes (a device
+        // selected, or a group activated), any per-app redirect still pointed at
+        // one of those speakers yields back to "follows main output" — selecting
+        // the speaker is the senior action (a receiver holds ONE AirPlay session;
+        // the two roles can't share it). `clearRoutes` no-ops when nothing
+        // conflicts, so this is cheap on every selection change; its change edge
+        // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing down the
+        // now-stale per-app tap. The popover's picker refuses the mirror-image
+        // conflict up front (a Main Out member is never offered as a redirect
+        // target), so the two directions can never build the overlap.
+        groupController.onMainOutMembersChanged = { [weak self] memberIDs in
+            self?.appRouting.clearRoutes(toDevices: memberIDs)
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)

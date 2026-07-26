@@ -91,6 +91,44 @@ import Testing
         #expect(!(backend.devices.first { $0.id == "office" }?.isSelected == true))
     }
 
+    // MARK: onMainOutMembersChanged — the "one role per speaker" hook
+
+    /// Selecting a speaker into Main Out (Selected Devices target) fires
+    /// `onMainOutMembersChanged` with the AirPlay member set, so the coordinating
+    /// layer can yield any per-app redirect still pointed at it. The local Mac is
+    /// never in the set (it's not a backend output).
+    @Test func onMainOutMembersChangedFiresWithSelectedAirPlayMembers() async throws {
+        let (controller, _) = try await makeController()
+        controller.setMainOut(.selectedDevices)
+        // Reset to a clean baseline so the assertion reads only OUR toggle.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        var lastMembers: Set<String>?
+        controller.onMainOutMembersChanged = { lastMembers = $0 }
+
+        _ = controller.setDeviceSelected("office", true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(lastMembers?.contains("office") == true,
+                "selecting a speaker fires with it in the Main Out member set")
+        #expect(lastMembers?.contains("local-mac") != true,
+                "the local Mac is never a backend output, so never a redirect conflict")
+    }
+
+    /// Activating a group fires the hook with every AirPlay member of that group,
+    /// so redirects pointed at any of them yield — the group path, which reaches
+    /// the backend through `activateGroup`, not the Selected-Devices branch.
+    @Test func onMainOutMembersChangedFiresWithGroupMembersOnActivation() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair",
+                                        memberIDs: ["office", "homepod-bed"], memberVolumes: [:]))
+        var lastMembers: Set<String>?
+        controller.onMainOutMembersChanged = { lastMembers = $0 }
+
+        controller.activateGroup(id: "g1")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(lastMembers == ["office", "homepod-bed"],
+                "group activation fires with exactly the group's AirPlay members")
+    }
+
     /// Poll `backend` until `id`'s connection state satisfies `predicate`
     /// (mirrors `PopoverControllerTests.waitForConnectionState`).
     private func waitForConnectionState(

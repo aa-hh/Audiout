@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudiouterSharedUI
 
@@ -12,10 +12,10 @@ import AppKit
 /// collision nudge separates two identical inputs — plus a sanity check that the
 /// four canonical brand apps land in their warm-adapted neighbourhoods.
 @MainActor
-final class AppTetherColorTests: IsolatedTestCase {
+@Suite final class AppTetherColorTests: IsolatedSuite {
 
-    override func setUp() {
-        super.setUp()
+    override init() {
+        super.init()
         AppTetherColor.clearCache()
     }
 
@@ -69,7 +69,7 @@ final class AppTetherColorTests: IsolatedTestCase {
 
     // MARK: (a) Determinism
 
-    func test_determinism_sameIconYieldsIdenticalColorTwice() {
+    @Test func determinism_sameIconYieldsIdenticalColorTwice() {
         let icon = solidIcon(0x1DB954)   // Spotify green
 
         AppTetherColor.clearCache()
@@ -80,71 +80,68 @@ final class AppTetherColorTests: IsolatedTestCase {
         for dark in [true, false] {
             let a = resolvedHSB(first, dark: dark)
             let b = resolvedHSB(second, dark: dark)
-            XCTAssertEqual(a.hue, b.hue, accuracy: 0.001, "hue drift (dark=\(dark))")
-            XCTAssertEqual(a.saturation, b.saturation, accuracy: 0.001, "sat drift (dark=\(dark))")
-            XCTAssertEqual(a.brightness, b.brightness, accuracy: 0.001, "bri drift (dark=\(dark))")
+            #expect(abs(a.hue - b.hue) <= 0.001, "hue drift (dark=\(dark))")
+            #expect(abs(a.saturation - b.saturation) <= 0.001, "sat drift (dark=\(dark))")
+            #expect(abs(a.brightness - b.brightness) <= 0.001, "bri drift (dark=\(dark))")
         }
         // The underlying derivation is value-equal too.
-        XCTAssertEqual(AppTetherColor.deriveTone(from: icon), AppTetherColor.deriveTone(from: icon))
+        #expect(AppTetherColor.deriveTone(from: icon) == AppTetherColor.deriveTone(from: icon))
     }
 
-    func test_determinism_gradientIconIsStable() {
+    @Test func determinism_gradientIconIsStable() {
         let icon = gradientIcon(0xFF7139, 0xC08457)
-        XCTAssertEqual(AppTetherColor.deriveTone(from: icon), AppTetherColor.deriveTone(from: icon))
+        #expect(AppTetherColor.deriveTone(from: icon) == AppTetherColor.deriveTone(from: icon))
     }
 
     // MARK: (b) Pure red clears the failure-red band
 
-    func test_pureRed_steersOutOfFailureBand() {
+    @Test func pureRed_steersOutOfFailureBand() {
         guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(0xFF0000)) else {
-            return XCTFail("pure red should derive a tint")
+            Issue.record("pure red should derive a tint")
+            return
         }
-        XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(tone.hue),
-                       "steered red hue \(tone.hue) still inside the failure band")
-        XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue))
+        #expect(!(AppTetherColor.ReservedBand.failureRed.contains(tone.hue)), "steered red hue \(tone.hue) still inside the failure band")
+        #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue)))
         // Landed on the rose/pink (magenta) side.
-        XCTAssertTrue(tone.hue >= 325 && tone.hue < 350,
-                      "expected rose, got \(tone.hue)")
+        #expect(tone.hue >= 325 && tone.hue < 350, "expected rose, got \(tone.hue)")
     }
 
     // MARK: (c) Pure orange clears the gold/amber band
 
-    func test_pureOrange_steersOutOfGoldBand() {
+    @Test func pureOrange_steersOutOfGoldBand() {
         for hex in [UInt32(0xFFA500), 0xFFC000] {   // orange, amber — both inside [28,68)
             guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(hex)) else {
-                return XCTFail("orange should derive a tint")
+                Issue.record("orange should derive a tint")
+                return
             }
-            XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue),
-                           "steered orange hue \(tone.hue) still inside the gold band")
-            XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(tone.hue))
-            XCTAssertTrue(tone.hue >= AppTetherColor.terracottaLow - 1
-                          && tone.hue <= AppTetherColor.terracottaHigh + 1,
-                          "expected terracotta corridor, got \(tone.hue)")
+            #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue)), "steered orange hue \(tone.hue) still inside the gold band")
+            #expect(!(AppTetherColor.ReservedBand.failureRed.contains(tone.hue)))
+            #expect(tone.hue >= AppTetherColor.terracottaLow - 1
+                          && tone.hue <= AppTetherColor.terracottaHigh + 1, "expected terracotta corridor, got \(tone.hue)")
         }
     }
 
     // MARK: (d) Blue stays blue-ish
 
-    func test_blue_staysBlue() {
+    @Test func blue_staysBlue() {
         for hex in [UInt32(0x1C9BF0), 0x0000FF] {
             guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(hex)) else {
-                return XCTFail("blue should derive a tint")
+                Issue.record("blue should derive a tint")
+                return
             }
-            XCTAssertTrue(tone.hue >= 180 && tone.hue <= 270,
-                          "blue drifted out of the blue range: \(tone.hue)")
-            XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(tone.hue))
-            XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue))
+            #expect(tone.hue >= 180 && tone.hue <= 270, "blue drifted out of the blue range: \(tone.hue)")
+            #expect(!(AppTetherColor.ReservedBand.failureRed.contains(tone.hue)))
+            #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue)))
         }
     }
 
     // MARK: (e) Greyscale hits the neutral fallback
 
-    func test_greyscale_fallsBackToNeutral() {
+    @Test func greyscale_fallsBackToNeutral() {
         for hex in [UInt32(0x808080), 0x2A2A2A, 0xEDEDED] {
-            XCTAssertEqual(AppTetherColor.deriveTone(from: solidIcon(hex)), .neutral,
-                           "grey \(String(hex, radix: 16)) should have no dominant hue")
+            #expect(AppTetherColor.deriveTone(from: solidIcon(hex)) == .neutral, "grey \(String(hex, radix: 16)) should have no dominant hue")
         }
-        XCTAssertEqual(AppTetherColor.deriveTone(from: nil), .neutral)
+        #expect(AppTetherColor.deriveTone(from: nil) == .neutral)
 
         // The emitted colour is the neutral link tone.
         let derived = AppTetherColor.color(forBundleID: "com.example.grey", icon: solidIcon(0x808080))
@@ -152,42 +149,40 @@ final class AppTetherColorTests: IsolatedTestCase {
         for dark in [true, false] {
             let a = resolvedHSB(derived, dark: dark)
             let b = resolvedHSB(expected, dark: dark)
-            XCTAssertEqual(a.hue, b.hue, accuracy: 0.5)
-            XCTAssertEqual(a.saturation, b.saturation, accuracy: 0.01)
-            XCTAssertEqual(a.brightness, b.brightness, accuracy: 0.01)
+            #expect(abs(a.hue - b.hue) <= 0.5)
+            #expect(abs(a.saturation - b.saturation) <= 0.01)
+            #expect(abs(a.brightness - b.brightness) <= 0.01)
         }
     }
 
     // MARK: (f) The nudge helper separates two identical inputs
 
-    func test_nudge_separatesTwoIdenticalIcons() {
+    @Test func nudge_separatesTwoIdenticalIcons() {
         let icon = solidIcon(0x1C9BF0)   // Safari blue, twice
         let colors = AppTetherColor.colors(forKeyedIcons: [("a", icon), ("b", icon)])
         let a = resolvedHSB(colors["a"]!, dark: true)
         let b = resolvedHSB(colors["b"]!, dark: true)
-        XCTAssertGreaterThanOrEqual(AppTetherColor.circularDistance(a.hue, b.hue),
-                                    AppTetherColor.defaultMinimumHueSeparation - 1,
-                                    "identical icons were not nudged apart")
+        #expect(AppTetherColor.circularDistance(a.hue, b.hue) >= AppTetherColor.defaultMinimumHueSeparation - 1, "identical icons were not nudged apart")
     }
 
-    func test_nudge_isDeterministicByKey() {
+    @Test func nudge_isDeterministicByKey() {
         let icon = solidIcon(0x1C9BF0)
         let first = AppTetherColor.colors(forKeyedIcons: [("a", icon), ("b", icon)])
         let second = AppTetherColor.colors(forKeyedIcons: [("b", icon), ("a", icon)])   // reordered input
         for key in ["a", "b"] {
             let x = resolvedHSB(first[key]!, dark: true)
             let y = resolvedHSB(second[key]!, dark: true)
-            XCTAssertEqual(x.hue, y.hue, accuracy: 0.001, "nudge not stable for key \(key)")
+            #expect(abs(x.hue - y.hue) <= 0.001, "nudge not stable for key \(key)")
         }
     }
 
-    func test_nudgedHue_avoidsReservedBandsWhenRotating() {
+    @Test func nudgedHue_avoidsReservedBandsWhenRotating() {
         // A rotation step that would land inside a reserved band must re-steer.
         let taken: [CGFloat] = [200]
         let nudged = AppTetherColor.nudgedHue(200, awayFrom: taken, minimumSeparation: 20)
-        XCTAssertGreaterThanOrEqual(AppTetherColor.circularDistance(200, nudged), 19)
-        XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(nudged))
-        XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(nudged))
+        #expect(AppTetherColor.circularDistance(200, nudged) >= 19)
+        #expect(!(AppTetherColor.ReservedBand.failureRed.contains(nudged)))
+        #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(nudged)))
     }
 
     // MARK: (g) No derived tint ever renders as (near-)black
@@ -198,18 +193,19 @@ final class AppTetherColorTests: IsolatedTestCase {
     /// 0.38), or a gold-steered orange likewise dropped and Increase-Contrast-
     /// darkened (~0.33), used to bottom out dark enough to read as black against
     /// the near-black canvas at the 5pt chip. The legibility floor now caps that.
-    func test_derivedTint_neverDarkerThanLegibilityFloor() {
+    @Test func derivedTint_neverDarkerThanLegibilityFloor() {
         // Darkest inputs: a gold-steered orange (warm, steered) and a cool green.
         let orange = AppTetherColor.deriveTone(from: solidIcon(0xFFA500))
         let green  = AppTetherColor.deriveTone(from: solidIcon(0x1DB954))
         for tone in [orange, green] {
-            guard case .tinted(let t) = tone else { return XCTFail("expected a tint") }
+            guard case .tinted(let t) = tone else {
+                Issue.record("expected a tint")
+                return
+            }
             for dark in [true, false] {
                 for ic in [true, false] {
                     let c = AppTetherColor.components(for: t, dark: dark, increaseContrast: ic)
-                    XCTAssertGreaterThanOrEqual(
-                        c.brightness, AppTetherColor.minimumLegibleBrightness,
-                        "tone \(t) below the legibility floor (dark=\(dark), ic=\(ic))")
+                    #expect(c.brightness >= AppTetherColor.minimumLegibleBrightness, "tone \(t) below the legibility floor (dark=\(dark), ic=\(ic))")
                 }
             }
         }
@@ -218,41 +214,43 @@ final class AppTetherColorTests: IsolatedTestCase {
     /// The floor caps darkness WITHOUT inverting the reserved-band steering it
     /// exists to guarantee: a gold-steered orange stays in the terracotta
     /// corridor and clears both reserved bands even after the brightness cap.
-    func test_legibilityFloor_preservesReservedBandSteering() {
+    @Test func legibilityFloor_preservesReservedBandSteering() {
         guard case .tinted(let t) = AppTetherColor.deriveTone(from: solidIcon(0xFFA500)) else {
-            return XCTFail("orange should derive a tint")
+            Issue.record("orange should derive a tint")
+            return
         }
-        XCTAssertTrue(t.goldSteered, "0xFFA500 should have gold-steered")
-        XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(t.hue))
-        XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(t.hue))
+        #expect(t.goldSteered, "0xFFA500 should have gold-steered")
+        #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(t.hue)))
+        #expect(!(AppTetherColor.ReservedBand.failureRed.contains(t.hue)))
         // Floor binds on the warm-paper variant but leaves the hue untouched.
         let light = AppTetherColor.components(for: t, dark: false, increaseContrast: false)
-        XCTAssertEqual(light.brightness, AppTetherColor.minimumLegibleBrightness, accuracy: 0.0001)
-        XCTAssertEqual(light.hue, t.hue, accuracy: 0.001)
+        #expect(abs(light.brightness - AppTetherColor.minimumLegibleBrightness) <= 0.0001)
+        #expect(abs(light.hue - t.hue) <= 0.001)
     }
 
     // MARK: Appearance variants (light + dark + Increase Contrast)
 
-    func test_toneHasDistinctLightDarkAndIncreaseContrastVariants() {
+    @Test func toneHasDistinctLightDarkAndIncreaseContrastVariants() {
         guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(0x1DB954)) else {
-            return XCTFail()
+            Issue.record()
+            return
         }
         let dark = AppTetherColor.components(for: tone, dark: true, increaseContrast: false)
         let light = AppTetherColor.components(for: tone, dark: false, increaseContrast: false)
         let darkIC = AppTetherColor.components(for: tone, dark: true, increaseContrast: true)
 
         // Same hue across appearances; only lightness/saturation move.
-        XCTAssertEqual(dark.hue, light.hue, accuracy: 0.001)
+        #expect(abs(dark.hue - light.hue) <= 0.001)
         // Text on warm paper is darker than on the warm-dark canvas.
-        XCTAssertLessThan(light.brightness, dark.brightness)
+        #expect(light.brightness < dark.brightness)
         // Increase Contrast pushes the dark variant brighter and a touch more saturated.
-        XCTAssertGreaterThan(darkIC.brightness, dark.brightness)
-        XCTAssertGreaterThanOrEqual(darkIC.saturation, dark.saturation)
+        #expect(darkIC.brightness > dark.brightness)
+        #expect(darkIC.saturation >= dark.saturation)
     }
 
     // MARK: Sanity — the four canonical brand apps land near the spec swatches
 
-    func test_canonicalApps_landInWarmNeighbourhoodsAndClearBands() {
+    @Test func canonicalApps_landInWarmNeighbourhoodsAndClearBands() {
         // (input brand hex, expected warm-adapted hue window)
         let cases: [(name: String, hex: UInt32, low: CGFloat, high: CGFloat)] = [
             ("Spotify", 0x1DB954, 128, 165),   // sage green   (~#6FA98C)
@@ -262,14 +260,12 @@ final class AppTetherColorTests: IsolatedTestCase {
         ]
         for c in cases {
             guard case .tinted(let tone) = AppTetherColor.deriveTone(from: solidIcon(c.hex)) else {
-                return XCTFail("\(c.name) should derive a tint")
+                Issue.record("\(c.name) should derive a tint")
+                return
             }
-            XCTAssertTrue(tone.hue >= c.low && tone.hue <= c.high,
-                          "\(c.name) hue \(tone.hue) outside [\(c.low),\(c.high)]")
-            XCTAssertFalse(AppTetherColor.ReservedBand.failureRed.contains(tone.hue),
-                           "\(c.name) landed in the failure band")
-            XCTAssertFalse(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue),
-                           "\(c.name) landed in the gold band")
+            #expect(tone.hue >= c.low && tone.hue <= c.high, "\(c.name) hue \(tone.hue) outside [\(c.low),\(c.high)]")
+            #expect(!(AppTetherColor.ReservedBand.failureRed.contains(tone.hue)), "\(c.name) landed in the failure band")
+            #expect(!(AppTetherColor.ReservedBand.goldAmber.contains(tone.hue)), "\(c.name) landed in the gold band")
 
             // The warm-adapted output is CALMED (never full brand vividness)
             // but legibly bright AND legibly coloured on the dark canvas —
@@ -278,10 +274,8 @@ final class AppTetherColorTests: IsolatedTestCase {
             // a near-grey smudge; see `test_measuredContrast_clearsWCAGFloor`
             // for the actual WCAG numbers this range was picked against.
             let render = AppTetherColor.components(for: tone, dark: true, increaseContrast: false)
-            XCTAssertTrue(render.saturation > 0.30 && render.saturation <= 0.70,
-                          "\(c.name) saturation \(render.saturation) outside the calmed-but-legible band")
-            XCTAssertTrue(render.brightness >= 0.55 && render.brightness <= 0.85,
-                          "\(c.name) brightness \(render.brightness) off warm-dark range")
+            #expect(render.saturation > 0.30 && render.saturation <= 0.70, "\(c.name) saturation \(render.saturation) outside the calmed-but-legible band")
+            #expect(render.brightness >= 0.55 && render.brightness <= 0.85, "\(c.name) brightness \(render.brightness) off warm-dark range")
         }
     }
 
@@ -318,7 +312,7 @@ final class AppTetherColorTests: IsolatedTestCase {
     /// dark-theme chip is never actually drawn against the light canvas, so
     /// only same-theme pairings are asserted), with and without Increase
     /// Contrast.
-    func test_measuredContrast_clearsWCAGFloor() {
+    @Test func measuredContrast_clearsWCAGFloor() {
         let canvasDark = NSColor(srgbRed: 0x16 / 255.0, green: 0x13 / 255.0, blue: 0x0F / 255.0, alpha: 1)
         let canvasLight = NSColor(srgbRed: 0xF4 / 255.0, green: 0xEF / 255.0, blue: 0xE7 / 255.0, alpha: 1)
         let floor: CGFloat = 3.0
@@ -346,15 +340,13 @@ final class AppTetherColorTests: IsolatedTestCase {
                 let dark = AppTetherColor.components(for: tone, dark: true, increaseContrast: ic)
                 let darkColor = AppTetherColor.srgb(hue: dark.hue, saturation: dark.saturation, brightness: dark.brightness)
                 let darkRatio = contrastRatio(darkColor, canvasDark)
-                XCTAssertGreaterThanOrEqual(darkRatio, floor,
-                                            "\(name) dark ic=\(ic): \(darkRatio):1 vs canvas below the \(floor):1 floor")
+                #expect(darkRatio >= floor, "\(name) dark ic=\(ic): \(darkRatio):1 vs canvas below the \(floor):1 floor")
                 if darkRatio < worstDark.ratio { worstDark = (name, darkRatio) }
 
                 let light = AppTetherColor.components(for: tone, dark: false, increaseContrast: ic)
                 let lightColor = AppTetherColor.srgb(hue: light.hue, saturation: light.saturation, brightness: light.brightness)
                 let lightRatio = contrastRatio(lightColor, canvasLight)
-                XCTAssertGreaterThanOrEqual(lightRatio, floor,
-                                            "\(name) light ic=\(ic): \(lightRatio):1 vs canvas below the \(floor):1 floor")
+                #expect(lightRatio >= floor, "\(name) light ic=\(ic): \(lightRatio):1 vs canvas below the \(floor):1 floor")
                 if lightRatio < worstLight.ratio { worstLight = (name, lightRatio) }
             }
         }
@@ -364,9 +356,7 @@ final class AppTetherColorTests: IsolatedTestCase {
         // worst dark ~3.48:1, a cool-violet hue in the Firefox-globe family
         // the earlier brightness-only floor targeted; worst light ~4.0:1),
         // not sit at 3.0 exactly.
-        XCTAssertGreaterThan(worstDark.ratio, 3.4,
-                             "worst dark-theme case (\(worstDark.name)) has too little headroom above the floor")
-        XCTAssertGreaterThan(worstLight.ratio, 3.9,
-                             "worst light-theme case (\(worstLight.name)) has too little headroom above the floor")
+        #expect(worstDark.ratio > 3.4, "worst dark-theme case (\(worstDark.name)) has too little headroom above the floor")
+        #expect(worstLight.ratio > 3.9, "worst light-theme case (\(worstLight.name)) has too little headroom above the floor")
     }
 }

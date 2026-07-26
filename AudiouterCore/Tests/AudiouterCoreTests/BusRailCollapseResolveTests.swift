@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
 import AppKit
+import Testing
 @testable import AudiouterSharedUI
 
 /// Pure-geometry coverage for the **collapse-reactive rail** (`RailPlan.resolve`,
@@ -19,7 +19,7 @@ import AppKit
 /// Coordinates are non-flipped (y-up): higher y = nearer the top of the panel, so
 /// the origin (Main Audio) sits at a HIGHER y than the device stops below it.
 @MainActor
-final class BusRailCollapseResolveTests: IsolatedTestCase {
+@Suite final class BusRailCollapseResolveTests: IsolatedSuite {
 
     // A three-device span: two through-members then a terminus member, all under
     // the Main Audio ring. Device clip fully expanded (floor below every node).
@@ -41,16 +41,16 @@ final class BusRailCollapseResolveTests: IsolatedTestCase {
 
     // MARK: Behavior 1 — collapsed device section terminates at its header dot
 
-    func testExpandedRailEndsAtLowestNodeNoTerminusDot() {
+    @Test func expandedRailEndsAtLowestNodeNoTerminusDot() {
         let plan = RailPlan.resolve(expandedInput())
-        XCTAssertEqual(plan.origin, .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
+        #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "expanded origin curves into the Main Audio ring")
-        XCTAssertEqual(plan.stops.count, 3, "every in-span node is drawn when expanded")
-        XCTAssertNil(plan.terminusDotY,
+        #expect(plan.stops.count == 3, "every in-span node is drawn when expanded")
+        #expect(plan.terminusDotY == nil,
                      "expanded: the rail ends naturally at its lowest node — no cut dot")
     }
 
-    func testCollapsedDeviceSectionCutsRailWithHeaderDotAndDropsAllNodes() {
+    @Test func collapsedDeviceSectionCutsRailWithHeaderDotAndDropsAllNodes() throws {
         var input = expandedInput()
         // Device body collapsed: clip height 0, floor risen to just under the
         // device header (say y = 452, header at ~455).
@@ -58,17 +58,18 @@ final class BusRailCollapseResolveTests: IsolatedTestCase {
         input.deviceFloorY = 452
         let plan = RailPlan.resolve(input)
 
-        XCTAssertEqual(plan.stops.count, 0,
+        #expect(plan.stops.count == 0,
                        "a collapsed device section draws NONE of its now-hidden nodes")
-        XCTAssertEqual(try XCTUnwrap(plan.terminusDotY), 452, accuracy: 0.001,
+        let terminusDotY = try #require(plan.terminusDotY)
+        #expect(abs(terminusDotY - 452) <= 0.001,
                        "the rail is cut with a terminus dot at the collapsed section floor (its header)")
-        XCTAssertEqual(plan.origin, .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
+        #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "the ORIGIN is untouched — only the far end collapsed (behavior 2 contrast)")
     }
 
     // MARK: Behavior 2 — the origin moves up when the ORIGIN section collapses
 
-    func testCollapsedOriginSectionMovesOriginToHeaderDot() {
+    @Test func collapsedOriginSectionMovesOriginToHeaderDot() {
         var input = expandedInput()
         // Origin (System Audio) body collapsed: clip shrank past the ring, so the
         // ring is no longer inside the band → origin snaps to the header dot.
@@ -76,29 +77,29 @@ final class BusRailCollapseResolveTests: IsolatedTestCase {
         input.originClipBand = 558...560          // ring (500) now BELOW the band
         let plan = RailPlan.resolve(input)
 
-        XCTAssertEqual(plan.origin, .headerDot(y: 560),
+        #expect(plan.origin == .headerDot(y: 560),
                        "a collapsed origin section begins the rail at its own header dot")
-        XCTAssertEqual(plan.railTopY, 560, accuracy: 0.001,
+        #expect(abs(plan.railTopY - 560) <= 0.001,
                        "the vertical rail now starts at the header, not the ring landing")
-        XCTAssertEqual(plan.stops.count, 3,
+        #expect(plan.stops.count == 3,
                        "the device section is still expanded, so all its nodes still draw")
-        XCTAssertNil(plan.terminusDotY, "device end unaffected by the origin collapsing")
+        #expect(plan.terminusDotY == nil, "device end unaffected by the origin collapsing")
     }
 
-    func testOriginStillRidesTheRingWhileItRemainsInsideTheShrinkingBand() {
+    @Test func originStillRidesTheRingWhileItRemainsInsideTheShrinkingBand() {
         var input = expandedInput()
         // Mid-collapse of the origin section: the flag is already set, but the clip
         // band still contains the ring — the origin must NOT snap early (behavior 3).
         input.originSectionCollapsed = true
         input.originClipBand = 470...520          // ring (500) still inside
         let plan = RailPlan.resolve(input)
-        XCTAssertEqual(plan.origin, .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
+        #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "while the ring is still within the clip band the origin stays on the ring")
     }
 
     // MARK: Behavior 3 — the terminus tracks the live clip floor frame-by-frame
 
-    func testTerminusFloorSqueezesContinuouslyWithTheClipHeight() {
+    @Test func terminusFloorSqueezesContinuouslyWithTheClipHeight() throws {
         // Sweep the device clip floor UP through the three node ys; the number of
         // drawn stops and the cut position must track it monotonically — proof the
         // rail squeezes in sync with the live (animating) clip, not a before/after
@@ -108,27 +109,30 @@ final class BusRailCollapseResolveTests: IsolatedTestCase {
         // Floor just above the lowest node (340): that node is clipped, two remain.
         input.deviceFloorY = 360
         var plan = RailPlan.resolve(input)
-        XCTAssertEqual(plan.stops.map(\.y), [420, 380],
+        #expect(plan.stops.map(\.y) == [420, 380],
                        "floor at 360 clips only the lowest node")
-        XCTAssertEqual(try XCTUnwrap(plan.terminusDotY), 360, accuracy: 0.001)
+        var terminusDotY = try #require(plan.terminusDotY)
+        #expect(abs(terminusDotY - 360) <= 0.001)
 
         // Floor risen further (above 380): only the top node remains.
         input.deviceFloorY = 400
         plan = RailPlan.resolve(input)
-        XCTAssertEqual(plan.stops.map(\.y), [420], "floor at 400 clips the lower two nodes")
-        XCTAssertEqual(try XCTUnwrap(plan.terminusDotY), 400, accuracy: 0.001)
+        #expect(plan.stops.map(\.y) == [420], "floor at 400 clips the lower two nodes")
+        terminusDotY = try #require(plan.terminusDotY)
+        #expect(abs(terminusDotY - 400) <= 0.001)
 
         // Floor above every node: the rail is a bare stub to the floor, no nodes.
         input.deviceFloorY = 450
         plan = RailPlan.resolve(input)
-        XCTAssertTrue(plan.stops.isEmpty, "floor above all nodes clips them all")
-        XCTAssertEqual(try XCTUnwrap(plan.terminusDotY), 450, accuracy: 0.001,
+        #expect(plan.stops.isEmpty, "floor above all nodes clips them all")
+        terminusDotY = try #require(plan.terminusDotY)
+        #expect(abs(terminusDotY - 450) <= 0.001,
                        "the cut dot follows the floor exactly as it rises")
     }
 
     // MARK: Behavior 4 — re-expand restores the exact prior geometry
 
-    func testResolveIsPureSoReexpandRestoresIdenticalGeometry() {
+    @Test func resolveIsPureSoReexpandRestoresIdenticalGeometry() {
         let before = RailPlan.resolve(expandedInput())
 
         // Collapse (any intermediate + fully-collapsed state) …
@@ -139,19 +143,20 @@ final class BusRailCollapseResolveTests: IsolatedTestCase {
 
         // … then expand again with the SAME expanded input: identical plan back.
         let after = RailPlan.resolve(expandedInput())
-        XCTAssertEqual(before, after,
+        #expect(before == after,
                        "resolve carries no hidden state — re-expanding restores the exact rail")
     }
 
     // MARK: Guard — a degenerate collapse never puts the dot above the rail start
 
-    func testTerminusDotIsClampedNotAboveRailTop() {
+    @Test func terminusDotIsClampedNotAboveRailTop() throws {
         var input = expandedInput()
         // Pathological: device floor risen ABOVE the ring landing (panel squashed).
         input.deviceSectionCollapsed = true
         input.deviceFloorY = 900
         let plan = RailPlan.resolve(input)
-        XCTAssertEqual(try XCTUnwrap(plan.terminusDotY), plan.railTopY, accuracy: 0.001,
+        let terminusDotY = try #require(plan.terminusDotY)
+        #expect(abs(terminusDotY - plan.railTopY) <= 0.001,
                        "the cut dot is clamped to railTop so it never draws above the origin")
     }
 }

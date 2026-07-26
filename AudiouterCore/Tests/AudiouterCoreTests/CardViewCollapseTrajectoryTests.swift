@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 import AppKit
 @testable import AudiouterPopoverUI
 
@@ -31,7 +32,7 @@ import AppKit
 /// (the controller decides `animated`), so the animated path runs deterministically
 /// here regardless of the CI machine's accessibility settings.
 @MainActor
-final class CardViewCollapseTrajectoryTests: IsolatedTestCase {
+@Suite final class CardViewCollapseTrajectoryTests: IsolatedSuite {
 
     private let headerRowHeight: CGFloat = 28
     private let bodyRowHeight: CGFloat = 24
@@ -82,20 +83,20 @@ final class CardViewCollapseTrajectoryTests: IsolatedTestCase {
     /// The core regression: the FIRST animated collapse of a never-toggled card
     /// must begin its height animation at the EXPANDED height, not snap from 0.
     /// Before the fix, `lastAnimatedStartHeight` would be `0` here (the snap).
-    func testFirstAnimatedCollapseStartsFromExpandedHeightNotZero() throws {
+    @Test func firstAnimatedCollapseStartsFromExpandedHeightNotZero() throws {
         let card = makeLaidOutExpandedCard()
 
         let expandedHeight = card.bodyFittingHeight
-        XCTAssertEqual(expandedHeight, CGFloat(bodyRowCount) * bodyRowHeight, accuracy: 0.5,
-                       "the expanded body is exactly its body rows stacked")
-        XCTAssertGreaterThan(expandedHeight, 0, "precondition: there is a body to collapse")
+        #expect(abs(expandedHeight - CGFloat(bodyRowCount) * bodyRowHeight) <= 0.5,
+                "the expanded body is exactly its body rows stacked")
+        #expect(expandedHeight > 0, "precondition: there is a body to collapse")
 
         card.setBodyCollapsed(true, animated: true)
 
-        let firstStart = try XCTUnwrap(card.lastAnimatedStartHeight,
-                                       "an animated collapse must record its start height")
-        XCTAssertEqual(firstStart, expandedHeight, accuracy: 0.5,
-                       "FIRST collapse must animate DOWN from the expanded height — a 0 here is the snap glitch")
+        let firstStart = try #require(card.lastAnimatedStartHeight,
+                                      "an animated collapse must record its start height")
+        #expect(abs(firstStart - expandedHeight) <= 0.5,
+                "FIRST collapse must animate DOWN from the expanded height — a 0 here is the snap glitch")
     }
 
     /// First-collapse-vs-second-collapse trajectory parity: the height animation
@@ -103,48 +104,47 @@ final class CardViewCollapseTrajectoryTests: IsolatedTestCase {
     /// timing curve — the clip (and thus the rail + body content) occupy identical
     /// geometry at every animation progress point. This is the property whose
     /// absence the user saw as "the first collapse jumps, the rest are fine".
-    func testFirstAndSecondCollapseShareIdenticalStartHeight() throws {
+    @Test func firstAndSecondCollapseShareIdenticalStartHeight() throws {
         let card = makeLaidOutExpandedCard()
 
         let expandedHeight = card.bodyFittingHeight
 
         // First collapse (fresh card, never toggled).
         card.setBodyCollapsed(true, animated: true)
-        let firstStart = try XCTUnwrap(card.lastAnimatedStartHeight)
+        let firstStart = try #require(card.lastAnimatedStartHeight)
 
         // Expand back to the same expanded state …
         card.setBodyCollapsed(false, animated: true)
-        let expandStart = try XCTUnwrap(card.lastAnimatedStartHeight)
-        XCTAssertEqual(expandStart, 0, accuracy: 0.5,
-                       "an expand animates UP from the collapsed floor (0)")
+        let expandStart = try #require(card.lastAnimatedStartHeight)
+        #expect(abs(expandStart - 0) <= 0.5,
+                "an expand animates UP from the collapsed floor (0)")
 
         // … then the second collapse from that identical expanded state.
         card.setBodyCollapsed(true, animated: true)
-        let secondStart = try XCTUnwrap(card.lastAnimatedStartHeight)
+        let secondStart = try #require(card.lastAnimatedStartHeight)
 
-        XCTAssertEqual(firstStart, secondStart, accuracy: 0.5,
-                       "first and second collapse must share the same start height (identical trajectory)")
-        XCTAssertEqual(firstStart, expandedHeight, accuracy: 0.5,
-                       "…and that shared start is the true expanded height, not the stale 0")
+        #expect(abs(firstStart - secondStart) <= 0.5,
+                "first and second collapse must share the same start height (identical trajectory)")
+        #expect(abs(firstStart - expandedHeight) <= 0.5,
+                "…and that shared start is the true expanded height, not the stale 0")
     }
 
     /// The non-animated path (initial build + Reduce Motion) is unaffected: it
     /// applies the end state synchronously and records no animation start height,
     /// so the fix touches ONLY the animated trajectory.
-    func testNonAnimatedCollapseRecordsNoAnimationStart() {
+    @Test func nonAnimatedCollapseRecordsNoAnimationStart() {
         let card = makeLaidOutExpandedCard()
 
         card.setBodyCollapsed(true, animated: false)
-        XCTAssertNil(card.lastAnimatedStartHeight,
-                     "the non-animated end-state path must not record an animation start height")
+        #expect(card.lastAnimatedStartHeight == nil,
+                "the non-animated end-state path must not record an animation start height")
         // The panel settles layout after a non-animated collapse (`fittingSizeSettled`);
         // mirror that so the clip's FRAME reflects the applied end-state constraint.
         card.layoutSubtreeIfNeeded()
-        XCTAssertEqual(card.bodyClipHeight, 0, accuracy: 0.5, "collapsed end state applied synchronously")
+        #expect(abs(card.bodyClipHeight - 0) <= 0.5, "collapsed end state applied synchronously")
     }
 
-    override func tearDown() {
+    deinit {
         windows.removeAll()
-        super.tearDown()
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Foundation
+import Testing
 import CoreFoundation
 @testable import AudiouterCore
 
@@ -18,7 +19,7 @@ import CoreFoundation
 /// exercises the real `CFNotificationCenter` add/remove/deliver path — which is
 /// the part that can dangle — while leaving the production name's correctness
 /// where it necessarily lives: the live gated run.
-final class PermissionStateObserverTests: IsolatedTestCase {
+@Suite final class PermissionStateObserverTests: IsolatedSuite {
 
     // MARK: Fixtures
 
@@ -102,7 +103,7 @@ final class PermissionStateObserverTests: IsolatedTestCase {
 
     /// The core contract: a kick that resolves `.granted` latches the fresh
     /// verdict FIRST and then fires `onBecameGranted`, exactly once.
-    func test_kick_firesOnceOnTheGrantEdge() async {
+    @Test func kick_firesOnceOnTheGrantEdge() async {
         let spawns = SpawnLedger(line: Self.grantedLine)
         let grants = GrantLedger()
         let observer = makeObserver(spawns: spawns, grants: grants)
@@ -111,15 +112,15 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         observer.start()   // the launch trigger: arms + kicks once
         await pollUntil { grants.fires == 1 }
 
-        XCTAssertEqual(grants.fires, 1)
-        XCTAssertEqual(grants.sources, ["PermissionStateObserver.launch"],
-                       "the latch must record WHICH trigger caught the grant")
-        XCTAssertTrue(observer.test_didObserveGrant)
+        #expect(grants.fires == 1)
+        #expect(grants.sources == ["PermissionStateObserver.launch"],
+                "the latch must record WHICH trigger caught the grant")
+        #expect(observer.test_didObserveGrant)
     }
 
     /// One-way, like the latch it feeds: further kicks after the edge neither
     /// re-fire the callback nor re-record the grant.
-    func test_kick_doesNotRefireAfterTheEdge() async {
+    @Test func kick_doesNotRefireAfterTheEdge() async {
         let spawns = SpawnLedger(line: Self.grantedLine)
         let grants = GrantLedger()
         let observer = makeObserver(spawns: spawns, grants: grants)
@@ -131,14 +132,14 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         for _ in 0..<10 { observer.kick(source: "routing_action") }
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(grants.fires, 1, "onBecameGranted fires on the EDGE, once")
-        XCTAssertEqual(grants.sources.count, 1)
+        #expect(grants.fires == 1, "onBecameGranted fires on the EDGE, once")
+        #expect(grants.sources.count == 1)
     }
 
     /// "Then stops kicking": once the edge has been observed, no further kick
     /// spawns a helper — the design must not keep paying a process spawn per
     /// routing action for the rest of the session.
-    func test_kick_stopsSpawningAfterGranted() async {
+    @Test func kick_stopsSpawningAfterGranted() async {
         let spawns = SpawnLedger(line: Self.grantedLine)
         let grants = GrantLedger()
         let observer = makeObserver(spawns: spawns, grants: grants)
@@ -151,14 +152,14 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         for _ in 0..<20 { observer.kick(source: "routing_action") }
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(spawns.spawns, spawnsAtGrant, "no helper spawn after the grant edge")
+        #expect(spawns.spawns == spawnsAtGrant, "no helper spawn after the grant edge")
     }
 
     /// The refusal side of the latch's one-way rule: only `.resolved(.granted)`
     /// may ever latch. A denied/undetermined answer, and every `.unresolved`
     /// reason, mean "we still don't know" — collapsing any of them into a
     /// verdict is the exact bug `SystemAudioCaptureTCC` exists to prevent.
-    func test_kick_neverLatchesOnAnythingButAResolvedGrant() async {
+    @Test func kick_neverLatchesOnAnythingButAResolvedGrant() async {
         for line in [Self.undeterminedLine, "audio=1 screen=1 control=1", "audio=0 screen=0 control=9", "garbage"] {
             let spawns = SpawnLedger(line: line)
             let grants = GrantLedger()
@@ -166,9 +167,9 @@ final class PermissionStateObserverTests: IsolatedTestCase {
             observer.start()
             await pollUntil(timeout: 0.5) { spawns.spawns > 0 }
             try? await Task.sleep(nanoseconds: 150_000_000)
-            XCTAssertEqual(grants.fires, 0, "line: \(line)")
-            XCTAssertEqual(grants.sources, [], "line: \(line)")
-            XCTAssertFalse(observer.test_didObserveGrant, "line: \(line)")
+            #expect(grants.fires == 0, "line: \(line)")
+            #expect(grants.sources == [], "line: \(line)")
+            #expect(!observer.test_didObserveGrant, "line: \(line)")
             observer.stop()
         }
     }
@@ -176,7 +177,7 @@ final class PermissionStateObserverTests: IsolatedTestCase {
     /// An already-granted app has nothing to detect, so a kick must not spawn a
     /// helper at all — this is what keeps a routing action free once the latch
     /// is set.
-    func test_kick_isInertWhenTheGrantIsAlreadyKnownGood() async {
+    @Test func kick_isInertWhenTheGrantIsAlreadyKnownGood() async {
         let spawns = SpawnLedger(line: Self.grantedLine)
         let grants = GrantLedger()
         let observer = makeObserver(spawns: spawns, grants: grants, alreadyGranted: { true })
@@ -186,8 +187,8 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         for _ in 0..<10 { observer.kick(source: "routing_action") }
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(spawns.spawns, 0)
-        XCTAssertEqual(grants.fires, 0)
+        #expect(spawns.spawns == 0)
+        #expect(grants.fires == 0)
     }
 
     // MARK: Burst coalescing (the toggle-spam case, with no timer)
@@ -195,7 +196,7 @@ final class PermissionStateObserverTests: IsolatedTestCase {
     /// A burst of routing actions must NOT spawn a helper each. There is no
     /// debounce timer here by design — `TCCProbeRunner`'s single-flighting is
     /// what bounds a burst of any size to at most two spawns.
-    func test_kick_burstCoalescesToAtMostTwoSpawns() async {
+    @Test func kick_burstCoalescesToAtMostTwoSpawns() async {
         // A slow spawn guarantees the burst genuinely overlaps one in flight,
         // which is the condition single-flighting exists for.
         let spawns = SpawnLedger(line: Self.undeterminedLine)
@@ -207,9 +208,9 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         for _ in 0..<50 { observer.kick(source: "routing_action") }
         try? await Task.sleep(nanoseconds: 600_000_000)
 
-        XCTAssertLessThanOrEqual(spawns.spawns, 2,
-                                 "51 kicks must coalesce — got \(spawns.spawns) spawns")
-        XCTAssertGreaterThan(spawns.spawns, 0, "the burst must still resolve at least once")
+        #expect(spawns.spawns <= 2,
+                "51 kicks must coalesce — got \(spawns.spawns) spawns")
+        #expect(spawns.spawns > 0, "the burst must still resolve at least once")
     }
 
     // MARK: Darwin observer lifecycle
@@ -218,61 +219,62 @@ final class PermissionStateObserverTests: IsolatedTestCase {
     /// the observer, so a missing removal is a dangling pointer with no symptom
     /// until it crashes. This asserts both halves: the notification reaches the
     /// bare C callback while armed, and reaches nothing after `stop()`.
-    func test_darwinObserver_isAddedAndRemoved() {
+    @Test func darwinObserver_isAddedAndRemoved() async {
         let spawns = SpawnLedger(line: Self.undeterminedLine)
         let grants = GrantLedger()
         let name = privateNotificationName()
         let observer = makeObserver(spawns: spawns, grants: grants, notificationName: name)
 
-        XCTAssertFalse(observer.test_isArmed)
+        #expect(!observer.test_isArmed)
         observer.start()
-        XCTAssertTrue(observer.test_isArmed)
+        #expect(observer.test_isArmed)
 
         // The launch kick already spawned once; wait it out so the count below
         // can only reflect the notification.
-        let launchSettled = expectation(description: "launch kick resolved")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { launchSettled.fulfill() }
-        wait(for: [launchSettled], timeout: 2)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         let spawnsBeforePost = spawns.spawns
-        XCTAssertGreaterThan(spawnsBeforePost, 0, "start() performs the launch kick")
+        #expect(spawnsBeforePost > 0, "start() performs the launch kick")
 
         post(name)
-        let delivered = expectation(description: "darwin notification kicked the observer")
-        pollOnMain(deadline: 3, until: { spawns.spawns > spawnsBeforePost }, fulfill: delivered)
-        wait(for: [delivered], timeout: 4)
-        let spawnsAfterPost = spawns.spawns
+        var spawnsAfterPost = spawnsBeforePost
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if spawns.spawns > spawnsBeforePost {
+                spawnsAfterPost = spawns.spawns
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
 
         observer.stop()
-        XCTAssertFalse(observer.test_isArmed)
+        #expect(!observer.test_isArmed)
 
         post(name)
-        let quiet = expectation(description: "no delivery after removal")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { quiet.fulfill() }
-        wait(for: [quiet], timeout: 2)
-        XCTAssertEqual(spawns.spawns, spawnsAfterPost,
-                       "a removed observer must not be called back — a live one is a dangling pointer")
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(spawns.spawns == spawnsAfterPost,
+                "a removed observer must not be called back — a live one is a dangling pointer")
     }
 
     /// `stop()` is idempotent and safe to call when never armed — `deinit` calls
     /// it unconditionally.
-    func test_stop_isIdempotentAndSafeWhenNeverArmed() {
+    @Test func stop_isIdempotentAndSafeWhenNeverArmed() {
         let spawns = SpawnLedger(line: Self.undeterminedLine)
         let observer = makeObserver(spawns: spawns, grants: GrantLedger())
         observer.stop()
         observer.stop()
-        XCTAssertFalse(observer.test_isArmed)
+        #expect(!observer.test_isArmed)
 
         observer.start()
         observer.start()   // idempotent arm
-        XCTAssertTrue(observer.test_isArmed)
+        #expect(observer.test_isArmed)
         observer.stop()
         observer.stop()
-        XCTAssertFalse(observer.test_isArmed)
+        #expect(!observer.test_isArmed)
     }
 
     /// An unarmed observer is completely inert — a routing action that fires
     /// before (or without) arming must not spawn anything.
-    func test_kick_isInertBeforeStart() async {
+    @Test func kick_isInertBeforeStart() async {
         let spawns = SpawnLedger(line: Self.grantedLine)
         let grants = GrantLedger()
         let observer = makeObserver(spawns: spawns, grants: grants)
@@ -281,8 +283,8 @@ final class PermissionStateObserverTests: IsolatedTestCase {
         observer.kick(source: "routing_action")
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(spawns.spawns, 0)
-        XCTAssertEqual(grants.fires, 0)
+        #expect(spawns.spawns == 0)
+        #expect(grants.fires == 0)
     }
 
     // MARK: Darwin post/poll helpers
@@ -292,19 +294,5 @@ final class PermissionStateObserverTests: IsolatedTestCase {
             CFNotificationCenterGetDarwinNotifyCenter(),
             CFNotificationName(rawValue: name as CFString),
             nil, nil, true)
-    }
-
-    /// Re-checks `until` on the MAIN run loop, which is also what lets a Darwin
-    /// notification be delivered while a synchronous `wait(for:)` is pending.
-    private func pollOnMain(
-        deadline: TimeInterval, until condition: @escaping () -> Bool, fulfill: XCTestExpectation
-    ) {
-        let end = Date().addingTimeInterval(deadline)
-        func step() {
-            if condition() { fulfill.fulfill(); return }
-            guard Date() < end else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { step() }
-        }
-        step()
     }
 }

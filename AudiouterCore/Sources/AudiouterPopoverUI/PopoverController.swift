@@ -2272,9 +2272,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     public func test_dragMainOutMaster(to value: Int) {
-        groupController?.beginMainOutMasterDrag()
         groupController?.setMainOutMasterVolume(value)
-        groupController?.endMainOutMasterDrag()
         refreshMainOutRow()
     }
 
@@ -2282,9 +2280,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if groupController?.activeGroupID != groupID {
             groupController?.setMainOut(.group(id: groupID))
         }
-        groupController?.beginMasterDrag()
-        groupController?.setMasterVolume(value)
-        groupController?.endMasterDrag()
+        groupController?.setMainOutMasterVolume(value)
     }
 }
 
@@ -2351,17 +2347,9 @@ extension PopoverController: MainOutRowView.Delegate {
         rebuild()
     }
 
-    public func mainOutRowBeginMasterDrag(_ row: MainOutRowView) {
-        groupController?.beginMainOutMasterDrag()
-    }
-
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
-    }
-
-    public func mainOutRowEndMasterDrag(_ row: MainOutRowView) {
-        groupController?.endMainOutMasterDrag()
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool) {

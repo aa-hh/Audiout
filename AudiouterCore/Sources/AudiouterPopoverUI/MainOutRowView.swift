@@ -33,9 +33,7 @@ public final class MainOutRowView: NSView {
 
     public protocol Delegate: AnyObject {
         func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget)
-        func mainOutRowBeginMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int)
-        func mainOutRowEndMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool)
     }
 
@@ -579,18 +577,15 @@ public final class MainOutRowView: NSView {
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
-    // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
         let event = NSApp.currentEvent
         if !isDraggingMaster {
             isDraggingMaster = true
-            delegate?.mainOutRowBeginMasterDrag(self)
         }
         delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
         readoutLabel.stringValue = "\(sender.integerValue)%"
         if event?.type == .leftMouseUp {
             isDraggingMaster = false
-            delegate?.mainOutRowEndMasterDrag(self)
         }
     }
 
@@ -724,9 +719,7 @@ public final class MainOutRowView: NSView {
 
     /// Simulate a master drag to `value`.
     public func test_dragMaster(to value: Int) {
-        delegate?.mainOutRowBeginMasterDrag(self)
         delegate?.mainOutRow(self, didSetMaster: value)
-        delegate?.mainOutRowEndMasterDrag(self)
     }
 }
 

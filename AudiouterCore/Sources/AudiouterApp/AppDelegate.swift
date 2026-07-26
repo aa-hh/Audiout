@@ -1224,21 +1224,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.updateAppLevel(rms, for: bundleID)
             return
         case .systemVolumeChanged(let volume):
-            // The volume keys move the system output = the local "Current Device",
-            // which the capture tap mutes while streaming — so they were adjusting a
-            // device the user couldn't hear. Hand the fact to the routing brain, which
-            // mirrors it onto the Main Out master so the keys drive what's actually
-            // playing (and no-ops in passthrough, where the keys already did the job).
+            // The volume keys moved the system output, which IS Main Out's own value.
+            // Nothing is redistributed: Main is a stored master gain, and every device
+            // picks the change up because `Main × Group × Device` is formed at the
+            // write boundary. So the keys drive whatever is actually playing without
+            // any device's own level being touched.
+            //
+            // The system hardware is ALREADY at `volume` — this only brings Main into
+            // agreement and re-pushes the dependent gains. It deliberately writes no
+            // hardware, which is what keeps the keys from feeding back on themselves.
             //
             // This delegate is the whole reason the backend can stay below the routing
             // brain: `NativeBackend` owns the system-volume listener but must not know
             // `GroupController` exists, so it publishes the fact and this — already the
             // place backend events meet app-level controllers — does the wiring.
-            groupController.mirrorSystemVolumeToMainOut(volume)
+            groupController.applyExternalSystemVolume(volume)
             log("event: \(describe(event))")
-            // Falls through to the repaint below. The mirror's own `setVolume` calls
-            // echo back as `deviceUpdated`s and repaint again with the settled values;
-            // this pass just keeps the master readout honest in the meantime.
+            // Falls through to the repaint below, to keep the master readout honest.
         case .routedApps(let deviceID, let appNames):
             // The live "which app streams here now" map (T6). T9: store it on the
             // popover so the device row's routing sublabel can prefer this
@@ -1327,7 +1329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .appLevel(let bundleID, let rms):
             return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
-            return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
+            return "systemVolumeChanged(\(volume)) — syncing Main Out"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):

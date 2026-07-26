@@ -264,7 +264,7 @@ import AppKit
         #expect(popover.test_mainOutRow.test_masterValue == 50, "the Main Out slider shows the current target's master")
     }
 
-    @Test func mainOutMasterDragScalesMembersProportionally() async throws {
+    @Test func mainOutMasterIsIndependentOfMemberVolumes() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
@@ -272,8 +272,9 @@ import AppKit
         backend.setVolume(40, for: "office"); backend.setVolume(80, for: "homepod-bed"); await drain()
         #expect(controller.mainOutMasterVolume == 60)
         popover.test_dragMainOutMaster(to: 30); await drain()
-        #expect(backend.devices.first { $0.id == "office" }?.volume == 20)
-        #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 40)
+        #expect(controller.mainOutMasterVolume == 30, "master volume is the dragged value")
+        #expect(backend.devices.first { $0.id == "office" }?.volume == 40, "member volumes remain unchanged")
+        #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 80, "member volumes remain unchanged")
     }
 
     @Test func saveActionDisabledWhenSetEqualsGroup() async throws {

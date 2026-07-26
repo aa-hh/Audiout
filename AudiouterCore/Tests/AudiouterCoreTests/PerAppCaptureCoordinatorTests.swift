@@ -486,6 +486,63 @@ extension SerializedSharedState {
         coordinator.stop(bundleID: "com.example.music")
     }
 
+    // MARK: - Telemetry: two coordinator instances must be tellable apart.
+    //
+    // The app runs TWO PerAppCaptureCoordinators over the SAME bundle IDs
+    // (NativeBackend.perAppCapture, routing; NativeBackend.meteringCapture,
+    // the `.unmuted` metering-only one), both emitting `capturePA` transitions
+    // into one telemetry stream. Undiscriminated, their lines interleave into
+    // a sequence no single state machine could produce — a `from: capturing`
+    // with no preceding `to: capturing` — which is exactly the "unexplained"
+    // anomaly chased in docs/plans/PLAN-LIVE-TEST-HANDOFF-2026-07-25.md. The
+    // `coordinator` field is what makes the two streams separable again.
+
+    @Test func transitionTelemetryIdentifiesWhichCoordinatorInstanceEmittedIt() throws {
+        let routingTap = FakeProcessTap()
+        let meteringTap = FakeProcessTap()
+        let (routingResolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let (meteringResolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let routing = makeCoordinator(
+            makeTap: { routingTap }, processResolver: routingResolver, muteBehavior: .mutedWhenTapped)
+        let metering = PerAppCaptureCoordinator(
+            makeTap: { meteringTap }, processResolver: meteringResolver,
+            muteBehavior: .unmuted, name: "AudiouterMeter", installsProcessListListener: false)
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Both instances drive the SAME bundle ID, as production does.
+        routing.start(bundleID: "com.example.music")
+        metering.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = routing.state(for: "com.example.music") { return true }; return false }
+        waitFor { if case .capturing = metering.state(for: "com.example.music") { return true }; return false }
+        // Only the metering instance stops — the interleaving that produced the
+        // "capturing -> stopping with no prior -> capturing" misread.
+        metering.stop(bundleID: "com.example.music")
+
+        Telemetry._installTestSink(nil) // flush barrier
+
+        let transitions: [[String: Any]] = spy.all.compactMap {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any],
+                  obj["evt"] as? String == "transition" else { return nil }
+            return obj
+        }
+        #expect(!transitions.isEmpty, "expected capturePA transition lines among: \(spy.all)")
+        for line in transitions {
+            #expect(line["coordinator"] != nil, "every transition must name its instance: \(line)")
+        }
+        let names = Set(transitions.compactMap { $0["coordinator"] as? String })
+        #expect(names == ["AirPlayController", "AudiouterMeter"],
+                "the two instances must be distinguishable, got \(names)")
+        // The stop belongs to the metering instance ALONE — the whole point.
+        let stopping = transitions.filter { $0["to"] as? String == "stopping" }
+        #expect(stopping.count == 1)
+        #expect(stopping.first?["coordinator"] as? String == "AudiouterMeter")
+
+        routing.stop(bundleID: "com.example.music")
+    }
+
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
     // (.creatingTap) must be coalesced (Slot.pendingDeviceChange) and replayed once the
     // rebuild lands in .capturing, not dropped.

@@ -102,6 +102,22 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private let makeTap: @Sendable () -> ProcessAudioTap
     private let processResolver: AudioProcessResolver
     private let muteBehavior: TapMuteBehavior
+    /// This instance's short label — the SAME string that names its private
+    /// tap/aggregate devices — stamped on every `capturePA` transition as
+    /// `coordinator`.
+    ///
+    /// There is more than ONE live `PerAppCaptureCoordinator` in the app
+    /// (`NativeBackend.perAppCapture`, the routing one, and
+    /// `NativeBackend.meteringCapture`, the `.unmuted` metering-only one),
+    /// both logging `capturePA` transitions for the SAME bundle IDs into the
+    /// SAME telemetry stream. Without a discriminator the two interleave into
+    /// sequences that look impossible for one state machine — a
+    /// `from: capturing` with no preceding `to: capturing`, or a long "gap"
+    /// that is really one instance sitting healthily in `.capturing` while the
+    /// other churns. That misread cost a live-test session hours (see
+    /// `docs/plans/PLAN-LIVE-TEST-HANDOFF-2026-07-25.md`); the field is what
+    /// makes the log readable.
+    private let name: String
     /// Whether `start(bundleID:)` arms the REAL, live system-wide
     /// ``kAudioHardwarePropertyProcessObjectList`` listener
     /// (``installProcessListListenerLocked()``). Defaults to `true` in the
@@ -231,7 +247,8 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 }
             },
             processResolver: processResolver,
-            muteBehavior: muteBehavior
+            muteBehavior: muteBehavior,
+            name: name
         )
     }
     #endif
@@ -246,12 +263,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        name: String = "AirPlayController",
         installsProcessListListener: Bool = true,
         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
+        self.name = name
         self.installsProcessListListener = installsProcessListListener
         self.membershipDebounceInterval = membershipDebounceInterval
     }
@@ -709,6 +728,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         let previous = slot.state
         slot.state = newState
         var fields = [
+            // WHICH coordinator instance — see the `name` property's doc. Two
+            // instances share this category; without this field their lines
+            // interleave into a sequence no single state machine could produce.
+            "coordinator": name,
             "bundleID": bundleID,
             "from": Self.telemetryLabel(for: previous),
             "to": Self.telemetryLabel(for: newState),

@@ -4746,7 +4746,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///   different things on the two protocols.
     private func engineVolume(forID id: String, uiVolume: Int) -> Double {
         let fraction = Double(uiVolume.clampedToVolume) / 100.0 * masterGainFraction
-        return (known[id]?.supportsAirPlay2 ?? true)
+        let isAirPlay2 = known[id]?.supportsAirPlay2 ?? true
+        // ZERO MEANS SILENT, from whichever stage produced it — Main, the group, or
+        // the device's own fader. Without this an AP1 receiver floors at
+        // `airPlay1MinVolumeDB` (−12 dB), which is plainly audible: pulling Main to
+        // 0 would duck the room but not silence it. Reuses the true-mute sentinel
+        // the mute path already sends (`setMuted`, ~1548) so "muted" and "turned all
+        // the way down" reach an AP1 receiver as the same −144 dB, instead of
+        // disagreeing by 12 dB.
+        //
+        // Deliberately EXACT zero, not an epsilon: the inputs are integer percents,
+        // so `0/100` is exactly 0.0 and any audible-but-tiny value must still take
+        // the curve. And deliberately only the zero case — whether −12 dB is the
+        // right floor for the AUDIBLE range is a by-ear question against real
+        // hardware (see ``airPlay1MinVolumeDB``), untouched here.
+        if fraction == 0 { return isAirPlay2 ? Self.engineVolume(fraction: 0) : -1.0 }
+        return isAirPlay2
             ? Self.engineVolume(fraction: fraction)
             : Self.engineVolumeAP1(fraction: fraction)
     }
@@ -4951,8 +4966,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
+            // Via `engineVolume(forID:)` rather than the static AP2-only map, so a
+            // muted AP1 receiver that drops and reconnects comes back TRULY silent
+            // (−144 dB) instead of at the curve's −30 dB floor — quietly audible,
+            // which is not what "muted" means. `setMuted` already sends the sentinel
+            // on this device; this path had been missing it.
             stashedVolume[id] = seed
-            pushVolume(outputID, engineValue: Self.engineVolume(0))
+            pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: 0))
         } else {
             pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: seed))
         }

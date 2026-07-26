@@ -1299,6 +1299,73 @@ extension SerializedSharedState {
                        "Main 40 × device 50 must reach the engine as ONE Double product (0.40 × 0.50 = 0.20), with no intermediate rounding")
     }
 
+    // MARK: Zero means silent — on AirPlay 1 too
+
+    /// Pulling MAIN to 0 must silence an AirPlay-1 receiver, not merely duck it.
+    /// The AP1 perceptual curve floors at `airPlay1MinVolumeDB` (−12 dB) so that
+    /// the whole slider stays usable on wide-mixer RAOP hardware — but that floor
+    /// applied at zero too, leaving an AirPort Express plainly audible with the
+    /// master all the way down. Effective zero now takes the same true-mute
+    /// sentinel the mute path sends (−1.0 ⇒ −144 dB).
+    @Test func mainAtZeroTrulySilencesAnAirPlay1Receiver() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "Main at 0 must send AP1's true-mute sentinel, not the curve's −12 dB floor")
+        #expect(!engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.6) < 0.0001 },
+                       "0.6 is what the curve returns at zero — exactly the audible floor this fixes")
+    }
+
+    /// The same guarantee reached from the OTHER stage: the device's own fader at 0
+    /// with Main wide open. Zero is zero whichever stage produced it, because the
+    /// check is on the formed product rather than on any single input.
+    @Test func deviceFaderAtZeroTrulySilencesAnAirPlay1Receiver() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setVolume(0, for: device.id)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == -1.0 },
+                       "a device's own fader at 0 silences AP1 too — the check is on the product, not on Main")
+    }
+
+    /// An AP2 receiver keeps taking plain 0.0 at effective zero: the sentinel is an
+    /// AirPlay-1 protocol affordance, and sending a negative value to AP2 would be
+    /// meaningless. Guards against "fixing" zero by making it protocol-blind.
+    @Test func effectiveZeroStaysPlainZeroOnAirPlay2() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
+        #expect(!engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 },
+                       "the true-mute sentinel is AP1-only; AP2 takes plain 0.0")
+    }
+
     /// A Main/Group gain change RE-PUSHES every currently-added output's wire
     /// level — and, the other half of the same invariant, leaves every one of
     /// their OWN stored `Device.volume`s exactly where the user left them. This is

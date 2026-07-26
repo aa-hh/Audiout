@@ -186,22 +186,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// open, and every routing action.
     private let permissionObserver = PermissionStateObserver()
 
-    /// Whether a mid-session grant should ALSO resume whole-system speaker
-    /// streaming, not just per-app routes. False at launch and true from the
-    /// first wake onward — the user's locked resume scope:
-    ///  - **Launch:** per-app routes only. `AudiouterCore/AGENTS.md` records the
-    ///    deliberate product decision that a previously-selected device never
-    ///    auto-streams at launch (`RoutingStore` is write-only at launch), so
-    ///    force-restarting the whole-system gate there would resurrect a
-    ///    selection the user never re-made this session.
-    ///  - **Wake:** both. Sleep is explicitly a transient dropout, never a
-    ///    deselection (`NativeBackend`'s sleep/wake section keeps
-    ///    `expectedSelected` intact across it), so whatever was streaming before
-    ///    sleep is still what the user asked for.
-    /// ``PermissionStateObserver/onBecameGranted`` fires at most once, so this
-    /// flag's value AT THAT MOMENT decides the scope.
-    private var permissionResumeIncludesWholeSystem = false
-
     /// Whether `backend.start()` has run. On first-run native the backend start
     /// (and its Bonjour discovery, which triggers the Local Network prompt) is
     /// DEFERRED until onboarding is dismissed, so the prompt is primed by the
@@ -434,10 +418,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
+        // A persisted `.device` redirect must never survive a full Audiouter
+        // restart (simplification of the app-quit reset, scaled to every route
+        // at once) — mirrors the existing "the live routing set is not
+        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
+        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
+        // below so the backend never sees a stale `.device` route even
+        // transiently at launch.
+        appRouting.clearAllDeviceRoutes()
         // Seed the backend with the persisted route table + excluded set (T7). A
-        // prune above would already have pushed via `onRoutesDidChange`, but that
-        // fires only when something changed — this unconditional push syncs the
-        // loaded routes even when nothing was pruned.
+        // prune/clear above would already have pushed via `onRoutesDidChange`, but
+        // that fires only when something changed — this unconditional push syncs
+        // the loaded routes even when nothing was pruned/cleared.
         pushAppRoutesToBackend()
 
         // A routed app quitting now RESETS its route (product decision 2026-07-22):
@@ -594,14 +586,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // launch has nothing to detect (`kick` would short-circuit on every
         // trigger anyway), and leaving it unarmed also leaves the Darwin
         // registration — and its unretained back-pointer — unmade.
+        // NOTE: the observer's ONLY job is to latch the fresh grant
+        // (`SystemAudioCaptureTCC.recordFreshGrant`), so `isGranted()` starts
+        // answering true in THIS process — a mid-session grant is otherwise
+        // invisible to it for the process's whole life (the TCC read is
+        // process-lifetime cached). Nothing auto-resumes off the back of it:
+        // the app deliberately starts empty, per-app `.device` routes are
+        // cleared at launch (`AppRoutingController.clearAllDeviceRoutes()`),
+        // and the user re-picks a destination themselves. The latch is what
+        // makes that re-pick actually produce audio without a relaunch.
         if SystemAudioCaptureTCC.effectiveStatus() != .granted {
-            permissionObserver.onBecameGranted = { [weak self] in
-                // Fires on the helper spawn's completion thread; every resume
-                // path below touches main-actor state, so hop first.
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.resumeCaptureAfterPermissionGrant() }
-                }
-            }
             permissionObserver.start()
         }
 
@@ -626,39 +620,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.auditRequiredPermissionsIfNeeded()
-                // T6-rev, wake trigger: from here on a mid-session grant resumes
-                // BOTH per-app and whole-system capture — see
-                // `permissionResumeIncludesWholeSystem`. Set before the kick so
-                // a resolution that lands immediately already sees the wider
-                // scope.
-                self.permissionResumeIncludesWholeSystem = true
+                // Re-check the grant on wake so the latch is current. This does
+                // NOT resume anything — the app's own sleep/wake reconnect
+                // (`NativeBackend.handleSystemDidWake`) is what brings a live
+                // stream back; this only keeps `isGranted()` honest.
                 self.permissionObserver.kick(source: "wake")
             }
-        }
-    }
-
-    /// The one-shot response to the system-audio grant finally being PROVEN
-    /// (T6-rev), fired from ``PermissionStateObserver/onBecameGranted`` once
-    /// `SystemAudioCaptureTCC.recordFreshGrant(source:)` has already latched —
-    /// so every tap started from here passes the `isGranted()` gate that had
-    /// been refusing them.
-    ///
-    /// Both resume paths exist because a refusal strands each of them in its own
-    /// way, with no recovery of its own: the whole-system gate believes it is
-    /// already running (so every later reconcile short-circuits), and an
-    /// unchanged per-app route table produces an empty start set. See
-    /// `NativeBackend.forceCaptureGateReevaluation()` /
-    /// `resumeRefusedAppCaptures()` for each trap in full.
-    @MainActor
-    private func resumeCaptureAfterPermissionGrant() {
-        guard let native = backend as? NativeBackend else { return }
-        // Per-app routes always: restoring a route the user configured is not
-        // the same as re-opening a stream they never re-selected this session.
-        native.resumeRefusedAppCaptures()
-        // Whole-system only after a wake (see `permissionResumeIncludesWholeSystem`
-        // for why launch deliberately does NOT).
-        if permissionResumeIncludesWholeSystem {
-            native.forceCaptureGateReevaluation()
         }
     }
 

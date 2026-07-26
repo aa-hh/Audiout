@@ -56,10 +56,17 @@ public final class PermissionStateObserver: @unchecked Sendable {
 
     /// Fired EXACTLY ONCE, on the transition edge, after
     /// ``SystemAudioCaptureTCC/recordFreshGrant(source:)`` has already been
-    /// recorded — so a handler that immediately re-drives capture sees
-    /// `SystemAudioCaptureTCC.isGranted() == true` and its taps are no longer
-    /// refused. Called on an ARBITRARY thread (the helper spawn's completion
+    /// recorded. Called on an ARBITRARY thread (the helper spawn's completion
     /// thread); a main-thread consumer must hop itself.
+    ///
+    /// NOTE: production currently sets no handler, deliberately. Nothing
+    /// auto-resumes audio when the grant lands — the app starts empty, per-app
+    /// `.device` routes are cleared at launch, and the user re-picks a
+    /// destination themselves. The LATCH is the whole point of this type: it is
+    /// what makes that re-pick work immediately instead of needing a relaunch.
+    /// This hook remains as a tested seam for a future consumer that genuinely
+    /// needs the edge; do not wire resume behaviour back onto it without
+    /// re-opening that product decision.
     public var onBecameGranted: (@Sendable () -> Void)? {
         get { lock.withLock { _onBecameGranted } }
         set { lock.withLock { _onBecameGranted = newValue } }

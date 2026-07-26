@@ -146,4 +146,32 @@ public final class AppRoutingController {
         guard changed else { return }
         persist()
     }
+
+    /// Revert EVERY route currently redirecting to a specific AirPlay device
+    /// back to `.noRedirect` — called once at Audiouter's own launch, so a
+    /// `.device` route never survives a full app restart (a simplification of
+    /// the app-quit-triggered `resetDeviceRoute(bundleID:)`, scaled to "all
+    /// routes at once" instead of one app). Mirrors the discipline already
+    /// applied to the live routing set (`RoutingStore` is write-only at
+    /// launch — see `AudiouterCore/AGENTS.md`): a persisted `.device` route
+    /// surviving a restart while its target was offline the whole time is the
+    /// same stale intent, just at the per-app level.
+    ///
+    /// `.noRedirect` and `.currentDevice` routes are left alone (only
+    /// `.isDeviceRoute` routes are touched), and this deliberately does NOT
+    /// touch `clearedDeviceRouteMemory` — that map backs the narrower
+    /// per-app-quit "Resume → <device>" offer, a separate mechanism from this
+    /// broader launch-time clear. Batches every changed route into exactly one
+    /// `persist()` / `onRoutesDidChange` fire, not one per route.
+    public func clearAllDeviceRoutes() {
+        var changed = false
+        for i in appRoutes.indices {
+            if appRoutes[i].destination.isDeviceRoute {
+                appRoutes[i].destination = .noRedirect
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persist()
+    }
 }

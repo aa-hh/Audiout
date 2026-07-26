@@ -147,6 +147,77 @@ final class AppRoutingControllerTests: XCTestCase {
         XCTAssertEqual(before, after, "no-op resets must not rewrite the store")
     }
 
+    // MARK: clearAllDeviceRoutes — every `.device` route reverts to `.noRedirect` at launch
+
+    /// Every `.device`-routed app reverts to `.noRedirect`; `.noRedirect` and
+    /// `.currentDevice` routes are left untouched, and the reset persists so a
+    /// reloaded controller (simulating the NEXT launch) sees it too.
+    func testClearAllDeviceRoutesRevertsOnlyDeviceRoutesAndPersists() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
+        controller.addRoute(bundleID: "com.spotify.client", displayName: "Spotify")
+        controller.setDestination(.device(id: "office"), for: "com.spotify.client")
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+        controller.addRoute(bundleID: "com.apple.TextEdit", displayName: "TextEdit") // stays .noRedirect
+
+        controller.clearAllDeviceRoutes()
+
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .noRedirect)
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination, .noRedirect)
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination, .currentDevice,
+                       "a deliberate 'play on this Mac' pick must survive the launch-time clear")
+        XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.apple.TextEdit" }?.destination, .noRedirect)
+
+        let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
+        XCTAssertEqual(reloaded.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination, .noRedirect,
+                       "the clear must persist")
+        XCTAssertEqual(reloaded.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination, .noRedirect,
+                       "the clear must persist")
+    }
+
+    /// A call with no `.device` routes present at all is a true no-op: it must
+    /// not rewrite the store and must not fire `onRoutesDidChange`.
+    func testClearAllDeviceRoutesWithNoDeviceRoutesIsNoOpAndDoesNotPersist() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music") // stays .noRedirect
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+        let fileURL = fileURL(in: dir)
+        let before = try Data(contentsOf: fileURL)
+        var fireCount = 0
+        controller.onRoutesDidChange = { fireCount += 1 }
+
+        controller.clearAllDeviceRoutes()
+
+        let after = try Data(contentsOf: fileURL)
+        XCTAssertEqual(before, after, "a no-op clear must not rewrite the store")
+        XCTAssertEqual(fireCount, 0, "a no-op clear must not fire onRoutesDidChange")
+    }
+
+    /// Batching: with MULTIPLE `.device` routes present, the whole operation
+    /// must fire `onRoutesDidChange` exactly once, not once per cleared route.
+    func testClearAllDeviceRoutesFiresOnRoutesDidChangeExactlyOnce() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
+        controller.addRoute(bundleID: "com.spotify.client", displayName: "Spotify")
+        controller.setDestination(.device(id: "office"), for: "com.spotify.client")
+        controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
+        controller.setDestination(.device(id: "kitchen"), for: "org.mozilla.firefox")
+
+        var fireCount = 0
+        controller.onRoutesDidChange = { fireCount += 1 }
+
+        controller.clearAllDeviceRoutes()
+
+        XCTAssertEqual(fireCount, 1, "clearing several device routes in one call must fire the change signal exactly once")
+        XCTAssertEqual(controller.routedAppCount, 0)
+    }
+
     // MARK: Duplicate addRoute is a no-op
 
     func testDuplicateAddRouteIsNoOp() {

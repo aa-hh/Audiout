@@ -713,23 +713,17 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
 
     /// The exact `reason` the pre-tap TCC gate throws with when
     /// `SystemAudioCaptureTCC.isGranted()` refuses (see `beginStart`'s gate).
-    /// Named rather than inlined so ``isPermissionRefusal`` below identifies it
-    /// by a shared constant instead of by re-typing the prose — a silently
-    /// diverging copy would turn the refusal into an unrecognized failure and
-    /// strand the bundle again.
+    /// A named constant rather than an inline literal so the message stays in
+    /// one place — tests match on it, and a silently diverging copy would make
+    /// a refusal indistinguishable from a real Core Audio failure in the logs.
+    ///
+    /// NOTE: nothing recovers a refused bundle automatically, by design. The app
+    /// starts empty, per-app `.device` routes are cleared at launch
+    /// (`AppRoutingController.clearAllDeviceRoutes()`), and the user re-picks a
+    /// destination after granting — at which point the fresh-grant latch in
+    /// ``SystemAudioCaptureTCC`` means the new tap is allowed straight away,
+    /// with no relaunch.
     public static let notAuthorizedReason = "audio capture not authorized — awaiting the Setup grant"
-
-    /// Whether THIS failure is the system-audio permission refusal specifically,
-    /// as opposed to any other `.tapCreationFailed` (a real `AudioHardware
-    /// CreateProcessTap` error code). It matters because a refusal is the one
-    /// per-app failure with no self-healing path of its own — `NativeBackend`'s
-    /// indefinite retry is `.processNotYetAudible`-only — so it needs the
-    /// separate, grant-triggered recovery in
-    /// ``NativeBackend/resumeRefusedAppCaptures()``.
-    public var isPermissionRefusal: Bool {
-        if case .tapCreationFailed(let reason) = self { return reason == Self.notAuthorizedReason }
-        return false
-    }
 
     /// A human-readable, UI-renderable description of the failure and its
     /// remedy (mirrors ``NativeCaptureError/userMessage``).

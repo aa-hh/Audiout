@@ -1,7 +1,7 @@
 # Plan — AirPlay Coexistence: share the timing ports with macOS, take over cleanly, show up in Sound settings
 
 Status: **WAVES 1–2 BUILT AND COMMITTED on `claude/airplay-audio-dropdown-1d717f`; NOT MERGED. Wave 3 planned, not started.** T1/T1b `40f49b6` · T3 `e05f5a1` · T2 `4c7da45` · T2b `7295940` · T4 `1298a70` · T5 `c437b26` · T6 `bee8ef1` · T7 `281cd66` · docs `25a22f4`. Combined tree green (AirPlayEngine 179, AudiouterCore 1529). **Alec's live test is owed before any merge** — see "Wave 4 — combined live checklist"; nothing merges without his explicit go-ahead (standing rule, doubly so here: this rewrites the lifecycle of the one root component).
-Author in a dedicated worktree/branch off `main`; `main` is merge-only. Merge only after Alec live-tests and explicitly says go (standing rule — doubly so here: this rewrites the lifecycle of the one root component and adds a driver-class component).
+Author in a dedicated worktree/branch off `main`; `main` is merge-only. Merge only after Alec live-tests and explicitly says go (standing rule — doubly so here: this rewrites the lifecycle of the one root component). *(No driver-class component after all — decision 3's mechanism became the aggregate device; see its SUPERSEDED MECHANISM note.)*
 
 Problem being fixed: Audiouter's root PTP helper binds UDP 319/320 at boot (`RunAtLoad` + `KeepAlive`) and holds them forever, even when the app isn't running. macOS's own AirPlay 2 sender needs the same ports, so **installing Audiouter permanently breaks the system AirPlay dropdown** (confirmed live 2026-07-26: `ptp-helper` PID 618 held `*.319`/`*.320` with Audiouter not even running). Users will use both paths; they must coexist.
 

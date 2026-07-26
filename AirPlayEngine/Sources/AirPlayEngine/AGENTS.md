@@ -86,9 +86,10 @@ flowchart LR
    `remoteHub`).
 3. `applyConfigOnEngineThread()` pushes `EngineConfig` into the vendored
    `conffile` setters (retained C strings, not copied by the C side).
-4. `ptpd_find_or_bind()` runs (non-fatal; result published as
-   `ptpClockAvailable`), then both `output_airplay.init` and `output_raop.init`
-   run so AP2 and RAOP discovery/session paths are both live.
+4. **`ptpd_init()` runs** (deferred, no-op at startup since the daemon is
+   demand-started per-session, T2b) — both `output_airplay.init` and
+   `output_raop.init` run so AP2 and RAOP discovery/session paths are both live.
+   **PTP clock lookup is deferred to connect time** (T4: `ptpd_daemon_probe()`).
 5. `updateDiscovery(_:)` feeds a resolved `DeviceDescriptor` into the vendored
    discovery callback (`feedDescriptor`, engine thread) and seeds
    `knownOutputs[id] = .stopped`.

@@ -47,16 +47,20 @@ The problem, measured then explained by the code: with the aggregate as default 
 
 ## Wave 1 — on-demand helper lifecycle (Direction A: system dropdown works whenever we're idle)
 
-- **T1 — libairptp: expose daemon idle state.** Add `airptp_peer_count(hdl)` (or equivalent idle-since query) to the MIT-side library so the helper can see its own peer table (which already self-prunes at 15 s). Small, in-repo, MIT file.
-- **T2 — helper: demand-start + bind-retry + idle-exit.** Add a Mach service check-in (launchd demand-start trigger; XPC listener held open, serves nothing — shm + loopback-UDP stay the only data transport per ptp-helper-design.md §4). Bind loop: retry 319/320 for ~10 s before giving up (this is the helper's half of takeover — the app frees the ports in parallel, T5). Idle-exit: peer table empty for ~30 s → clean `airptp_end` + exit; launchd releases the ports. Grace period covers session-start's peers==0 window.
-- **T3 — plist: on-demand shape.** Drop `RunAtLoad`/`KeepAlive`, add `MachServices`. Same label → Login Items approval should persist across the re-registration; verify live (R2). KeepAlive's crash-respawn role is replaced by demand-start: a crashed helper is simply re-launched on next touch, and per-session `find()` (design §2.4) already catches mid-session death.
-- **T4 — app: touch at session start.** Connect to the Mach service when a session starts (demand-starts the helper), then `find()` with a short retry window instead of assuming the helper is already up (startup-order change vs. design §5.1). Status/approval UX (`PTPHelperService.swift`) unchanged.
+**DONE — 2026-07-26:**
+
+- **T1 — libairptp: expose daemon idle state (40f49b6).** Added `airptp_peer_active_count(hdl)` to the MIT-side library, plus fixed `localhost_msg_send()` to select the daemon-published IP family (T1b), so the helper can see its own peer table (which already self-prunes at 15 s). Small, in-repo, MIT file.
+- **T2 — helper: demand-start + bind-retry + idle-exit (4c7da45).** Added Mach service check-in (launchd demand-start trigger; XPC listener held open, serves nothing — shm + loopback-UDP stay the only data transport per ptp-helper-design.md §4). Bind loop: retry 319/320 for ~10 s before giving up (this is the helper's half of takeover — the app frees the ports in parallel, T5). Idle-exit: peer table empty for ~30 s → clean `airptp_end` + exit; launchd releases the ports. Grace period covers session-start's peers==0 window.
+- **T3 — plist: on-demand shape (e05f5a1).** Dropped `RunAtLoad`, changed `KeepAlive` to `{SuccessfulExit: false}`, added `MachServices`. Same label → Login Items approval persists across the re-registration (verified live). KeepAlive's crash-respawn role is unchanged; idle-exit (status 0) stays down, not respawned.
+- **T4 — app: demand-start + per-connect probe (1298a70).** App connects to Mach service at session start (demand-starts the helper), then `ptpd_daemon_probe()` at connect time reads the clock instead of at engine startup (T2b: `ptpd_init()` now returns 0/"deferred" when no daemon present). Startup-order change per design §5.1. Status/approval UX (`PTPHelperService.swift`) unchanged.
 
 ## Wave 2 — automatic takeover (Direction B: our click wins even when macOS is playing)
 
-- **T5 — detect + free.** On connect-click: if the current default output device's transport is AirPlay (`kAudioDeviceTransportTypeAirPlay`), switch default output away (to the virtual device once Wave 3 lands; built-in speakers before that) using the existing default-output-switching machinery. macOS tears its session down and frees the ports (latency per G1); the helper's T2 retry loop then wins the bind.
-- **T6 — takeover UI.** Transient "Taking over from AirPlay…" state on the device row while T5+T2 race runs; on timeout (ports never freed — G1 tells us if this can happen), a plain-language fallback pointing at Control Center disconnect. Never a raw error.
-- **T7 — yield-back verification.** Our session ends (last device disconnected, or app quits) → peers drop → helper idle-exits ≤ ~45 s → system dropdown works again. App-quit path must remove peers / stop the session so idle-exit actually triggers.
+**DONE — 2026-07-26:**
+
+- **T5 — detect + free (c437b26).** On connect-click: if the current default output device's transport is AirPlay (`kAudioDeviceTransportTypeAirPlay`), switch default output away (to the virtual device once Wave 3 lands; built-in speakers before that) using the existing default-output-switching machinery (`DefaultOutputSwitcher.swift`). macOS tears its session down and frees the ports (latency per G1); the helper's T2 retry loop then wins the bind.
+- **T6 — takeover UI (bee8ef1).** Transient "Taking over from AirPlay…" state on the device row while T5+T2 race runs; on timeout (ports never freed — G1 tells us if this can happen), a plain-language fallback pointing at Control Center disconnect. Never a raw error. Added `TakeoverStatus`, `BackendEvent.takeoverStatus`, and banner button.
+- **T7 — yield-back verification (281cd66).** Our session ends (last device disconnected, or app quits) → peers drop → helper idle-exits ≤ ~45 s → system dropdown works again. App-quit path must remove peers / stop the session so idle-exit actually triggers. Verified by `PTPYieldBackTests.swift`.
 
 ## Wave 3 — virtual output device (gated on G2)
 

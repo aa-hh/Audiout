@@ -48,12 +48,14 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
 - **Firewall verdicts stick to already-bound sockets.** Allowlist the binary
   *before* it binds, or PTP is silently dropped — session succeeds, receiver
   stays silent.
-- **The engine is a PTP client, never a PTP binder.** `shims/ptpd.c` only calls
+- **The engine is a PTP deferred client, never a PTP binder.** `shims/ptpd.c` only calls
   `airptp_daemon_find()` — the shipped default never binds UDP 319/320 itself;
   that privileged bind belongs solely to the separate `ptp-helper` root daemon
-  (see `docs/ptp-helper-design.md`). `AUDIOUTER_PTP_INPROC_BIND=1` restores the
-  old in-process bind as a **dev/CI-only** fallback — never rely on it in the
-  shipped path.
+  (see `docs/ptp-helper-design.md` §1.3, §5.1; Waves 1–2 PLAN). **The clock lookup is
+  deferred per-session** (T4: `ptpd_daemon_probe()` at connect time), not at engine
+  startup. This keeps the PTP ports free when idle, enabling coexistence with macOS's
+  own AirPlay. `AUDIOUTER_PTP_INPROC_BIND=1` restores the old in-process bind as a
+  **dev/CI-only** fallback — never rely on it in the shipped path.
 - **Two sender backends share one registry.** `sender/raop.c` (classic
   AirPlay 1 / RAOP) is vendored alongside `sender/airplay.c` (AirPlay 2) as a
   second `struct output_definition` (`output_raop`); `shims/outputs.c`'s

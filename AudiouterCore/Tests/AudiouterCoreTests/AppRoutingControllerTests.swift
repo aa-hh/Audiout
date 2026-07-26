@@ -290,12 +290,14 @@ import Testing
         #expect(before == after, "no-op resets must not rewrite the store")
     }
 
-    // MARK: clearAllDeviceRoutes — every `.device` route reverts to `.noRedirect` at launch
+    // MARK: clearAllRedirectsAtLaunch — EVERY redirect reverts to `.noRedirect` at launch
 
-    /// Every `.device`-routed app reverts to `.noRedirect`; `.noRedirect` and
-    /// `.currentDevice` routes are left untouched, and the reset persists so a
-    /// reloaded controller (simulating the NEXT launch) sees it too.
-    @Test func clearAllDeviceRoutesRevertsOnlyDeviceRoutesAndPersists() throws {
+    /// Every redirected app — `.device` AND `.currentDevice` alike — reverts to
+    /// `.noRedirect` (product decision, Alec 2026-07-26: live testing showed
+    /// restored `.currentDevice` routes going live at launch, silently starting
+    /// captures the user never asked for that session); rows themselves stay,
+    /// and the reset persists so a reloaded controller (the NEXT launch) sees it.
+    @Test func clearAllRedirectsAtLaunchRevertsEveryRedirectAndPersists() throws {
         let dir = tempDirectory()
         let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
@@ -306,44 +308,44 @@ import Testing
         controller.setDestination(.currentDevice, for: "com.apple.Safari")
         controller.addRoute(bundleID: "com.apple.TextEdit", displayName: "TextEdit") // stays .noRedirect
 
-        controller.clearAllDeviceRoutes()
+        controller.clearAllRedirectsAtLaunch()
 
         #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect)
         #expect(controller.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination == .noRedirect)
-        #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination == .currentDevice,
-                "a deliberate 'play on this Mac' pick must survive the launch-time clear")
+        #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination == .noRedirect,
+                "a 'play on this Mac' pick must ALSO reset at launch — no redirect survives a restart")
         #expect(controller.appRoutes.first { $0.bundleID == "com.apple.TextEdit" }?.destination == .noRedirect)
+        #expect(controller.appRoutes.count == 4, "rows persist; only destinations reset")
 
         let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
         #expect(reloaded.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect,
                 "the clear must persist")
-        #expect(reloaded.appRoutes.first { $0.bundleID == "com.spotify.client" }?.destination == .noRedirect,
-                "the clear must persist")
+        #expect(reloaded.appRoutes.first { $0.bundleID == "com.apple.Safari" }?.destination == .noRedirect,
+                "the .currentDevice clear must persist too")
     }
 
-    /// A call with no `.device` routes present at all is a true no-op: it must
+    /// A call with no redirects present at all is a true no-op: it must
     /// not rewrite the store and must not fire `onRoutesDidChange`.
-    @Test func clearAllDeviceRoutesWithNoDeviceRoutesIsNoOpAndDoesNotPersist() throws {
+    @Test func clearAllRedirectsAtLaunchWithNoRedirectsIsNoOpAndDoesNotPersist() throws {
         let dir = tempDirectory()
         let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
-        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music") // stays .noRedirect
-        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
-        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")   // stays .noRedirect
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari") // stays .noRedirect
         let fileURL = fileURL(in: dir)
         let before = try Data(contentsOf: fileURL)
         var fireCount = 0
         controller.onRoutesDidChange = { fireCount += 1 }
 
-        controller.clearAllDeviceRoutes()
+        controller.clearAllRedirectsAtLaunch()
 
         let after = try Data(contentsOf: fileURL)
         #expect(before == after, "a no-op clear must not rewrite the store")
         #expect(fireCount == 0, "a no-op clear must not fire onRoutesDidChange")
     }
 
-    /// Batching: with MULTIPLE `.device` routes present, the whole operation
+    /// Batching: with MULTIPLE redirects present, the whole operation
     /// must fire `onRoutesDidChange` exactly once, not once per cleared route.
-    @Test func clearAllDeviceRoutesFiresOnRoutesDidChangeExactlyOnce() {
+    @Test func clearAllRedirectsAtLaunchFiresOnRoutesDidChangeExactlyOnce() {
         let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
         controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
@@ -355,18 +357,18 @@ import Testing
         var fireCount = 0
         controller.onRoutesDidChange = { fireCount += 1 }
 
-        controller.clearAllDeviceRoutes()
+        controller.clearAllRedirectsAtLaunch()
 
         #expect(fireCount == 1, "clearing several device routes in one call must fire the change signal exactly once")
         #expect(controller.routedAppCount == 0)
     }
 
-    /// `clearAllDeviceRoutes` must NOT touch `clearedDeviceRouteMemory` — that
+    /// `clearAllRedirectsAtLaunch` must NOT touch `clearedDeviceRouteMemory` — that
     /// map backs the narrower app-quit "Resume → <device>" offer
     /// (`resetDeviceRoute`), a separate mechanism from this broader
     /// launch-time clear. This is a deliberate judgment call, not an oversight
-    /// — see the doc comment on `clearAllDeviceRoutes()`.
-    @Test func clearAllDeviceRoutesDoesNotTouchClearedDeviceRouteMemory() {
+    /// — see the doc comment on `clearAllRedirectsAtLaunch()`.
+    @Test func clearAllRedirectsAtLaunchDoesNotTouchClearedDeviceRouteMemory() {
         let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
         controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
@@ -377,11 +379,11 @@ import Testing
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
         controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
 
-        controller.clearAllDeviceRoutes()
+        controller.clearAllRedirectsAtLaunch()
 
         #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect)
         #expect(controller.clearedDeviceRouteTarget(for: "com.apple.Music") == nil,
-               "clearAllDeviceRoutes must not populate clearedDeviceRouteMemory for routes it clears")
+               "clearAllRedirectsAtLaunch must not populate clearedDeviceRouteMemory for routes it clears")
         #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room",
                 "an existing memory entry from an earlier resetDeviceRoute must be left untouched")
     }

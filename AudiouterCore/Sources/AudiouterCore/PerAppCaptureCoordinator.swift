@@ -851,7 +851,7 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
     ///
     /// NOTE: nothing recovers a refused bundle automatically, by design. The app
     /// starts empty, per-app `.device` routes are cleared at launch
-    /// (`AppRoutingController.clearAllDeviceRoutes()`), and the user re-picks a
+    /// (`AppRoutingController.clearAllRedirectsAtLaunch()`), and the user re-picks a
     /// destination after granting — at which point the fresh-grant latch in
     /// ``SystemAudioCaptureTCC`` means the new tap is allowed straight away,
     /// with no relaunch.

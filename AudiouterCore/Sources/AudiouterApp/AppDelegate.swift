@@ -444,14 +444,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
-        // A persisted `.device` redirect must never survive a full Audiouter
-        // restart (simplification of the app-quit reset, scaled to every route
-        // at once) — mirrors the existing "the live routing set is not
-        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
-        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
-        // below so the backend never sees a stale `.device` route even
-        // transiently at launch.
-        appRouting.clearAllDeviceRoutes()
+        // NO persisted redirect of any kind survives a full Audiouter restart —
+        // every launch starts with every application on "Follows main output"
+        // (product decision, Alec 2026-07-26: live testing showed restored
+        // `.currentDevice` routes going live at launch, silently starting
+        // captures/exclusions the user never asked for that session). Mirrors
+        // the existing "the live routing set is not auto-resumed at launch"
+        // discipline (AudiouterCore/AGENTS.md) at the per-app level. Called
+        // BEFORE the initial `pushAppRoutesToBackend()` below so the backend
+        // never sees a stale redirect even transiently at launch.
+        appRouting.clearAllRedirectsAtLaunch()
         // Seed the backend with the persisted route table + excluded set (T7). A
         // prune/clear above would already have pushed via `onRoutesDidChange`, but
         // that fires only when something changed — this unconditional push syncs
@@ -618,7 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // invisible to it for the process's whole life (the TCC read is
         // process-lifetime cached). Nothing auto-resumes off the back of it:
         // the app deliberately starts empty, per-app `.device` routes are
-        // cleared at launch (`AppRoutingController.clearAllDeviceRoutes()`),
+        // cleared at launch (`AppRoutingController.clearAllRedirectsAtLaunch()`),
         // and the user re-picks a destination themselves. The latch is what
         // makes that re-pick actually produce audio without a relaunch.
         if SystemAudioCaptureTCC.effectiveStatus() != .granted {

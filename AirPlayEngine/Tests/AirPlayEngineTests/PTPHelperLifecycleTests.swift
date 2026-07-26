@@ -43,11 +43,15 @@ import PTPHelperTestSupport
 // `.serialized` below; it inherits from the parent.
 
 /// High test-only ports, as in `PTPHelperIPCTests.swift`. NEVER 319/320.
-private let ptpLifecycleEventPort: UInt16 = 30319
-private let ptpLifecycleGeneralPort: UInt16 = 30320
+/// Not `private`: `PTPYieldBackTests.swift` (T7) reuses these alongside
+/// `HelperRun`/`ptpHelperBinaryURL` below to drive the same real subprocess,
+/// serialized under the same `SerializedLibairptpState` parent so reusing the
+/// fixed high ports/shm name across files is safe (never concurrent).
+let ptpLifecycleEventPort: UInt16 = 30319
+let ptpLifecycleGeneralPort: UInt16 = 30320
 
 /// Test-only shm name — never the production "/airptp_shm" (see the header).
-private let ptpLifecycleShmName = "/airptp_shm_lifecycle_test"
+let ptpLifecycleShmName = "/airptp_shm_lifecycle_test"
 
 extension SerializedLibairptpState {
 
@@ -147,8 +151,9 @@ final class PTPHelperLifecycleTests {
 /// `.build/<config>/ptp-helper` (`swift build --build-tests` builds the
 /// executable products too), so the test bundle's own directory is the
 /// lookup. `AUDIOUTER_PTP_HELPER_BINARY` overrides it for anyone running the
-/// suite against a bundled/installed copy.
-private let ptpHelperBinaryURL: URL? = {
+/// suite against a bundled/installed copy. Not `private` — `PTPYieldBackTests`
+/// (T7) reuses this lookup; see the reuse note on `ptpLifecycleEventPort`.
+let ptpHelperBinaryURL: URL? = {
     let env = ProcessInfo.processInfo.environment["AUDIOUTER_PTP_HELPER_BINARY"]
     if let env, !env.isEmpty { return URL(fileURLWithPath: env) }
 
@@ -162,8 +167,10 @@ private let ptpHelperBinaryURL: URL? = {
 // MARK: - Subprocess wrapper
 
 /// One `ptp-helper` subprocess, launched with the T2 timing knobs turned
-/// down to test scale.
-private final class HelperRun {
+/// down to test scale. Not `private` — `PTPYieldBackTests` (T7) reuses this
+/// wrapper rather than duplicating a second subprocess harness; see the reuse
+/// note on `ptpLifecycleEventPort`.
+final class HelperRun {
     let process = Process()
     private let logURL: URL
 

@@ -640,6 +640,53 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// LIVE BUG (2026-07-26): a `.currentDevice` per-app route is rendered by
+    /// `LocalPlaybackEngine` through THIS app's own `AVAudioEngine`, into the very
+    /// device the whole-system tap taps. If our own process isn't excluded, the
+    /// `.mutedWhenTapped` tap re-captures that render and MUTES it — the app went
+    /// silent on the Mac's speakers and came out the AirPlay selection instead.
+    /// Same R2 self-exclude `setSyncedLocalSink` does, via the other render path.
+    @Test func localPlaybackRenderProcessIsExcludedSoItsOutputIsNotRecapturedAndMuted() {
+        let tap = FakeTap()
+        // 999 stands in for THIS process — the fake resolver keys pid == objectID.
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.app.a": 111, "com.audiouter.self": 999]))
+
+        coordinator.start()
+        #expect(tap.excludedProcessObjectIDs == [], "nothing rendering locally yet")
+        let createsBeforeLocal = tap.creates
+
+        // A `.currentDevice` route goes live.
+        coordinator.setLocalPlaybackRenderPID(999)
+
+        #expect(tap.creates > createsBeforeLocal, "the exclusion change recreates the capturing tap")
+        #expect(
+            tap.excludedProcessObjectIDs.contains(999),
+            "our own render process must be excluded, else the .mutedWhenTapped tap re-captures and mutes local playback")
+
+        // Re-passing the same pid must not churn the tap (the caller re-passes it
+        // on every route update).
+        let createsAfterLocal = tap.creates
+        coordinator.setLocalPlaybackRenderPID(999)
+        #expect(tap.creates == createsAfterLocal, "an unchanged pid must not rebuild the tap")
+
+        // It unions with — never replaces — the routed-app exclusions.
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
+            excludedBundleIDs: [])
+        #expect(
+            tap.excludedProcessObjectIDs == [111, 999],
+            "a routed app's exclusion and our own render exclusion must coexist")
+
+        // Last `.currentDevice` route goes away: our process re-enters the mix.
+        coordinator.setLocalPlaybackRenderPID(nil)
+        #expect(
+            !tap.excludedProcessObjectIDs.contains(999),
+            "with nothing rendering locally, our process must not stay excluded")
+        coordinator.stop()
+    }
+
     /// A `.device`-routed app's process object never appears in the
     /// system-mix tap's exclusion-blind spot — i.e. it IS present in the
     /// exclusion list (so it can never double-send: once to its own

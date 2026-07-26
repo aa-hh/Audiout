@@ -2037,6 +2037,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //
             // R5: the EFFECTIVE table, so an app whose target is unreachable is NOT
             // excluded — that omission is exactly what puts it back in the system mix.
+            // ...and excluding OUR OWN process whenever any `.currentDevice` route
+            // is live, because `localPlaybackEngine` renders those routes through
+            // this app's AVAudioEngine INTO the very device the whole-system tap
+            // taps. Without this the tap re-captures that render and — being
+            // `.mutedWhenTapped` — mutes it: the app went silent on the Mac's
+            // speakers and came out the AirPlay selection instead. Exactly the R2
+            // self-exclude `attachSyncedLocalSink` already does for the "play
+            // everywhere" sink, via the other in-process render path.
+            //
+            // Set BEFORE `updateRouting` so that when both change (the common
+            // empty↔non-empty transition) the pid is already staged and the tap is
+            // built once against the final exclusion set. Idempotent: re-passing an
+            // unchanged pid is a no-op, so the steady state never rebuilds.
+            self.captureCoordinator?.setLocalPlaybackRenderPID(
+                plan.localExcluded.isEmpty ? nil : getpid())
             self.captureCoordinator?.updateRouting(
                 appRoutes: plan.effectiveRoutes,
                 excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
@@ -5406,6 +5421,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Default no-op so a capture-gate-only fake compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
+
+    /// Declare whether ``LocalPlaybackEngine`` is rendering any `.currentDevice`
+    /// route in this process (`getpid()` when it is, `nil` when it isn't), so the
+    /// whole-system tap excludes our own render. Default no-op so a fake that
+    /// doesn't exercise local playback compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setLocalPlaybackRenderPID(_ pid: pid_t?)
 }
 
 extension CaptureControlling {
@@ -5426,6 +5448,9 @@ extension CaptureControlling {
     /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
     /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op so a fake that doesn't exercise local playback compiles
+    /// unchanged; ``NativeCaptureCoordinator`` provides the real one.
+    func setLocalPlaybackRenderPID(_ pid: pid_t?) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}

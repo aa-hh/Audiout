@@ -129,6 +129,11 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         /// silently dropped — see `handleDeviceChange(bundleID:)` and
         /// dev/notes/stability-audit-2026-07-18.md §C6.
         var pendingDeviceChange = false
+        /// W1-T4: the process-OBJECT set this slot's LIVE tap was last built
+        /// against — the per-slot compare-before-rebuild baseline for live
+        /// membership diffing (``handleMembershipChange()``). Recorded on each
+        /// successful `.capturing` commit; an unchanged resolve does ZERO work.
+        var lastTappedProcessObjects: Set<AudioObjectID> = []
     }
 
     private let queue = DispatchQueue(label: "PerAppCaptureCoordinator.state")
@@ -154,6 +159,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     #endif
+
+    /// W1-T4 live-membership diffing: a dedicated DEBOUNCED serial queue owning the
+    /// diff timer, DISTINCT from ``queue`` (``handleMembershipChange`` reaches into
+    /// state via `queue.sync`, which would deadlock if run on `queue`). The same
+    /// process-object-list listener that re-drives dead slots (the resume
+    /// self-heal) ALSO schedules a debounced diff here so a browser tab spawning a
+    /// new audio child mid-session — while its slot is already `.capturing` — is
+    /// picked up too, not just a fully-dead slot resuming.
+    private let membershipQueue = DispatchQueue(label: "PerAppCaptureCoordinator.membership")
+    /// The pending coalesced diff. Confined to ``membershipQueue``; cancelled and
+    /// replaced by each notification in the debounce window so a rapid
+    /// spawn/kill/spawn burst collapses to one diff pass.
+    private var membershipDiffWork: DispatchWorkItem?
+    /// How long to wait for process-list churn to settle before diffing.
+    /// Injectable so tests can shrink it; production coalesces a burst of tab
+    /// open/close notifications into one diff.
+    private let membershipDebounceInterval: DispatchTimeInterval
 
     /// Fired on every per-bundle-ID state transition. Called on the
     /// coordinator's internal queue.
@@ -224,12 +246,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
-        installsProcessListListener: Bool = true
+        installsProcessListListener: Bool = true,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
         self.installsProcessListListener = installsProcessListListener
+        self.membershipDebounceInterval = membershipDebounceInterval
     }
 
     /// Tears down every still-active tap. A backstop against leaking system
@@ -244,6 +268,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         // and `deinit` cannot run concurrently with one (same argument
         // ``SystemOutputVolume.deinit`` makes).
         removeProcessListListenerLocked()
+        membershipQueue.sync { membershipDiffWork?.cancel(); membershipDiffWork = nil }
         #endif
         let leftover = queue.sync { slots.values.compactMap { $0.tap } }
         leftover.forEach { $0.teardown() }
@@ -362,6 +387,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return
                 }
                 slot.tap = tap
+                slot.lastTappedProcessObjects = Set(processes.map(\.objectID)) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
             }
         } catch {
@@ -464,6 +490,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                     return false
                 }
                 slot.tap = newTap
+                slot.lastTappedProcessObjects = Set(processes.map(\.objectID)) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
                 // STABILITY(C6): a device-change notification landed while we were
                 // rebuilding — replay it once now that we're capturing again,
@@ -579,18 +606,92 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// notification in CI isn't possible without live Core Audio churn. Behavior
     /// is unchanged; this is only an access-level seam.
     func handleProcessListChanged() {
+        // (1) Resume self-heal (T3): re-drive dead-but-retryable slots IMMEDIATELY
+        // — a latency path (an app just resumed audio), so NOT debounced.
         let toRetry: [String] = queue.sync {
             slots.compactMap { key, slot -> String? in
                 guard case .failed(let error) = slot.state, error.isRetryable else { return nil }
                 return key
             }
         }
-        guard !toRetry.isEmpty else { return }
-        Telemetry.log(.capturePA, "resume_listener_fired", [
-            "count": "\(toRetry.count)",
-            "bundleIDs": toRetry.joined(separator: ","),
-        ])
-        for bundleID in toRetry { start(bundleID: bundleID) }
+        // NOTE: NOT an early `guard ... else { return }` any more — the membership
+        // diff below must run even when no slot needs re-driving.
+        if !toRetry.isEmpty {
+            Telemetry.log(.capturePA, "resume_listener_fired", [
+                "count": "\(toRetry.count)",
+                "bundleIDs": toRetry.joined(separator: ","),
+            ])
+            for bundleID in toRetry { start(bundleID: bundleID) }
+        }
+
+        // (2) Live-membership diffing (W1-T4): a browser opening/closing a tab
+        // spawns/kills an audio child, changing the process set an ALREADY
+        // capturing slot should tap. Coalesce a burst onto `membershipQueue` and
+        // diff once it settles. Distinct from (1), which only re-drives DEAD slots.
+        scheduleMembershipDiff()
+    }
+
+    /// Coalesce process-list notifications: cancel any pending diff and arm a fresh
+    /// one ``membershipDebounceInterval`` out, so a rapid spawn/kill/spawn burst
+    /// collapses to one diff pass. Runs on ``membershipQueue`` (never ``queue``) so
+    /// the `queue.sync` inside the diff cannot deadlock.
+    private func scheduleMembershipDiff() {
+        membershipQueue.async { [weak self] in
+            guard let self else { return }
+            self.membershipDiffWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.handleMembershipChange() }
+            self.membershipDiffWork = work
+            self.membershipQueue.asyncAfter(deadline: .now() + self.membershipDebounceInterval, execute: work)
+        }
+    }
+
+    /// Diff every currently-capturing slot's resolved process-object set against
+    /// the set its live tap was last built against (``Slot/lastTappedProcessObjects``).
+    /// For each slot whose set genuinely changed, recreate its tap against the
+    /// fresh set via ``handleDeviceChange(bundleID:)`` (the proven rebuild path —
+    /// re-resolves + rebuilds + records a fresh baseline). A slot whose set is
+    /// unchanged — the overwhelmingly common case under tab churn — is skipped with
+    /// ZERO Core Audio work (the CPU-storm loop-breaker). Internal (not private) so
+    /// tests can drive a diff pass without waiting out the real debounce timer.
+    func handleMembershipChange() {
+        // Snapshot each capturing slot's baseline under the lock, then resolve
+        // (which enumerates the HAL) OUTSIDE it.
+        let baselines: [(bundleID: String, oldObjects: Set<AudioObjectID>)] = queue.sync {
+            slots.compactMap { key, slot in
+                guard case .capturing = slot.state else { return nil }
+                return (key, slot.lastTappedProcessObjects)
+            }
+        }
+        guard !baselines.isEmpty else { return }
+
+        for baseline in baselines {
+            let newObjects = Set(processResolver.resolve(bundleID: baseline.bundleID).map(\.objectID))
+            // Empty = the app fully quit (even its main process is gone). Do NOT
+            // churn a healthy slot to `.failed` from here — leave that to the
+            // device-change/backoff paths; a transient empty resolve during churn
+            // shouldn't tear a capturing slot down.
+            guard !newObjects.isEmpty else { continue }
+            // COMPARE-BEFORE-REBUILD: unchanged membership → zero work.
+            guard newObjects != baseline.oldObjects else { continue }
+            // Re-check under the lock that the slot is still capturing against the
+            // SAME baseline (a concurrent stop()/device-change may have moved it, or
+            // already rebuilt it) before recreating.
+            let stillStale: Bool = queue.sync {
+                guard let slot = slots[baseline.bundleID], case .capturing = slot.state else { return false }
+                return slot.lastTappedProcessObjects == baseline.oldObjects
+            }
+            guard stillStale else { continue }
+            Telemetry.log(.capturePA, "membership_changed", [
+                "bundleID": baseline.bundleID,
+                "oldObjectCount": "\(baseline.oldObjects.count)",
+                "objectCount": "\(newObjects.count)",
+            ])
+            // Recreate via the proven device-change machinery: it re-resolves the
+            // set itself, tears the old tap down, rebuilds, and records the fresh
+            // baseline. Exactly one rebuild per genuine change (this tap has no
+            // in-place update path).
+            handleDeviceChange(bundleID: baseline.bundleID)
+        }
     }
     #endif
 
@@ -711,6 +812,20 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
         return true
     }
 
+    /// The exact `reason` the pre-tap TCC gate throws with when
+    /// `SystemAudioCaptureTCC.isGranted()` refuses (see `beginStart`'s gate).
+    /// A named constant rather than an inline literal so the message stays in
+    /// one place — tests match on it, and a silently diverging copy would make
+    /// a refusal indistinguishable from a real Core Audio failure in the logs.
+    ///
+    /// NOTE: nothing recovers a refused bundle automatically, by design. The app
+    /// starts empty, per-app `.device` routes are cleared at launch
+    /// (`AppRoutingController.clearAllDeviceRoutes()`), and the user re-picks a
+    /// destination after granting — at which point the fresh-grant latch in
+    /// ``SystemAudioCaptureTCC`` means the new tap is allowed straight away,
+    /// with no relaunch.
+    public static let notAuthorizedReason = "audio capture not authorized — awaiting the Setup grant"
+
     /// A human-readable, UI-renderable description of the failure and its
     /// remedy (mirrors ``NativeCaptureError/userMessage``).
     public var userMessage: String {
@@ -810,6 +925,12 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try createTapAndReadFormat(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
             try createAggregate(bundleID: bundleID)
             try startIOProc()
+            // Correct the converter's input rate to the aggregate's REAL rate
+            // BEFORE the format is returned (the converter is built from it) and
+            // before the rate listener is installed (its compare-before-rebuild
+            // guard reads `format.sampleRate`). Mirrors the whole-system tap's
+            // ordering exactly — see `reconcileFormatWithAggregate`.
+            reconcileFormatWithAggregate(bundleID: bundleID)
             installDefaultDeviceListener()
             installSampleRateListener(bundleID: bundleID)
         } catch {
@@ -835,7 +956,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         Telemetry.log(.capturePA, "gate_check", ["bundleID": bundleID, "granted": String(granted)])
         guard granted else {
             throw PerAppCaptureError.tapCreationFailed(
-                reason: "audio capture not authorized — awaiting the Setup grant")
+                reason: PerAppCaptureError.notAuthorizedReason)
         }
 
         // Stereo mixdown of EVERY resolved process object (dev/audiocap
@@ -1065,6 +1186,49 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         return cf as String
     }
 
+    /// Correct `format`/`asbd` to the AGGREGATE's real nominal rate (the per-app
+    /// port of the whole-system tap's identical fix — see
+    /// `CoreAudioSystemTap.reconcileFormatWithAggregate`).
+    ///
+    /// `createTapAndReadFormat` reads `kAudioTapPropertyFormat` off the BARE
+    /// process tap, before it joins the aggregate device. With sub-tap drift
+    /// compensation on, the aggregate resamples the tap's audio onto ITS OWN
+    /// clock (the tapped output device's nominal rate) — so a tap that read back
+    /// 44100 pre-aggregate can actually deliver 48000-rate buffers once
+    /// aggregated. Building the `AVAudioConverter` from the stale pre-aggregate
+    /// rate makes it reinterpret every 48000 buffer as 44100: a sustained ~8.8%
+    /// pitch-UP with judder, exactly the live symptom on a per-app redirect.
+    ///
+    /// This ALSO repairs the rate listener's compare-before-rebuild guard: that
+    /// guard compares the notified device rate against `format.sampleRate`, so
+    /// while `format` held the unreconciled pre-aggregate rate the two could
+    /// never match and EVERY notification rebuilt the tap (the observed per-app
+    /// rebuild storm). Reconciling here makes both comparisons apples-to-apples.
+    ///
+    /// The aggregate's nominal rate (not a second `kAudioTapPropertyFormat`
+    /// re-read) is authoritative precisely because drift compensation resamples
+    /// the sub-tap ONTO the aggregate clock — that is the cadence the IOProc
+    /// sees. If the aggregate rate can't be read we keep the pre-aggregate
+    /// format (no regression vs. the prior behaviour).
+    private func reconcileFormatWithAggregate(bundleID: String) {
+        guard aggregateID != kAudioObjectUnknown else { return }
+        let aggregateRate = CoreAudioSystemTap.readNominalSampleRate(aggregateID)
+        let reconciled = CoreAudioSystemTap.reconciledFormat(
+            declared: format, aggregateRate: aggregateRate)
+        guard reconciled != format else { return }
+        AudioDiag.log(
+            "PAC \(bundleID): pre-aggregate tap format declared \(format.sampleRate) Hz but the "
+            + "aggregate device actually delivers \(reconciled.sampleRate) Hz — correcting the "
+            + "converter's input rate to the aggregate's real rate (prevents a sustained pitch shift)")
+        Telemetry.log(.capturePA, "rate_reconciled", [
+            "bundleID": bundleID,
+            "declaredRate": String(format.sampleRate),
+            "aggregateRate": String(reconciled.sampleRate),
+        ])
+        self.asbd.mSampleRate = Double(reconciled.sampleRate)
+        self.format = reconciled
+    }
+
     /// Best-effort CURRENT nominal sample rate of `deviceID`
     /// (`kAudioDevicePropertyNominalSampleRate`), read fresh at the moment
     /// the rate-change notification fires, so the Telemetry `newRate` field
@@ -1090,14 +1254,34 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
+            // COMPARE-BEFORE-REBUILD LOOP-BREAKER (reuses
+            // `CoreAudioSystemTap.shouldRebuildForNominalRate`, pure/tested):
+            // Core Audio posts this listener for a set-to-same-value too, not
+            // just a genuine change. Without this guard EVERY such spurious
+            // re-announcement tore this per-app tap down and rebuilt it —
+            // observed live as a per-app capture restarting every few seconds
+            // with no real rate change. `format.sampleRate` is safe to compare
+            // against here specifically because `reconcileFormatWithAggregate`
+            // already corrected it to the aggregate's real rate at start —
+            // comparing against the unreconciled pre-aggregate rate would make
+            // this guard never match and rebuild on every notification.
+            guard CoreAudioSystemTap.shouldRebuildForNominalRate(
+                notifiedRate: newRate, currentEffectiveRate: self.format.sampleRate) else {
+                Telemetry.log(.capturePA, "rate_notification_skipped", [
+                    "bundleID": bundleID,
+                    "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
+                    "rate": String(self.format.sampleRate),
+                ])
+                return
+            }
             // The Telemetry call below is the real HAL detection point, so it
             // carries the richest fields (device name, and a fresh HAL read of
             // the NEW rate rather than waiting for the rebuilt tap's ASBD).
             // Never exercised by the hermetic suite (no live Core Audio) — see
             // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
             // which is.
-            guard let self else { return }
-            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
             Telemetry.log(.capturePA, "rate_rebuild", [
                 "bundleID": bundleID,
                 "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),

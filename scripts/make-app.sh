@@ -63,6 +63,15 @@ LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network 
 HELPER_EXECUTABLE="ptp-helper"
 HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 
+# Tiny, short-lived TCC-preflight probe (T14, TCCProbeRunner.swift): a
+# brand-new process gets a brand-new `TCCAccessPreflight` cache, dodging the
+# per-process staleness `TCCBucketDiagnostic.swift`'s header comment documents
+# — `TCCProbeRunner` spawns this fresh, on demand, to get a live read with no
+# app relaunch needed. Unlike ptp-helper above, it lives in the SAME package
+# (AudiouterCore) as the app executable, so it's built via the SAME `swift
+# build` invocation/bin dir below rather than a second package build.
+TCC_PROBE_EXECUTABLE="tcc-probe"
+
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
 #      "-" to force ad-hoc, or to a full identity string to pin a specific one.
@@ -88,9 +97,25 @@ else
   CODESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application:[^"]*"' | head -1 | tr -d '"' || true)"
   if [ -n "$CODESIGN_IDENTITY" ]; then
     echo "==> Auto-detected Developer ID signing identity: $CODESIGN_IDENTITY"
+  elif [ "${CODESIGN_REQUIRE_IDENTITY:-0}" = "1" ]; then
+    # Strict opt-in for permission-dependent builds (live/on-device testing). A
+    # Developer ID signature keys TCC grants to a STABLE Team ID + bundle id, so
+    # a grant survives every rebuild; an ad-hoc signature re-pins to a fresh
+    # cdhash each build, orphaning the grant and forcing re-onboarding. When
+    # CODESIGN_REQUIRE_IDENTITY=1 we refuse to silently produce that throwaway
+    # build — fail loudly so the tester notices the missing cert instead of
+    # chasing "permissions denied" on a binary that can never keep them.
+    echo "ERROR: CODESIGN_REQUIRE_IDENTITY=1 but no Developer ID Application identity is in the keychain." >&2
+    echo "       An ad-hoc build's TCC grants re-pin to the binary and are lost on the next rebuild." >&2
+    echo "       Install the Developer ID cert, or set CODESIGN_IDENTITY explicitly, or unset" >&2
+    echo "       CODESIGN_REQUIRE_IDENTITY to allow the ad-hoc fallback." >&2
+    exit 1
   else
     CODESIGN_IDENTITY="-"
     echo "==> No Developer ID Application identity in keychain — falling back to ad-hoc signing"
+    echo "    NOTE: ad-hoc TCC grants re-pin to the binary and are LOST on the next rebuild." >&2
+    echo "    For repeatable permission-dependent testing, sign with Developer ID" >&2
+    echo "    (set CODESIGN_REQUIRE_IDENTITY=1 to make a missing cert a hard error)." >&2
   fi
 fi
 # Secure timestamp only with a real identity: Apple's timestamp service needs a
@@ -153,6 +178,13 @@ BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c re
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
+# Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
+# alongside it, no second package build needed (contrast with ptp-helper below).
+echo "==> Building $TCC_PROBE_EXECUTABLE (release)"
+swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$TCC_PROBE_EXECUTABLE"
+BUILT_TCC_PROBE="$BIN_DIR/$TCC_PROBE_EXECUTABLE"
+test -x "$BUILT_TCC_PROBE" || { echo "error: built binary not found at $BUILT_TCC_PROBE" >&2; exit 1; }
+
 # Separate package (AirPlayEngine), separate `swift build` invocation — see
 # HELPER_EXECUTABLE comment above for why this binary is built and signed
 # apart from the app executable.
@@ -181,6 +213,11 @@ chmod +x "$MACOS_DIR/$EXECUTABLE"
 # points BundleProgram at this exact bundle-relative path.
 cp "$BUILT_HELPER" "$MACOS_DIR/$HELPER_EXECUTABLE"
 chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
+
+# tcc-probe ships alongside the app executable too — TCCProbeRunner.locateHelper()
+# resolves it at exactly Contents/MacOS/tcc-probe, relative to the running bundle.
+cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
+chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 
 # --- SMAppService launchd daemon plist -------------------------------------
 # Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
@@ -499,7 +536,10 @@ plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null
 #     distinguishable; see the multiple-app-copies-collide hazard.
 #   AIRPLAYENGINE_LOG_FILE / _LEVEL — append engine + DACP diagnostics to a file
 #     an `open`-launched session (stderr/os_log swallowed) can still be read from.
-for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL; do
+#   AUDIOUTER_TCC_DIAG — starts `TCCBucketDiagnostic`'s once-per-second raw
+#     TCC-bucket poll (T1); needed here for the same reason as the others — an
+#     `open`ed bundle never sees the shell's env.
+for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUTER_TCC_DIAG; do
   eval "val=\${$diag:-}"
   if [ -n "$val" ]; then
     plutil -insert "LSEnvironment.$diag" -string "$val" "$PLIST"
@@ -590,6 +630,17 @@ echo "==> Codesigning ptp-helper (identity: $CODESIGN_IDENTITY, inside-out, befo
 codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
 codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE"
 
+# tcc-probe is the same shape as ptp-helper above: a second Mach-O directly in
+# Contents/MacOS, so --deep on the outer app wouldn't reach it either — sign it
+# here, inside-out, same reason. No --entitlements: it only calls the private
+# read-only TCCAccessPreflight (see Sources/tcc-probe/main.swift) — no audio
+# capture, no network, no keychain/JIT access — so, same as ptp-helper, it gets
+# no entitlements of its own; the app's audio-capture/local-network entitlements
+# stay scoped to the main executable only.
+echo "==> Codesigning tcc-probe (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
+codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
+codesign --verify --strict "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
+
 echo "==> Codesigning app (identity: $CODESIGN_IDENTITY, hardened runtime)"
 ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
@@ -625,5 +676,9 @@ codesign --verify --deep --strict "$APP_BUNDLE" || { echo "ERROR: codesign --ver
 test -x "$MACOS_DIR/$HELPER_EXECUTABLE" || { echo "ERROR: $MACOS_DIR/$HELPER_EXECUTABLE missing after assembly" >&2; exit 1; }
 test -f "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist" || { echo "ERROR: $LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist missing after assembly" >&2; exit 1; }
 codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE" || { echo "ERROR: codesign --verify --strict failed on ptp-helper" >&2; exit 1; }
+
+# tcc-probe is the same shape (not nested code, so --deep never looked at it either).
+test -x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE" || { echo "ERROR: $MACOS_DIR/$TCC_PROBE_EXECUTABLE missing after assembly" >&2; exit 1; }
+codesign --verify --strict "$MACOS_DIR/$TCC_PROBE_EXECUTABLE" || { echo "ERROR: codesign --verify --strict failed on tcc-probe" >&2; exit 1; }
 
 echo "==> Done: $APP_BUNDLE"

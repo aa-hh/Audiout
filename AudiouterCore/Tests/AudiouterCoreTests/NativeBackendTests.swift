@@ -403,7 +403,12 @@ final class NativeBackendTests: XCTestCase {
         connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
-        injectedMeteringCapture: PerAppCaptureCoordinator? = nil
+        injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
+        captureRetryDelay: TimeInterval = 2.0,
+        captureRetryMaxBackoff: TimeInterval = 10.0,
+        watchdogScheduler: SilenceWatchdogScheduling? = nil,
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
     ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
@@ -411,7 +416,12 @@ final class NativeBackendTests: XCTestCase {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: systemVolume, connectVolume: connectVolume, processResolver: processResolver,
             injectedPerAppCapture: injectedPerAppCapture,
-            injectedMeteringCapture: injectedMeteringCapture)
+            injectedMeteringCapture: injectedMeteringCapture,
+            captureRetryDelay: captureRetryDelay,
+            captureRetryMaxBackoff: captureRetryMaxBackoff,
+            watchdogScheduler: watchdogScheduler,
+            silenceFallbackDelay: silenceFallbackDelay,
+            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass)
         return (backend, engine, discovery)
     }
 
@@ -2663,6 +2673,212 @@ final class NativeBackendTests: XCTestCase {
             "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
     }
 
+    // MARK: Whole-system capture retry (T16, E10)
+    //
+    // Before this fix `captureCoordinator.onStateChange` was never wired to
+    // anything at all — a `.failed` whole-system tap (TCC lost mid-session, a
+    // HAL hiccup building the aggregate device, a bad ASBD read) stayed dead
+    // until the user happened to toggle a Selected Device (the only OTHER path
+    // that re-invokes `reconcileCaptureGate`). These mirror the T8
+    // `.processNotYetAudible` retry tests above (bounded/backoff/cancellation),
+    // but for the ONE whole-system tap rather than a per-bundle-ID capture —
+    // plus the extra "must not restart a tap nobody wants any more" guard that
+    // has no per-app equivalent (see `scheduleCaptureRetry`'s doc comment).
+    //
+    // `FakeCapture` has no real state machine of its own — `fireState(_:)`
+    // drives `NativeBackend.handleCaptureCoordinatorStateChange` directly, the
+    // same way the real `NativeCaptureCoordinator.onStateChange` would, with no
+    // Core Audio tap in the loop.
+
+    /// A transient `.failed` (e.g. `.tapCreationFailed`) while capture is
+    /// desired must self-heal: the backend's own backoff retry re-invokes
+    /// `coordinator.start()` with NO further UI action (no re-toggle of the
+    /// Selected Device).
+    func testWholeSystemCaptureFailedSchedulesRetryThatRestartsTheTap() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.03, captureRetryMaxBackoff: 0.1)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Retry Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        XCTAssertEqual(capture.startCount, 1)
+
+        capture.fireState(.failed(.tapCreationFailed(reason: "test failure")))
+
+        await pollUntil(timeout: 2) { capture.startCount >= 2 }
+        XCTAssertGreaterThanOrEqual(capture.startCount, 2,
+            "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
+    }
+
+    /// A `.capturing` transition — recovery, whether from our own retry or a
+    /// device-change rebuild inside the real coordinator — must cancel any
+    /// pending retry immediately and reset the backoff attempt counter, so a
+    /// LATER unrelated failure starts its backoff from attempt 1 again, not
+    /// wherever the prior chain left off.
+    func testWholeSystemCaptureRetryCancelledOnRecovery() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.2, captureRetryMaxBackoff: 0.5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Recovery Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        capture.fireState(.failed(.aggregateDeviceFailed(reason: "test")))
+        await pollUntil { backend.test_hasPendingCaptureRetry() }
+        XCTAssertEqual(backend.test_captureRetryCount(), 1)
+
+        // Recovered well before the 0.2s backoff would have fired.
+        let format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        capture.fireState(.capturing(format))
+
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "recovering to .capturing must cancel any pending retry immediately")
+        XCTAssertEqual(backend.test_captureRetryCount(), 0, "recovery resets the backoff attempt counter")
+
+        // Give the cancelled timer's original deadline time to pass and prove
+        // no stray start() lands from it.
+        let countAfterRecover = capture.startCount
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertEqual(capture.startCount, countAfterRecover,
+            "a cancelled retry must never fire a stray start() after recovery")
+    }
+
+    /// Single-flighting: N `.failed` events in a row (well within the backoff
+    /// window) must replace, never stack, the pending retry timer — so exactly
+    /// ONE retry-driven `start()` lands, not N of them landing back-to-back.
+    /// The attempt counter still grows per failure (it feeds the backoff delay
+    /// math), even though only the LAST scheduled timer ever fires.
+    func testWholeSystemCaptureRetryIsSingleFlighted() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.15, captureRetryMaxBackoff: 0.3)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "SingleFlight Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        // Two `.failed` events back to back, well inside the first's 0.15s
+        // backoff window — the second must REPLACE the first's timer.
+        capture.fireState(.failed(.tapCreationFailed(reason: "first")))
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        capture.fireState(.failed(.tapCreationFailed(reason: "second")))
+
+        XCTAssertEqual(backend.test_captureRetryCount(), 2,
+            "the attempt counter still grows per failure (feeds the backoff delay)")
+
+        await pollUntil(timeout: 2) { capture.startCount > startsBefore }
+        // Past BOTH original timers' deadlines (0.15s and 0.02+0.3s) — if the
+        // first had NOT been cancelled, this window would show a 2nd extra
+        // start() beyond the one the surviving (2nd) timer produces.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(capture.startCount, startsBefore + 1,
+            "N `.failed` events in a row must never stack N retry timers (single-flighting)")
+    }
+
+    /// `.osUnsupported` is the one permanently-dead `NativeCaptureError` — no
+    /// retry can ever fix an OS-version gate, so it must never schedule one
+    /// (matches `PerAppCaptureError.isRetryable`'s exact same carve-out).
+    func testWholeSystemCaptureRetryDoesNotSpinOnOSUnsupported() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Unsupported Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        capture.fireState(.failed(.osUnsupported(minimum: "14.2")))
+
+        // Several backoff periods' worth of margin — a permanently-dead
+        // failure must never spin a retry.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "a permanently-dead failure (.osUnsupported) must not schedule a retry")
+        XCTAssertEqual(capture.startCount, startsBefore,
+            "an unretryable failure must never re-invoke start()")
+    }
+
+    /// A `.failed` while NOTHING is selected (capture was never desired) must
+    /// be a pure no-op — there is no per-bundle route to check against for the
+    /// whole-system tap, only `captureRunning`, and it must gate the retry here
+    /// too, not just at fire time.
+    func testWholeSystemCaptureFailedWithNothingSelectedNeverSchedulesRetry() async {
+        let (backend, engine, _) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        capture.fireState(.failed(.tapCreationFailed(reason: "test")))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "a `.failed` while capture isn't desired at all must never schedule a retry")
+        XCTAssertEqual(capture.startCount, 0, "start() must never be called with nothing selected")
+    }
+
+    /// The whole-system tap is the ONE global `.mutedWhenTapped` tap — unlike an
+    /// orphaned per-app retry (harmless: it's caught and stopped at its OWN
+    /// `.capturing` landing site), blindly restarting THIS tap once capture is
+    /// no longer desired would mute the Mac's speakers with nowhere for the
+    /// captured audio to go. Deselecting during the backoff wait must cancel
+    /// the pending retry so it never fires at all.
+    func testWholeSystemCaptureRetryDoesNotFireAfterDeselect() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.15, captureRetryMaxBackoff: 0.3)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Deselect Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        let startsBefore = capture.startCount
+
+        capture.fireState(.failed(.deviceLost(reason: "test")))
+        await pollUntil { backend.test_hasPendingCaptureRetry() }
+
+        // Deselect everything DURING the backoff wait.
+        backend.setOutputSet([])
+        await pollUntil { capture.ops.last == "stop" }
+        XCTAssertFalse(backend.test_hasPendingCaptureRetry(),
+            "deselecting must cancel the pending retry (reconcileCaptureGate's own hygiene)")
+
+        // Past the original backoff deadline: no stray start() must land.
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertEqual(capture.startCount, startsBefore,
+            "a retry must never restart the whole-system tap once capture is no longer " +
+            "desired — it would mute the Mac with the audio going nowhere")
+    }
+
     // MARK: Sleep/wake (B6b)
 
     /// Discover an AP2 device, select it, and wait until it's streaming (`added`).
@@ -2833,13 +3049,26 @@ final class NativeBackendTests: XCTestCase {
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
         private var _onDeviceRateRebuild: (@Sendable () -> Void)?
         private var _ops: [String] = []
         private var _meteringActive = false
+        /// How many times `start()` has actually been called — including a
+        /// retry-driven restart, not just the first one (T16, E10). `ops` also
+        /// records this (as another `"start"` entry), but a dedicated counter
+        /// reads clearer at the call site of a retry-recovery test.
+        private var _startCount = 0
 
         var onLevel: (@Sendable (_ rms: Float) -> Void)? {
             get { lock.withLock { _onLevel } }
             set { lock.withLock { _onLevel = newValue } }
+        }
+        /// T16, E10: fired by `fireState(_:)` to script the whole-system tap's
+        /// state machine — `NativeBackend.start()` wires this exactly like the
+        /// real `NativeCaptureCoordinator.onStateChange`.
+        var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
+            get { lock.withLock { _onStateChange } }
+            set { lock.withLock { _onStateChange = newValue } }
         }
         /// Whole-system tap device/rate-rebuild seam (T2): the real coordinator
         /// fires this ONLY when a device/nominal-rate change rebuilt the tap — the
@@ -2851,9 +3080,44 @@ final class NativeBackendTests: XCTestCase {
             get { lock.withLock { _onDeviceRateRebuild } }
             set { lock.withLock { _onDeviceRateRebuild = newValue } }
         }
-        func start() { lock.withLock { _ops.append("start") } }
+        func start() { lock.withLock { _ops.append("start"); _startCount += 1 } }
         func stop() { lock.withLock { _ops.append("stop") } }
         func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+
+        /// R14: records every `refreshExcludedProcessSet(forRelaunchedBundleID:)`
+        /// call so a test can assert `NativeBackend.handleAppLaunched` /
+        /// `handlePerAppCaptureHealthChange` re-resolve the whole-system tap's
+        /// exclusion for a relaunched/now-audible bundle ID.
+        private var _refreshedBundleIDs: [String] = []
+        func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+            lock.withLock { _refreshedBundleIDs.append(bundleID) }
+        }
+        var refreshedBundleIDs: [String] { lock.withLock { _refreshedBundleIDs } }
+
+        /// R5: records the route table + denylist handed to `updateRouting`, in
+        /// order, so a test can assert exactly WHICH bundle IDs the whole-system tap
+        /// was told to exclude. The real coordinator turns `.device`-routed bundle
+        /// IDs plus the denylist into excluded process object ids (covered by
+        /// `NativeCaptureCoordinatorTests`); at THIS seam the question is only what
+        /// `NativeBackend` decided to send, which is what the effective route table
+        /// changes.
+        private var _routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] = []
+        func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
+            lock.withLock { _routingUpdates.append((appRoutes, excludedBundleIDs)) }
+        }
+        var routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] {
+            lock.withLock { _routingUpdates }
+        }
+        /// The bundle IDs the LAST `updateRouting` call would have the whole-system
+        /// tap exclude: every `.device`-routed bundle ID unioned with the denylist —
+        /// i.e. `NativeCaptureCoordinator`'s own union rule, mirrored here.
+        var lastExcludedBundleIDs: Set<String>? {
+            guard let last = routingUpdates.last else { return nil }
+            let routedAway = last.appRoutes
+                .filter(\.destination.isDeviceRoute)
+                .map(\.bundleID)
+            return last.excludedBundleIDs.union(routedAway)
+        }
 
         /// Fire a device/nominal-rate rebuild exactly as the real coordinator does
         /// from `recreateTap(cause: .deviceOrRateChange)` (T2), so a test can
@@ -2869,6 +3133,8 @@ final class NativeBackendTests: XCTestCase {
         /// Whether the tap is running right now — i.e. exactly when the real
         /// `.mutedWhenTapped` tap has the Mac's speakers muted.
         var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+        /// Total `start()` calls so far (T16, E10) — see `_startCount`.
+        var startCount: Int { lock.withLock { _startCount } }
         /// The last value passed to `setMeteringActive`, `false` until called.
         var meteringActive: Bool { lock.withLock { _meteringActive } }
         /// Fire `onLevel` as the real coordinator would — but only if metering is
@@ -2877,6 +3143,13 @@ final class NativeBackendTests: XCTestCase {
         func fireLevelIfActive(_ rms: Float) {
             let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
             if active { handler?(rms) }
+        }
+        /// Fire `onStateChange` as the real coordinator would on a transition
+        /// (T16, E10) — drives `NativeBackend.handleCaptureCoordinatorStateChange`
+        /// with no real Core Audio tap in the loop.
+        func fireState(_ state: NativeCaptureCoordinator.State) {
+            let handler = lock.withLock { _onStateChange }
+            handler?(state)
         }
     }
 
@@ -3187,6 +3460,108 @@ final class NativeBackendTests: XCTestCase {
                       "the LAST engine op must be the add that leaves the device genuinely streaming")
     }
 
+    /// Post-merge adversarial finding: a system SLEEP landing while a whole-system
+    /// rebind recovery was waiting out its backoff delay stranded a still-selected
+    /// speaker silent for the rest of the app's life.
+    ///
+    /// The attempt that schedules a backed-off retry deliberately KEEPS the device's
+    /// `converging` slot ("still in progress"). Sleep clears `added`, so when the
+    /// retry finally fired, its ownership re-check failed and it simply returned —
+    /// releasing nothing. Every path that re-adds a device is gated on
+    /// `!converging.contains(id)`, so from that moment `handleSystemDidWake`'s
+    /// re-kick skipped the device, as did every later `setOutputSet`: it never got
+    /// an engine session again, and no watchdog re-issues one.
+    ///
+    /// `handleSystemWillSleep` now abandons in-flight recovery the way `stop()` does
+    /// (cancel the timers, clear the generations) and releases exactly the slots
+    /// those recoveries held, so wake re-converges the device normally.
+    func testSleepDuringRebindRecoveryBackoffStillReconvergesOnWake() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        // A long backoff so the sleep below lands squarely INSIDE the delay window,
+        // with the retry still pending and the `converging` slot still held.
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        // The receiver refuses the rebind, so recovery attempt 1 fails and schedules
+        // a backed-off retry — the state the sleep has to clean up after.
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
+        }
+        let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        backend.handleSystemWillSleep()
+        engine.addFailures = []          // the receiver is reachable again after wake
+        backend.handleSystemDidWake()
+
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt
+        }
+        XCTAssertGreaterThan(engine.addedIDs.filter { $0 == device.outputID }.count, addsAfterFailedAttempt,
+                             "wake must re-add a still-selected device even though a rebind recovery was "
+                             + "mid-backoff when the Mac slept — a `converging` slot left held by that "
+                             + "recovery makes the wake re-kick (and every later select) skip the device "
+                             + "forever, which is silence with no self-recovery")
+        await pollUntil(timeout: 2) {
+            backend.devices.first { $0.id == device.id }?.isSelected == true
+        }
+        XCTAssertTrue(backend.devices.first { $0.id == device.id }!.isSelected,
+                      "the device must end up genuinely streaming again after wake")
+    }
+
+    /// The UI half of the same finding: sleep must also retract the "recovering"
+    /// badge for a rebind it just abandoned. The chain that would have emitted
+    /// `recovering: false` on success is cancelled by the sleep, so without an
+    /// explicit clear the popover strands a recovery spinner on a device that is
+    /// not recovering and — post-wake — is converging by an entirely different
+    /// path. Same discipline as the `clearSilenceOverride()`/`clearSystemAirPlayGuard()`
+    /// clears already in `handleSystemWillSleep`.
+    func testSleepClearsTheRecoveringBadgeForAnAbandonedRebind() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()   // emits recovering:true, then fails attempt 1
+        await pollUntil(timeout: 5) {
+            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
+        }
+
+        // Subscribe AFTER the recovery is established but BEFORE the sleep, so the
+        // only `recovering: false` this can observe is the one sleep itself emits.
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .streamHealth(let id, let recovering) = $0 {
+                    return id == device.id && !recovering
+                }
+                return false
+            }
+        } after: { backend.handleSystemWillSleep() }
+
+        XCTAssertTrue(
+            events.contains {
+                if case .streamHealth(let id, let recovering) = $0 { return id == device.id && !recovering }
+                return false
+            },
+            "sleep must clear the recovering badge for the rebind it abandons — the chain that "
+            + "would have cleared it on success is cancelled, so nothing else ever will")
+    }
+
     // MARK: Per-app routing (T6)
 
     /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`
@@ -3403,6 +3778,139 @@ final class NativeBackendTests: XCTestCase {
         // Selected Devices set — AGENTS.md invariant).
         XCTAssertFalse(backend.devices.first { $0.id == device.id }?.isSelected ?? true,
                        "a redirect target must not be marked isSelected by the per-app path")
+    }
+
+    /// D4-best-effort's engine failure was previously swallowed with `try?` in
+    /// `performBindOp`, so a per-app bind that genuinely fails at the engine left
+    /// the UI's `.routedApps` claim (published purely from mixer TOPOLOGY by
+    /// `handleDestinationSetsChanged`, ahead of and independent from whether the
+    /// engine call underneath succeeds) standing — the teal dot + "streaming Foo"
+    /// sublabel kept claiming a session that was never actually established.
+    /// `handleBindFailure` now walks that claim back to empty on a failed bind,
+    /// mirroring exactly the clear `handleDestinationSetsChanged` emits when a
+    /// device legitimately loses its stream.
+    func testFailedBindEmitsRoutedAppsClearInsteadOfFalselyClaimingStream() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Force the per-app engine bind to throw for this device.
+        engine.addFailures = [device.outputID.rawValue]
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
+        }
+
+        XCTAssertTrue(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
+            return false
+        }, "topology-driven .routedApps still fires first, purely from mixer intent")
+        XCTAssertTrue(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "a bind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming a stream")
+
+        // Confirm the engine bind attempt actually happened (and, by construction
+        // of this test's `addFailures`, failed).
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+    }
+
+    /// Same fallback for the REBIND path: a membership change that reassigns a
+    /// device to a new per-app stream (here, one of two sibling apps sharing a
+    /// device's stream terminates — see
+    /// `testAppTerminatedMidStreamRebindsDeviceToSurvivingSiblingsStream` for the
+    /// happy-path version of this exact setup) can also fail at the engine. The
+    /// device must fall back to an empty `.routedApps` claim rather than keep
+    /// asserting the surviving app's stream.
+    func testFailedRebindEmitsRoutedAppsClearInsteadOfFalselyClaimingStream() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Rebind Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar", "Foo"] }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([
+                self.route("com.foo", name: "Foo", toDevice: device.id),
+                self.route("com.bar", name: "Bar", toDevice: device.id),
+            ])
+        }
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        // Now force the rebind's re-add (Foo's termination reassigns the device
+        // to Bar-only's fresh stream) to fail at the engine.
+        engine.addFailures = [device.outputID.rawValue]
+
+        let afterTermination = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: { backend.handleAppTerminated(bundleID: "com.foo") }
+
+        XCTAssertTrue(afterTermination.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Bar"] }
+            return false
+        }, "topology still updates to the surviving app first, purely from mixer intent")
+        XCTAssertTrue(afterTermination.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "a rebind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming Bar's stream")
+
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= 2 }
+    }
+
+    /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
+    /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`), same pattern as
+    /// `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+    func testFailedBindLogsTelemetry() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Telemetry Bind-Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func bindFailedLines() -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "bind_failed"
+                    && $0["device"] as? String == device.id
+            }
+        }
+        // `Telemetry.log` is non-blocking (its own writer queue), so poll for the
+        // line to land rather than reading the box immediately after the
+        // `.routedApps` event that's emitted from the same `stateQueue.sync` block
+        // — same pattern as
+        // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+        await pollUntil(timeout: 5) { !bindFailedLines().isEmpty }
+        XCTAssertFalse(bindFailedLines().isEmpty,
+                       "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
+        XCTAssertEqual(bindFailedLines().first?["op"] as? String, "bind",
+                       "the logged op must identify this as a bind (not rebind) failure")
     }
 
     // MARK: T10 cross-component gap coverage
@@ -3908,6 +4416,213 @@ final class NativeBackendTests: XCTestCase {
                        "no further retry may be scheduled once the route has been dropped")
     }
 
+    /// Bug 1 fix (tap resurrection race): a `.processNotYetAudible` retry
+    /// scheduled BEFORE a de-route must not resurrect a live (muted) Core Audio
+    /// tap for a bundle ID nobody wants any more if it fires AFTER the de-route
+    /// and happens to succeed (the app started playing audio in the interim).
+    ///
+    /// Models the scripted-tap setup of `testProcessNotYetAudibleRetriesStopOnDeRoute`
+    /// above, but de-routes via a DESTINATION CHANGE (`.device` → `.noRedirect`,
+    /// bundle ID kept `stillPresent` in the route table) rather than removing the
+    /// route entirely. A full removal (`updateAppRoutes([])`) races
+    /// `updateAppRoutes`'s own `pendingRetries` cleanup (best-effort
+    /// `DispatchWorkItem.cancel()`, applied only to bundle IDs no longer present
+    /// in the table AT ALL) — which is exactly why
+    /// `testProcessNotYetAudibleRetriesStopOnDeRoute` only TOLERATES an
+    /// already-in-flight retry rather than asserting one occurs. This test needs
+    /// the retry to deterministically survive the de-route so it can prove what
+    /// happens when it lands, so it keeps "com.foo" in the table with
+    /// `.noRedirect`: that still clears `routedBundleIDs`/`localBundleIDs` (the
+    /// fix's membership guard) and still fully removes the coordinator's slot via
+    /// the ordinary `captureToStop` diff — but does NOT touch `pendingRetries`,
+    /// so the scheduled retry is guaranteed to still fire.
+    func testOrphanedCaptureAfterDeRouteIsStoppedNotAccepted() async {
+        // Fails once (`.processNotYetAudible`), then succeeds — the single
+        // failure is what schedules the retry that must survive the de-route.
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            // A generous 0.3s delay (well past the 5ms poll granularity and the
+            // sub-millisecond de-route call below) so the de-route deterministically
+            // lands before the timer fires, rather than racing it.
+            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        // Let the first (scripted) failure happen — its retry is now scheduled
+        // ~0.3s out.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+
+        // De-route WITHOUT removing "com.foo" from the table (destination ->
+        // .noRedirect instead of dropping the AppRoute entirely) — see the test's
+        // doc comment for why this is what makes the retry's survival
+        // deterministic rather than a tolerated race. Snapshot the per-device
+        // bind count here: `updateAppRoutes` binds a device OPTIMISTICALLY from
+        // route-table membership alone (see `testAppRouteBindsDeviceToNonZeroStream`),
+        // so this device already has ONE bind from the very first
+        // `updateAppRoutes([route(...)])` call above, well before either capture
+        // attempt — the leak signal to prove is "no NEW bind after this point",
+        // not "no bind ever".
+        let bindCountAtDeRoute = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect),
+        ])
+
+        // The scheduled retry fires AFTER the de-route and SUCCEEDS per the
+        // script — this is the resurrection race: a capture lands, in a
+        // brand-new coordinator slot, for a bundle ID nobody wants any more.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+
+        // The fix's orphan guard must stop it right back, not accept it. The stop
+        // is dispatched onto `captureControlQueue` (async — calling it inline
+        // from inside the coordinator's own state-change callback would deadlock
+        // its queue, see the `isOrphan` branch of `handlePerAppCaptureHealthChange`),
+        // so this must be polled rather than asserted synchronously.
+        await pollUntil(timeout: 5) {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+        if case .idle = perAppCapture.state(for: "com.foo") {} else {
+            XCTFail("an orphaned recapture (bundle ID no longer routed or local) must be " +
+                     "stopped, not accepted — it stayed \(perAppCapture.state(for: "com.foo"))")
+        }
+
+        // No leaked engine binding either: the orphaned capture landing must never
+        // cause a FRESH per-app stream bind for the de-routed device — the orphan
+        // branch returns before `republishMixerTopology()`/
+        // `resetAirPlaySessionForRoutedApp` ever run, so the mixer/engine never
+        // hear about this capture at all.
+        XCTAssertEqual(engine.streamAddCalls.filter { $0.0 == device.outputID }.count, bindCountAtDeRoute,
+                       "an orphaned recapture must never cause a fresh per-app stream bind " +
+                       "for the de-routed device")
+    }
+
+    /// Bookkeeping-hygiene fix: `everCapturedBundleIDs` must forget a bundle
+    /// whose capture stops even though the bundle stays IN the route table —
+    /// a `.device` -> `.noRedirect` -> `.device` toggle (same bundle id, same
+    /// route row), not just when it leaves the table entirely. Before the fix,
+    /// the SECOND capture (after re-routing back to `.device`) misread as
+    /// `isRecapture == true` and fired an extra `resetAirPlaySessionForRoutedApp`
+    /// (an extra removeOutput/addOutput pair) on top of the one NATURAL bind
+    /// the re-route's own destination-set change already produces.
+    func testDeviceToggleOffThenOnDoesNotTriggerSpuriousRecaptureReset() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // De-route via destination change (bundle stays IN the table, unlike
+        // `testOrphanedCaptureAfterDeRouteIsStoppedNotAccepted`'s de-route,
+        // which mirrors the SAME style here) — the capture must actually stop.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect),
+        ])
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // Re-route back to the same device — a brand-new (not rebuilt) capture.
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        // Give any (buggy) async session-reset time to land before inspecting —
+        // same tolerance `testRebindRecoveryGivesUpAfterMaxAttempts` uses to
+        // prove a negative ("nothing more happens").
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let binds = engine.streamAddCalls.filter { $0.0 == device.outputID }
+        XCTAssertEqual(binds.count, 2,
+                       "toggling a route off then back on is exactly two NATURAL binds " +
+                       "(initial route + re-route) — a stale isRecapture must not fire an extra " +
+                       "resetAirPlaySessionForRoutedApp on top, got \(binds.count)")
+    }
+
+    /// Bookkeeping-hygiene fix, `handleAppTerminated` half: a quit must forget
+    /// `everCapturedBundleIDs` for the terminated bundle — same "capture
+    /// genuinely stopped" contract as the route-toggle case above, reached via
+    /// `handleAppTerminated` instead of `updateAppRoutes`.
+    ///
+    /// Asserted DIRECTLY via `test_hasEverCaptured` rather than through an
+    /// engine-bind side effect (contrast the toggle test above): traced this
+    /// while writing the test — `resetAirPlaySessionForRoutedApp`, the
+    /// consumer of a stale entry here, is ALSO a guaranteed no-op when
+    /// triggered from a relaunch's `.capturing`, for an unrelated reason —
+    /// `handleAppLaunched` calls `perAppCapture.start` SYNCHRONOUSLY (it
+    /// blocks the caller until `.capturing`/`.failed` resolves, including
+    /// firing this handler, since neither the coordinator nor
+    /// `NativeBackend`'s `onStateChange` wiring hops to another queue) and
+    /// only calls its OWN `republishMixerTopology()` afterward — so
+    /// `routeMixer.streamID(for:)` is still nil at the moment `.capturing`
+    /// lands, regardless of `isRecapture`. That makes an engine-bind-counting
+    /// version of this test pass identically whether or not the fix below is
+    /// present (confirmed empirically) — a false positive. Direct state is
+    /// the honest way to test this specific half of the fix; the doc comment
+    /// on `everCapturedBundleIDs` at its declaration states the "cleared ...
+    /// when its capture stops" contract this keeps true independent of that
+    /// other function's current no-op behavior.
+    /// (`testCurrentDeviceAppTerminatedStopsItsCapture`/
+    /// `testCurrentDeviceAppRelaunchRestartsItsCapture` cover the SAME
+    /// handler for a `.currentDevice` bundle, but only assert coordinator
+    /// state, never `everCapturedBundleIDs` — a `.currentDevice` bundle also
+    /// has no mixer stream at all, ever, so this exact question doesn't arise
+    /// for them.)
+    func testAppTerminatedClearsEverCapturedBundleIDs() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+        XCTAssertTrue(backend.test_hasEverCaptured(bundleID: "com.foo"),
+                      "setup failed: the first capture must record the ever-captured bit")
+
+        backend.handleAppTerminated(bundleID: "com.foo")
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
+
+        XCTAssertFalse(backend.test_hasEverCaptured(bundleID: "com.foo"),
+                       "a quit must forget everCapturedBundleIDs for the terminated bundle, " +
+                       "per its own doc comment (\"cleared ... when its capture stops\")")
+    }
+
     /// A `ProcessAudioTap` that always succeeds and stores the
     /// `onDefaultDeviceChanged` closure it was handed, so a test can force a
     /// tap rebuild (`fireDeviceChange()`) at will — the per-app analogue of
@@ -4177,8 +4892,8 @@ final class NativeBackendTests: XCTestCase {
     /// `testDeviceUnavailableTearsDownBackendCaptureViaAppRoutingController` —
     /// that does not actually exist anywhere in the suite (only
     /// `AppRoutingController`-only-level coverage exists:
-    /// `testHandleDeviceUnavailableResetsMatchingRoutesAndPersists`). This is
-    /// that missing test: `AppRoutingController.handleDeviceUnavailable` must
+    /// `testHandleDeviceDisappearedResetsMatchingRoutesAndPersists`). This is
+    /// that missing test: `AppRoutingController.handleDeviceDisappeared` must
     /// reach all the way through `onRoutesDidChange` into a REAL
     /// `NativeBackend.updateAppRoutes` and tear down the per-app stream binding
     /// — not just reset the persisted route in isolation.
@@ -4199,10 +4914,10 @@ final class NativeBackendTests: XCTestCase {
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
 
         // The device the route targets disappears. In production this is
-        // `PopoverController.update(devices:)` calling `handleDeviceUnavailable`
+        // `PopoverController.update(devices:)` calling `handleDeviceDisappeared`
         // (PLAN decision 7); here we call it directly, exactly as that boundary
         // does, to prove the layers beneath it stay in sync.
-        controller.handleDeviceUnavailable(id: device.id)
+        controller.handleDeviceDisappeared(id: device.id)
 
         await pollUntil { engine.removedIDs.contains(device.outputID) }
         XCTAssertTrue(engine.removedIDs.contains(device.outputID),
@@ -4210,6 +4925,116 @@ final class NativeBackendTests: XCTestCase {
                       "driven through the REAL AppRoutingController -> NativeBackend chain, not a direct call")
         XCTAssertEqual(controller.appRoutes.first { $0.bundleID == "com.foo.player" }?.destination, .noRedirect,
                        "the persisted route must fall back to .noRedirect")
+    }
+
+    // MARK: R5 — a route whose target is temporarily unreachable
+
+    /// R5, the audibility half: a `.device` route whose target is discovered but
+    /// NOT reachable (`isAvailable == false`) must be treated as if the app weren't
+    /// routed at all — otherwise the app is excluded from the whole-system tap
+    /// (because the route table says it has its own stream) while that stream has
+    /// nowhere to go, and the app is simply silent with no visible cause. Keeping
+    /// the route is only safe BECAUSE of this: the app rejoins the system mix and
+    /// keeps playing wherever the Mac's current selection points.
+    ///
+    /// Then, with NO route-table edit at all, the device comes back and the redirect
+    /// must re-engage by itself: tap restarted, bundle ID excluded again, engine
+    /// stream re-bound.
+    func testUnreachableRouteTargetRejoinsSystemMixThenReEngagesOnRecovery() async throws {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo.player", "com.bar.player"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+
+        let target = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Flaky Speaker")
+        let bystander = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Steady Speaker")
+        await startAndDiscover(backend, engine, discovery, target)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == bystander.id } else { return false } }
+        } after: { discovery.fire(.appeared(bystander)) }
+
+        // Both apps routed, each to its own device. The route table is set ONCE here
+        // and never touched again for the rest of the test — every later transition
+        // has to come from reachability alone.
+        let routes = [
+            route("com.foo.player", name: "Foo", toDevice: target.id),
+            route("com.bar.player", name: "Bar", toDevice: bystander.id),
+        ]
+        backend.updateAppRoutes(routes)
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player", "com.bar.player"],
+                       "both reachable-target routes are live, so both apps are excluded from the "
+                       + "whole-system tap (they stream to their own devices)")
+        await pollUntil { perApp.state(for: "com.foo.player") != .idle }
+        XCTAssertNotEqual(perApp.state(for: "com.foo.player"), .idle, "its per-app tap is running")
+
+        // The target goes quiet but stays discovered — a sticky-AP2 receiver powering
+        // off. NOTHING calls updateAppRoutes; discovery is the only input.
+        let offline = DiscoveredDevice(
+            id: target.id, descriptor: target.descriptor, outputID: target.outputID,
+            isAirPlay2Supported: true, isAvailable: false)
+        discovery.fire(.updated(offline))
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == false }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.bar.player"],
+                       "R5: the unreachable-target app must LEAVE the exclusion set — that omission is "
+                       + "exactly what puts it back in the whole-system mix and keeps it audible")
+        await pollUntil { perApp.state(for: "com.foo.player") == .idle }
+        XCTAssertEqual(perApp.state(for: "com.foo.player"), .idle,
+                       "its per-app tap is stopped — there is nothing for it to feed")
+        XCTAssertNotEqual(perApp.state(for: "com.bar.player"), .idle,
+                          "the app routed to a still-reachable device is untouched")
+
+        // Recovery, with no route-table edit: the device re-resolves as reachable.
+        let addsBefore = engine.streamAddCalls.filter { $0.0 == target.outputID }.count
+        discovery.fire(.updated(target))
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player", "com.bar.player"],
+                       "R5 recovery: the redirect re-engages by itself, so the app is excluded again")
+        await pollUntil { perApp.state(for: "com.foo.player") != .idle }
+        XCTAssertNotEqual(perApp.state(for: "com.foo.player"), .idle, "its per-app tap restarted")
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == target.outputID }.count > addsBefore }
+        XCTAssertGreaterThan(engine.streamAddCalls.filter { $0.0 == target.outputID }.count, addsBefore,
+                             "the device is re-bound to its per-app stream, with no route-table mutation")
+    }
+
+    /// R5, the launch case that falls out of the same rule: persisted routes are
+    /// pushed into the backend before discovery has resolved anything, so their
+    /// targets are UNKNOWN — which counts as unreachable. The app must not be
+    /// excluded from the system mix during that window (it would be silent), and the
+    /// redirect must engage the moment its device appears.
+    func testRouteTargetNotYetDiscoveredDoesNotExcludeUntilItAppears() async throws {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo.player"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Late Speaker")
+        backend.start()
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { capture.lastExcludedBundleIDs != nil }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, [],
+                       "a route whose target hasn't been discovered yet must not exclude its app — "
+                       + "there is no stream for it to be excluded in favour of")
+        XCTAssertEqual(perApp.state(for: "com.foo.player"), .idle, "and no per-app tap yet")
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.foo.player") == true }
+        XCTAssertEqual(capture.lastExcludedBundleIDs, ["com.foo.player"],
+                       "the redirect engages on discovery alone, with no route-table edit")
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        XCTAssertTrue(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                      "and the device is bound to its per-app stream")
     }
 
     // MARK: Local playback (Bug T2 — .currentDevice as an independent local stream)
@@ -4343,6 +5168,92 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertTrue(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch
+    //
+    // `AppRoutingController.resetDeviceRoute` deliberately leaves a `.currentDevice`
+    // ("play on this Mac") route untouched on quit (its own doc comment +
+    // `AppRoutingControllerTests` prove that's correct and intentional — a local
+    // pick should survive the app's own quit/relaunch, unlike an AirPlay redirect).
+    // Because the persisted route never changes, `updateAppRoutes` is never
+    // re-invoked, so — before this fix — nothing ever called `perAppCapture.stop`
+    // for the bundle: its per-app Core Audio tap stayed registered in coreaudiod
+    // against a dead pid forever. `handleAppTerminated`/`handleAppLaunched` already
+    // existed for exactly this cleanup, but their guard was `.device`-route-only
+    // (`routedBundleIDs.contains` alone), so a `.currentDevice` bundle was silently
+    // ignored by both. The fix extends the guard to
+    // `routedBundleIDs.contains || localBundleIDs.contains`.
+
+    /// Bug 2 fix, quit half: a `.currentDevice` app's process quitting must stop
+    /// its per-app capture tap.
+    func testCurrentDeviceAppTerminatedStopsItsCapture() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.local"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .capturing = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("setup failed: capture never reached .capturing before handleAppTerminated")
+            return
+        }
+
+        backend.handleAppTerminated(bundleID: "com.local")
+
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .idle = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("a `.currentDevice` app's quit must stop its per-app capture tap — " +
+                     "it stayed \(perAppCapture.state(for: "com.local"))")
+        }
+    }
+
+    /// Bug 2 fix, relaunch half: after `handleAppTerminated` stops a
+    /// `.currentDevice` app's capture, `handleAppLaunched` must restart it — the
+    /// same guard extension fixes both directions (the old guard made
+    /// `handleAppLaunched` silently ignore a `.currentDevice` bundle too, so a
+    /// relaunched "play on this Mac" app never got its audio back without the
+    /// user re-touching the route).
+    func testCurrentDeviceAppRelaunchRestartsItsCapture() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.local"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+
+        backend.handleAppTerminated(bundleID: "com.local")
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+
+        backend.handleAppLaunched(bundleID: "com.local")
+
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.local") { return true }
+            return false
+        }
+        if case .capturing = perAppCapture.state(for: "com.local") {} else {
+            XCTFail("a relaunched `.currentDevice` app must have its per-app capture tap " +
+                     "restarted — it stayed \(perAppCapture.state(for: "com.local"))")
+        }
     }
 
     // MARK: - Metering: three real level sources (T3)
@@ -5027,6 +5938,714 @@ final class NativeBackendTests: XCTestCase {
         XCTAssertEqual(volumes, [50 + step, 50 + 2 * step, 50 + step],
                        "steps must accumulate from the current level, up then back down")
     }
+
+    /// Both routing chokepoints must fire `onRoutingAction` — this is what makes
+    /// the permission re-check reach EVERY user action that moves audio, including
+    /// a group activated through `GroupController.applyRouting`'s group branch
+    /// (which reaches `setOutputSet`, not any per-device UI path).
+    func testRoutingActionHookFiresFromBothChokepoints() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Hook Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let counter = HookCounter()
+        backend.onRoutingAction = { counter.bump() }
+
+        backend.setOutputSet([device.id])
+        XCTAssertEqual(counter.count, 1, "setOutputSet is a routing action")
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect, volume: 100),
+        ])
+        XCTAssertEqual(counter.count, 2, "updateAppRoutes is a routing action")
+    }
+
+    /// Thread-safe call counter for the routing hook (fired on the caller's
+    /// thread, which for these chokepoints is the caller of `setOutputSet`).
+    private final class HookCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+        func bump() { lock.withLock { _count += 1 } }
+        var count: Int { lock.withLock { _count } }
+    }
+
+    // ===== PORTED ours-only tests (R11 silence watchdog / W3-T3 system-AirPlay note / R12 keep-intent / R14 exclusion refresh) =====
+
+    private final class ManualWatchdogScheduler: SilenceWatchdogScheduling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [(id: Int, body: @Sendable () -> Void)] = []
+        private var nextID = 0
+        private var _armCount = 0
+        private var _delays: [TimeInterval] = []
+
+        func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
+            lock.lock(); defer { lock.unlock() }
+            let id = nextID; nextID += 1; _armCount += 1
+            _delays.append(delay)
+            pending.append((id, body))
+            return Token(id: id, scheduler: self)
+        }
+
+        fileprivate func cancel(id: Int) {
+            lock.withLock { pending.removeAll { $0.id == id } }
+        }
+
+        /// Total number of countdowns ever armed (for asserting "never armed").
+        var armCount: Int { lock.withLock { _armCount } }
+        /// Whether any countdown is currently armed (scheduled, not fired/cancelled).
+        var hasPending: Bool { lock.withLock { !pending.isEmpty } }
+        /// The delay of the MOST RECENT `schedule` call (Fix C: lets a test assert
+        /// which delay — the always-on silence delay vs the wake-restore preference —
+        /// an arm used). `nil` before anything was scheduled.
+        var lastDelay: TimeInterval? { lock.withLock { _delays.last } }
+
+        /// Fire (and consume) every pending countdown — the deterministic "T elapsed".
+        func fireAll() {
+            let bodies = lock.withLock { () -> [@Sendable () -> Void] in
+                let b = pending.map(\.body); pending.removeAll(); return b
+            }
+            for body in bodies { body() }
+        }
+
+        private final class Token: SilenceWatchdogToken {
+            let id: Int
+            weak var scheduler: ManualWatchdogScheduler?
+            init(id: Int, scheduler: ManualWatchdogScheduler) { self.id = id; self.scheduler = scheduler }
+            func cancel() { scheduler?.cancel(id: id) }
+        }
+    }
+
+    func testFailedDeviceReconvergesOnRediscoveryWithoutUserAction() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "SelfHealer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        XCTAssertEqual(backend.test_expectedSelected, [device.id],
+                       "R12: intent (expectedSelected) is untouched by the failure")
+
+        // The receiver comes back and the engine stops NACKing — simulate ONLY
+        // rediscovery, no `setOutputSet` re-call (the popover under R12 never
+        // makes one on `.failed`).
+        engine.addFailures = []
+        discovery.fire(.updated(device))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected,
+                       "rediscovery alone re-converged the still-desired device")
+        XCTAssertEqual(d?.isSelected, true)
+    }
+
+    /// R12/W2-T3, the explicit "Try again" path (as opposed to the rediscovery
+    /// path above): `GroupController.retryConnection(for:)` re-issues
+    /// `setOutputSet` with the SAME set — the id was never removed — so
+    /// `NativeBackend` must detect "already desired, still `.failed`" itself
+    /// and re-kick, rather than skipping because `previous == wantOn`.
+    func testRetryOfFailedWithUnchangedSetStillReconverges() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:34", name: "TryAgainer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+
+        // The receiver recovers, but nothing re-discovers it — only an explicit
+        // "Try again" re-issues the SAME output set (the id was already in it).
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        let d = backend.devices.first { $0.id == device.id }
+        XCTAssertEqual(d?.connectionState, .connected,
+                       "a same-membership retry call must still reconnect a .failed device")
+        XCTAssertEqual(d?.isSelected, true)
+    }
+
+    /// toggle-off → off: deselecting a connected device must clear the dot back to
+    /// `.off` (NativeBackend has no sticky-failed-survives-deselect behavior — its
+    /// failure park is unconditionally cleared on any toggle, so the connection dot
+    /// mirrors that and does not stay amber after the user turns the device off).
+
+    // MARK: Generalized silence watchdog (Wave 2 W2-T2, closes R11)
+    //
+    // These drive the fallback deterministically through an injected manual
+    // scheduler (`ManualWatchdogScheduler`) — the "T seconds elapsed" step is a
+    // single `fireAll()` call, never a real `sleep` on the countdown. The scenarios
+    // are the four the plan calls out: (a) all desired devices unavailable →
+    // un-gate + banner + intent kept; (b) reconnect → re-gate + banner clears + no
+    // intent change; (c) only SOME unavailable → never fires; (d) reconnect before
+    // T → the armed countdown cancels and never fires.
+
+    /// (a) A streaming device goes offline (dead-group / R11 case): after the
+    /// countdown elapses, capture UN-GATES (the Mac becomes audible), the fallback
+    /// banner is announced, and the selection intent is untouched.
+    func testSilenceWatchdogUnGatesWhenAllDesiredGoOffline() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "R11 Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)   // any positive value; the manual scheduler ignores the magnitude
+
+        // The speaker fails/powers off — an out-of-band engine `.failed`. Intent
+        // (desiredOn / expectedSelected) is preserved by design, so the gate still
+        // WANTS to stream but nothing is connected → the countdown arms.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertTrue(capture.isCapturing,
+                      "before the countdown fires, capture stays gated (the silent-Mac bug window)")
+
+        // T seconds elapse (subscribe first so the banner event is observed).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } }
+        } after: { scheduler.fireAll() }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } },
+                      "the fallback must announce the banner")
+
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(capture.isCapturing, "watchdog must un-gate capture so the Mac becomes audible (R11)")
+        XCTAssertTrue(backend.test_silenceFallbackActive)
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id),
+                      "the fallback must NOT clear the user's selection intent")
+    }
+
+    /// (b) After the fallback is active, a desired device reconnecting RE-GATES
+    /// capture (audio moves back to the device, the Mac re-mutes), clears the
+    /// banner, and never touches the intent.
+    func testSilenceWatchdogReEngagesOnReconnect() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Resume Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand, then fire → fallback active (capture off, Mac audible).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id))
+
+        // The speaker comes back — an out-of-band `.connected`. The gate re-engages,
+        // and the clear event is announced (subscribe first so it's observed).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } }
+        } after: { engine.pushState(device.outputID, .connected) }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } },
+                      "a reconnect must announce the banner clearing")
+
+        await pollUntil { capture.isCapturing }
+        XCTAssertFalse(backend.test_silenceFallbackActive, "a reconnect must clear the fallback")
+        XCTAssertTrue(capture.isCapturing, "a reconnect must re-gate capture (Mac re-muted, streaming to the device)")
+        XCTAssertTrue(backend.test_expectedSelected.contains(device.id),
+                      "intent must be unchanged throughout the fall-back / resume cycle")
+    }
+
+    /// (c) With only SOME desired devices unavailable (one still connected), the
+    /// watchdog must NOT fire — it keys on "ZERO connected", not "any unavailable".
+    func testSilenceWatchdogDoesNotFireWhenSomeStillConnected() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        backend.setWakeAudioRestoreDelay(600)
+
+        let good = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Good Speaker")
+        let bad = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Bad Speaker")
+        for d in [good, bad] {
+            _ = await collect(from: backend) { events in
+                events.contains { if case .deviceAdded(let x) = $0 { return x.id == d.id } else { return false } }
+            } after: { discovery.fire(.appeared(d)) }
+        }
+        engine.addFailures = [bad.outputID.rawValue]   // `bad` never reaches .connected
+
+        backend.setOutputSet([good.id, bad.id])
+        await pollUntil { backend.devices.first { $0.id == good.id }?.connectionState == .connected }
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == bad.id })?.connectionState { return true }
+            return false
+        }
+
+        // One member is connected → not stranded. Any transient countdown from the
+        // initial (both-connecting) moment must be disarmed, and firing whatever is
+        // pending must NOT trip the fallback (the fire re-checks the condition).
+        scheduler.fireAll()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_silenceFallbackActive,
+                       "a partly-connected selection is still audible — the watchdog must not fall back")
+        XCTAssertFalse(backend.test_silenceWatchdogArmed,
+                       "with a device connected, no countdown should be armed")
+        XCTAssertTrue(capture.isCapturing, "capture stays gated — the connected member is streaming")
+    }
+
+    /// (d) A reconnect BEFORE the countdown elapses cancels the armed watchdog, so
+    /// it never fires and the Mac never falls back.
+    func testSilenceWatchdogCancelsOnReconnectBeforeTimeout() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:74", name: "Flap Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand → the countdown arms (but we do NOT fire it yet).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertTrue(backend.test_silenceWatchdogArmed)
+
+        // The device recovers before the countdown elapses → the armed timer cancels.
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { !backend.test_silenceWatchdogArmed }
+        XCTAssertFalse(scheduler.hasPending, "a reconnect before T must cancel the armed countdown")
+
+        // Even if the (cancelled) timer somehow still fired, the re-check keeps it inert.
+        scheduler.fireAll()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_silenceFallbackActive, "the watchdog must never fire once cancelled")
+        XCTAssertTrue(capture.isCapturing, "capture stayed gated the whole time — no fallback")
+    }
+
+    // MARK: Fix B — the fallback banner never strands ON (invariant 4)
+
+    /// The exact stranding sequence that used to leave the "playing on this Mac"
+    /// banner ON forever: watchdog fires (banner true) → SLEEP clears the override
+    /// WITHOUT emitting → WAKE → the desired device reconnects → reconcile's
+    /// else-branch runs but the override is already false, so its `false` emit is
+    /// skipped. With the clear centralized through `clearSilenceOverride()`, the
+    /// `.localFallbackActive(false)` is emitted on the genuine true→false edge (at
+    /// sleep), so the banner is retracted and never strands ON.
+    func testFallbackBannerClearsAcrossSleepWakeReconnectCycle() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Banner Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(600)
+
+        // Strand + fire → fallback active (banner true).
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive }
+
+        // Subscribe, then run the FULL sleep → wake → reconnect cycle. A banner-clear
+        // (`false`) must be emitted somewhere in it, and the fallback must end cleared.
+        let events = await collect(from: backend, timeout: 4) {
+            $0.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } }
+        } after: {
+            backend.handleSystemWillSleep()
+            backend.handleSystemDidWake()
+            engine.pushState(device.outputID, .connected)
+        }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } },
+                      "the banner-clear must be emitted on the true→false edge — the banner must never strand ON")
+        await pollUntil { !backend.test_silenceFallbackActive }
+        XCTAssertFalse(backend.test_silenceFallbackActive, "the fallback must end cleared, not stuck on")
+    }
+
+    /// Fix B idempotency: a sleep/wake cycle with the override NEVER active must emit
+    /// NO `.localFallbackActive` at all — `clearSilenceOverride()` never fires a
+    /// spurious `false` that would flap the banner off when it was never on.
+    func testNoSpuriousFallbackClearWhenOverrideWasNeverActive() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "No-Spurious Speaker")
+        await connectAP2(backend, engine, discovery, device)   // connected; fallback never activated
+        await pollUntil { capture.isCapturing }
+
+        // Manually record any fallback events across a sleep/wake cycle (no
+        // expectation, so a legitimately empty result doesn't fail on timeout).
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream { if case .localFallbackActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+        backend.handleSystemWillSleep()
+        backend.handleSystemDidWake()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        let fallbackEvents = await box.snapshot()
+        XCTAssertTrue(fallbackEvents.isEmpty,
+                      "no fallback event may be emitted when the override was never active (\(fallbackEvents.count) seen)")
+    }
+
+    // MARK: Fix C — dead-group fallback has its OWN always-on short delay
+
+    /// The dead-group / stranded fallback during NORMAL operation arms on the
+    /// dedicated always-on `silenceFallbackDelay` — NOT the user's wake-restore
+    /// preference — so a "Never" wake-restore setting can never reopen R11's
+    /// indefinite silence. The fallback still fires and un-gates.
+    func testSilenceFallbackArmsOnAlwaysOnDelayEvenWhenWakeRestoreNever() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler, silenceFallbackDelay: 7)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Dead Group Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(nil)   // "Never" — must NOT disable the dead-group fallback
+
+        // The group dies during NORMAL operation (an out-of-band `.failed`, not a
+        // sleep/wake) → the countdown arms on the always-on delay, not the wake pref.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        XCTAssertEqual(scheduler.lastDelay, 7,
+                       "a normal-operation dead group arms on the ALWAYS-ON silence delay, not the (Never) wake pref")
+
+        // ...and it still fires: "Never" can't disable the dead-group fallback (R11).
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } }
+        } after: { scheduler.fireAll() }
+        XCTAssertTrue(events.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } },
+                      "'Never' on wake-restore must NOT disable the dead-group silence fallback (R11)")
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+    }
+
+    /// No regression: the wake-from-sleep restore path keeps using the user's
+    /// `wakeAudioRestoreDelay` preference (a separate, possibly-longer grace after a
+    /// sleep), distinct from the always-on dead-group delay.
+    func testWakeRestoreHonorsWakePreferenceNotAlwaysOnDelay() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler, silenceFallbackDelay: 7)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Wake Pref Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        backend.setWakeAudioRestoreDelay(123)   // a distinct wake preference
+        engine.addFailures = [device.outputID.rawValue]   // post-wake, nothing reconnects → arms
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !capture.isCapturing }
+        backend.handleSystemDidWake()
+
+        // The post-wake arm uses the WAKE preference (123), not the always-on 7.
+        await pollUntil { scheduler.hasPending }
+        XCTAssertEqual(scheduler.lastDelay, 123,
+                       "the post-wake restore path must keep honoring wakeAudioRestoreDelay (no regression)")
+    }
+
+    // MARK: System-AirPlay guard (Wave 3 W3-T3, PLAN-RELIABILITY.md)
+    //
+    // "If the user sets an AirPlay device as the *system* default output while we
+    // stream, surface a note (double-path audio / echo risk)." These drive the
+    // guard deterministically through the injected `systemDefaultOutputIsAirPlayClass`
+    // provider — no real Core Audio transport-type query in the loop.
+
+    /// (a) The system default output IS AirPlay-class and we ARE streaming
+    /// (whole-system capture running): the note fires.
+    func testSystemAirPlayGuardFiresWhenSystemDefaultIsAirPlayWhileStreaming() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A0", name: "Guard Speaker A")
+
+        // Subscribe BEFORE connecting: the guard's edge-triggered emit fires
+        // synchronously inside `setOutputSet` (as soon as the capture gate wants
+        // on), which can land before `connectAP2`'s own polls return — a
+        // subscription started afterward could miss it (`makeEventStream()` only
+        // replays `.deviceAdded`, not historical events).
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream {
+                if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.contains { if case .systemDefaultIsAirPlayActive(true) = $0 { return true } else { return false } },
+                      "the double-path note must fire once streaming starts with an AirPlay-class system default")
+        XCTAssertTrue(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (b) The system default output is NOT AirPlay-class (built-in/BT) while we
+    /// ARE streaming: no note.
+    func testSystemAirPlayGuardDoesNotFireWhenSystemDefaultIsNotAirPlay() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { false })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Guard Speaker B")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        // Give any (wrongly-firing) note event a beat to arrive.
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.isEmpty,
+                      "no note may fire while the system default is not AirPlay-class (\(noteEvents.count) seen)")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (c1) The note clears when STREAMING STOPS, even though the system default
+    /// is still AirPlay-class — there's nothing left to double up.
+    func testSystemAirPlayGuardClearsWhenStreamingStops() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A2", name: "Guard Speaker C")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }
+        XCTAssertTrue(capture.isCapturing)
+
+        // Deselect everything → streaming stops → the gate un-runs capture.
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: { backend.setOutputSet([]) }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "the note must clear the instant streaming stops")
+        await pollUntil { !capture.isCapturing }
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+    }
+
+    /// (c2) The note clears when the system default output CHANGES AWAY from
+    /// AirPlay-class, even though streaming continues uninterrupted.
+    func testSystemAirPlayGuardClearsWhenDefaultOutputChangesAwayFromAirPlay() async {
+        let isAirPlay = LockedBool(true)
+        let systemVolume = FakeSystemVolume()
+        let (backend, engine, discovery) = makeBackend(
+            systemVolume: systemVolume,
+            systemDefaultOutputIsAirPlayClass: { isAirPlay.get() })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A3", name: "Guard Speaker D")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }
+        XCTAssertTrue(capture.isCapturing)
+
+        // The system default output switches to something non-AirPlay (BT
+        // headphones, built-in speakers, …) — simulated via the same
+        // `defaultDeviceChanged` signal a real Sound-menu switch fires.
+        isAirPlay.set(false)
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: {
+            systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true)
+        }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "the note must clear when the default output changes away from AirPlay-class")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+        // Streaming itself is untouched — this is a UI note, not an audio-path change.
+        XCTAssertTrue(capture.isCapturing, "the guard note must never itself alter the capture gate")
+        XCTAssertTrue(backend.devices.first { $0.id == device.id }?.isSelected == true)
+    }
+
+    /// Fix W3-T3 (adversarial finding W3-T3): the double-path note must be CLEARED on
+    /// sleep, exactly as `handleSystemWillSleep` already clears the silence-override
+    /// banner. Sleep drives `captureRunning` false but hits neither
+    /// `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without the added
+    /// `clearSystemAirPlayGuard()` the note strands ON while nothing streams. Verified
+    /// end-to-end via the narrow strand sequence: note active → sleep → wake with the
+    /// selection gone (`reconcileCaptureGate` early-returns, capture stays off).
+    func testSystemAirPlayGuardClearedOnSleep() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { true })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "Guard Sleep Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { backend.test_systemAirPlayGuardActive }   // note active while streaming
+        XCTAssertTrue(capture.isCapturing)
+
+        // Sleep must emit the note-clear on the true→false edge (mirroring
+        // `clearSilenceOverride()`), else `captureRunning` goes false while the note
+        // strands ON — a UI-truth lie.
+        let events = await collect(from: backend) {
+            $0.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } }
+        } after: { backend.handleSystemWillSleep() }
+        XCTAssertTrue(events.contains { if case .systemDefaultIsAirPlayActive(false) = $0 { return true } else { return false } },
+                      "sleep must emit the double-path note-clear")
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive,
+                       "the double-path note must not strand ON across sleep")
+
+        // The strand sequence's tail: wake with the selection gone. `reconcileCaptureGate`
+        // early-returns (nothing to stream), so the note must simply STAY cleared.
+        backend.setOutputSet([])
+        backend.handleSystemDidWake()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive,
+                       "the note stays cleared after a wake with the selection gone (no re-strand)")
+    }
+
+    /// Fix W3-T3 idempotency guard: sleep must NOT emit a spurious note-clear when the
+    /// note was never active — the added `clearSystemAirPlayGuard()` only emits on a
+    /// genuine true→false edge. Here the system default is NOT AirPlay-class, so the
+    /// note never fires and sleep must stay silent on that channel.
+    func testSleepEmitsNoGuardClearWhenNoteWasNeverActive() async {
+        let (backend, engine, discovery) = makeBackend(systemDefaultOutputIsAirPlayClass: { false })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "No-Note Sleep Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+        XCTAssertFalse(backend.test_systemAirPlayGuardActive)
+
+        let box = EventBox()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 30_000_000)   // let the subscription register
+        backend.handleSystemWillSleep()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+        try? await Task.sleep(nanoseconds: 150_000_000)   // give any spurious emit time to arrive
+        task.cancel()
+        let noteEvents = await box.snapshot()
+        XCTAssertTrue(noteEvents.isEmpty,
+                      "sleep must not emit a spurious note-clear when the note was never active (\(noteEvents.count) seen)")
+    }
+
+
+    func testHandleAppLaunchedRefreshesSystemTapExclusionForExcludedApp() async {
+        let (backend, engine, _) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.handleAppLaunched(bundleID: "com.excluded.only")
+
+        XCTAssertEqual(capture.refreshedBundleIDs, ["com.excluded.only"],
+                       "handleAppLaunched must refresh the system tap's exclusion pids even for a "
+                       + "bundle ID with no active route (a purely user-excluded app)")
+    }
+
+    /// R14: a ROUTED app's relaunch also refreshes the system-tap exclusion
+    /// (not just its own per-app capture restart), so its fresh pid can't
+    /// double into both the target route and the system/Main-Out mix.
+    func testHandleAppLaunchedRefreshesSystemTapExclusionForRoutedApp() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.routed.relaunch"]))
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Refresh Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.routed.relaunch", name: "Relaunch", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        backend.handleAppTerminated(bundleID: "com.routed.relaunch")
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        backend.handleAppLaunched(bundleID: "com.routed.relaunch")
+
+        XCTAssertTrue(capture.refreshedBundleIDs.contains("com.routed.relaunch"),
+                     "a routed app's relaunch must also refresh the system tap's exclusion pids")
+    }
+
+    /// R9 (W1-T7 Gap 2): routing an app BEFORE it plays any sound double-sends it
+    /// the moment it starts — its audio reaching its own device AND the system mix.
+    /// Until the app is audible its pid cannot be translated to a Core Audio process
+    /// object, so the whole-system tap's exclusion list does not actually exclude it,
+    /// and nothing else re-resolves for this case: the app's PID set never changed,
+    /// only the pid's TRANSLATABILITY did, which the membership diff cannot see. The
+    /// fix hangs the re-resolve off the per-app tap reaching `.capturing`.
+    ///
+    /// This is the missing regression guard for that wiring — the fix itself survived
+    /// the 2026-07-24 `main` merge, its test did not. Discriminating because the test
+    /// never calls `handleAppLaunched`, the backend's ONLY other refresh call site, so
+    /// a recorded refresh can only have come from the capture-health transition.
+    func testExclusionRefreshesWhenARoutedAppFinallyBecomesAudible() async {
+        // Fails the first tap attempt with `.processNotYetAudible` (routed while
+        // silent), then succeeds. The retry delay is deliberately long so the
+        // "not yet audible" assertion below has a wide, non-flaky window.
+        let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
+        let resolver = singleProcessResolver(["com.notyet.audible": 4242])
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
+            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Not-Yet-Audible Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.notyet.audible", name: "Quiet", toDevice: device.id)])
+
+        // First attempt: the app is routed but silent, so the tap fails and no
+        // exclusion refresh has happened yet — this is exactly the window in which
+        // the app's audio would leak into the system mix if it started now.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+        XCTAssertFalse(capture.refreshedBundleIDs.contains("com.notyet.audible"),
+                       "nothing should have refreshed yet — the app has never been audible")
+
+        // The app starts playing: the retry's tap succeeds, capture health goes
+        // `.capturing`, and THAT is the edge which must re-resolve the exclusion.
+        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+        await pollUntil(timeout: 5) { capture.refreshedBundleIDs.contains("com.notyet.audible") }
+        XCTAssertTrue(capture.refreshedBundleIDs.contains("com.notyet.audible"),
+                      "the instant a routed app's per-app tap reaches .capturing, the whole-system "
+                      + "tap's exclusion must re-resolve — its pid only became translatable now, so "
+                      + "until this refresh the app is double-sent to its device AND the system mix")
+    }
+
 }
 
 // MARK: - collect(after:) convenience

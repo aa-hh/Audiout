@@ -99,10 +99,23 @@ let package = Package(
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
+        // Tiny, short-lived TCC-preflight probe (T14): `TCCProbeRunner` spawns this
+        // fresh, on demand, to get an un-cached `TCCAccessPreflight` read — see
+        // Sources/tcc-probe/main.swift for the full finding and output contract. No
+        // dependency on AudiouterCore by design: it must stay minimal, entitlement-free,
+        // and fast to spawn.
+        .executable(name: "tcc-probe", targets: ["tcc-probe"]),
         // The pure-AppKit menu-bar app. `swift build` produces a loose binary;
         // scripts/make-app.sh wraps it into a real double-clickable `.app`
         // (RESOLVED Q1 — SwiftPM executable + bundle script, no Xcode project).
         .executable(name: "AudiouterApp", targets: ["AudiouterApp"]),
+        // T7 (PLAN-FIREFOX-ROUTING-LEAK.md): silent, no-audio diagnostic —
+        // dumps every live Core Audio process object (pid, command, parent,
+        // whether it independently resolves as an NSRunningApplication) so
+        // Alec can confirm on his own machine whether a multi-process
+        // browser's actual audio producer is a child process our single-PID
+        // resolver can never find. Run: `swift run process-audio-dump`.
+        .executable(name: "process-audio-dump", targets: ["process-audio-dump"]),
     ],
     dependencies: [
         // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
@@ -207,6 +220,7 @@ let package = Package(
             name: "AudiouterApp",
             dependencies: [
                 "AudiouterCore",
+                "AudiouterSharedUI",
                 "AudiouterPopoverUI",
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
@@ -262,6 +276,21 @@ let package = Package(
         .executableTarget(
             name: "core-audio-diagnostic",
             dependencies: ["AudiouterCore"]
+        ),
+        // Tiny, short-lived TCC-preflight probe (T14) — see Sources/tcc-probe/main.swift
+        // for the output contract `TCCProbeRunner` parses. Run directly with:
+        // swift run tcc-probe   (reports the invoking TERMINAL's own TCC identity when
+        // run this way — a format check only, not the real attribution test, which
+        // needs the packaged .app to spawn it via TCCProbeRunner).
+        .executableTarget(
+            name: "tcc-probe"
+        ),
+        // T7 diagnostic (PLAN-FIREFOX-ROUTING-LEAK.md) — see the product
+        // comment above. Only needs AppKit (`NSRunningApplication`) and
+        // AudioToolbox; no dependency on AudiouterCore itself (it's a
+        // standalone read-only probe, not exercising any app code path).
+        .executableTarget(
+            name: "process-audio-dump"
         ),
         .testTarget(
             name: "AudiouterCoreTests",

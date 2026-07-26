@@ -69,7 +69,18 @@ final class GroupRenameFieldTests: IsolatedTestCase {
         XCTAssertTrue(editor.test_titleField.isSelectable, "still selectable")
         XCTAssertTrue(editor.test_titleField.acceptsFirstResponder,
                       "still a first responder — keyboard and VoiceOver reach it exactly as before")
-        XCTAssertEqual(editor.test_titleField.stringValue, "Downstairs")
+        // This is the LITERAL name, not `group.name` — deliberately. A real
+        // bug (2026-07-26) had `show(groupID:devices:)` correctly write the
+        // group's name, only for `loadView()`'s cell swap to run AFTER it (the
+        // view isn't embedded, and so never loaded, until `swapContent(to:)`
+        // runs — which `showEditor(for:)` calls AFTER `show()`) and silently
+        // reset it to a bare `WarmNameFieldCell()`'s own AppKit default
+        // ("Field", `NSCell`'s placeholder title). Every other test here
+        // compares against `group.name`/`controller.groups...` — a moving
+        // target that stayed self-consistent with the bug and never caught
+        // it. Asserting the literal is what makes this the regression guard.
+        XCTAssertEqual(editor.test_titleField.stringValue, "Downstairs",
+                       "must be the group's real name, not the cell's own default")
     }
 
     // MARK: Commit paths

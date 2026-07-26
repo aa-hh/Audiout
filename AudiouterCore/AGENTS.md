@@ -52,6 +52,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **The whole-system tap's `.failed` now self-heals via a bounded retry (T16,
+  E10).** `CaptureControlling` gained `onStateChange`; `NativeBackend` wires it in
+  `start()` and drives a capped-exponential backoff retry
+  (`handleCaptureCoordinatorStateChange` → `scheduleCaptureRetry`, mirroring the
+  per-app `.processNotYetAudible` retry). Two differences from the per-app path:
+  the retry only arms when `NativeCaptureError.isRetryable` (everything but
+  `.osUnsupported`), and — because there is ONE `.mutedWhenTapped` whole-system
+  tap — it **re-checks `captureRunning` at FIRE time** before calling `start()`,
+  so a deselect during the backoff can't restart the tap and mute the Mac with
+  the audio going nowhere (the bug `reconcileCaptureGate` exists to prevent).
 - **Resolving a bundle ID for per-app capture or whole-system exclusion MUST
   resolve to the FULL set of Core Audio processes, not a single pid.** Multi-process
   browsers emit audio from child/helper processes whose pids differ from the main
@@ -122,9 +132,112 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   inside `updateAppRoutes` whenever routes/excluded change, and an app that
   becomes excluded has its metering tap stopped immediately. The metering-only
   taps NEVER start/stop the primary routing coordinators' taps.
+- **A whole-system capture-tap rebuild caused by a DEVICE/RATE change must reset
+  the stream-0 AirPlay session (R10) — but ONLY that cause.** When the tapped
+  output device changes or renegotiates its nominal sample rate (another app
+  grabbing the mic; a default-output-device change), the tap is rebuilt and keeps
+  delivering fresh PCM, but the whole-system RTP timeline anchor is left desynced,
+  so every Selected-Devices speaker goes permanently silent until the session is
+  reset. `NativeCaptureCoordinator` signals *that specific cause* via
+  `onDeviceRateRebuild` (NEVER on the first `start()`, and for an
+  `.exclusionChange` rebuild only when the tap that came back up is measurably on a
+  different device or nominal rate than the one that went down — see the trap
+  below);
+  `NativeBackend.resetAirPlaySessionForWholeSystem()` responds by rebinding each
+  streaming (`added`) device — claiming the same per-device `converging` slot
+  `convergeDevice` uses (so the removeOutput → addOutput can't interleave with a
+  concurrent converge), bumping `rebindRecoveryGen`, and enqueuing the shared
+  rebind-recovery chain (with `stillOwnsRebind` ownership bow-out, backoff retry,
+  and `.streamHealth` signal-only events). It is BOOKKEEPING-TRANSPARENT and a
+  no-op when nothing streams whole-system. This is the stream-0 analog of the
+  per-app `resetAirPlaySessionForRoutedApp`. Crucially, an EXCLUSION-set rebuild
+  (the synced-local sink attach on every Mac+AirPlay connect, or an app-route
+  change) leaves the device/clock — and thus the receivers' timeline — intact and
+  must NOT reset: resetting there added a redundant RTP re-establish to every
+  connect ("connects fast, then a long silence"). The live exclusion set is instead
+  kept correct by the debounced process-object-list membership diff (W1-T7 Gap 1) +
+  `refreshExcludedProcessSet` (relaunch, W1-T7 Fix 1), which recreate the tap as
+  `.exclusionChange` (compare-before-rebuild, no session reset).
+  **TRAP: the rebuild cause is an assumption, not evidence — never make the reset
+  decision from `RebuildCause` alone.** The old tap's `teardown()` takes its
+  default-device listener with it and the new tap arms its own only inside
+  `createAndStart`, so a default-output-device change landing in between is delivered
+  to nobody: an `.exclusionChange` rebuild can come back up on a different device's
+  clock while the receivers hold the old timeline, and a cause-only trigger leaves
+  them silent until some later device/rate event happens to reset them. `recreateTap`
+  therefore also compares the outgoing tap's `SystemAudioTap.tappedDeviceID` and rate
+  against the incoming one's and resets on a real move. A tap that reports `nil`
+  (the protocol default) abstains from the identity half rather than forcing a reset.
+- **The silence fallback (R11) has its OWN always-on delay, decoupled from the
+  wake-restore preference.** `armSilenceWatchdog` uses the always-on
+  `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be
+  disabled) for a dead-group/stranded condition during normal operation, and the
+  user's `wakeAudioRestoreDelay` (Settings › Audio, `nil` = "Never") ONLY while
+  `awaitingWakeReconnect` (the post-wake window `handleSystemDidWake` opens). So a
+  "Never" wake setting can't reopen R11's indefinite silence during normal use,
+  while the post-wake grace still honors the user's preference. The fallback's
+  banner-clear (`.localFallbackActive(false)`) is emitted from ONE helper,
+  `clearSilenceOverride()`, on the genuine true→false edge — every path that ends
+  the fallback (reconcile, `stop`, sleep, wake) routes through it so the banner
+  never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply.
+  Saved groups still persist and re-apply. A per-app `.device` route follows
+  the SAME discipline at launch: `AppRoutingController.clearAllDeviceRoutes()`
+  reverts every `.device` route to `.noRedirect` once, called before the
+  initial route push, so a redirect never silently survives a full restart
+  regardless of how long its target was gone for.
+- **A per-app `.device` route survives its target going merely UNREACHABLE
+  (`isAvailable == false`) — it does NOT survive the target DISAPPEARING
+  entirely.** These are different signals and only the second resets the
+  route (`AppRoutingController.handleDeviceDisappeared`, fired from
+  `PopoverController.update(devices:)`). While a kept route's target is
+  unreachable, `NativeBackend` computes an EFFECTIVE route table — a
+  `.device` route whose target can't currently carry audio reads as
+  `.noRedirect` for every per-app mechanism (capture start/stop, the
+  whole-system tap's exclusion set, the mixer, local playback, metering) —
+  so the app rejoins whatever the system is currently outputting to instead
+  of being excluded in favor of a stream that goes nowhere. The USER's real
+  route table (`lastRoutes`) is untouched throughout; the redirect re-engages
+  itself the instant the device is reachable again, with no route-table edit
+  in either direction. Never make this decision from discovery events alone —
+  reachability also changes via engine-state transitions and converge
+  failures, all of which must funnel through `NativeBackend.commitKnownDevice`
+  so the effective table never goes stale in the direction that hurts (an app
+  excluded from the whole-system tap with nowhere for its own stream to go is
+  silence with no visible cause).
+- **A saved GROUP containing the local Mac must reach the backend the same
+  way the Selected-Devices path already does: the Mac filtered OUT of
+  `setOutputSet`, and the synced-local sink armed by whether the Mac is a
+  member of whatever MAIN OUT currently targets** — `GroupController
+  .isMainOutMember(_:)`, not `isSpeakerSelected(_:)` (the latter reads
+  Selected Devices only and is blind to group membership; wrong in BOTH
+  directions under a group target — a group containing the Mac never arms
+  the sink, and the Mac can arm the sink wrongly while merely sitting
+  untargeted in Selected Devices during an AirPlay-only group). Under
+  `.selectedDevices` `isMainOutMember` and `isSpeakerSelected` are
+  *provably* the same read (`mainOutMemberIDs` is `Array(selectedDeviceIDs)`
+  in that branch) — so this only changes behavior on the group path.
+- **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
+  so a grant made after launch is invisible to any in-process read forever —
+  and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
+  refresh that cache. The notification (plus launch/wake/routing/popover-open)
+  is therefore only the TRIGGER; the READER must be the freshly-spawned
+  `tcc-probe` helper (`TCCProbeRunner`). `PermissionStateObserver` pairs them
+  and is EVENT-DRIVEN BY DECISION — no `Timer`, no polling; burst safety comes
+  from `TCCProbeRunner`'s single-flighting. Only `.resolved(.granted)` may ever
+  reach `recordFreshGrant(source:)`; every other answer means "still unknown."
+- **A refused capture strands BOTH paths, and NOTHING auto-revives them
+  mid-session — by decision.** Whole-system: `reconcileCaptureGate()` sets
+  `captureRunning` before dispatching a `start()` that cannot report failure, so
+  every later reconcile short-circuits. Per-app: `updateAppRoutes` starts only
+  the route-table DIFF, so re-pushing an unchanged table starts nothing, and the
+  indefinite retry is `.processNotYetAudible`-only. The auto-resume machinery
+  that used to paper over both was DELETED (2026-07-25): the app never
+  auto-connects at launch and `AppRoutingController.clearAllDeviceRoutes()`
+  clears every `.device` route there, so a fresh launch after granting is the
+  supported — and only — recovery path. Do not reintroduce a mid-session
+  resume without revisiting that decision.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
@@ -139,20 +252,160 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
   change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full pre-commit run is `swift test --parallel --num-workers 4`**
-  (capped to 4 concurrent test processes to keep CPU/fan load reasonable on
-  an 8-core machine; ~70s warm vs ~124s for a bare serial `swift test`, only
-  marginally slower than an uncapped `--parallel`). It parallelizes at the
-  test-CLASS level: each suite runs in its own process, so tests must not
-  race on cross-process shared state.
+- **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
+  wraps `swift test --parallel` and adds the two things a bare run cannot do
+  on a machine with several worktrees in flight:
+  - **A machine-wide concurrency CAP** (`AUDIOUTER_TEST_SLOTS`, default **2**) —
+    a counting semaphore over `/tmp/audiouter-suite.lock.N`, shared across every
+    worktree and clone. `--num-workers 4` caps one PROCESS; it cannot see the
+    other agents each running their own capped suite. Four concurrent Guard 4
+    runs put 16 xctest processes plus four independent compiles on 8 cores —
+    measured 15-minute load averages of 29-73. The cap is 2, NOT 1: measured, a
+    warm run uses only ~2.6 of 8 cores (411s user + 66s sys over 181s wall), so
+    the suite is WAIT-bound, not CPU-bound, and two runs genuinely overlap.
+    Serialising to one would idle most of the machine and needlessly queue
+    agents behind each other.
+  - **Adaptive serial/parallel (`AUDIOUTER_TEST_MODE=auto|parallel|serial`).**
+    Measured on the same machine for the identical 1025 tests:
+
+    | mode | wall | user CPU | sys CPU |
+    |---|---|---|---|
+    | `--parallel 6` | 127s | **358s** | **51.7s** |
+    | `--parallel 2` | 278s | 316s | 46.6s |
+    | serial | 124s | **69.7s** | **6.0s** |
+
+    Serial does the same work for **~1/5 the CPU and ~1/8 the system time**.
+    **CORRECTED 2026-07-25** — `--parallel` forks one process per test
+    **METHOD**, not per class (an earlier version of this doc said "class";
+    verified wrong by watching live `ps` output: different methods of the
+    SAME class run as distinct concurrent processes, and total spawns for a
+    filtered single-class run equals that class's method count, not 1). This
+    suite has **1025 methods across 58 classes**, so each spawn re-execs and
+    re-links a large AppKit/CoreAudio/AirPlayEngine binary to run ONE test.
+    Real test work is ~70 CPU-seconds; parallel spends ~290 MORE on fork/exec
+    + dyld — **~0.28-0.33 CPU-seconds per spawn**, the right order of
+    magnitude for launching a large linked binary (dividing that overhead by
+    the class count instead gives ~5 CPU-seconds per spawn, which is not
+    physically plausible — more than the entire serial suite's total CPU).
+    **Consequence: consolidating test classes cannot reduce spawn count** —
+    1025 methods spawn ~1025 processes regardless of how many classes they
+    are grouped into. See `docs/notes/test-parallel-spawn-measurement.md`
+    (worktree `claude/test-class-consolidation`) for the full measurement.
+    This is also why lowering `--num-workers` barely helps — it staggers the
+    ~1025 spawns rather than removing them (6→2 workers was 2.2x SLOWER for
+    the same load).
+    On an idle machine parallel is still ~1.8x faster in wall time (~70s vs
+    ~124s warm), so `auto` picks parallel when nothing else is testing and
+    serial when something is — including a bare `swift test` started outside
+    this script, which it detects via `pgrep`.
+  - **Remote Mac (opt-in, off by default).** Configure with `git config`, NOT an
+    env var or a committed file:
+
+    ```
+    git config --local audiouter.remoteHost 'user@192.168.4.41'
+    git config --local audiouter.testPrefer remote   # or: local (default)
+    ```
+
+    This lands in `.git/config`, which is **not tracked** — so a personal
+    username and LAN address never enter the repo — and which every worktree
+    shares, so one command covers all of them. It is also read by git itself
+    rather than by a shell, which matters: hooks run NON-interactively and a
+    non-interactive zsh does not source `~/.zshrc`, so an `export` there would
+    reach some runs and not others. `AUDIOUTER_TEST_REMOTE_HOST` /
+    `AUDIOUTER_TEST_PREFER` still override per-invocation.
+
+    `testPrefer=local` (default) treats the two machines as ONE POOL: two runs
+    locally, and the third and fourth agent overflow to the remote rather than
+    queueing. `testPrefer=remote` sends every run there first instead. Either way
+    an asleep/offline remote costs one 5s probe and then behaves exactly as if
+    none were configured.
+
+    **A remote PASS is accepted; a remote FAILURE is re-run locally before it
+    can block anything.** Guard 4 refuses commits on this result, and the remote
+    is on a different Swift/SDK — a toolchain difference presenting as "your code
+    is broken" would send an agent hunting a bug that does not exist. The
+    asymmetry is deliberate: the expensive error is a false REFUSAL, not a false
+    pass on code paths that are provably identical (highest gate `macOS 15`,
+    Swift 5 language mode). Cost is one extra run, and only when something
+    actually failed. `rsync`s the WORKING TREE
+    (so uncommitted edits go too, which `git push` cannot do) into a per-worktree
+    directory under `AUDIOUTER_TEST_REMOTE_ROOT`. Cost is negligible: ~22MB/446
+    files on first sync, **~3KB after editing one file**. `.build` is excluded —
+    it bakes in absolute paths and is per-machine.
+    Probe timeout is a deliberate 5s: the known failure mode is the host being
+    ASLEEP, where it answers ping via a sleep proxy but refuses TCP, so a
+    generous timeout would stall every contended run behind a host that will
+    never answer. Any "cannot reach / cannot sync / connection dropped" outcome
+    falls back to the local queue and is NEVER reported as a test failure —
+    toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26)
+    and an agent reading infrastructure trouble as a code failure will chase a
+    bug that does not exist. A genuine remote FAILURE is reported, but flagged
+    to confirm locally first.
+    **Version parity is a smaller risk than it sounds:** the highest OS gate in
+    this repo is `#available(macOS 15, *)` and the deployment target is
+    `.macOS(.v14)`, so a macOS 26 host takes byte-identical code paths to a
+    macOS 27 one — nothing here knows macOS 26/27 exists. The package is also
+    `swift-tools-version:5.10` with no language-mode override, i.e. Swift 5
+    language mode, which does not diverge between 6.3 and 6.4.
+    **VERIFIED end-to-end 2026-07-25** against the real M3 (Apple M3, 8 cores,
+    24GB, macOS 26.5.2, Swift 6.3.1): builds clean on 6.3.1 with **zero errors**
+    (only cosmetic `ld` warnings about Homebrew dylibs built for macOS 26 vs the
+    macOS 14 deployment target), full suite **1025/1025 green in 45s** (vs
+    ~90-180s locally under contention), the audio gate skips its 7 correctly
+    there, and overflow triggers only once both local slots are held. Sync of
+    the whole tree takes ~1.6s over LAN.
+  - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
+    agent that types `swift test` or `swift build` directly bypasses it
+    entirely, and that is the dominant real-world source of load: while
+    measuring this, two other worktrees were independently running a full serial
+    suite and a `-c release` product build, driving load average to 29 and
+    making an unrelated 4s filtered run take 117s. Prefer `scripts/run-tests.sh`
+    for any full run. This is convention, not enforcement (the PreToolUse nudge
+    hook that tried to enforce it was deliberately removed and must not be
+    rebuilt).
+  - **A content-addressed pass cache**: if these exact sources already passed,
+    the run is skipped. Agents routinely run the suite by hand and then
+    commit, firing Guard 4 on byte-identical sources seconds later.
+
+  Escape hatches: `AUDIOUTER_TEST_MODE=parallel` (force the fast path when you
+  are watching the terminal), `AUDIOUTER_TEST_SLOTS=N` (concurrency cap,
+  default 2), `AUDIOUTER_TEST_NO_LOCK=1` (skip the cap entirely),
+  `AUDIOUTER_TEST_NO_CACHE=1` (force a real run), `AUDIOUTER_TEST_WORKERS=N`.
+  If all slots stay busy past `AUDIOUTER_TEST_LOCK_TIMEOUT` (default 1800s)
+  the runner proceeds **uncapped** rather than failing — it exists to protect
+  the CPU, not to gate correctness, and must never block a commit for a reason
+  the committer cannot see. `swift test` parallelizes at the test-**METHOD**
+  level (corrected — see the measured spawn-count finding above): each test
+  method runs in its own process, so tests must not race on cross-process
+  shared state.
 - **Coverage gate (the one enforcement that matters):** `.githooks/pre-commit`
-  Guard 4 runs the full `swift test --parallel --num-workers 4` whenever a commit's staged
+  Guard 4 runs the full suite via `scripts/run-tests.sh` whenever a commit's staged
   files touch AudiouterCore Swift sources/tests, and blocks the commit if it
   fails. So a too-narrow filter in the loop can never ship a regression — it
   only costs one extra fix cycle at commit. Everything that reaches `main` was
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
+  `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
+  `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,
+  not CPU** — measured, these tests cost 0.9 `coreaudiod` CPU-seconds, and the
+  whole suite costs ~10 across an 87s run (~11% of ONE core, ~1.4% of an 8-core
+  machine). Core Audio is NOT a meaningful part of suite cost; test execution
+  is. (Earlier "coreaudiod at 38-45%" figures were instantaneous `ps` %CPU
+  samples — they overstate sustained load badly; don't cite them.) What the gate
+  buys: these seven tests depend on real hardware and a machine-wide daemon, so
+  they are timing-sensitive to whatever else the Mac is doing — the documented
+  cause of three unrelated tests flaking under `--parallel` on a busy machine.
+  `AudioHardwareTestGate.skipUnlessEnabled()` is called from that file's
+  `makeStartedEngine()` — the one choke point all seven hardware tests share, so
+  a newly added test inherits the gate rather than silently reintroducing the
+  load. The 7 skip by default (visibly, with a reason); the 3 that only exercise
+  the pure static `isFollowableTransport` still run. Run the real ones
+  deliberately when working on local playback:
+  `AIRPLAY_AUDIO_HARDWARE_TESTS=1 swift test --filter LocalPlaybackEngineTests`.
+  They are NOT faked — `LocalPlaybackControlling` is the protocol fakes already
+  implement, so spying here would delete the only coverage of the real engine.
 - **Isolate shared state via `IsolatedTestCase`.** Because `--parallel` gives
   each suite its own process, two suites that both write `UserDefaults.standard`
   or the same `FileManager.default.temporaryDirectory` path race and flake.
@@ -201,9 +454,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
 | `SetupModel` | Brain of the first-run permission-priming flow (AppKit-free): per-permission `PermissionStatus`, PTP helper `PTPHelperStatus`, runs the injected probes, persists `AppSettings.hasCompletedSetup`, gates auto-present via `shouldPresentOnLaunch(settings:backendKind:)` (native only). UI = `AudiouterOnboardingUI`. |
+| `SystemAudioCaptureTCC` | Silent three-valued system-audio TCC read across both buckets, plus the one-way fresh-verdict latch (`recordFreshGrant(source:)` / `effectiveStatus()`) every capture gate reads through. |
+| `TCCProbeRunner` | Async, single-flighted launcher for the bundled `tcc-probe` helper — the only reader immune to this process's permanently-cached TCC read. |
+| `PermissionStateObserver` | Event-driven (zero-timer) detector for the grant ARRIVING mid-session: Darwin/launch/wake/routing/popover triggers → `TCCProbeRunner` → latch → `onBecameGranted` once. |
 | `AudioCapturePermissionProbing` / `CoreAudioTonePermissionProbe` | Seam + impl that BOTH triggers and verifies the system-audio grant — a denied tap returns `noErr`+zeros, so it plays a muted in-process tone, taps our OWN process, and reads RMS. **Gated on live TCC verify** (`dev/notes/onboarding-setup-brief.md`). |
 | `LocalNetworkPriming` / `LocalNetworkPrimer` | Seam + impl: a brief `NWBrowser` for `_airplay._tcp` that fires the Local Network prompt (no verify API exists — TN3179). |
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
+| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) shared by `CoreAudioProcessTap`'s and `CoreAudioSystemTap`'s default-device/nominal-rate listener blocks: fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
+| `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |

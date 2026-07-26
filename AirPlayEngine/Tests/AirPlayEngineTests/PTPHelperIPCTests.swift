@@ -89,6 +89,37 @@ final class PTPHelperIPCTests: XCTestCase {
         // trips macOS's Application Firewall's "accept incoming network
         // connections?" prompt for the xctest host process on every
         // `swift test` run. A loopback-only listener is never firewalled.
+        // T3 (swift-testing migration, cookbook §9 "the awkward case"): this
+        // skip's condition IS hoistable in principle — a real bind attempt on
+        // these high ports, cached once — unlike the un-hoistable
+        // `GroupControllerTests.swift:476` case, which depends on state built
+        // up earlier in the same test body. The cookbook's prescribed shape is
+        // a `static let` gate evaluated once at suite-discovery time, exposed
+        // as a `ConditionTrait` (`.enabled(if:)`) on the relevant test(s).
+        //
+        // NOT done here: `.enabled(if:)` / `ConditionTrait` only attach to a
+        // swift-testing `@Suite`/`@Test` declaration, and this file is still
+        // `final class PTPHelperIPCTests: XCTestCase` — full conversion of
+        // this file (its other `XCTAssert*` calls) is Wave 3's `T16`, not T3.
+        // Retrofitting a `Testing` trait onto an `XCTestCase` doesn't compile,
+        // so converting only this skip would force a partial file conversion,
+        // which the plan explicitly says not to do here.
+        //
+        // When T16 converts this file to `@Suite struct`/`final class`, hoist
+        // this into something like:
+        //   enum PortBindGate {
+        //       static let canBindTestPorts: Bool = {
+        //           guard let hdl = "127.0.0.1".withCString({ ptp_test_daemon_bind($0) }) else { return false }
+        //           ptp_test_end(hdl)
+        //           return true
+        //       }()
+        //   }
+        //   @Suite(.enabled(if: PortBindGate.canBindTestPorts, "Could not bind PTP test ports \(eventPort)/\(generalPort); skipping (likely port contention)"))
+        // and delete this `throw XCTSkip`. Note the probe bind+release happens
+        // once at discovery time and the test body still does its own real
+        // bind afterward for the actual assertions — two bind/release cycles
+        // instead of one, which is an acceptable tradeoff for CI-safety over
+        // exactly replicating today's single-bind shape.
         guard let masterHdl = "127.0.0.1".withCString({ ptp_test_daemon_bind($0) }) else {
             // Guard against CI flakiness if something else already holds
             // these high ports; skip rather than fail the suite.

@@ -130,6 +130,13 @@ override wins; System follows the OS.
 
 ### 1.3 Accent dial token remap (decision i)
 
+> **AMENDED (2026-07-25)** — the "remaps only the gold/ember/glow channel" rule
+> below now has four additional dial-aware tokens (the onboarding permission
+> hues, Subtle column only). See
+> `dev/notes/warm-signal-screens-followup.md` § Onboarding, "Resolved —
+> implementation record". `failure` / `caution` / `ring-connected` / text
+> tokens are still never remapped.
+
 Settings › Appearance › **Accent**: Full gold / Subtle / Follow system accent.
 The dial remaps **only the gold/ember/glow channel**. `failure`, `caution`,
 `ring-connected`, and all text tokens are **never** remapped — red stays red,
@@ -529,6 +536,15 @@ The proposal's bespoke halo glyph is not built (decision h). No custom menu-bar
 drawing task exists in the waved plan.
 
 ### 5.8 Onboarding (decisions k, l)
+
+> **SUPERSEDED IN PART (2026-07-25)** — the "unify a warm-neutral resting
+> state" clause immediately below is no longer current: per-permission
+> warm-harmonized GLYPH colours were restored (the four permission tiles are
+> distinct hues again, not one shared neutral). Current rule + colour table:
+> `dev/notes/warm-signal-screens-followup.md` § Onboarding, "Resolved —
+> implementation record". Everything else in this section still stands:
+> gold-lit granted icons, the plain **"speakers"** copy, and the Done power-on
+> meter sweep are unchanged.
 
 Warm canvas + permission tiles that unify a warm-neutral resting state with
 **gold-lit granted icons** (a granted permission's icon warms to gold — the one

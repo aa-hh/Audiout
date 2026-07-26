@@ -181,13 +181,15 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
-        muteBehavior: TapMuteBehavior = .mutedWhenTapped
+        muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) -> PerAppCaptureCoordinator {
         PerAppCaptureCoordinator(
             makeTap: makeTap,
             processResolver: processResolver,
             muteBehavior: muteBehavior,
-            installsProcessListListener: false
+            installsProcessListListener: false,
+            membershipDebounceInterval: membershipDebounceInterval
         )
     }
 
@@ -640,6 +642,138 @@ final class PerAppCaptureCoordinatorTests: XCTestCase {
 
         coordinator = nil
         XCTAssertGreaterThanOrEqual(tap.teardowns, 1, "dropping the coordinator without stop() must not leak the tap")
+    }
+
+    // MARK: - W1-T4: live per-slot membership diffing (browser tab churn)
+    //
+    // A CAPTURING slot's app spawns/kills an audio child mid-session (a browser
+    // opening/closing a tab) — the process set the slot should tap changes, but the
+    // slot is `.capturing`, so the resume self-heal (which only re-drives DEAD
+    // slots) never fires. `handleMembershipChange` diffs each capturing slot's
+    // resolved process-object set against the baseline its live tap was built
+    // against and RECREATES the tap on a genuine change (this coordinator's tap has
+    // no in-place update path — the recreate goes through the proven
+    // `handleDeviceChange` machinery), compare-before-rebuild so an unchanged set
+    // does ZERO work.
+
+    /// A child spawns under a capturing slot → the tap is recreated EXACTLY ONCE
+    /// against the expanded process set (main + the new child), so the child's
+    /// audio is captured too.
+    func testChildSpawnRecreatesTapWithExpandedProcessSet() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
+
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700)])
+        let createsAfterStart = tap.creates
+
+        // A new tab starts playing: a fresh audio child (objectID 21) appears under
+        // the same bundle id.
+        enumerator.setProcesses([
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox"),
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: "org.mozilla.firefox"),
+        ])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "a genuine membership change recreates the tap exactly once")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 21, pid: 701)],
+                       "the recreated tap covers the expanded process set")
+
+        // Idempotence: re-diffing the settled set does no further work.
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "the settled set must not trigger a second rebuild")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    /// A child dies under a capturing slot → the tap is recreated once against the
+    /// shrunk process set.
+    func testChildKillRecreatesTapWithShrunkProcessSet() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(processes: [
+            RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox"),
+            RawAudioProcess(objectID: 21, pid: 701, bundleID: "org.mozilla.firefox"),
+        ])
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
+
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        XCTAssertEqual(tap.lastProcesses?.count, 2)
+        let createsAfterStart = tap.creates
+
+        enumerator.setProcesses([RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox")]) // child gone
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterStart + 1)
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700)])
+        coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    /// THE regression-prevention property: an unchanged process set — a duplicate
+    /// notification, or churn in an unrelated app — triggers ZERO rebuilds.
+    func testUnchangedProcessSetTriggersZeroRebuilds() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
+
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        let createsAfterStart = tap.creates
+
+        coordinator.handleMembershipChange()
+        // Reorder is not a change under set semantics.
+        enumerator.setProcesses([RawAudioProcess(objectID: 20, pid: 700, bundleID: "org.mozilla.firefox")])
+        coordinator.handleMembershipChange()
+
+        XCTAssertEqual(tap.creates, createsAfterStart, "no rebuild for an unchanged process set")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    /// A membership diff only ever acts on CAPTURING slots — a diff while a slot is
+    /// not capturing touches no tap.
+    func testMembershipDiffIgnoresNonCapturingSlots() {
+        let tap = FakeProcessTap()
+        // Enumerator reports nothing → start lands the slot in `.failed(.processNotYetAudible)`.
+        let resolver = emptyResolver()
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
+
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { if case .failed = coordinator.state(for: "org.mozilla.firefox") { return true }; return false }
+        XCTAssertEqual(tap.creates, 0)
+
+        coordinator.handleMembershipChange()
+        XCTAssertEqual(tap.creates, 0, "a non-capturing slot must not be touched by a membership diff")
+    }
+
+    /// Rapid churn within the debounce window coalesces to a single settled diff —
+    /// one recreate against the FINAL set, not one per notification. Driven through
+    /// the real debounced `handleProcessListChanged` entry point.
+    func testRapidChurnWithinDebounceWindowCoalescesToOneRebuild() {
+        let tap = FakeProcessTap()
+        let (resolver, enumerator) = makeResolver(bundleID: "org.mozilla.firefox", objectID: 20, pid: 700)
+        let coordinator = makeCoordinator(
+            makeTap: { tap }, processResolver: resolver, membershipDebounceInterval: .milliseconds(60))
+
+        coordinator.start(bundleID: "org.mozilla.firefox")
+        waitFor { coordinator.state(for: "org.mozilla.firefox") == .capturing(tap.format) }
+        let createsAfterStart = tap.creates
+
+        func procs(_ ids: [(AudioObjectID, pid_t)]) -> [RawAudioProcess] {
+            ids.map { RawAudioProcess(objectID: $0.0, pid: $0.1, bundleID: "org.mozilla.firefox") }
+        }
+        // Three notifications inside the 60ms window, settling on {20, 22}.
+        enumerator.setProcesses(procs([(20, 700), (21, 701)])); coordinator.handleProcessListChanged()
+        enumerator.setProcesses(procs([(20, 700)]));            coordinator.handleProcessListChanged()
+        enumerator.setProcesses(procs([(20, 700), (22, 702)])); coordinator.handleProcessListChanged()
+
+        waitFor { tap.creates >= createsAfterStart + 1 }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2)) // let any extra rebuilds surface
+
+        XCTAssertEqual(tap.creates, createsAfterStart + 1, "the burst coalesces to a single settled rebuild")
+        XCTAssertEqual(tap.lastProcesses, [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 22, pid: 702)],
+                       "the coalesced diff applies the SETTLED process set")
+        coordinator.stop(bundleID: "org.mozilla.firefox")
     }
 }
 

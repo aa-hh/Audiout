@@ -40,6 +40,26 @@ package layout, backends, and core types, see
   presents (ignores backend + the completed flag, to iterate on the flow itself),
   unset = the default gate. Sibling of `AIRPLAY_BACKEND`; forward it the same way
   (`launchctl setenv`, or run the bundle binary directly with the var set).
+- **`AIRPLAY_PERMISSIONS` simulates the OS permission seams (testing knob).**
+  `PermissionMode.resolved` reads it: `granted` / `denied` inject *simulated*
+  audio/Local-Network/Accessibility/PTP seams so the whole permission flow runs
+  without touching real macOS TCC; unset (or `system`) uses the real production
+  probes. `AppDelegate` resolves it ONCE into `permissionProviders` and threads
+  the same bundle into both `SetupModel` sites, `registerPTPHelperIfNeeded()`,
+  and `MediaKeyController` — so nothing reads a real grant behind the
+  simulation's back. WHY: macOS keys every TCC grant to the binary's code
+  signature, so an ad-hoc rebuild orphans yesterday's grant and re-onboarding
+  churns every build; this knob makes permission LOGIC iterable regardless.
+  LIMIT: `granted` makes the flow *believe* capture is on — it does NOT make the
+  Core Audio tap deliver real samples; end-to-end audio still needs a genuine
+  grant on a stably-signed (Developer ID) build. Sibling of `AIRPLAY_BACKEND`;
+  forward it the same way.
+- **Permission-dependent live builds need a stable signature.**
+  `scripts/make-app.sh` signs with Developer ID when the keychain has one, else
+  ad-hoc. Ad-hoc grants re-pin to the binary and are lost on the next rebuild,
+  so for repeatable on-device permission testing sign with Developer ID; set
+  `CODESIGN_REQUIRE_IDENTITY=1` to turn a missing cert into a hard error instead
+  of a silent throwaway ad-hoc build.
 - **`AppDelegate` alone enforces "excluded ⇒ un-routable."** Neither
   `ExcludedAppsController` nor `AppRoutingController` prunes the other —
   `pruneRoutesForExcludedApps()` must run on launch and on every
@@ -78,6 +98,25 @@ package layout, backends, and core types, see
   Close item, so this is explicit: action `performClose:`, target `nil`, so it
   dispatches down the responder chain to whichever window is key (Settings or
   the Groups panel/mixer window) rather than being hardwired to one.
+- **The mid-session permission grant is detected by EVENTS, never a timer.**
+  `AppDelegate` owns the one `PermissionStateObserver` (retained for the app's
+  lifetime — its `CFNotificationCenter` registration holds an unretained
+  back-pointer) and arms it at launch ONLY when the grant isn't already in
+  place. It is kicked from five places and polled from none: the Darwin
+  notification (inside the observer), launch, `NSWorkspace.didWakeNotification`,
+  every routing action, and a menu-bar/popover open. Routing actions must reach
+  it through `NativeBackend.onRoutingAction` — the two backend chokepoints — not
+  the four `GroupController` call sites, which miss a group activated via
+  `activateGroup(id:)` inside `applyRouting()`. Any hook added here MUST be
+  non-blocking: both chokepoints run on the main thread, so a synchronous helper
+  spawn would put process-spawn latency on every device toggle.
+- **Resume scope on a grant is asymmetric, and deliberately so.** At LAUNCH only
+  per-app routes resume (`resumeRefusedAppCaptures()`); whole-system
+  (`forceCaptureGateReevaluation()`) resumes only once a wake has happened
+  (`permissionResumeIncludesWholeSystem`). Auto-streaming a previously-selected
+  device at launch would contradict the product decision recorded in
+  [../../AGENTS.md](../../AGENTS.md); sleep, by contrast, is a transient dropout
+  that keeps the selection intent.
 
 ## Map
 

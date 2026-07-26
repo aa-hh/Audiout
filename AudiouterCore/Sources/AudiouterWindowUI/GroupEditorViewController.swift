@@ -160,7 +160,19 @@ public final class GroupEditorViewController: NSViewController {
         // any configuration, so the settings below land on the new cell (the
         // same ordering `MembershipRowView` uses for `InvisibleSwitchCell` and
         // `DeviceRowView` for `WarmFaderCell`).
-        nameField.cell = WarmNameFieldCell()
+        // `textCell:`, NOT the bare zero-arg initializer: a plain
+        // `WarmNameFieldCell()` defaults its `stringValue` to AppKit's own
+        // `NSCell` placeholder ("Field") — invisible as long as `loadView()`
+        // runs before `show()` ever sets a real name, but `showEditor(for:)`
+        // calls `show()` BEFORE `swapContent(to:)` embeds this controller's
+        // view for the first time, so `loadView()` (and this cell swap) can
+        // run AFTER `show()` already wrote the group's real name — silently
+        // discarding it back to the AppKit default (caught 2026-07-26: every
+        // rename-field test that compared against the LITERAL name passed
+        // fine on its own, but the two that hardcoded "Downstairs" exposed
+        // the mismatch). Carrying the field's current text into the new cell
+        // makes the swap correct regardless of which runs first.
+        nameField.cell = WarmNameFieldCell(textCell: nameField.stringValue)
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
         nameField.font = Tokens.Font.heading

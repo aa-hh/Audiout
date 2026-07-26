@@ -468,6 +468,170 @@ public enum Tokens {
             warmDynamic(name: "dotSocket", dark: 0x34302A, darkHighContrast: 0x4A443B,
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
         }
+
+        // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
+        //
+        // Onboarding's four permission rows (`PermissionRowView`: System Audio,
+        // Local Network, Remote Control, Speaker Sync) went to a single neutral
+        // grey glyph in the warm pass (`85c2052`, which retired the old
+        // `.systemBlue`/`.systemIndigo`/`.systemPurple`/`.systemTeal` tile
+        // colours outright). This wave brings a DISTINCT hue back per row —
+        // warmed and deepened off each permission's ORIGINAL macOS colour
+        // family (Q1) — rather than one shared neutral: `.systemBlue` ->
+        // `permissionSystemAudio` ("warm slate"), `.systemIndigo` ->
+        // `permissionLocalNetwork` ("dusty plum"), `.systemPurple` ->
+        // `permissionRemoteControl` ("muted mauve"). Speaker Sync (previously
+        // `.systemTeal`) does NOT get a warmed teal — Q1 moves it into the
+        // GOLD family instead (`permissionSpeakerSync`, a deepened brass), the
+        // one row that was always going to end up gold-adjacent once granted.
+        // Per Q3 the colour lands on the SF SYMBOL GLYPH ONLY — `IconTileView`
+        // keeps its neutral `Tokens.Color.raised` fill and hairline rim
+        // untouched, exactly like every other tile. Per Q2 granting still
+        // crossfades the glyph the rest of the way to `Tokens.Color.gold` for
+        // all four rows, unchanged from the existing rule.
+        //
+        // DIAL RESOLUTION (Q5/NEW-1) deliberately does NOT reuse `accentDynamic`
+        // (see `permissionDynamic` below for the two concrete reasons, verified
+        // by reading `accentDynamic`/`systemAccentColor` above): routing four
+        // distinct identity hues through `accentDynamic`'s `.systemAccent`
+        // branch would resolve all of them to the SAME `controlAccentColor`-
+        // scaled value, erasing the very distinction this wave adds back; and
+        // its `subtle: nil -> .clear` fallback is a halo-only escape hatch that
+        // would render an invisible glyph here instead of a muted one.
+        // `permissionDynamic` resolves `.subtle` to the authored SUBTLE column
+        // (Q5 — the dial genuinely mutes these four) and BOTH `.fullGold` and
+        // `.systemAccent` to the authored FULL column (NEW-1 — Follow-System
+        // does not collapse these onto the live accent).
+        //
+        // RESERVED BANDS (`AppTetherColor.ReservedBand` applies the identical
+        // reasoning to derived tether hues; the bands themselves are declared
+        // there, not duplicated here): every hue below clears the gold/amber
+        // window `[28°,68°)` — landing in it would misread an ungranted row as
+        // already "granted" — and the failure-red window
+        // `[0°,12°) ∪ [350°,360°)`. Measured hues (own-theme Full column, all
+        // four stay within ~1-2° of these across every dial column/appearance/
+        // Increase-Contrast variant since only saturation/brightness shift):
+        // `permissionSystemAudio` ~210° (blue, already clear of both bands),
+        // `permissionLocalNetwork` ~274-276° (indigo warmed toward magenta),
+        // `permissionRemoteControl` ~321-324° (purple warmed toward pink),
+        // `permissionSpeakerSync` ~21-23° — strictly BELOW the gold band's 28°
+        // floor, the same terracotta corridor `AppTetherColor.steer` escapes a
+        // raw hue into when it steers off gold. That keeps all four ≥45° apart
+        // from each other and from both reserved bands in every one of the 32
+        // authored hexes (mutual-distinguishability check, Q1 criterion 4).
+        //
+        // CONTRAST (WCAG 2.x relative luminance — same formula as
+        // `AppTetherColorTests.relativeLuminance`/`contrastRatio`): every one
+        // of the 32 hexes below (4 tokens x {Full,Subtle} x {dark,
+        // darkHighContrast,light,lightHighContrast}) measures >=3:1 against
+        // BOTH `Tokens.Color.panel` and `Tokens.Color.raised` in its own theme
+        // — see each case's own measured numbers. The Subtle column is
+        // AUTHORED by hand, not derived by a desaturation formula, matching
+        // the `gold`/`ember` precedent: a mechanically-desaturated Subtle for
+        // `permissionSpeakerSync`'s Full dark hue undershot the floor
+        // (~2.8:1) before being hand-raised back above it — exactly the
+        // silent under-floor failure this rule exists to catch.
+        //
+        // First consumer: `PermissionRowView`'s `IconTileView` per-row resting
+        // glyph tint, one call site per row (T2 of this wave, landing
+        // immediately after this case addition).
+
+        /// Warmed & deepened from `.systemBlue` (System Audio's retired tile
+        /// colour) — a blue-grey "warm slate," the row's RESTING (ungranted)
+        /// glyph tint; granting crossfades to `gold` (Q2, unchanged). Hue
+        /// ~210° in every column/appearance — its own family, already clear of
+        /// both reserved bands (gold/amber `[28°,68°)`, failure-red
+        /// `[0°,12°)∪[350°,360°)`). CONTRAST RATIONALE (>=3:1 vs BOTH `panel`
+        /// and `raised`, both themes, both dial columns): Full dark `#75828F`
+        /// = 4.45:1 vs `panel` / 4.16:1 vs `raised`; Full light `#788B9E` =
+        /// 3.31:1 vs `panel` / 3.51:1 vs `raised`. Subtle (authored, not
+        /// derived): dark `#6C7680` = 3.78:1 vs `panel` / 3.53:1 vs `raised`;
+        /// light `#737D86` = 3.96:1 vs `panel` / 4.19:1 vs `raised` — clears
+        /// the same floor with the same margin discipline as Full, never
+        /// fading toward invisibility. IC variants push further from both
+        /// surfaces (my picks, flagged for a future contrast sweep like
+        /// `ringConnected`'s): Full dark `#9FAEBD` = 7.71:1 vs `panel`, Full
+        /// light `#4B5B6B` = 6.59:1 vs `panel`; Subtle dark `#8C98A3` =
+        /// 5.94:1 vs `panel`, Subtle light `#4B535B` = 7.37:1 vs `panel`.
+        /// Mutually distinguishable from the other three permission hues
+        /// (~275°/~322°/~22°) by >=45° in every column.
+        public static var permissionSystemAudio: NSColor {
+            permissionDynamic(name: "permissionSystemAudio",
+                              full: WarmVariants(dark: 0x75828F, darkHighContrast: 0x9FAEBD,
+                                                 light: 0x788B9E, lightHighContrast: 0x4B5B6B),
+                              subtle: WarmVariants(dark: 0x6C7680, darkHighContrast: 0x8C98A3,
+                                                   light: 0x737D86, lightHighContrast: 0x4B535B))
+        }
+
+        /// Warmed & deepened from `.systemIndigo` (Local Network's retired tile
+        /// colour) — a "dusty plum," warmed toward magenta off indigo's cooler
+        /// blue-purple; granting crossfades to `gold` (Q2, unchanged). Hue
+        /// ~274-276° in every column/appearance, clear of both reserved bands.
+        /// CONTRAST RATIONALE: Full dark `#816D8F` = 3.76:1 vs `panel` /
+        /// 3.51:1 vs `raised`; Full light `#887199` = 4.07:1 vs `panel` /
+        /// 4.31:1 vs `raised`. Subtle (authored): dark `#776882` = 3.40:1 vs
+        /// `panel` / 3.18:1 vs `raised`; light `#7A6E82` = 4.52:1 vs `panel` /
+        /// 4.79:1 vs `raised`. IC variants (my picks, flagged for a future
+        /// sweep): Full dark `#A78FB8` = 6.04:1 vs `panel`, Full light
+        /// `#584366` = 8.22:1 vs `panel`; Subtle dark `#9988A6` = 5.35:1 vs
+        /// `panel`, Subtle light `#4F4557` = 8.53:1 vs `panel`. Mutually
+        /// distinguishable from the other three permission hues (~210°/
+        /// ~322°/~22°) by >=45° in every column.
+        public static var permissionLocalNetwork: NSColor {
+            permissionDynamic(name: "permissionLocalNetwork",
+                              full: WarmVariants(dark: 0x816D8F, darkHighContrast: 0xA78FB8,
+                                                 light: 0x887199, lightHighContrast: 0x584366),
+                              subtle: WarmVariants(dark: 0x776882, darkHighContrast: 0x9988A6,
+                                                   light: 0x7A6E82, lightHighContrast: 0x4F4557))
+        }
+
+        /// Warmed & deepened from `.systemPurple` (Remote Control's retired
+        /// tile colour) — a "muted mauve," warmed toward pink off purple's
+        /// cooler violet; granting crossfades to `gold` (Q2, unchanged). Hue
+        /// ~321-324° in every column/appearance, clear of both reserved bands.
+        /// CONTRAST RATIONALE: Full dark `#8C6D81` = 3.84:1 vs `panel` /
+        /// 3.59:1 vs `raised`; Full light `#9E7890` = 3.57:1 vs `panel` /
+        /// 3.79:1 vs `raised`. Subtle (authored): dark `#806977` = 3.50:1 vs
+        /// `panel` / 3.27:1 vs `raised`; light `#86737F` = 4.15:1 vs `panel` /
+        /// 4.40:1 vs `raised`. IC variants (my picks, flagged for a future
+        /// sweep): Full dark `#BA95AC` = 6.64:1 vs `panel`, Full light
+        /// `#6B495F` = 7.22:1 vs `panel`; Subtle dark `#A3899A` = 5.49:1 vs
+        /// `panel`, Subtle light `#5B4A55` = 7.75:1 vs `panel`. Mutually
+        /// distinguishable from the other three permission hues (~210°/
+        /// ~275°/~22°) by >=45° in every column.
+        public static var permissionRemoteControl: NSColor {
+            permissionDynamic(name: "permissionRemoteControl",
+                              full: WarmVariants(dark: 0x8C6D81, darkHighContrast: 0xBA95AC,
+                                                 light: 0x9E7890, lightHighContrast: 0x6B495F),
+                              subtle: WarmVariants(dark: 0x806977, darkHighContrast: 0xA3899A,
+                                                   light: 0x86737F, lightHighContrast: 0x5B4A55))
+        }
+
+        /// Speaker Sync's retired tile colour was `.systemTeal`, but per Q1 it
+        /// does NOT get a warmed teal — it moves INTO the gold family instead,
+        /// a deepened "brass." Hue ~21-23° in every column/appearance:
+        /// strictly BELOW the gold/amber reserved band's 28° floor (the same
+        /// terracotta corridor `AppTetherColor.steer` escapes a raw hue into
+        /// off gold), so a resting Speaker Sync row reads as warm/golden-
+        /// adjacent WITHOUT being mistaken for the vivid granted `gold`
+        /// (~42°) it crossfades to on grant (Q2, unchanged) — also clear of
+        /// the failure-red band. CONTRAST RATIONALE: Full dark `#916B54` =
+        /// 3.69:1 vs `panel` / 3.45:1 vs `raised`; Full light `#8F634A` =
+        /// 4.89:1 vs `panel` / 5.18:1 vs `raised`. Subtle (authored): dark
+        /// `#876A59` = 3.52:1 vs `panel` / 3.29:1 vs `raised`; light `#796356`
+        /// = 5.31:1 vs `panel` / 5.63:1 vs `raised`. IC variants (my picks,
+        /// flagged for a future sweep): Full dark `#BD8D71` = 6.00:1 vs
+        /// `panel`, Full light `#613D29` = 8.97:1 vs `panel`; Subtle dark
+        /// `#A88672` = 5.26:1 vs `panel`, Subtle light `#524036` = 9.23:1 vs
+        /// `panel`. Mutually distinguishable from the other three permission
+        /// hues (~210°/~275°/~322°) by >=45° in every column.
+        public static var permissionSpeakerSync: NSColor {
+            permissionDynamic(name: "permissionSpeakerSync",
+                              full: WarmVariants(dark: 0x916B54, darkHighContrast: 0xBD8D71,
+                                                 light: 0x8F634A, lightHighContrast: 0x613D29),
+                              subtle: WarmVariants(dark: 0x876A59, darkHighContrast: 0xA88672,
+                                                   light: 0x796356, lightHighContrast: 0x524036))
+        }
     }
 
     // MARK: - Type
@@ -688,6 +852,49 @@ private func systemAccentColor(in appearance: NSAppearance, scale: CGFloat) -> N
                    green: scaled(srgb.greenComponent),
                    blue: scaled(srgb.blueComponent),
                    alpha: 1)
+}
+
+/// The accent-dial-aware resolver for the four permission-row identity hues
+/// (`permissionSystemAudio`/`permissionLocalNetwork`/`permissionRemoteControl`/
+/// `permissionSpeakerSync`, Q1-Q6/NEW-1) — a SIBLING of `accentDynamic`, not a
+/// caller of it. Two concrete reasons, each verified by reading the code
+/// above before writing this function, not assumed:
+///
+/// 1. `accentDynamic`'s `.systemAccent` case calls `systemAccentColor(in:
+///    scale:)`, which returns `controlAccentColor` scaled by a constant —
+///    a value that depends on the LIVE SYSTEM ACCENT, not on which token
+///    asked for it. `gold`/`ember`/`glow` sharing that is correct (they are
+///    ONE accent instrument by design). These four are the opposite: their
+///    entire purpose is to stay FOUR DIFFERENT hues. Routing them through
+///    `accentDynamic` would make every one of them resolve to the same
+///    `controlAccentColor`-derived value under Follow-System, silently
+///    collapsing the whole point of this wave the moment a user picks that
+///    dial position.
+/// 2. `accentDynamic`'s `subtle: WarmVariants?` models a token that can have
+///    NO Subtle rendering at all (`glow`'s `subtle: nil -> .clear`, because a
+///    halo is allowed to vanish). These four are opaque SF Symbol glyph
+///    fills, always rendering something — `.clear` here would be an
+///    invisible icon, not a muted one, so `subtle` below is a non-optional
+///    `WarmVariants` and the Subtle case always resolves a real colour.
+///
+/// Resolution (NEW-1/Q5): `.fullGold` AND `.systemAccent` both resolve the
+/// authored FULL column (these hues do not remap to the live accent);
+/// `.subtle` resolves the authored SUBTLE column (the dial genuinely mutes
+/// these four, unlike `failure`/`caution`/`ringConnected` which the dial
+/// never touches at all).
+private func permissionDynamic(name: String,
+                               full: WarmVariants,
+                               subtle: WarmVariants) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        switch Tokens.accentStyle {
+        case .fullGold, .systemAccent:
+            return NSColor(warmSignalHex: full.hex(isDark: isDark, increaseContrast: increaseContrast))
+        case .subtle:
+            return NSColor(warmSignalHex: subtle.hex(isDark: isDark, increaseContrast: increaseContrast))
+        }
+    }
 }
 
 private extension NSColor {

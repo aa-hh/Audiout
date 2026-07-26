@@ -211,6 +211,29 @@ public actor AirPlayEngine {
     // check per write.
     private nonisolated let latencyProbe: WriteLatencyProbe
 
+    // Write-path backpressure guard (memory-leak audit 2026-07-23): bounds the
+    // *un-drained* audio queued per stream on the engine thread, dropping further
+    // writes past the cap so a wedged engine thread can't let producers grow
+    // libevent's pending list without bound. Off-actor (nonisolated) for the same
+    // reason as `cadence`: the hot `write(streams:pts:)` path is `nonisolated` and
+    // must not hop the actor executor per frame, so it reads this via the guard's
+    // own NSLock, never through actor isolation. Internal (not private) so
+    // `@testable` unit tests can drive/inspect it directly. Reset by
+    // `start()`/`stop()` so a session that ended with a wedged (never-draining)
+    // thread doesn't leave a stuck backlog that would trip the cap on the next
+    // start — the reservations of writes whose bodies were dropped on teardown
+    // are cleared with it. Unlike `cadence`, this DOES gate the write (drops), but
+    // only ever refuses a NEW write; it never blocks the producer.
+    nonisolated let writeBacklog = WriteBacklogGuard(capSeconds: AirPlayEngine.maxInFlightAudioSeconds)
+
+    // Always-on (T-ENG-SCHED-1, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md
+    // task T1) diagnostic scheduling probe discriminating H1 (send-thread
+    // starvation) / H2 (capture-side underrun) / H3 (in-cycle stalls) — see
+    // `WriteSchedulingProbe`. Same off-actor placement as `cadence`/
+    // `latencyProbe`; unlike `latencyProbe` it has no env gate (plan Q5a:
+    // "probe always-on, rate-limited").
+    private nonisolated let schedulingProbe = WriteSchedulingProbe()
+
     // Test seam (headless verification). When set, `issueOverride` replaces the
     // backend device_* call in startOp: it still arms the REAL C dispatcher
     // waiter (outputs_callback_add + CompletionRegistry) and returns N, but does
@@ -445,6 +468,12 @@ public actor AirPlayEngine {
 
         started = true
         startedFlag.store(true)
+        // Fresh session: clear any backpressure backlog left by a prior run — in
+        // particular one that ended with a WEDGED engine thread, whose un-drained
+        // write bodies were dropped on teardown and so never released their
+        // reservations. Without this a restart could inherit a tripped cap that
+        // never self-heals (nothing left to drain those reservations).
+        writeBacklog.reset()
         startStateReconcile()
     }
 
@@ -489,6 +518,7 @@ public actor AirPlayEngine {
             headlessFlag.store(false)
             issueOverride = nil
             startedFlag.store(false)
+            writeBacklog.reset()
             stateReconcileTask?.cancel()
             stateReconcileTask = nil
             completions.uninstall()   // resumes (cancels) every in-flight op continuation
@@ -501,6 +531,7 @@ public actor AirPlayEngine {
         guard started else { return }
         started = false
         startedFlag.store(false)
+        writeBacklog.reset()
         stateReconcileTask?.cancel()
         stateReconcileTask = nil
 
@@ -1008,8 +1039,50 @@ public actor AirPlayEngine {
     /// dropped/no-op'd.
     public nonisolated func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
         guard startedFlag.load() else { return }
+        // T-ENG-SCHED-1 (H2): gap since the previous `write` call itself —
+        // captured before any filtering/copying, so a late call from the
+        // capture side shows up here regardless of what it contains.
+        schedulingProbe.recordWriteArrival()
         let entries = streams.prefix(Self.maxSimultaneousStreams).filter { !$0.pcm.isEmpty }
         guard !entries.isEmpty else { return }
+
+        let bytesPerSample = PCMFormat.airplay.channels * PCMFormat.airplay.bitsPerSample / 8
+        let sampleRate = PCMFormat.airplay.sampleRate
+
+        // T-ENG-CADENCE-1: record this write's audio-time contribution against
+        // the wall clock. Keyed off the FIRST entry — the cadence tracker models
+        // one write-rate stream; a future task can split per-stream cadence if
+        // simultaneous streams stop sharing a nominal rate. Recorded for EVERY
+        // producer write, including one we go on to drop below: cadence measures
+        // the producer's real feed rate, which our backpressure decision must not
+        // distort. Allocation-free, never gates the write.
+        if let firstSamples = entries.first.map({ $0.pcm.count / bytesPerSample }) {
+            cadence.record(samples: firstSamples, sampleRate: sampleRate)
+        }
+        // Latency budget probe (env-gated, diagnostic only): how stale is the
+        // pts the producer stamped, measured on the pts's own CLOCK_MONOTONIC
+        // domain? Seconds here would mean upstream capture queuing/aggregation;
+        // ~10-30 ms is a healthy tap→convert→write pipeline.
+        latencyProbe.record(pts: pts)
+
+        // BACKPRESSURE (memory-leak audit 2026-07-23): reserve this call's
+        // per-stream audio-time against the bounded queue-depth cap BEFORE
+        // allocating any C buffer, so a dropped write costs nothing. If a stream's
+        // un-drained backlog is already at the cap — the engine thread has stopped
+        // draining, e.g. a vendored callback wedged in a blocking syscall — DROP
+        // this write instead of piling another PCM-carrying closure onto
+        // libevent's unbounded pending list. The reservation is released when the
+        // enqueued body actually DRAINS (below), so the cap self-heals the instant
+        // the thread catches up — it is never a one-shot trip. Batched entries are
+        // admitted/dropped as a unit (they share one phase-aligned pts and can't
+        // be partially delivered); the per-app router feeds one stream per call,
+        // so in practice this is pure per-stream backpressure.
+        let additions: [(streamId: UInt32, audioSeconds: Double)] = entries.map { entry in
+            (streamId: entry.streamId,
+             audioSeconds: Double(entry.pcm.count / bytesPerSample) / Double(sampleRate))
+        }
+        guard writeBacklog.admit(additions) else { return }
+        let backlog = writeBacklog
 
         // Copy each buffer out of its `Data` (which may be reclaimed) into a C
         // buffer the engine thread owns for the duration of the write.
@@ -1019,7 +1092,6 @@ public actor AirPlayEngine {
             let samples: Int
             let streamId: UInt32
         }
-        let bytesPerSample = PCMFormat.airplay.channels * PCMFormat.airplay.bitsPerSample / 8
         let prepared: [PreparedEntry] = entries.map { entry in
             let byteCount = entry.pcm.count
             let cbuf = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
@@ -1032,28 +1104,39 @@ public actor AirPlayEngine {
             )
         }
 
-        // T-ENG-CADENCE-1: record this write's audio-time contribution against
-        // the wall clock BEFORE handing off to the engine thread. Keyed off the
-        // FIRST entry — the cadence tracker models one write-rate stream; a
-        // future task can split per-stream cadence if simultaneous streams stop
-        // sharing a nominal rate. Allocation-free, never gates the write below.
-        if let first = prepared.first {
-            cadence.record(samples: first.samples, sampleRate: PCMFormat.airplay.sampleRate)
-        }
-        // Latency budget probe (env-gated, diagnostic only): how stale is the
-        // pts the producer stamped, measured on the pts's own CLOCK_MONOTONIC
-        // domain? Seconds here would mean upstream capture queuing/aggregation;
-        // ~10-30 ms is a healthy tap→convert→write pipeline.
-        latencyProbe.record(pts: pts)
         let quality = media_quality(
-            sample_rate: Int32(PCMFormat.airplay.sampleRate),
+            sample_rate: Int32(sampleRate),
             bits_per_sample: Int32(PCMFormat.airplay.bitsPerSample),
             channels: Int32(PCMFormat.airplay.channels),
             bit_rate: 0
         )
 
+        // T-ENG-SCHED-1 (H1): set immediately before handing `body` to the
+        // engine thread (see below) — `body`'s own first line reads this to
+        // compute wake latency (enqueue instant -> body actually running).
+        // A plain `var` so the closure captures it BY REFERENCE and sees the
+        // value written just before enqueue, not whatever it was when `body`
+        // was defined.
+        var enqueueMonotonicMs: Double = 0
+
         let body: () -> Void = {
-            defer { prepared.forEach { $0.cbuf.deallocate() } }
+            // T-ENG-SCHED-1: wake latency (H1) and in-cycle work time (H3 /
+            // T14's future `computation` calibration). Both allocation-free
+            // ring-buffer stores — see `WriteSchedulingProbe`.
+            let bodyStartMs = WriteSchedulingProbe.nowMs()
+            self.schedulingProbe.recordWakeLatency(enqueuedAtMs: enqueueMonotonicMs, startedAtMs: bodyStartMs)
+            // ONE defer, deliberately: these two branches each arrived with their
+            // own `defer` doing the same `prepared.forEach { $0.cbuf.deallocate() }`.
+            // Keeping both would deallocate every PCM buffer twice per write.
+            defer {
+                prepared.forEach { $0.cbuf.deallocate() }
+                self.schedulingProbe.recordInCycleWork(startedAtMs: bodyStartMs, finishedAtMs: WriteSchedulingProbe.nowMs())
+                // Release the backpressure reservation on DRAIN — this closure has
+                // now run on the engine thread (or inline, headless). Doing it here,
+                // not after `enqueue` merely returned true (which per AGENTS.md means
+                // SCHEDULED, not COMPLETED), is what makes the cap self-healing.
+                backlog.release(additions)
+            }
             // Build a stack output_buffer. data[0] is the original (untranscoded)
             // PCM per outputs.h; each session's own ALAC encoder converts it.
             // The C array backing `data` is a tuple in Swift, but it's laid out
@@ -1088,15 +1171,29 @@ public actor AirPlayEngine {
         // (`applyVolumeOnDevice`/`liveDeviceState`/`startOp`) via the nonisolated
         // `headlessFlag` mirror, since this method is `nonisolated` and can't read
         // the actor-isolated `issueOverride` directly. Production (headlessFlag
-        // == false) is byte-for-byte the prior dispatch: always `engineThread.enqueue`.
+        // == false) hands off to the engine thread.
+        // T-ENG-SCHED-1: last thing before handoff, so the wake-latency
+        // measurement `body` takes on the other side covers only actual
+        // scheduling delay, not this function's own remaining setup work.
+        enqueueMonotonicMs = WriteSchedulingProbe.nowMs()
         if headlessFlag.load() {
             body()
-        } else {
+        } else if let thread = engineThreadHolder.current, thread.enqueue(body, tracked: false) {
             // Untracked: an audio frame carries no continuation, so dropping a
             // late one on teardown is correct (and keeps the hot path free of a
-            // per-write pending-table op). `current` is nil after stop() — the
-            // `startedFlag` guard above already gates that, this just no-ops.
-            engineThreadHolder.current?.enqueue(body, tracked: false)
+            // per-write pending-table op). `body` will run on the engine thread
+            // when this once-event fires and release its reservation there.
+        } else {
+            // The base is gone (pre-`start()` / mid-teardown, `current` nil or
+            // `enqueue` returned false): `body` will NEVER run, so its `defer`
+            // never fires. Free the buffers and release the backpressure
+            // reservation here to keep the cap balanced — otherwise a reservation
+            // for a body that can't drain would linger until the next
+            // `start()`/`stop()` reset. (The `startedFlag` guard above already
+            // makes this path rare; it is the correct-vs-leak fallback, not a hot
+            // path.)
+            prepared.forEach { $0.cbuf.deallocate() }
+            backlog.release(additions)
         }
     }
 
@@ -1109,6 +1206,26 @@ public actor AirPlayEngine {
     /// last real entry — `airplay_write` loops `for (i; obuf->data[i].buffer;
     /// i++)` and never sees a `bufsize`/count, only the NULL sentinel.
     static let maxSimultaneousStreams = 6
+
+    /// The write-path backpressure cap (memory-leak audit 2026-07-23): the most
+    /// *un-drained* audio, per stream, that may sit queued on the engine thread
+    /// before further writes are dropped. Expressed as an audio-`TimeInterval`
+    /// rather than a raw closure/frame count on purpose — a write carries
+    /// `samples / sampleRate` seconds (nominal AirPlay frame = 352 samples /
+    /// 44100 Hz ≈ 8 ms), so a time cap stays meaningful at any producer frame
+    /// size, where a count would silently mean different amounts of buffering.
+    ///
+    /// 2 s is far above any healthy backlog: when the engine thread is draining,
+    /// each write's `outputs_write` hands straight off to the sender's sockets, so
+    /// per-stream in-flight sits at a frame or two — 2 s is ~250 nominal frames of
+    /// headroom, so ordinary scheduling jitter (GC, thread contention, parallel-CI
+    /// load) never trips it. It also bounds the worst case: at ~44100·4 B/s ≈
+    /// 176 KB/s per stream, a stalled stream pins at most ~350 KB before dropping,
+    /// versus unbounded today. And 2 s of audio is already staler than any
+    /// receiver's useful buffer (the sender start buffer defaults to 2250 ms of
+    /// receiver-side scheduling lead — a different quantity), so audio queued that
+    /// far behind is better dropped than delivered late.
+    static let maxInFlightAudioSeconds: TimeInterval = 2.0
 
     // MARK: - Write-cadence diagnostics (T-ENG-CADENCE-1)
 
@@ -1124,6 +1241,64 @@ public actor AirPlayEngine {
     /// is off. `nonisolated` for the same reason as `writeCadenceSnapshot()`.
     public nonisolated func writeLatencySnapshot() -> WriteLatencySnapshot {
         latencyProbe.snapshot()
+    }
+
+    /// A snapshot of the write-path backpressure guard (memory-leak audit
+    /// 2026-07-23): how many writes have been dropped for exceeding the per-stream
+    /// queue-depth cap, and the current worst-case backlog. `droppedWrites == 0`
+    /// in healthy operation. `nonisolated` for the same reason as
+    /// `writeCadenceSnapshot()`.
+    public nonisolated func writeBacklogSnapshot() -> WriteBacklogSnapshot {
+        writeBacklog.snapshot()
+    }
+
+    /// A consistent snapshot of the always-on scheduling probe
+    /// (T-ENG-SCHED-1): wake latency (H1), in-cycle work time (H3/T14
+    /// calibration), and inter-arrival gap (H2). `nonisolated` and cheap to
+    /// call from any thread — T2's telemetry bridge polls this every ~5s
+    /// from a non-RT thread, never the engine thread.
+    public nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
+        schedulingProbe.snapshot()
+    }
+
+    // MARK: - Audio I/O workgroup (T7, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md)
+
+    /// Join the engine thread to the I/O workgroup published by `deviceID`, which
+    /// MUST be the capture AGGREGATE device's `AudioObjectID` — never the default
+    /// output device's. Measured during planning: the two publish DISTINCT
+    /// workgroups that do NOT nest, so joining the output device's and then the
+    /// aggregate's returns `EALREADY` and the thread ends up in the wrong one.
+    ///
+    /// The engine thread is the target because, until Stage 2 splits a dedicated
+    /// real-time send thread out, IT is the thread doing the audio work: it runs
+    /// `event_base_dispatch`, and the whole `outputs_write` → `airplay_write` →
+    /// encode → encrypt → send path executes inside the closures enqueued onto it
+    /// by `write(streams:pts:)`. The capture IOProc's own delivery thread is NOT a
+    /// candidate: it is a HAL-owned/dispatch-serviced context we neither own nor
+    /// can pin an identity to, and the HAL already runs it inside the device's
+    /// workgroup — which is precisely the workgroup we are asking to be scheduled
+    /// alongside.
+    ///
+    /// `nonisolated` and fire-and-forget (same rationale as `write`): the caller is
+    /// the capture coordinator on its own state queue, and the actual join is
+    /// marshaled onto the engine thread, which is the only thread allowed to
+    /// perform it. Returns `false` only when there is no engine thread to schedule
+    /// onto (pre-`start()` / post-`stop()`), in which case there is no membership
+    /// to manage. A join that fails at the Core Audio level is reported by
+    /// `EngineThread` and is deliberately non-fatal — see its `EINVAL` handling.
+    @discardableResult
+    public nonisolated func joinIOWorkgroup(deviceID: UInt32) -> Bool {
+        engineThreadHolder.current?.updateWorkgroup(deviceID: deviceID) ?? false
+    }
+
+    /// Drop the engine thread's I/O workgroup membership, if any. Called before the
+    /// aggregate that published the workgroup is destroyed (tap teardown/recreate),
+    /// so the next `joinIOWorkgroup` starts from a clean slate — see
+    /// `EngineThread.updateWorkgroup` for why leave-then-join is mandatory rather
+    /// than merely tidy.
+    @discardableResult
+    public nonisolated func leaveIOWorkgroup() -> Bool {
+        engineThreadHolder.current?.updateWorkgroup(deviceID: nil) ?? false
     }
 
     /// Test/diagnostic seam: reset the cadence counters (e.g. after a known
@@ -1260,6 +1435,31 @@ public actor AirPlayEngine {
     /// fires off-actor on the CompletionRegistry timer queue. Clears the leaked
     /// callback slot and, if the device still has a live session, resets its
     /// `callback_id` so a late completion can't resolve a reused slot's op.
+    ///
+    /// A9-F4 (slot-cleanup ORDERING — why a late cleanup can't clobber the NEXT
+    /// op's slot). Three composed facts close the race, so `tracked: false` here
+    /// is safe:
+    ///   1. Per-id serialization (B5.1): the next op on this SAME `id` cannot arm
+    ///      until the timed-out `startOp` returns and its `defer releaseOp(id)`
+    ///      fires. A DIFFERENT-id op can never take this slot or device meanwhile:
+    ///      the leaked slot stays occupied (cb != NULL) until this clear runs, so
+    ///      `outputs_callback_add`'s first-free scan skips it; and `device_cb_set`
+    ///      only touches THIS timed-out device.
+    ///   2. Enqueue-before-resume: the `onTimeout` closure calls this (enqueuing
+    ///      the cleanup) STRICTLY BEFORE it `cont.resume(throwing: .opTimedOut)`.
+    ///      The next same-id op can only arm AFTER that resume propagates (throw ->
+    ///      defer releaseOp -> wake waiter -> next startOp -> enqueue body), so the
+    ///      cleanup is enqueued strictly before the next op's body is enqueued.
+    ///   3. FIFO engine-thread queue: `EngineThread.enqueue` schedules via
+    ///      `event_base_once(base, -1, EV_TIMEOUT, …, tv=NULL)`, which libevent 2.x
+    ///      deliberately makes ORDER-PRESERVING (it routes a NULL/zero timeout to
+    ///      `event_active` on the priority's FIFO active queue, NOT the timer
+    ///      min-heap — see libevent's own "so let's make it fast (and
+    ///      order-preserving)" comment). Same priority => activation order ==
+    ///      execution order, so (2)'s cleanup runs before the next op's body.
+    /// Headless mode is even stronger: the cleanup runs INLINE before the resume,
+    /// so it completes before `startOp` returns. Regression:
+    /// `SlotCleanupOrderingTests` locks facts (1)+(2) via the headless inline path.
     private nonisolated func scheduleSlotCleanup(callbackId: Int32, id: OutputID) {
         let cleanup: () -> Void = {
             outputs_callback_clear(callbackId)
@@ -1532,8 +1732,14 @@ extension TransportCommand {
 /// LOGGING: crossing a coarse threshold (currently >= 250ms of accumulated
 /// deficit or overrun since the last log) emits one `os_log` line via the
 /// `.default` level so sustained cadence trouble is visible without spamming
-/// a log line per write (which, at ~226 writes/sec for 352-sample frames at
-/// 44.1kHz, would be prohibitively noisy).
+/// a log line per write (which, at ~86.1 writes/sec, would be prohibitively
+/// noisy). That figure is the IOProc's own cadence — 512 frames /
+/// 44100 Hz ≈ 11.61 ms per cycle → 1000/11.61 ≈ 86.1 — because `write` is
+/// called once per IOProc buffer, not once per RTP packet. (An earlier
+/// version of this comment claimed "~226 writes/sec for 352-sample frames at
+/// 44.1kHz" — both numbers were wrong: 44100/352 ≈ 125.3 is the RTP *packet*
+/// cadence [`AIRPLAY_SAMPLES_PER_PACKET`], a different quantity from the
+/// write cadence measured here. See plan §B.3/F25.)
 final class WriteCadenceTracker: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.airplayengine", category: "write-cadence")
@@ -1628,6 +1834,140 @@ final class WriteCadenceTracker: @unchecked Sendable {
         var ts = timespec()
         clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
         return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1e9
+    }
+}
+
+/// Write-path backpressure guard (memory-leak audit 2026-07-23) — the ONE
+/// unbounded-growth site a full audit found in this engine layer.
+///
+/// `AirPlayEngine.write(streams:pts:)` heap-copies each PCM buffer and enqueues a
+/// closure onto the single engine thread via `EngineThread.enqueue`/
+/// `event_base_once`. There was no queue-depth measure, drop policy, or cap
+/// anywhere on that path, so if the engine thread ever stops draining (a real,
+/// documented failure mode — a vendored callback wedged in a blocking syscall,
+/// which is exactly when `EngineThread.stop()` gives up and leaks the thread)
+/// producers keep enqueueing at audio cadence and libevent's pending-event list
+/// grows without bound — hundreds of KB/s per active stream for as long as the
+/// stall lasts. This guard bounds it.
+///
+/// DESIGN
+/// - PER STREAM. The per-app router (`NativeBackend`) feeds one `streamId` per
+///   `write` call — one mixed buffer per destination-set — so a single stalled
+///   destination must not cause writes for unrelated streams to be dropped. (The
+///   engine thread is shared, so a true thread wedge stalls every stream at once;
+///   per-stream accounting simply keeps recovery independent and never penalizes
+///   a healthy stream for a noisy neighbor.)
+/// - AUDIO-TIME cap, not a frame count. A write carries `samples / sampleRate`
+///   seconds; a `TimeInterval` cap stays meaningful regardless of the producer's
+///   frame size, where a raw closure count would silently mean different amounts
+///   of buffering at different sizes.
+/// - REFUSE THE INCOMING WRITE when full. At/over the cap we drop the incoming
+///   write — never enqueue it — rather than block the producer or grow further.
+///   (We can't evict an already-queued frame: once a closure is handed to
+///   `event_base_once` it lives in libevent's pending list, and reaching in to
+///   drop it would mean modifying `EngineThread`/the vendored core — out of
+///   scope. Refusing at the Swift boundary is the correct place to cap.) Audio
+///   that can't be handed to the engine thread in time is better dropped than
+///   buffered into staleness, matching the vendored UDP `sendto`-drop-on-stall
+///   philosophy one layer down.
+/// - SELF-HEALING, never one-shot. A reservation is released when the write's
+///   body actually RUNS on the engine thread (drains) — see `write`'s `body`
+///   `defer` — not when `enqueue` returns (which per AGENTS.md means SCHEDULED,
+///   not COMPLETED). The admit test uses ">= cap on the CURRENT backlog", so an
+///   empty stream always admits: an oversized single write can never permanently
+///   wedge a stream, and the cap clears the instant one queued frame drains.
+///
+/// HOT-PATH CONTRACT: `admit`/`release` allocate nothing beyond the caller's tiny
+/// per-call `additions` list; all state is a scalar/dictionary guarded by one
+/// `NSLock` — the same lock discipline as ``WriteCadenceTracker`` (the hot write
+/// path is `nonisolated` and must not hop the actor executor per frame).
+final class WriteBacklogGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private let log = Logger(subsystem: "com.airplayengine", category: "write-backlog")
+
+    /// The cap: max un-drained audio-seconds per stream before writes are dropped.
+    let capSeconds: Double
+
+    /// Audio-seconds enqueued-but-not-yet-drained, per `streamId`. An absent key
+    /// means zero; a key is pruned back out when its backlog returns to zero, so
+    /// the dictionary stays bounded by the number of concurrently-active streams.
+    private var inFlight: [UInt32: Double] = [:]
+    /// Streams currently in the "dropping" state (backlog at/over the cap). Used
+    /// to log the enter/leave transition ONCE each instead of once per dropped
+    /// frame (~125/s during a stall).
+    private var dropping: Set<UInt32> = []
+    /// Cumulative write CALLS dropped across all streams (diagnostic).
+    private var droppedWrites: UInt64 = 0
+
+    init(capSeconds: Double) { self.capSeconds = capSeconds }
+
+    /// Try to admit one `write` call's per-stream audio-time additions as a UNIT.
+    /// Returns `true` — the caller enqueues, and MUST later `release` the SAME
+    /// `additions` when the write drains — or `false`, meaning the caller drops
+    /// the whole call and does not enqueue. Atomic across all involved streams so
+    /// a phase-aligned batch is admitted or dropped together.
+    @discardableResult
+    func admit(_ additions: [(streamId: UInt32, audioSeconds: Double)]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+
+        // Refuse the whole call if ANY involved stream is already at/over the cap.
+        let overCap = additions.contains { (inFlight[$0.streamId] ?? 0) >= capSeconds }
+        if overCap {
+            droppedWrites &+= 1
+            for a in additions where (inFlight[a.streamId] ?? 0) >= capSeconds {
+                if dropping.insert(a.streamId).inserted {
+                    log.notice("write-backlog cap (\(self.capSeconds, format: .fixed(precision: 1))s) reached for stream \(a.streamId); dropping writes until it drains")
+                }
+            }
+            return false
+        }
+
+        for a in additions {
+            inFlight[a.streamId, default: 0] += a.audioSeconds
+            if dropping.remove(a.streamId) != nil {
+                log.notice("write-backlog for stream \(a.streamId) recovered; resuming writes")
+            }
+        }
+        return true
+    }
+
+    /// Release (drain) a previously-admitted write's per-stream audio-time — call
+    /// exactly once, with the SAME `additions` passed to `admit`, when the write's
+    /// body has actually run on the engine thread.
+    func release(_ additions: [(streamId: UInt32, audioSeconds: Double)]) {
+        lock.lock(); defer { lock.unlock() }
+        for a in additions {
+            let remaining = (inFlight[a.streamId] ?? 0) - a.audioSeconds
+            if remaining <= 1e-9 {
+                inFlight[a.streamId] = nil // clamp negatives + prune to bound the dict
+            } else {
+                inFlight[a.streamId] = remaining
+            }
+        }
+    }
+
+    /// Current un-drained backlog for `streamId` (seconds of audio). Test/inspect.
+    func inFlightSeconds(streamId: UInt32) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return inFlight[streamId] ?? 0
+    }
+
+    /// A consistent snapshot of the guard's counters.
+    func snapshot() -> WriteBacklogSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return WriteBacklogSnapshot(
+            droppedWrites: droppedWrites,
+            maxInFlightSeconds: inFlight.values.max() ?? 0,
+            streamsTracked: inFlight.count
+        )
+    }
+
+    /// Clear all backlog, dropping-state, and counters (fresh engine session).
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        inFlight.removeAll()
+        dropping.removeAll()
+        droppedWrites = 0
     }
 }
 
@@ -1758,5 +2098,224 @@ final class WriteLatencyProbe: @unchecked Sendable {
             maxPtsAgeMs: maxAgeMs.isFinite ? maxAgeMs : 0,
             isEnabled: enabled
         )
+    }
+}
+
+// MARK: - Write-scheduling diagnostic probe (T-ENG-SCHED-1)
+
+/// Fixed-capacity ring buffer of millisecond samples backing
+/// `WriteSchedulingProbe`. `record(_:)` is allocation-free — it overwrites a
+/// preallocated slot, matching the hot-path contract `WriteCadenceTracker`/
+/// `WriteLatencyProbe` already establish. `snapshotWindow()` is NOT
+/// allocation-free (it copies the current window into a new `Array`) and
+/// must only be called from the rate-limited log path or an external
+/// `WriteSchedulingProbe.snapshot()` poll — never per-`record()`. Not
+/// `Sendable`/thread-safe on its own: every call is made under
+/// `WriteSchedulingProbe`'s single lock, same pattern as the counters inside
+/// `WriteCadenceTracker`/`WriteLatencyProbe`.
+private final class MetricRing {
+    private let capacity: Int
+    private let buffer: UnsafeMutablePointer<Double>
+    private var writeIndex = 0
+    private var filled = 0
+    private(set) var cumulativeCount: UInt64 = 0
+
+    init(capacity: Int) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+        buffer = UnsafeMutablePointer<Double>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+    }
+
+    deinit {
+        buffer.deinitialize(count: capacity)
+        buffer.deallocate()
+    }
+
+    /// Allocation-free: overwrites the next ring slot in place.
+    func record(_ valueMs: Double) {
+        buffer[writeIndex] = valueMs
+        writeIndex += 1
+        if writeIndex == capacity { writeIndex = 0 }
+        if filled < capacity { filled += 1 }
+        cumulativeCount &+= 1
+    }
+
+    /// Copies the current (bounded, fixed-size) window out. Allocates —
+    /// callers keep this off the per-`record()` hot path.
+    func snapshotWindow() -> [Double] {
+        guard filled > 0 else { return [] }
+        return (0..<filled).map { buffer[$0] }
+    }
+}
+
+/// Nearest-rank percentile helper shared by all three
+/// `WriteSchedulingProbe` metric families. `cumulativeCount` is reported
+/// separately from `samples.count` because the former is the total ever
+/// recorded while the latter is bounded by the ring's fixed capacity (see
+/// `MetricRing`).
+private func percentileStats(_ samples: [Double], cumulativeCount: UInt64) -> WriteSchedulingMetricSnapshot {
+    guard !samples.isEmpty else { return WriteSchedulingMetricSnapshot(count: cumulativeCount) }
+    let sorted = samples.sorted()
+    func pct(_ p: Double) -> Double {
+        let idx = Swift.min(sorted.count - 1, Swift.max(0, Int((p * Double(sorted.count - 1)).rounded())))
+        return sorted[idx]
+    }
+    return WriteSchedulingMetricSnapshot(
+        count: cumulativeCount,
+        p50Ms: pct(0.50),
+        p95Ms: pct(0.95),
+        p99Ms: pct(0.99),
+        maxMs: sorted.last ?? 0
+    )
+}
+
+/// Always-on diagnostic probe (plan Q5a: "probe always-on, rate-limited" —
+/// unlike the env-gated `WriteLatencyProbe`) built to discriminate the three
+/// competing causes of audio dropouts under system load
+/// (docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md §B.4, task T1):
+///
+///   - **wake latency** (H1 — send-thread starvation): time from the instant
+///     `write(streams:pts:)` hands its closure to the engine thread to the
+///     instant that closure actually starts running. Large values under
+///     load mean the send thread isn't being scheduled promptly.
+///   - **in-cycle work time** (H3 / a future real-time budget): wall time
+///     from that closure's entry to its exit. This is what T14 calibrates
+///     the real-time `computation` constant from (3× measured p99) and also
+///     exposes pathological in-cycle stalls on its own.
+///   - **inter-arrival gap** (H2 — capture-side underrun): time between
+///     successive `write` calls themselves, independent of anything that
+///     happens to a call after it arrives. Late arrivals here point at the
+///     capture side, not the send thread.
+///
+/// HOT-PATH CONTRACT: mirrors `WriteCadenceTracker`/`WriteLatencyProbe` —
+/// each `record*` entry point does one preallocated `MetricRing` store under
+/// a single `NSLock`; no allocation, no closure capturing heap state per
+/// call. Percentile computation (sort) and the log line (`String(format:)`)
+/// happen only on the rate-limited log path (≤ once per `logInterval`) or
+/// when `snapshot()` is polled from a non-RT thread (T2's telemetry bridge)
+/// — both are exempt from the allocation-free rule by the same precedent
+/// `WriteLatencyProbe.record` already relies on for its own log line.
+///
+/// `CLOCK_MONOTONIC_RAW` throughout, matching `WriteCadenceTracker` (immune
+/// to NTP/wall-clock slew) — appropriate because all three families measure
+/// real elapsed scheduling time, never the producer's claimed `pts` (that is
+/// `WriteLatencyProbe`'s job, on `CLOCK_MONOTONIC`).
+final class WriteSchedulingProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let log = Logger(subsystem: "com.airplayengine", category: "write-scheduling")
+    private let logInterval: Double
+
+    private let wakeRing: MetricRing
+    private let workRing: MetricRing
+    private let gapRing: MetricRing
+
+    private var lastWriteArrivalMs: Double?
+    private var windowStartMs: Double?
+
+    init(logInterval: Double = 5.0, ringCapacity: Int = 1024) {
+        self.logInterval = logInterval
+        self.wakeRing = MetricRing(capacity: ringCapacity)
+        self.workRing = MetricRing(capacity: ringCapacity)
+        self.gapRing = MetricRing(capacity: ringCapacity)
+    }
+
+    /// `CLOCK_MONOTONIC_RAW`, in milliseconds. Callers take this reading at
+    /// each measurement point (enqueue instant, closure entry/exit,
+    /// write-call arrival) themselves — this just reads the clock, so it
+    /// stays allocation-free and lock-free on its own.
+    static func nowMs() -> Double {
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
+        return Double(ts.tv_sec) * 1000 + Double(ts.tv_nsec) / 1_000_000
+    }
+
+    /// H1 — wake latency: `startedAtMs` (closure entry) minus
+    /// `enqueuedAtMs` (instant just before handoff to the engine thread).
+    /// `enqueuedAtMs == 0` is treated as "not yet set" and skipped (guards
+    /// against a body that somehow runs before its own enqueue site, which
+    /// should never happen but must never corrupt the ring with a bogus
+    /// negative/huge value).
+    func recordWakeLatency(enqueuedAtMs: Double, startedAtMs: Double) {
+        guard enqueuedAtMs > 0 else { return }
+        recordLocked(startedAtMs - enqueuedAtMs, into: wakeRing)
+    }
+
+    /// In-cycle work time: closure exit minus closure entry.
+    func recordInCycleWork(startedAtMs: Double, finishedAtMs: Double) {
+        recordLocked(finishedAtMs - startedAtMs, into: workRing)
+    }
+
+    /// H2 — inter-arrival gap: time since the previous call to this method.
+    /// Called once per `write(streams:pts:)` invocation, at its very top.
+    /// Also drives the rate-limited log check, so logging cadence tracks
+    /// real write activity rather than a separate timer.
+    func recordWriteArrival() {
+        let now = Self.nowMs()
+        lock.lock()
+        defer { lock.unlock() }
+        if let last = lastWriteArrivalMs {
+            gapRing.record(now - last)
+        }
+        lastWriteArrivalMs = now
+        maybeLogLocked(nowMs: now)
+    }
+
+    private func recordLocked(_ valueMs: Double, into ring: MetricRing) {
+        guard valueMs.isFinite, valueMs >= 0 else { return }
+        lock.lock()
+        ring.record(valueMs)
+        lock.unlock()
+    }
+
+    /// A consistent snapshot of all three metric families. Safe and cheap
+    /// to call from any thread without RT-thread involvement (T2 polls this
+    /// off the RT path every ~5s): the lock is held only long enough to copy
+    /// the bounded ring windows out; sorting/percentile computation happens
+    /// outside it.
+    func snapshot() -> WriteSchedulingSnapshot {
+        lock.lock()
+        let wakeSamples = wakeRing.snapshotWindow()
+        let wakeCount = wakeRing.cumulativeCount
+        let workSamples = workRing.snapshotWindow()
+        let workCount = workRing.cumulativeCount
+        let gapSamples = gapRing.snapshotWindow()
+        let gapCount = gapRing.cumulativeCount
+        lock.unlock()
+
+        return WriteSchedulingSnapshot(
+            wakeLatency: percentileStats(wakeSamples, cumulativeCount: wakeCount),
+            inCycleWork: percentileStats(workSamples, cumulativeCount: workCount),
+            interArrivalGap: percentileStats(gapSamples, cumulativeCount: gapCount)
+        )
+    }
+
+    /// Rate-limited log line, at most once per `logInterval` seconds,
+    /// emitted via os_log AND stderr — following `WriteLatencyProbe.record`'s
+    /// exact style. Called with `lock` already held (from
+    /// `recordWriteArrival`); the sort + `String(format:)` work here is the
+    /// allocation exemption documented on the type itself.
+    private func maybeLogLocked(nowMs: Double) {
+        guard let start = windowStartMs else {
+            windowStartMs = nowMs
+            return
+        }
+        let elapsedMs = nowMs - start
+        guard elapsedMs >= logInterval * 1000 else { return }
+        windowStartMs = nowMs
+
+        let wake = percentileStats(wakeRing.snapshotWindow(), cumulativeCount: wakeRing.cumulativeCount)
+        let work = percentileStats(workRing.snapshotWindow(), cumulativeCount: workRing.cumulativeCount)
+        let gap = percentileStats(gapRing.snapshotWindow(), cumulativeCount: gapRing.cumulativeCount)
+
+        let line = String(
+            format: "write-scheduling probe: wake p50/p95/p99/max %.2f/%.2f/%.2f/%.2fms (n=%llu) | "
+                + "in-cycle p50/p95/p99/max %.2f/%.2f/%.2f/%.2fms (n=%llu) | "
+                + "inter-arrival p50/p95/p99/max %.2f/%.2f/%.2f/%.2fms (n=%llu)",
+            wake.p50Ms, wake.p95Ms, wake.p99Ms, wake.maxMs, wake.count,
+            work.p50Ms, work.p95Ms, work.p99Ms, work.maxMs, work.count,
+            gap.p50Ms, gap.p95Ms, gap.p99Ms, gap.maxMs, gap.count)
+        log.notice("\(line, privacy: .public)")
+        FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 }

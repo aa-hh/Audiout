@@ -524,6 +524,15 @@ func run() -> Int32 {
         let deviceIconController = DeviceIconController(loadPersisted: false)
         let windowController = MixerWindowController(groupController: controller,
                                                       deviceIconController: deviceIconController)
+        // `update(devices:)` now gates its sidebar/content refresh behind
+        // `isEffectivelyVisible` (real `window.isVisible` OR this override) —
+        // this tool never truly orders the window on screen under
+        // `AIRPLAY_HEADLESS=1`, so without it every `update(devices:)` below
+        // silently no-ops and the sidebar renders empty (caught 2026-07-26:
+        // mixer-1's device list vanished the moment this gate landed).
+        // Mirrors `popover-harness/main.swift`'s identical
+        // `popover.test_isShownOverride = true` for the same B8 gate.
+        windowController.test_isWindowVisibleOverride = true
         backend.start()
         guard waitForFleet(backend, count: 7) else {
             print("SETUP FAIL: fleet did not fully discover"); return 2

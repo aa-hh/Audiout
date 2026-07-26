@@ -122,12 +122,12 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// T5: logs the final granted/denied/... verdict this file's audible
     /// ``probe()`` or silent ``currentStatusSilently()`` produced, and HOW it
     /// was determined. `site` distinguishes the two callers; `method`
-    /// distinguishes a direct `TCCAccessPreflight` read (fast, no tone, no
-    /// tap beyond a possible cold prompt) from the audible self-tap tone
-    /// fallback (`functionalGrantProbe()`) and from the older CoreGraphics
-    /// Screen-Recording read (`currentStatusSilently()`'s fallback for an
-    /// `.undetermined`/unreadable TCC decision). These are genuinely
-    /// different checks of "is audio capture allowed" that are not
+    /// distinguishes a direct single-bucket `TCCAccessPreflight` read (fast,
+    /// no tone, no tap beyond a possible cold prompt, used by `probe()`'s
+    /// `runProbe()`) from the audible self-tap tone fallback
+    /// (`functionalGrantProbe()`) and from `currentStatusSilently()`'s
+    /// latch-aware ``SystemAudioCaptureTCC/effectiveStatus()`` read. These are
+    /// genuinely different checks of "is audio capture allowed" that are not
     /// guaranteed to agree — logging which one answered is exactly the kind
     /// of asymmetry T5 exists to make visible, alongside
     /// ``SetupModel``'s reported-vs-actual comparison and the real
@@ -209,8 +209,8 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
         // OPEN for the whole wait so the prompt stays up and, once the user
         // allows, our tone starts flowing through it.
         let tap = SelfProcessTap(processObject: processObject)
-        guard tap.start() else { return .denied }
         defer { tap.teardown() }
+        guard tap.start() else { return .denied }
 
         let deadline = Date().addingTimeInterval(promptAnswerTimeout)
         while Date() < deadline {
@@ -234,41 +234,53 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// way to distinguish "granted" from "denied" for the explicit "Allow…"
     /// gesture; firing that tone on every reactivate — including a bare Cmd+Tab
     /// away and back while onboarding is still open — would be user-hostile.
-    /// The silent read queries the **System Audio Recording Only** bucket
-    /// (`kTCCServiceAudioCapture`) directly — NOT `CGPreflightScreenCaptureAccess()`,
-    /// which reports the wrong permission on macOS 14.4+ (see the detailed note on
-    /// `currentStatusSilently()` below).
+    ///
+    /// The silent read is ``SystemAudioCaptureTCC/effectiveStatus()``: the
+    /// fresh-verdict LATCH if one has been recorded this session (a grant proved
+    /// out-of-process by `TCCProbeRunner`/`PermissionStateObserver`, which this
+    /// process's own permanently-cached `TCCAccessPreflight` read can never
+    /// see), otherwise ``SystemAudioCaptureTCC/combinedStatus()``. Reading
+    /// through the latch matters HERE specifically because this is the
+    /// reactivate/wake revocation audit's input: without it, a user who granted
+    /// mid-session would keep auditing as `.unknown` for the rest of the run
+    /// even after the app had proven the grant. `combinedStatus()` itself — it
+    /// consults BOTH buckets this app can be registered under
+    /// (`kTCCServiceAudioCapture`, the "System Audio Recording Only" list this
+    /// app is actually listed under, and `kTCCServiceScreenCapture`) and
+    /// combines them: any bucket granted wins; denied only when BOTH are
+    /// denied; anything else (including either bucket merely undetermined) is
+    /// `.undetermined`, which maps to ``PermissionStatus/unknown`` below —
+    /// **never** `.denied`.
+    ///
+    /// An earlier version of this method asked only
+    /// `CGPreflightScreenCaptureAccess()` — the "Screen & System Audio
+    /// Recording" list, a genuinely separate list this app never appears in —
+    /// whenever the audio bucket read `.undetermined`, and mapped a `false`
+    /// from that call straight to `.denied`. Because this app is never in that
+    /// list, the call could only ever read `false`, so that fallback could
+    /// only ever manufacture a denial and could never rescue a real grant. The
+    /// app's own telemetry showed the damage: 17 verdicts came through that
+    /// path, every one of them `.denied`, including one that contradicted a
+    /// functional tone probe that had proven capture was working 55 seconds
+    /// earlier. `combinedStatus()` replaces it — it can still recover a stale
+    /// Screen-Recording-only grant as a last resort (see its own doc comment),
+    /// but that recovery path can only ever turn `nil` into `.granted`, never
+    /// into `.denied`.
     public func currentStatusSilently() -> PermissionStatus? {
         let site = "CoreAudioTonePermissionProbe.currentStatusSilently"
-        switch SystemAudioCaptureTCC.preflight() {
+        switch SystemAudioCaptureTCC.effectiveStatus() {
         case .granted:
-            logVerdict(site: site, .granted, method: "tcc_preflight")
+            logVerdict(site: site, .granted, method: "tcc_effective")
             return .granted
         case .denied:
-            logVerdict(site: site, .denied, method: "tcc_preflight")
+            logVerdict(site: site, .denied, method: "tcc_effective")
             return .denied
         case .undetermined:
-            // NOTE (T5 divergence risk): unlike `SystemAudioCaptureTCC.isGranted()`
-            // — the REAL gate the capture coordinators key tap creation on —
-            // which treats a live `.undetermined` TCC decision as flatly
-            // not-granted, THIS silent read falls back to the older
-            // CoreGraphics Screen-Recording check even when the real
-            // `kTCCServiceAudioCapture` decision is merely undetermined
-            // (not unreadable). A stale/unrelated Screen-Recording grant
-            // could make this report `.granted` while `isGranted()` still
-            // reports `false` for the exact same instant — the `method`
-            // field below makes that gap legible instead of silently assumed
-            // away.
-            let verdict: PermissionStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
-            logVerdict(site: site, verdict, method: "cg_screen_recording_fallback_undetermined")
-            return verdict
-        case .none:
-            // The private TCC symbol/service is unavailable (pre-14.4, where
-            // the tap grant lived under Screen Recording only) — this is the
-            // one fallback branch with no live TCC read to disagree with.
-            let verdict: PermissionStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
-            logVerdict(site: site, verdict, method: "cg_screen_recording_fallback_no_tcc_symbol")
-            return verdict
+            // "Don't know yet" must never become a denial — .unknown is the
+            // existing calm/no-alarm status (SetupModel renders it as a plain
+            // "Allow…" row, not a "your permission was turned off" banner).
+            logVerdict(site: site, .unknown, method: "tcc_effective")
+            return .unknown
         }
     }
 
@@ -381,6 +393,8 @@ private final class SelfProcessTap: @unchecked Sendable {
         self.processObject = processObject
     }
 
+    deinit { teardown() }
+
     func peak() -> Float { peakLock.withLock { _peak } }
 
     /// Create the muted self-tap + aggregate + IOProc and start it. Returns false
@@ -458,16 +472,20 @@ private final class SelfProcessTap: @unchecked Sendable {
     /// Stop + destroy the IOProc, aggregate, and tap (order matters). Idempotent.
     func teardown() {
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)") }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)") }
             aggregateID = kAudioObjectUnknown
         }
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr { AudioDiag.log("SelfProcessTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)") }
             tapID = kAudioObjectUnknown
         }
     }

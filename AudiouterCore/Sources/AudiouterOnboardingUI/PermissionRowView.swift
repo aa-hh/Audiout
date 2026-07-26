@@ -7,14 +7,19 @@ import AudiouterSharedUI
 /// The static identity of one permission row (the parts that never change).
 struct PermissionRowContent {
     /// SF Symbol shown in the leading icon tile. Every tile shares the same
-    /// warm-neutral `raised` well (spec §5.8 — the old per-row system-colour
-    /// chips are retired); the symbol alone warms to gold once granted.
+    /// neutral `raised` well + hairline rim (Q3 of the colour-return pass —
+    /// the tile fill/rim are never coloured); the symbol's RESTING tint is
+    /// this row's ``iconColor`` and warms to gold once granted (unchanged).
     let symbolName: String
     let title: String
     /// The plain-language "why we need this," in the user's mental model.
     let detail: String
     /// Leading-edge call to action, e.g. "Allow…".
     let allowButtonTitle: String
+    /// This row's resting (ungranted) glyph tint — one of the four
+    /// `Tokens.Color.permission*` hues (colour-return pass, decisions
+    /// Q1/Q3). Passed straight to ``IconTileView``.
+    let iconColor: NSColor
 }
 
 /// Shared trailing-accessory push button for onboarding rows (``PermissionRowView``,
@@ -61,11 +66,13 @@ func onboardingRowStatusLabel(_ text: String, symbol: String, tint: NSColor) -> 
     return stack
 }
 
-/// One permission row in the onboarding window: a leading warm-neutral icon
-/// tile (gold-lit once granted — see ``IconTileView``), a title + wrapping
-/// "why" subtitle, and a trailing accessory that swaps with the live
-/// ``PermissionStatus`` — an Allow button, a spinner while probing, a
-/// green "Allowed", or a "Denied" + "Open System Settings" fallback.
+/// One permission row in the onboarding window: a leading icon tile — a
+/// neutral well holding a symbol tinted with this row's own
+/// ``PermissionRowContent/iconColor`` (gold-lit once granted — see
+/// ``IconTileView``) — a title + wrapping "why" subtitle, and a trailing
+/// accessory that swaps with the live ``PermissionStatus`` — an Allow
+/// button, a spinner while probing, a green "Allowed", or a "Denied" +
+/// "Open System Settings" fallback.
 ///
 /// Rows are designed to sit inside a grouped ``RoundedContainerView`` (the
 /// System Settings inset-list look), so the row itself carries only its own
@@ -118,7 +125,8 @@ final class PermissionRowView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         iconTile = IconTileView(symbolName: content.symbolName,
-                                accessibility: content.title)
+                                accessibility: content.title,
+                                color: content.iconColor)
         iconTile.setContentHuggingPriority(.required, for: .horizontal)
 
         titleLabel.stringValue = content.title
@@ -351,12 +359,14 @@ final class ProminentButton: NSButton {
 
 // MARK: - Appearance-adaptive rounded views
 
-/// A small rounded tile holding an SF Symbol — the unified warm-neutral
-/// permission chip (spec §5.8). Every tile rests on the same `Tokens.Color.raised`
-/// well with a hairline rim (the old per-row systemBlue/Indigo/Purple/Teal
-/// category chips are retired); the SYMBOL alone "warms to gold" once its
-/// permission is granted — the one place gold marks success outside the
-/// instruments (house rule 1's flagged onboarding exception, spec §10).
+/// A small rounded tile holding an SF Symbol. Every tile rests on the same
+/// neutral `Tokens.Color.raised` well with a hairline rim (Q3 of the
+/// colour-return pass — the FILL/RIM are never coloured, only the glyph);
+/// the SYMBOL's resting tint is caller-supplied (`color`, one of the four
+/// `Tokens.Color.permission*` hues for the onboarding rows) and "warms to
+/// gold" once its permission is granted — the one place gold marks success
+/// outside the instruments (house rule 1's flagged onboarding exception,
+/// spec §10).
 ///
 /// The gold-lit swap is the only onboarding choreography: a ≤300 ms crossfade
 /// between two stacked symbol image views, skipped entirely under Reduce
@@ -369,7 +379,8 @@ final class ProminentButton: NSButton {
 final class IconTileView: NSView {
 
     private let radius: CGFloat
-    /// The row icon-chip side; the hero uses a larger explicit size.
+    /// The row icon-chip side. `git grep IconTileView` shows both call sites
+    /// (`PermissionRowView`, `PTPHelperRowView`) use this default.
     static let side: CGFloat = 30
 
     /// The resting (warm-neutral) symbol and its gold-lit twin, stacked.
@@ -382,6 +393,7 @@ final class IconTileView: NSView {
 
     init(symbolName: String,
          accessibility: String,
+         color: NSColor = Tokens.Color.secondaryLabel,
          side: CGFloat = IconTileView.side,
          pointSize: CGFloat = 15,
          cornerRadius: CGFloat = 7) {
@@ -393,7 +405,7 @@ final class IconTileView: NSView {
         restingImage.image = NSImage(systemSymbolName: symbolName,
                                      accessibilityDescription: accessibility)
         restingImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
-        restingImage.contentTintColor = Tokens.Color.secondaryLabel
+        restingImage.contentTintColor = color
         restingImage.translatesAutoresizingMaskIntoConstraints = false
         addSubview(restingImage)
 
@@ -451,6 +463,21 @@ final class IconTileView: NSView {
         layer?.borderWidth = 1
         layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
+    }
+
+    // MARK: Test-support hooks
+
+    /// The resting (ungranted) glyph tint — the row's `iconColor` (Q1/Q3).
+    var test_restingTint: NSColor? { restingImage.contentTintColor }
+
+    /// The lit (granted) glyph tint — always `Tokens.Color.gold` (Q2, unchanged).
+    var test_litTint: NSColor? { litImage.contentTintColor }
+
+    /// The tile's own FILL colour — asserted elsewhere to confirm Q3 (the
+    /// tile fill/rim never colour, only the glyph does) held across this wave.
+    var test_fillColor: NSColor? {
+        guard let cg = layer?.backgroundColor else { return nil }
+        return NSColor(cgColor: cg)
     }
 }
 

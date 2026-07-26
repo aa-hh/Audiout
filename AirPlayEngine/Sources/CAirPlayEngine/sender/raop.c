@@ -2047,6 +2047,13 @@ session_free(struct raop_session *rs)
   if (rs->server_fd >= 0)
     close(rs->server_fd);
 
+  /* A session torn down mid-handshake (external stop/deinit racing an
+   * in-flight pair-verify/pair-setup exchange) bypasses the handshake state
+   * machine's own pair_verify_free()/pair_setup_free() calls -- free them
+   * here too. Both are NULL-safe, matching every other call site. */
+  pair_verify_free(rs->pair_verify_ctx);
+  pair_setup_free(rs->pair_setup_ctx);
+
   free(rs->realm);
   free(rs->nonce);
   free(rs->session);
@@ -2966,6 +2973,19 @@ packet_send(struct raop_session *rs, struct rtp_packet *pkt)
   ret = send(rs->server_fd, pkt->data, pkt->data_len, 0);
   if (ret < 0)
     {
+      // [AirPlayEngine vendored change 2026-07-25: EAGAIN on non-blocking DGRAM
+      // send is a dropped packet, not a fatal session error — see
+      // docs/VENDORED-DIFFS.md Entry 4]
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+	{
+	  static uint64_t raop_dropped_packets;
+
+	  raop_dropped_packets++;
+	  DPRINTF(E_WARN, L_RAOP, "Dropped packet for '%s' (send would block): %s (total dropped: %" PRIu64 ")\n",
+	    rs->devname, strerror(errno), raop_dropped_packets);
+	  return -1;
+	}
+
       DPRINTF(E_LOG, L_RAOP, "Send error for '%s': %s\n", rs->devname, strerror(errno));
 
       // Can't free it right away, it would make the ->next in the calling
@@ -3998,6 +4018,7 @@ raop_pair_request_send(int step, struct raop_session *rs, void (*cb)(struct evrt
   if (!req)
     {
       DPRINTF(E_LOG, L_RAOP, "Could not create RTSP request for verification step %d\n", step);
+      free(body);
       return -1;
     }
 
@@ -4037,6 +4058,7 @@ raop_cb_pair_verify_step2(struct evrtsp_request *req, void *arg)
   int ret;
 
   pair_verify_free(rs->pair_verify_ctx);
+  rs->pair_verify_ctx = NULL; /* null-out after free: session_free() frees it again (NULL-safe, not double-free-safe) */
 
   ret = raop_pair_response_process(5, req, rs);
   if (ret < 0)

@@ -55,6 +55,14 @@ func describe(_ event: BackendEvent) -> String? {
     case .remoteTransport(let command):
         // Also native-only (a key pressed on the speaker itself); never under mock.
         return "▶ remote key  \(command) (from a speaker)"
+    case .localFallbackActive(let active):
+        // Native-only (the R11 silence watchdog); never under mock. Handled so the
+        // switch stays exhaustive.
+        return "♪ local fallback \(active ? "ON (speakers unreachable)" : "OFF (resumed)")"
+    case .systemDefaultIsAirPlayActive(let active):
+        // Native-only (the W3-T3 system-AirPlay guard); never under mock. Handled
+        // so the switch stays exhaustive.
+        return "♪ system-AirPlay note \(active ? "ON (double-path risk)" : "OFF")"
     case .streamHealth(let id, let recovering):
         // Also native-only (T8 rebind-recovery signal); never under mock.
         return "⚠ stream health \(id) recovering:\(recovering)"

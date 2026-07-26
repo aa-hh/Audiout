@@ -73,6 +73,15 @@ final class LocalPlaybackEngineTests: XCTestCase {
     /// the audio device — the metering path under test reads RMS off the
     /// captured buffer and is identical whether output is real or offline.
     private func makeStartedEngine() throws -> LocalPlaybackEngine {
+        // Offline rendering rather than `AudioHardwareTestGate.skipUnlessEnabled()`
+        // (main's approach for this helper): both exist to keep the ~54 CPU-seconds
+        // of coreaudiod load out of routine runs, but offline rendering achieves
+        // that WITHOUT skipping — the test still executes on every run instead of
+        // silently not running unless someone sets AIRPLAY_AUDIO_HARDWARE_TESTS.
+        // Safe because, as the doc comment above states, the metering path under
+        // test reads RMS off the captured buffer and is identical whether output
+        // is real or offline. The gate is still used elsewhere in this file for
+        // tests that genuinely need real hardware.
         let engine = LocalPlaybackEngine(offlineRenderingForTests: true)
         try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
         return engine
@@ -233,52 +242,263 @@ final class LocalPlaybackEngineTests: XCTestCase {
         XCTAssertEqual(level.rms, 0.0, accuracy: 0.001, "silent buffer reads as zero RMS")
     }
 
-    // MARK: - Anti-feedback follow guard (transport type)
+    // MARK: - Memory leak: orphaned player node on engine start failure
 
-    #if canImport(AudioToolbox)
+    /// When ``startEngineOnGraphQueue()`` throws (e.g., during device config
+    /// churn), the freshly-attached player node MUST be detached — not orphaned
+    /// in the engine's graph. This test forces a start failure via the
+    /// `test_startOverride` seam and verifies the error is re-thrown.
+    func testAddAppDetachesPlayerOnStartFailure() throws {
+        // Reference engine: a normal, successful add-then-remove. This tells us
+        // what "internal engine bookkeeping only, zero app players" looks like
+        // as an attached-node COUNT, without guessing at AVAudioEngine's own
+        // lazy mixer/output-node creation (which `startEngineOnGraphQueue()`
+        // triggers via `_ = engine.mainMixerNode` BEFORE it ever calls
+        // `engine.start()` — so that internal setup happens identically whether
+        // start succeeds or fails, and a bare pre-`addApp` baseline of 0 does
+        // NOT account for it). `removeApp` only ever detaches the app's own
+        // player (verified by reading its body), never the engine's own nodes,
+        // so this is a clean "player added, then correctly removed" reference.
+        let referenceEngine = LocalPlaybackEngine()
+        try referenceEngine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        referenceEngine.removeApp(bundleID: bundleID)
+        let noOrphanNodeCount = referenceEngine.test_attachedNodeCount
 
-    /// Real local-hardware transports are FOLLOWED: "Current Device" plays out
-    /// wherever the user is actually listening (built-in, Bluetooth headphones,
-    /// USB, HDMI, Thunderbolt, …), which is the whole point of the bug fix.
-    func testFollowableTransportsAreFollowed() {
-        for transport in [
-            kAudioDeviceTransportTypeBuiltIn,
-            kAudioDeviceTransportTypeBluetooth,
-            kAudioDeviceTransportTypeBluetoothLE,
-            kAudioDeviceTransportTypeUSB,
-            kAudioDeviceTransportTypeHDMI,
-            kAudioDeviceTransportTypeThunderbolt,
-            kAudioDeviceTransportTypeDisplayPort,
-            kAudioDeviceTransportTypePCI,
-            kAudioDeviceTransportTypeFireWire,
-        ] {
-            XCTAssertTrue(LocalPlaybackEngine.isFollowableTransport(transport),
-                          "transport \(transport) is real local hardware — must be followed")
+        let engine = LocalPlaybackEngine()
+
+        // Force engine.start() to throw via the test seam.
+        struct TestError: Error { let message: String }
+        let testError = TestError(message: "test override")
+        engine.test_startOverride = {
+            throw testError
         }
-    }
 
-    /// The anti-feedback guard: AirPlay and virtual/aggregate defaults are REFUSED
-    /// (local playback stays on the built-in speakers), because this app may be
-    /// streaming the whole-system mix into exactly that device — following it would
-    /// loop local playback back into the capture.
-    func testFeedbackRiskTransportsAreRefused() {
-        for transport in [
-            kAudioDeviceTransportTypeAirPlay,
-            kAudioDeviceTransportTypeVirtual,
-            kAudioDeviceTransportTypeAggregate,
-            kAudioDeviceTransportTypeAutoAggregate,
-        ] {
-            XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(transport),
-                           "transport \(transport) is AirPlay/virtual — must be refused (anti-feedback)")
+        // Attempt to add an app — this should throw when start fails.
+        var errorThrown = false
+        do {
+            try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        } catch is TestError {
+            errorThrown = true
+        } catch {
+            XCTFail("Expected TestError, got \(type(of: error)): \(error)")
         }
+
+        XCTAssertTrue(errorThrown, "addApp must throw when engine start fails")
+
+        // DIRECT proof of the fix: after a failed start, the attached-node count
+        // must match the "no orphan" reference exactly. `addApp`'s idempotency
+        // guard (`nodes[bundleID]`) never got populated by the failed call, so a
+        // second `addApp` for the same bundle ID would attach a brand-new,
+        // independently-tracked player node regardless of whether the first one
+        // was ever cleaned up — a "second call succeeds" check alone would pass
+        // even with the leak present (confirmed: the delta between a failed and
+        // a subsequent successful call is always +1 either way). Comparing
+        // against the engine's real attached-node count is what actually rules
+        // out the orphan.
+        XCTAssertEqual(engine.test_attachedNodeCount, noOrphanNodeCount,
+                       "a failed engine start must leave no orphaned player node attached")
+
+        // Secondary check: a retry with the override cleared should also work
+        // end-to-end (proves the failed attempt left no stale bookkeeping either).
+        engine.test_startOverride = nil
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        engine.stop()  // Clean up
+        referenceEngine.stop()
     }
 
-    /// An unreadable transport (`nil`) is treated conservatively as not-followable,
-    /// so the safe built-in fallback is used rather than risking a feedback loop.
-    func testUnreadableTransportIsNotFollowed() {
-        XCTAssertFalse(LocalPlaybackEngine.isFollowableTransport(nil),
-                       "an unreadable transport must fall back to the safe built-in target")
+    // MARK: - Config-change debounce (redirect-churn burst coalescing)
+
+    /// A burst of `AVAudioEngineConfigurationChange` notifications (redirect
+    /// churn — routing/unrouting several apps in quick succession, each
+    /// creating/destroying its own Core Audio tap+aggregate device) must
+    /// collapse into exactly ONE call to the reconnect handler, not one per
+    /// notification. Drives ``LocalPlaybackEngine/test_triggerConfigChangeDebounce()``
+    /// — the same trailing-edge debounce path `init`'s real observer closure
+    /// uses — three times a few ms apart (a real notification burst is at
+    /// least this tight: several taps torn down/created back-to-back on the
+    /// same churn event), then proves via
+    /// ``LocalPlaybackEngine/test_configChangeHandlerFireCount`` (a plain
+    /// counter, not real engine/playback state — this test only needs to prove
+    /// coalescing, not exercise the reconnect sequence itself) that the
+    /// handler fired once, and only after settling. No `addApp` is called, so
+    /// `nodes` stays empty and the real handler takes its early-return branch
+    /// (`engineRunning = false`) — no Core Audio interaction, no audio, on a
+    /// worker thread that reads real hardware.
+    func testConfigChangeBurstCoalescesIntoOneHandlerCall() throws {
+        let engine = LocalPlaybackEngine()
+        defer { engine.stop() }
+
+        engine.test_triggerConfigChangeDebounce()
+        Thread.sleep(forTimeInterval: 0.01)
+        engine.test_triggerConfigChangeDebounce()
+        Thread.sleep(forTimeInterval: 0.01)
+        engine.test_triggerConfigChangeDebounce()
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 0,
+                       "the handler must not have fired yet — still inside the ~300ms debounce window")
+
+        // Wait past the debounce interval (300ms) with margin, then check.
+        let settled = XCTestExpectation(description: "debounce settles")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+        wait(for: [settled], timeout: 2.0)
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 1,
+                       "a burst of 3 rapid notifications must collapse into exactly ONE handler call")
     }
 
-    #endif
+    /// The debounce must not weaken responsiveness for the common case: ONE
+    /// isolated config-change notification (not part of a burst) still
+    /// recovers — the handler still fires — after roughly the debounce
+    /// interval. Guards against a broken implementation that only fires on a
+    /// SUBSEQUENT notification (a true "N-th event" throttle) rather than
+    /// timing off the single call actually made.
+    func testSingleConfigChangeStillFiresHandlerAfterDebounceInterval() throws {
+        let engine = LocalPlaybackEngine()
+        defer { engine.stop() }
+
+        engine.test_triggerConfigChangeDebounce()
+
+        let settled = XCTestExpectation(description: "single debounce settles")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+        wait(for: [settled], timeout: 2.0)
+
+        XCTAssertEqual(engine.test_configChangeHandlerFireCount, 1,
+                       "a single, isolated notification must still recover on its own — the debounce " +
+                       "delays and coalesces, it must never indefinitely postpone recovery")
+    }
+
+    // MARK: - Follow-real-output-with-guard (R13)
+
+    /// A fake ``LocalOutputResolving`` so the follow-with-guard decision +
+    /// compare-before-rebuild are assertable without any real Core Audio: the test
+    /// dictates the "default output", the "built-in", and which ids are loop
+    /// risks. `@unchecked Sendable` (mutated across the listener contract) with a
+    /// lock, like the other fakes in this suite.
+    private final class FakeOutputResolver: LocalOutputResolving, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _defaultDevice: UInt32?
+        private let _builtIn: UInt32?
+        private let _loopRiskIDs: Set<UInt32>
+        init(defaultDevice: UInt32?, builtIn: UInt32?, loopRiskIDs: Set<UInt32> = []) {
+            self._defaultDevice = defaultDevice
+            self._builtIn = builtIn
+            self._loopRiskIDs = loopRiskIDs
+        }
+        func setDefaultDevice(_ id: UInt32?) { lock.withLock { _defaultDevice = id } }
+        func defaultOutputDevice() -> UInt32? { lock.withLock { _defaultDevice } }
+        func builtInOutputDevice() -> UInt32? { _builtIn }
+        func isLoopRisk(_ device: UInt32) -> Bool { _loopRiskIDs.contains(device) }
+    }
+
+    private let builtInID: UInt32 = 1
+
+    /// (a) Default = Bluetooth headphones (non-AirPlay, non-aggregate) → the engine
+    /// FOLLOWS it. This is the R13 fix: a "Current Device" app must play where the
+    /// user is actually listening, not blast out the built-in speakers.
+    func testFollowsPlainDefaultOutput() {
+        let bt: UInt32 = 42
+        let resolver = FakeOutputResolver(defaultDevice: bt, builtIn: builtInID)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), bt,
+                       "a plain (BT/USB/wired) default output must be followed")
+    }
+
+    /// (b) Default = an AirPlay-class device → the engine STAYS on built-in (loop
+    /// guard). Following the AirPlay default would feed the whole-system AirPlay
+    /// path back into playback in a loop.
+    func testAirPlayDefaultFallsBackToBuiltIn() {
+        let airplay: UInt32 = 99
+        let resolver = FakeOutputResolver(defaultDevice: airplay, builtIn: builtInID, loopRiskIDs: [airplay])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), builtInID,
+                       "an AirPlay-class default must fall back to built-in (loop guard)")
+    }
+
+    /// (c) Default = one of our OWN aggregate devices → the engine STAYS on
+    /// built-in (loop guard).
+    func testOwnAggregateDefaultFallsBackToBuiltIn() {
+        let ourAggregate: UInt32 = 77
+        let resolver = FakeOutputResolver(defaultDevice: ourAggregate, builtIn: builtInID, loopRiskIDs: [ourAggregate])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertEqual(engine.resolveTargetDeviceID(), builtInID,
+                       "one of our own tap aggregates as the default must fall back to built-in (loop guard)")
+    }
+
+    /// When neither the default nor built-in resolves, the target is `nil` (the
+    /// engine keeps `AVAudioEngine`'s own default — best effort).
+    func testNoResolvableDeviceYieldsNilTarget() {
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        XCTAssertNil(engine.resolveTargetDeviceID())
+    }
+
+    /// The loop-guard name classification, tested against the EXACT names the app's
+    /// three aggregate-creation sites build — so the prefix set can't silently
+    /// drift out of sync with them, while ordinary output devices are never
+    /// mistaken for ours.
+    func testOwnAggregateNamePrefixesMatchRealCreationSiteNames() {
+        let prefixes = LocalPlaybackEngine.ownAggregateNamePrefixes
+        func isOurs(_ name: String) -> Bool { prefixes.contains { name.hasPrefix($0) } }
+        // Exact names from NativeCaptureCoordinator / PerAppCaptureCoordinator /
+        // AudioCapturePermissionProbe:
+        XCTAssertTrue(isOurs("Tap-Audiouter"))
+        XCTAssertTrue(isOurs("PerAppTap-Audiouter-com.example.app"))
+        XCTAssertTrue(isOurs("SetupProbe-Audiouter"))
+        // Ordinary hardware outputs must not be classified as ours:
+        XCTAssertFalse(isOurs("MacBook Pro Speakers"))
+        XCTAssertFalse(isOurs("External Headphones"))
+        XCTAssertFalse(isOurs("Sonos Living Room"))
+    }
+
+    /// (d) The default output changes (BT connects) → the engine re-points exactly
+    /// once; a follow-up notification whose resolved target is UNCHANGED does ZERO
+    /// rebuilds (the compare-before-rebuild loop-breaker).
+    func testDefaultOutputChangeRepointsOnceThenZeroOnUnchanged() throws {
+        // Start with no resolvable device so the real engine boots on AVAudioEngine's
+        // own default (no fake device id is ever actually applied to hardware).
+        let resolver = FakeOutputResolver(defaultDevice: nil, builtIn: nil)
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        defer { engine.stop() }
+        XCTAssertNil(engine.test_configuredTargetDevice)
+        XCTAssertEqual(engine.test_repointCount, 0)
+
+        // BT connects: the default output now resolves to a new device.
+        resolver.setDefaultDevice(200)
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        XCTAssertEqual(engine.test_repointCount, 1, "a changed default output must repoint exactly once")
+        XCTAssertEqual(engine.test_configuredTargetDevice, 200)
+
+        // A duplicate/spurious notification resolving to the SAME target: no work.
+        // (Fired twice to be sure the guard is stable, not one-shot.)
+        engine.handleDefaultOutputChange()
+        engine.handleDefaultOutputChange()
+        engine.test_flushGraphQueue()
+        XCTAssertEqual(engine.test_repointCount, 1,
+                       "an unchanged resolved target must do zero rebuilds (compare-before-rebuild)")
+        XCTAssertEqual(engine.test_configuredTargetDevice, 200)
+    }
+
+    /// (e) An output config-change event (the "dies through mic" trigger: the mic
+    /// engaging voice-processing mode stops `AVAudioEngine`) must REBUILD the graph
+    /// and keep playing — not die. Proven by a buffer still scheduling + metering
+    /// after the change.
+    func testConfigurationChangeRebuildsInsteadOfDying() throws {
+        let engine = try makeStartedEngine()
+        defer { engine.stop() }
+        let recorder = LevelRecorder()
+        engine.onAppLevel = { recorder.record($0, $1) }
+        engine.setMeteringActive(true)
+
+        // Simulate the AVAudioEngineConfigurationChange the mic (or a device switch)
+        // fires — the engine has stopped itself.
+        engine.test_simulateConfigurationChange()
+
+        // Playback survived: the node is still alive and engineRunning was restored,
+        // so a captured buffer still schedules and meters.
+        engine.receive(buffer: constantBuffer(amplitude: 0.5), for: bundleID)
+        XCTAssertEqual(recorder.count, 1,
+                       "receive() after a config change must still fire — the engine rebuilt, it did not die")
+    }
 }

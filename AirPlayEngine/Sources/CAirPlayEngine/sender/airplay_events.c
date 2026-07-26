@@ -109,6 +109,9 @@ client_free(struct airplay_events_client *client)
   free(client->name);
   pair_cipher_free(client->cipher_ctx);
 
+  if (client->fd >= 0)
+    close(client->fd);
+
   free(client);
 }
 
@@ -610,6 +613,8 @@ respond(struct airplay_events_client *client)
   if (ret < 0)
     {
       DPRINTF(E_WARN, L_AIRPLAY, "Could not encrypt AirPlay event data response: %s\n", pair_cipher_errmsg(client->cipher_ctx));
+      evbuffer_free(encrypted);
+      evbuffer_free(response);
       return -1;
     }
 
@@ -773,7 +778,9 @@ airplay_events_listen(const char *name, uint64_t device_id, const char *address,
   ret = client_add(name, device_id, fd, key, key_len);
   if (ret < 0)
     {
-      close(fd);
+      /* client_add's error path already ran client_free(), which now closes
+       * fd itself -- closing it again here would double-close (a race with
+       * any thread that has since reopened the same fd number). */
       return -1;
     }
 

@@ -68,14 +68,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
     private var statusItemController: StatusItemController!
 
-    /// Device IDs that currently have a non-empty CONFIRMED `.routedApps` app
-    /// list (T6's live "which app streams here now" signal, mirrored here off
-    /// the same events `PopoverController.applyRoutedApps` ingests — no new
-    /// polling). Feeds the menu-bar routing dot's predicate
-    /// (`StatusRoutingIndicator`, Warm Signal §5.5): a live per-app route
-    /// counts as broadcasting even when the Main Out target is passthrough.
-    private var liveRoutedDeviceIDs: Set<String> = []
-
     /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
     /// Wired with an explicit production `AppRoutingController` so app routes
@@ -106,6 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// audio in-process and discovers under the app's own identity, so the sole
     /// path that needs the two OS grants.
     private let backendKind = BackendKind.resolved()
+
+    /// The four OS permission seams (audio capture, Local Network, Accessibility,
+    /// PTP helper), resolved ONCE from `AIRPLAY_PERMISSIONS` (see
+    /// ``PermissionMode``). Default `.system` = the real production probes, so a
+    /// plain launch is unchanged; `granted`/`denied` inject simulated seams so
+    /// the whole permission flow can be driven without touching real TCC (which
+    /// re-pins to the binary on every ad-hoc rebuild — the iteration tax this
+    /// knob removes). Threaded into BOTH `SetupModel` construction sites,
+    /// `registerPTPHelperIfNeeded()`, and `MediaKeyController` so nothing reads a
+    /// real grant behind the simulation's back.
+    private let permissionProviders = PermissionMode.resolved().makeProviders()
 
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Check Permissions…" from Settings ▸ General).
@@ -140,6 +143,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionAuditCooldownUntil: Date?
     private let permissionAuditCooldown: TimeInterval = 30
 
+    /// Bumped every time `presentSetup` actually constructs a NEW controller
+    /// (never on the re-front branch). The constructing call captures the
+    /// post-increment value into a plain `let` at closure-creation time (no
+    /// chicken-egg timing problem, unlike trying to capture `controller`
+    /// itself before it exists) and its `onFinished` compares that snapshot
+    /// against the live counter before clearing `onboardingWindowController`
+    /// — so a finish callback can only ever nil out the reference to the
+    /// controller IT belongs to, never a newer one built after it. Defensive
+    /// belt-and-suspenders on top of `presentSetup`'s own reentrancy guard
+    /// (see that method's doc comment for the bug this whole pair of guards
+    /// closes): even if some future caller reintroduces reentrancy, a stale
+    /// finish can no longer wipe a live controller's reference out from
+    /// under it.
+    private var onboardingPresentationGeneration = 0
+
+    /// True once EITHER the launch-time check or the popover-open check
+    /// (T4/B3) has auto-presented the friendly `.firstRun` Setup window for
+    /// an `.undetermined` audio-capture verdict this session. Both call
+    /// sites discover `.undetermined` completely independently of each
+    /// other (one at launch, one on click), so a single shared flag — set by
+    /// whichever fires first, in ``presentSetupForUndeterminedIfNeeded()`` —
+    /// is what stops the other from popping a second window later in the
+    /// same session. Never reset: this is a one-shot-per-launch guard, not a
+    /// cooldown (see `permissionAuditCooldownUntil` for the separate,
+    /// time-based guard against fighting the reactivate/wake audit).
+    private var didAutoPresentSetupForUndetermined = false
+
+    /// Detects the system-audio grant ARRIVING mid-session (T6-rev). Retained
+    /// for the app's lifetime because the `CFNotificationCenter` registration it
+    /// owns holds an unretained pointer back to it — see
+    /// ``PermissionStateObserver``'s `deinit`. Armed at launch only when the
+    /// grant isn't already in place, and kicked (never polled) by wake, popover
+    /// open, and every routing action.
+    private let permissionObserver = PermissionStateObserver()
+
     /// Whether `backend.start()` has run. On first-run native the backend start
     /// (and its Bonjour discovery, which triggers the Local Network prompt) is
     /// DEFERRED until onboarding is dismissed, so the prompt is primed by the
@@ -169,6 +207,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// placeholder master-volume value the status symbol tracks.
     private var devicesByID: [String: Device] = [:]
 
+    /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
+    /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
+    /// bookkeeping — kept here too because the status item's idle/streaming
+    /// decision (`MenuBarStatus.isStreaming`) needs it and has no other route
+    /// to it (the popover's copy is private). An empty `appNames` clears the
+    /// entry for that device, same discipline as the popover's copy.
+    private var routedAppNamesByDeviceID: [String: [String]] = [:]
+
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -180,7 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Turns a transport key pressed ON A SPEAKER (`BackendEvent.remoteTransport`)
     /// into a Mac media key so the frontmost player responds. Owns the one-time
     /// Accessibility prompt the feature needs.
-    private let mediaKeyController = MediaKeyController()
+    private lazy var mediaKeyController = MediaKeyController(
+        remoteControl: permissionProviders.remoteControl)
 
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
@@ -221,6 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // T1 diagnostic (`AUDIOUTER_TCC_DIAG=1`, off by default): starts a
+        // once-per-second raw-bucket poll as early as possible so a fresh
+        // `open`-launch is captured before any permission prompt can fire.
+        // See `TCCBucketDiagnostic` for what it settles and why.
+        TCCBucketDiagnostic.startIfEnabled()
+
         // Apply the persisted appearance override BEFORE building any UI, so the
         // status item and popover pick it up on first paint (Settings ›
         // Appearance). `.system` is a no-op (`NSApp.appearance = nil`).
@@ -262,6 +315,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
+            // T6-rev: a menu-bar click is a "the user is engaging with the app
+            // right now" event, so it's one of the five triggers that re-checks
+            // the grant out-of-process. Asynchronous by contract, so it can't
+            // change the verdict THIS click reads (that one is still the
+            // possibly-stale in-process read below) — it's what makes the NEXT
+            // click, or any routing action in between, see the truth.
+            self.permissionObserver.kick(source: "popover_open")
+            // T4 (B2): a cheap, silent read — NEVER the `.permissionLost` alarm
+            // banner, which is reserved for an explicit `.denied` (B1, the
+            // reactivate/wake audit). `.undetermined` here typically means the
+            // user completed Setup without ever actually granting the tap
+            // (Done doesn't require a grant — see `OnboardingViewController`'s
+            // Done handler), and a menu-bar click is the user's own explicit
+            // decision to use the app — the natural moment to offer the
+            // friendly first-run nudge rather than silently opening a popover
+            // that can do nothing. `presentSetupForUndeterminedIfNeeded()`
+            // one-shot/cooldown-gates the presentation (T4/B3) and reports
+            // whether it actually took over, so the popover doesn't ALSO open
+            // underneath it in the same click.
+            if SystemAudioCaptureTCC.effectiveStatus() == .undetermined,
+               self.presentSetupForUndeterminedIfNeeded() {
+                return
+            }
             self.popoverController.toggle(relativeTo: button)
         }
 
@@ -275,17 +351,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
-        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
-        // "Selected Devices" (not just which AirPlay devices are) to detect
-        // "play everywhere" — `GroupController.applyRouting` always filters the
-        // local device out of what it hands `backend.setOutputSet`, so that call
-        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
-        // existing public read that does; wire it in once, here, right after
-        // both are constructed. `backend as? NativeBackend` is nil for
-        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
-        // `LatencyConfigurable` optional-capability pattern used below.
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
+        // what Main Out points at (not just which AirPlay devices are) to detect
+        // "play everywhere" — neither `GroupController.applyRouting` nor
+        // `activateGroup` ever hands the local device to `backend.setOutputSet`,
+        // so that call alone can't carry this. `isMainOutMember(_:)` is the read
+        // that answers it for BOTH Main Out targets; wire it in once, here, right
+        // after both are constructed. Deliberately NOT `isSpeakerSelected(_:)`,
+        // which sees only the Selected Devices set: under a group target that
+        // both fails to arm the sink for a group containing the Mac and arms it
+        // for an AirPlay-only group whose Mac is merely still sitting in the
+        // untargeted Selected Devices set. For `.selectedDevices` the two are the
+        // same read, so this is a group-path-only change.
+        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // matching the `MeteringControlling`/`LatencyConfigurable`
+        // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
-            self?.groupController?.isSpeakerSelected(id) ?? false
+            self?.groupController?.isMainOutMember(id) ?? false
+        }
+        // T6-rev: every user action that routes audio funnels into exactly two
+        // backend methods (`setOutputSet` / `updateAppRoutes`), and both fire
+        // this. Kicking from there rather than from the four `GroupController`
+        // call sites is what catches a group activated through `applyRouting`'s
+        // group branch, and keeps the check in one place. `kick` returns
+        // immediately (it only enqueues an out-of-process resolution), which is
+        // required: both chokepoints run on the main thread.
+        (backend as? NativeBackend)?.onRoutingAction = { [weak self] in
+            self?.permissionObserver.kick(source: "routing_action")
         }
 
         // Construct the production AppRoutingController explicitly (T-11), using
@@ -327,10 +419,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
+        // A persisted `.device` redirect must never survive a full Audiouter
+        // restart (simplification of the app-quit reset, scaled to every route
+        // at once) — mirrors the existing "the live routing set is not
+        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
+        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
+        // below so the backend never sees a stale `.device` route even
+        // transiently at launch.
+        appRouting.clearAllDeviceRoutes()
         // Seed the backend with the persisted route table + excluded set (T7). A
-        // prune above would already have pushed via `onRoutesDidChange`, but that
-        // fires only when something changed — this unconditional push syncs the
-        // loaded routes even when nothing was pruned.
+        // prune/clear above would already have pushed via `onRoutesDidChange`, but
+        // that fires only when something changed — this unconditional push syncs
+        // the loaded routes even when nothing was pruned/cleared.
         pushAppRoutesToBackend()
 
         // A routed app quitting now RESETS its route (product decision 2026-07-22):
@@ -339,10 +439,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (and, before the cold-prompt guard, re-prompt) on a later launch.
         // `resetDeviceRoute` reverts a `.device` redirect back to `.noRedirect` and
         // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing the
-        // per-app tap down through the SAME un-route path a manual change takes
-        // (so it supersedes the old `handleAppTerminated` "keep route, show
-        // offline" behavior). Core can't observe AppKit notifications itself, so
-        // this is the one place that forwards the quit across the boundary. Never
+        // per-app tap down through the SAME un-route path a manual change takes —
+        // but ONLY for a `.device` route: it deliberately leaves a `.currentDevice`
+        // ("play on this Mac") route untouched (see its own doc comment), so on its
+        // own it can't tear down THAT tap on quit — it would otherwise leak
+        // (registered in coreaudiod against a dead pid) forever. Forwarding to
+        // `backend.handleAppTerminated` below covers both cases directly (capture
+        // lifecycle, orthogonal to `resetDeviceRoute`'s route persistence) —
+        // called FIRST so its routed/local membership check sees the pre-reset
+        // state rather than racing `resetDeviceRoute`'s own cascade having already
+        // changed it. Core can't observe AppKit notifications itself, so this is
+        // the one place that forwards the quit across the boundary. Never
         // explicitly removed: this observer's lifetime is the app's own
         // (AppDelegate is never deallocated before termination).
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -355,6 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     as? NSRunningApplication,
                 let bundleID = app.bundleIdentifier
             else { return }
+            (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
             self?.appRouting.resetDeviceRoute(bundleID: bundleID)
         }
 
@@ -430,7 +538,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // which lagged the launch: the user saw the popover first (a menu-bar
             // click, `onboardingWindowController` still nil) and setup flashed in
             // after. Local Network / PTP gaps are still caught by that audit.
-            let liveAudioGranted = SystemAudioCaptureTCC.isGranted()
+            //
+            // T4 (B1): reads `effectiveStatus()`, NOT `isGranted()` — `isGranted()`
+            // collapses `.undetermined` to `false`, which used to fire the
+            // alarming `.permissionLost` "your permission was turned off" banner
+            // for a user who simply never granted it yet (Done doesn't require a
+            // grant — see `OnboardingViewController`'s Done handler), a SECOND
+            // false-banner path that never showed up in the probe telemetry at
+            // all. Only an explicit `.denied` — something WAS decided and is now
+            // off — gets the alarm; `.undetermined` takes the same friendly
+            // `.firstRun` path the popover-open check below uses, one-shot-gated
+            // by `presentSetupForUndeterminedIfNeeded()` so the two call sites
+            // can't double-present.
+            let effectiveAudioStatus = SystemAudioCaptureTCC.effectiveStatus()
             // T5: the live-permission-triggered half of the gate. Logged
             // unconditionally (not only when it re-presents) so the common
             // "still granted" case is on record too, not just the exception —
@@ -438,15 +558,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `shouldPresentOnLaunch` above, runs regardless of backend kind.
             Telemetry.log(.permission, "onboarding_gate", [
                 "site": "AppDelegate.launch.liveAudioCaptureCheck",
-                "decision": (onboardingWindowController == nil && !liveAudioGranted) ? "present" : "skip",
+                "decision": (onboardingWindowController == nil && effectiveAudioStatus != .granted) ? "present" : "skip",
                 "hasCompletedSetup": "\(settings.hasCompletedSetup)",
                 "backendKind": "\(backendKind)",
-                "liveGranted": "\(liveAudioGranted)",
+                "effectiveStatus": "\(effectiveAudioStatus)",
             ])
-            if onboardingWindowController == nil, !liveAudioGranted {
-                log("Audio capture not granted at launch — presenting setup")
-                presentSetup(reason: .permissionLost([.audioCapture]))
+            switch effectiveAudioStatus {
+            case .denied:
+                if onboardingWindowController == nil {
+                    log("Audio capture explicitly denied at launch — presenting setup")
+                    presentSetup(reason: .permissionLost([.audioCapture]))
+                }
+            case .undetermined:
+                presentSetupForUndeterminedIfNeeded()
+            case .granted:
+                break
             }
+        }
+
+        // T6-rev: arm the mid-session grant detector. Both launch branches above
+        // reach here, because a first-run user is the MOST likely to grant while
+        // this process is already running — and this process's own
+        // `TCCAccessPreflight` read is cached for its whole lifetime, so without
+        // this the app would keep refusing its own taps until the user quit and
+        // relaunched, even though macOS had already authorized it.
+        //
+        // Armed only when the grant isn't already in place: an already-granted
+        // launch has nothing to detect (`kick` would short-circuit on every
+        // trigger anyway), and leaving it unarmed also leaves the Darwin
+        // registration — and its unretained back-pointer — unmade.
+        // NOTE: the observer's ONLY job is to latch the fresh grant
+        // (`SystemAudioCaptureTCC.recordFreshGrant`), so `isGranted()` starts
+        // answering true in THIS process — a mid-session grant is otherwise
+        // invisible to it for the process's whole life (the TCC read is
+        // process-lifetime cached). Nothing auto-resumes off the back of it:
+        // the app deliberately starts empty, per-app `.device` routes are
+        // cleared at launch (`AppRoutingController.clearAllDeviceRoutes()`),
+        // and the user re-picks a destination themselves. The latch is what
+        // makes that re-pick actually produce audio without a relaunch.
+        if SystemAudioCaptureTCC.effectiveStatus() != .granted {
+            permissionObserver.start()
         }
 
         // Revocation watch: if a REQUIRED permission (audio capture, local
@@ -467,7 +618,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.auditRequiredPermissionsIfNeeded() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.auditRequiredPermissionsIfNeeded()
+                // Re-check the grant on wake so the latch is current. This does
+                // NOT resume anything — the app's own sleep/wake reconnect
+                // (`NativeBackend.handleSystemDidWake`) is what brings a live
+                // stream back; this only keeps `isGranted()` honest.
+                self.permissionObserver.kick(source: "wake")
+            }
         }
     }
 
@@ -481,7 +640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func registerPTPHelperIfNeeded() {
         guard case .native = backendKind else { return }
-        let ptpHelper = SMAppServicePTPHelper()
+        let ptpHelper = permissionProviders.ptpHelper
         guard ptpHelper.status == .notRegistered else { return }
         do {
             try ptpHelper.register()
@@ -506,10 +665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return }
 
         let model = permissionAuditModel ?? SetupModel(
-            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
-            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
-            remoteControl: RemoteControlPrimerFactory.makeDefault(),
-            ptpHelper: SMAppServicePTPHelper(),
+            providers: permissionProviders,
             settings: settings,
             localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model
@@ -527,6 +683,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Present the friendly `.firstRun` Setup window in response to an
+    /// `.undetermined` audio-capture verdict — shared by the launch-time
+    /// check (B1) and the popover-open check (B2), the two independent sites
+    /// that each discover `.undetermined` on their own. `.undetermined` means
+    /// "not yet decided," not "revoked," so this is deliberately the calm
+    /// first-run presentation, never the `.permissionLost` alarm banner.
+    ///
+    /// Four guards, all required (T4/B3):
+    /// 1. `onboardingWindowController == nil` — `presentSetup` itself already
+    ///    re-fronts rather than double-presenting even without this (see its
+    ///    own reentrancy guard), but checking here first avoids flipping
+    ///    ``didAutoPresentSetupForUndetermined`` for no reason when a window
+    ///    is already up for some unrelated reason.
+    /// 2. `!didAutoPresentSetupForUndetermined` — once per app session, not
+    ///    on every popover click.
+    /// 3. `permissionAuditCooldownUntil` — the SAME cooldown a
+    ///    `.permissionLost` dismissal already arms (`presentSetup`'s
+    ///    `onFinished`), so this friendly path can't immediately re-pop right
+    ///    after the user just dismissed the alarm banner without granting —
+    ///    it would otherwise fight the reactivate/wake audit's own cooldown
+    ///    wait.
+    /// 4. Setting the flag BEFORE calling `presentSetup`, not after — so a
+    ///    caller cannot re-enter this method (there is none today, but the
+    ///    ordering itself is what makes "once per session" true regardless).
+    ///
+    /// Returns whether it actually presented, so a caller that would
+    /// otherwise ALSO open something else in the same gesture (the popover
+    /// click, B2) can skip that when Setup just took over instead.
+    @discardableResult
+    @MainActor
+    private func presentSetupForUndeterminedIfNeeded() -> Bool {
+        guard onboardingWindowController == nil else { return false }
+        guard !didAutoPresentSetupForUndetermined else { return false }
+        if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return false }
+        didAutoPresentSetupForUndetermined = true
+        presentSetup(reason: .firstRun)
+        return true
+    }
+
     /// Start the backend exactly once. Subscribes to the event stream BEFORE
     /// `start()` so the initial `deviceAdded` burst isn't missed. On first-run
     /// native this runs when onboarding is dismissed; otherwise at launch.
@@ -539,40 +734,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
-    /// and present it. Used for first-run, "Check Permissions…", AND the
-    /// automatic permission-revocation reopen (`auditRequiredPermissionsIfNeeded`).
-    /// `onFinished` starts the backend if it hasn't already (first run) and is a
-    /// guarded no-op on a re-run (backend already streaming).
+    /// and present it. Used for first-run, "Check Permissions…", the automatic
+    /// permission-revocation reopen (`auditRequiredPermissionsIfNeeded`), and the
+    /// undetermined-verdict popover-open path (`onButtonClicked`). `onFinished`
+    /// starts the backend if it hasn't already (first run) and is a guarded
+    /// no-op on a re-run (backend already streaming).
+    ///
+    /// **REENTRANCY GUARD (fix for a live-reported bug: "the setup window will
+    /// just close even though I haven't finished").** A second call while a
+    /// Setup window is ALREADY open used to construct a brand-new controller
+    /// and overwrite `onboardingWindowController` with it. That drops the app's
+    /// only strong reference to the OLD controller — and releasing a window
+    /// controller whose window is still on screen tears the window down as
+    /// part of that release, which fires `windowWillClose` → `dismiss()` →
+    /// `onFinished` on the OLD controller. So a reentrant call didn't just fail
+    /// to show a second window — it silently CLOSED THE FIRST ONE and ran its
+    /// finish side effects (`startBackendIfNeeded`, `pushAppRoutesToBackend`,
+    /// `showPopoverHome`) before the user had actually finished. Three of five
+    /// call sites happened to already guard `onboardingWindowController == nil`
+    /// before calling this; "Check Permissions…" (`onRunSetupAgain`) did not,
+    /// and the popover-open check this task adds would have been a sixth
+    /// unguarded site — so the fix belongs HERE, unconditionally, rather than
+    /// as yet another guard every caller has to remember to add. When a window
+    /// is already open, this simply re-fronts it and returns — no new model,
+    /// no new controller, no risk of the drop-and-tear-down above.
+    ///
+    /// The incoming `reason` is NOT applied to an already-open window: no
+    /// existing caller can actually reach the re-front branch with
+    /// `.permissionLost` (every `.permissionLost` call site already guards
+    /// `onboardingWindowController == nil`), so there is no live case that
+    /// needs an "upgrade," and silently reinterpreting an open `.firstRun`
+    /// window as `.permissionLost` would risk showing the "permission turned
+    /// off" alarm banner without the explicit denial the locked design
+    /// requires it to have (see `onButtonClicked`'s doc comment). A future
+    /// caller that genuinely needs to upgrade an open window's banner should
+    /// do so deliberately, respecting that rule — this method does not
+    /// preempt that decision by guessing.
     ///
     /// - Parameters:
     ///   - reason: `.firstRun` (default) for the ordinary flows, unchanged from
     ///     before; `.permissionLost` for the automatic reopen, which also shows
-    ///     the "turned off" banner.
+    ///     the "turned off" banner. Ignored when re-fronting an already-open
+    ///     window (see above).
     ///   - model: pass the SAME model the triggering audit already refreshed
     ///     (so the rows reflect the just-observed unmet statuses instead of
     ///     resetting to blank); `nil` builds a fresh one, as every pre-existing
     ///     call site did. Either way the result is stashed in
     ///     `permissionAuditModel` so later automatic audits keep reusing it.
+    ///     Ignored when re-fronting an already-open window.
     @MainActor
     private func presentSetup(reason: OnboardingReason = .firstRun, model providedModel: SetupModel? = nil) {
+        // Re-entry guard (matches the three other call sites' `onboardingWindowController
+        // == nil` pattern above). Both this branch and the memory-leak branch hit
+        // this independently, which is how confident we are it's real: without the
+        // guard, a second call while a first onboarding window is still open
+        // (reachable via Settings ▸ General's "Run Setup Again…" — the window is
+        // normal-level, so Settings stays clickable) silently overwrites
+        // `onboardingWindowController`. Releasing the old controller fires its
+        // `windowWillClose` → `onFinished`, which nils the reference to the NEW
+        // controller just stored, leaving it unretained so it deallocates and
+        // vanishes — and orphaning the first window's two live 1.5 s polling
+        // Timers (`OnboardingViewController`), never stopped. Observed live as
+        // "the setup window just closes while I'm still granting permissions."
+        // Re-front the existing window instead, so a repeat click visibly does
+        // something rather than silently no-op'ing.
+        if let existing = onboardingWindowController {
+            existing.present()
+            return
+        }
+
+        // Generation stamp: `onFinished` below only clears
+        // `onboardingWindowController` when the closing controller is still the
+        // CURRENT one, so a late teardown can never clobber a newer window even
+        // if a future caller reintroduces re-entrancy past the guard above.
+        onboardingPresentationGeneration += 1
+        let presentationGeneration = onboardingPresentationGeneration
+
         let model = providedModel ?? SetupModel(
-            audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
-            localNetwork: LocalNetworkPrimerFactory.makeDefault(),
-            remoteControl: RemoteControlPrimerFactory.makeDefault(),
-            ptpHelper: SMAppServicePTPHelper(),
+            providers: permissionProviders,
             settings: settings,
             localNetworkGated: SetupModel.osGatesLocalNetwork)
         permissionAuditModel = model
         let controller = OnboardingWindowController(model: model, reason: reason) { [weak self] in
             guard let self else { return }
-            self.onboardingWindowController = nil
+            // Belt-and-suspenders identity check (see
+            // `onboardingPresentationGeneration`'s doc comment): only clear the
+            // stored reference if THIS finish still belongs to the current
+            // controller, so a stale finish can never wipe a newer one.
+            if self.onboardingPresentationGeneration == presentationGeneration {
+                self.onboardingWindowController = nil
+            }
             self.startBackendIfNeeded()
-            // Re-apply persisted per-app routes now that Setup has closed. Any
-            // capture tap they need was REFUSED before the grant (the cold-prompt
-            // guard in the capture coordinators — see `SystemAudioCaptureTCC`), so
-            // this is what actually starts routing once the user has granted. A
-            // no-op push when nothing is routed, and still safe if they finished
-            // WITHOUT granting: the guard simply refuses again, never prompting.
+            // Re-apply persisted per-app routes now that Setup has closed. Kept
+            // for the case a route was ADDED/CHANGED while Setup was open — but
+            // this is NOT what restarts a route that was REFUSED before the grant
+            // (the cold-prompt guard in the capture coordinators — see
+            // `SystemAudioCaptureTCC`): `updateAppRoutes` starts only the
+            // route-table DIFF, so re-pushing the SAME unchanged table yields an
+            // EMPTY start set and starts nothing. NOTHING revives a refused route
+            // mid-session any more — that auto-resume machinery was deleted
+            // (2026-07-25, see `AudiouterCore/AGENTS.md`); relaunching after the
+            // grant is the supported recovery, and launch clears `.device` routes
+            // anyway. Still a no-op push when nothing is routed, and still safe if they
+            // finished WITHOUT granting: the guard simply refuses again, never
+            // prompting.
             self.pushAppRoutesToBackend()
             if case .permissionLost = reason {
                 self.permissionAuditCooldownUntil = Date().addingTimeInterval(self.permissionAuditCooldown)
@@ -983,12 +1248,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // every other event — this call only updates state, it doesn't repaint
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
-            // Mirror the same live-route signal for the status glyph's routing
-            // dot (empty list = the live set for this device went back to empty).
+            // The menu-bar glyph's streaming decision reads this same live-route
+            // signal (empty list = the live set for this device went back to empty).
             if appNames.isEmpty {
-                liveRoutedDeviceIDs.remove(deviceID)
+                routedAppNamesByDeviceID.removeValue(forKey: deviceID)
             } else {
-                liveRoutedDeviceIDs.insert(deviceID)
+                routedAppNamesByDeviceID[deviceID] = appNames
             }
             log("event: \(describe(event))")
         case .routedAppRunning(let bundleID, let isRunning):
@@ -1002,6 +1267,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // playback so the actual song responds. No device model to repaint — this
             // targets whatever app is playing — so handle it and return.
             mediaKeyController.handle(command)
+            log("event: \(describe(event))")
+            return
+        case .localFallbackActive(let active):
+            // The generalized silence watchdog (R11) un-gated (or re-gated) whole-system
+            // capture: nothing the user selected stayed connected, so the Mac fell back
+            // to local playback (or a device reconnected and audio moved back). Show or
+            // clear the popover banner; the selection intent is untouched, so no device
+            // model changed — handle it and return.
+            popoverController.setLocalFallbackActive(active)
+            log("event: \(describe(event))")
+            return
+        case .systemDefaultIsAirPlayActive(let active):
+            // W3-T3: the macOS system default output is (or stopped being)
+            // AirPlay-class while we're actively streaming — double-path/echo
+            // risk. Purely informational: show or clear the popover note; no
+            // device model changed, no audio path is altered — handle it and
+            // return.
+            popoverController.setSystemAirPlayNoteActive(active)
             log("event: \(describe(event))")
             return
         case .streamHealth:
@@ -1020,18 +1303,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // open), then drive the status symbol from the Main Out master.
         let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
-        // Warm Signal §5.5 — the status glyph is a truthful glance: the arc is
-        // the Main Out master (drained while master-muted), the corner dot is
-        // the shared routing-live predicate over this same snapshot. The
-        // routed-apps set is intersected with the known fleet so a device that
-        // vanished mid-stream can't keep the dot lit.
-        let hasLiveAppRoutes = liveRoutedDeviceIDs.contains { devicesByID[$0] != nil }
-        statusItemController.update(
-            masterVolume: popoverController.statusMasterVolume,
-            isMainOutMuted: groupController.isMainOutMuted,
-            isRoutingLive: StatusRoutingIndicator.isRoutingLive(
-                devices: devices,
-                hasLiveAppRoutes: hasLiveAppRoutes))
+        // The status glyph is a truthful glance: the arc is the Main Out master,
+        // and the symbol goes accent-coloured while anything is actually leaving
+        // the Mac (Main Out membership OR a live per-app redirect).
+        statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
     }
@@ -1058,6 +1334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         case .remoteTransport(let command):
             return "remoteTransport(\(command)) — driving Mac media playback"
+        case .localFallbackActive(let active):
+            return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
+        case .systemDefaultIsAirPlayActive(let active):
+            return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
         case .streamHealth(let id, let recovering):
             return "streamHealth(\(id), recovering: \(recovering))"
         }
@@ -1090,6 +1370,12 @@ final class QuittingIndicatorPanel: NSPanel {
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
+        // A programmatic NSPanel defaults `isReleasedWhenClosed` to true (AppKit
+        // releases it on close) — combined with the strong `quittingIndicator`
+        // property that ALSO releases it (cleared to nil after close), that's a
+        // double-release. This class has no window controller to own that
+        // instead, so ARC via the property is the one owner.
+        isReleasedWhenClosed = false
         isFloatingPanel = true
         level = .floating
         isOpaque = false

@@ -5,8 +5,15 @@ final class GroupControllerTests: XCTestCase {
 
     /// Deterministic backend: no discovery stagger, no timers, pre-populated
     /// synchronously via a blocking discovery wait (mirrors MockBackendTests).
-    private func makeBackend(_ fleet: [Device] = .demoFleet) async throws -> MockBackend {
-        let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
+    /// `connectScripts` (default none) lets a caller exercise the connection
+    /// state machine (fail/retry choreography) the same way
+    /// `PopoverControllerTests.makeScriptedPopover` does.
+    private func makeBackend(
+        _ fleet: [Device] = .demoFleet,
+        connectScripts: [String: ConnectScript] = [:]
+    ) async throws -> MockBackend {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
+                                  simulatesDropouts: false, connectScripts: connectScripts)
         let stream = backend.makeEventStream()
         let expectation = expectation(description: "fleet discovered")
         let box = CountBox()
@@ -75,6 +82,124 @@ final class GroupControllerTests: XCTestCase {
         _ = controller.setDeviceSelected("office", false)
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(backend.devices.first { $0.id == "office" }?.isSelected == true)
+    }
+
+    /// Poll `backend` until `id`'s connection state satisfies `predicate`
+    /// (mirrors `PopoverControllerTests.waitForConnectionState`).
+    private func waitForConnectionState(
+        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
+        _ predicate: (ConnectionState) -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let device = backend.devices.first(where: { $0.id == id }),
+               predicate(device.connectionState) { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for \(id)'s connection state")
+    }
+
+    private func isFailed(_ state: ConnectionState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    /// R12/W2-T3 — `retryConnection(for:)`, the Selected-Devices branch: a
+    /// `.failed` device is never removed from `selectedDeviceIDs` any more, so
+    /// the ONLY way "Try again" can reach the backend is this dedicated call
+    /// (a plain `setDeviceSelected(id, true)` would be a same-state no-op).
+    /// Membership must stay untouched throughout — retry is a backend-facing
+    /// re-kick, not a model mutation.
+    func testRetryConnectionForSelectedDeviceReconnectsWithoutTouchingMembership() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+        controller.setMainOut(.selectedDevices)
+
+        _ = controller.setDeviceSelected("office", true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "R12: still selected despite the failure")
+
+        _ = controller.retryConnection(for: "office")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "retry never touches membership")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertTrue(controller.isSpeakerSelected("office"))
+    }
+
+    /// R12/W2-T3 — `retryConnection(for:)`, the active-GROUP branch: a group
+    /// member that fails is never dropped from the group (group membership was
+    /// never touched by connection state to begin with), so retry must
+    /// re-activate the group rather than mistake this for a Selected-Devices
+    /// id. Confirms Groups and Selected Devices behave identically for retry.
+    func testRetryConnectionForActiveGroupMemberReconnectsWithoutTouchingMembership() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+        try controller.saveGroup(Group(id: "g1", name: "Office Pair", memberIDs: ["office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        XCTAssertEqual(controller.activeGroupID, "g1", "still the active group despite the failure")
+        XCTAssertFalse(controller.isSpeakerSelected("office"),
+                       "a pure group member is never in the ad-hoc Selected-Devices set")
+
+        _ = controller.retryConnection(for: "office")
+        XCTAssertEqual(controller.activeGroupID, "g1", "retry never touches group membership/activation")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertEqual(controller.activeGroupID, "g1")
+    }
+
+    /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
+    /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
+    /// whichever membership set happens to contain `id` first.
+    /// `selectedDeviceIDs` and an active group's `memberIDs` are independent
+    /// sets: a device can be in BOTH (selected individually, then also a
+    /// member of a group that later becomes Main Out). Before the fix, the
+    /// Selected-Devices branch ran first, matched on `selectedDeviceIDs`
+    /// membership alone, saw `mainOut != .selectedDevices`, skipped
+    /// `applyRouting()`, and returned `.ok` anyway — a dead retry that never
+    /// reached the backend even though the button reported success. This
+    /// drives the connect script's SECOND attempt (`.connect`) only if the
+    /// group re-kick actually fires `setOutputSet` again; the old order would
+    /// leave `office` parked in `.failed` forever and this test would time out.
+    func testRetryConnectionForDeviceInBothSelectedDevicesAndActiveGroupUsesGroupRouting() async throws {
+        let backend = try await makeBackend(connectScripts: ["office": ConnectScript(attempts: [
+            .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+            .connect(after: 0.05),
+        ])])
+        let (controller, _) = try await makeController(injectedBackend: backend)
+
+        // A group containing "office" becomes Main Out first — this is attempt
+        // #1 (the scripted failure) and it's the ONLY thing driving the backend
+        // so far.
+        try controller.saveGroup(Group(id: "g1", name: "Office Pair", memberIDs: ["office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        try await waitForConnectionState(backend, id: "office", isFailed)
+
+        // NOW compose "office" into Selected Devices too. Main Out is still the
+        // group, so `setDeviceSelected`'s own live-apply guard does NOT fire —
+        // this only changes membership, no extra backend call, no extra
+        // attempt consumed. The two membership sets now overlap while the
+        // group remains the one actually routing.
+        _ = controller.setDeviceSelected("office", true)
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "now also in Selected Devices (independent set)")
+        XCTAssertEqual(controller.activeGroupID, "g1", "Main Out is still the group — this is what's actually routing")
+        XCTAssertTrue(isFailed(backend.devices.first { $0.id == "office" }!.connectionState),
+                      "still failed — composing membership must not have re-kicked anything yet")
+
+        // The retry button is the only thing left that can consume attempt #2
+        // (`.connect`). Under the pre-fix branch order this call is a dead
+        // no-op (matches `selectedDeviceIDs` first, sees `mainOut != .selectedDevices`,
+        // never calls `applyRouting()`) and this assertion times out.
+        _ = controller.retryConnection(for: "office")
+        XCTAssertTrue(controller.isSpeakerSelected("office"), "retry never touches Selected-Devices membership")
+        XCTAssertEqual(controller.activeGroupID, "g1", "retry never touches group membership/activation")
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        XCTAssertEqual(controller.activeGroupID, "g1")
     }
 
     func testDefaultSelectionIsLocalPassthrough() async throws {
@@ -369,6 +494,138 @@ final class GroupControllerTests: XCTestCase {
 
         XCTAssertEqual(volume("sonos-move", in: backend), 77)
         XCTAssertEqual(volume("office", in: backend), 12)
+    }
+
+    // MARK: Activation — the local Mac is never an engine output
+    //
+    // A saved group may MIX the Mac with AirPlay speakers (the pre-engine
+    // local-mix block is gone — `canSelectLocalSpeaker` is unconditionally true).
+    // `activateGroup` must therefore apply the SAME local-device filter
+    // `applyRouting()`'s Selected-Devices branch does: the Mac is the Mac's own
+    // output, not an engine output, and `NativeBackend.setOutputSet` documents
+    // that `GroupController` never hands it through. The Mac still plays — via
+    // the synced local sink, armed off `isMainOutMember(_:)` (below).
+
+    /// Mixed group {Mac, AirPlay}: only the AirPlay side reaches the backend.
+    func testActivateGroupMixingMacWithAirPlayExcludesMacFromOutputSet() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), ["sonos-move"],
+                       "the local Mac must never enter the backend output set")
+        XCTAssertFalse(backend.devices.first { $0.id == "local-mac" }?.isSelected ?? false,
+                       "the Mac has no engine session — it plays via the synced local sink")
+    }
+
+    /// Mac-ONLY group: the backend output set is EMPTY (passthrough), exactly as
+    /// a Selected-Devices set of {local} reaches the backend. Handing the Mac
+    /// through instead made this look like "≥1 real output" downstream — which is
+    /// what would arm the synced local sink with nothing behind it.
+    func testActivateGroupOfTheMacAloneReachesBackendAsEmptyOutputSet() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Just the Mac",
+                                       memberIDs: ["local-mac"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), [],
+                       "a Mac-only group is passthrough — an EMPTY backend output set")
+    }
+
+    /// The Mac's "volume" is the Mac's SYSTEM output level, so replaying a
+    /// group's remembered value would silently move it on every activation (and a
+    /// remembered 0 would mute the Mac outright). Its AirPlay siblings still get
+    /// their remembered levels.
+    func testActivateGroupDoesNotPushRememberedVolumeToTheMac() async throws {
+        let (controller, backend) = try await makeController()
+        let macVolumeBefore = volume("local-mac", in: backend)
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"],
+                                       memberVolumes: ["local-mac": 0, "sonos-move": 77]))
+
+        controller.setMainOut(.group(id: "g1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(volume("sonos-move", in: backend), 77, "AirPlay members still get their levels")
+        XCTAssertEqual(volume("local-mac", in: backend), macVolumeBefore,
+                       "activating a group must not write the Mac's system output volume")
+    }
+
+    // MARK: Main Out membership — the synced-local-sink arming query
+    //
+    // `isMainOutMember(_:)` is what `NativeBackend.selectedDevicesQuery` is wired
+    // to (AppDelegate). It has to exist because the Mac never travels in
+    // `setOutputSet`'s ids, and it must follow the MAIN OUT TARGET, not the
+    // Selected Devices set, or the group path gets it wrong in both directions.
+
+    /// A group containing the Mac reports the Mac as a Main Out member — so the
+    /// synced local sink arms and the Mac stays audible alongside the speaker.
+    func testIsMainOutMemberSeesTheMacInsideTheActiveGroup() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: ["local-mac", "sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+
+        XCTAssertTrue(controller.isMainOutMember("local-mac"),
+                      "a group containing the Mac must arm the synced local sink")
+        XCTAssertTrue(controller.isMainOutMember("sonos-move"))
+        XCTAssertFalse(controller.isMainOutMember("office"), "a non-member is not a Main Out member")
+    }
+
+    /// The mirror failure: an AirPlay-ONLY group must NOT report the Mac, even
+    /// though the Mac is still sitting in the (now untargeted) Selected Devices
+    /// set — otherwise the sink arms and the Mac plays when the user routed the
+    /// audio away from it.
+    func testIsMainOutMemberIgnoresSelectedDevicesWhileAGroupIsTheTarget() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        try controller.saveGroup(Group(id: "g1", name: "Patio",
+                                       memberIDs: ["sonos-move"], memberVolumes: [:]))
+
+        controller.setMainOut(.group(id: "g1"))
+
+        XCTAssertTrue(controller.isSpeakerSelected("local-mac"),
+                      "the Mac is still in the untargeted Selected Devices set")
+        XCTAssertFalse(controller.isMainOutMember("local-mac"),
+                       "an AirPlay-only group must not arm the synced local sink")
+    }
+
+    /// The rewire's safety proof (NOT a regression test — this invariant holds
+    /// before and after the fix): under the ordinary `.selectedDevices` target,
+    /// `isMainOutMember(_:)` is EXACTLY `isSpeakerSelected(_:)` for every id in
+    /// every selection state, because `mainOutMemberIDs` is
+    /// `Array(selectedDeviceIDs)` in that branch. So repointing
+    /// `NativeBackend.selectedDevicesQuery` from one to the other changes
+    /// behaviour on the GROUP path only.
+    func testIsMainOutMemberEqualsIsSpeakerSelectedUnderSelectedDevicesTarget() async throws {
+        let (controller, backend) = try await makeController()
+        let ids = backend.devices.map(\.id) + ["never-discovered"]
+
+        func assertAgrees(_ label: String) {
+            for id in ids {
+                XCTAssertEqual(controller.isMainOutMember(id), controller.isSpeakerSelected(id),
+                               "\(label): the two reads disagree on \(id)")
+            }
+        }
+
+        controller.setMainOut(.selectedDevices)
+        assertAgrees("empty selection")
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        assertAgrees("{local-mac}")
+        _ = controller.setDeviceSelected("sonos-move", true)      // auto-swap → {sonos-move}
+        assertAgrees("AirPlay-only after auto-swap")
+        _ = controller.setDeviceSelected("local-mac", true)       // → mixed
+        assertAgrees("mixed {sonos-move, local-mac}")
+        _ = controller.setDeviceSelected("office", true)
+        assertAgrees("mixed + a second AirPlay device")
+        _ = controller.setDeviceSelected("sonos-move", false)
+        assertAgrees("after a removal")
     }
 
     func testDeactivateGroupClearsActiveIDWithoutChangingOutputSet() async throws {

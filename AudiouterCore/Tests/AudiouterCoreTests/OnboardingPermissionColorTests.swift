@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import XCTest
+import AppKit
+@testable import AudiouterCore
+@testable import AudiouterOnboardingUI
+@testable import AudiouterSharedUI
+
+/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the four permission-row
+/// identity tokens — `Tokens.Color.permissionSystemAudio` / `permissionLocalNetwork`
+/// / `permissionRemoteControl` / `permissionSpeakerSync` — stay mutually
+/// DISTINCT in both accent-dial columns (Q1), each clears the same >=3:1
+/// own-theme contrast floor every other `Tokens.Color` instrument is held to
+/// (T1's written arithmetic, exercised here), the accent dial genuinely MUTES
+/// all four in `.subtle` (Q5) while `.systemAccent` leaves them at their
+/// authored Full-gold hues and STILL mutually distinct (NEW-1 — the explicit
+/// guard against a later regression routing them through `accentDynamic`,
+/// which would collapse all four onto the same live-accent-derived value),
+/// and the glyph-only decision (Q3) holds end to end: granting still
+/// gold-lights the glyph while the tile's own FILL never recolours.
+///
+/// Two helpers are ported rather than shared, per the task's own instruction
+/// to leave `AppTetherColorTests.swift`/`SettingsAccentAndHintsTests.swift`
+/// untouched:
+///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`
+///    (~lines 293-307).
+///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`
+///    (~lines 89-96).
+/// Re-confirmed before writing this file: `SettingsAccentAndHintsTests`'s own
+/// `testAccentDialNeverRemapsFailureCautionOrRing` names `failure`/`caution`/
+/// `ringConnected` explicitly — not "every token the dial doesn't touch" — so
+/// these four new permission tokens (which the dial DOES remap, just not via
+/// `accentDynamic`) don't trip it, and that file needs no edit here.
+@MainActor
+final class OnboardingPermissionColorTests: IsolatedTestCase {
+
+    override func tearDown() {
+        // `Tokens.accentStyle` is process-global (the live remap seam) —
+        // restore the flagship default so no other test in this suite, or a
+        // later golden render in this process, inherits a dialed accent.
+        // Same discipline as `SettingsAccentAndHintsTests.tearDown`.
+        Tokens.accentStyle = .fullGold
+        super.tearDown()
+    }
+
+    // MARK: - Ported helpers (see file doc comment for provenance)
+
+    /// Resolve `color` to concrete sRGB under an explicit appearance — the
+    /// same way AppKit resolves a dynamic provider at draw time. Ported from
+    /// `SettingsAccentAndHintsTests` (~lines 89-96).
+    private func resolved(_ color: NSColor, appearanceName: NSAppearance.Name) -> NSColor {
+        var result = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            result = color.usingColorSpace(.sRGB) ?? color
+        }
+        return result
+    }
+
+    /// WCAG 2.x relative luminance of an sRGB color. Ported from
+    /// `AppTetherColorTests` (~lines 293-300).
+    private func relativeLuminance(_ color: NSColor) -> CGFloat {
+        func channel(_ c: CGFloat) -> CGFloat {
+            c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        let c = color.usingColorSpace(.sRGB)!
+        return 0.2126 * channel(c.redComponent) + 0.7152 * channel(c.greenComponent) + 0.0722 * channel(c.blueComponent)
+    }
+
+    /// WCAG contrast ratio between two sRGB colors, `1...21`. Ported from
+    /// `AppTetherColorTests` (~lines 302-307).
+    private func contrastRatio(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let l1 = relativeLuminance(a), l2 = relativeLuminance(b)
+        let (hi, lo) = l1 > l2 ? (l1, l2) : (l2, l1)
+        return (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Component-wise sRGB comparison with tolerance — the
+    /// `ControlPanelBackingViewTests.assertSameHue` idiom, needed here
+    /// because comparing two independently-resolved dynamic `NSColor`
+    /// instances (or a `layer.backgroundColor`-reconstructed color against a
+    /// resolved token) via plain `XCTAssertEqual` is not reliable once either
+    /// side has been round-tripped through `CGColor`.
+    private func assertSameRGB(_ a: NSColor?, _ b: NSColor?, _ message: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else {
+            return XCTFail("nil or non-convertible color: \(message)", file: file, line: line)
+        }
+        XCTAssertEqual(a.redComponent, b.redComponent, accuracy: 0.02, message, file: file, line: line)
+        XCTAssertEqual(a.greenComponent, b.greenComponent, accuracy: 0.02, message, file: file, line: line)
+        XCTAssertEqual(a.blueComponent, b.blueComponent, accuracy: 0.02, message, file: file, line: line)
+    }
+
+    /// The four permission tokens, named for failure messages. A computed
+    /// property (not a stored snapshot) so every call site gets a fresh
+    /// access — irrelevant for correctness (each dynamic `NSColor`'s
+    /// provider closure re-reads `Tokens.accentStyle` at RESOLUTION time
+    /// regardless of when the handle was obtained) but keeps call sites
+    /// honest about there being no caching here.
+    private var permissionTokens: [(name: String, color: NSColor)] {
+        [("permissionSystemAudio", Tokens.Color.permissionSystemAudio),
+         ("permissionLocalNetwork", Tokens.Color.permissionLocalNetwork),
+         ("permissionRemoteControl", Tokens.Color.permissionRemoteControl),
+         ("permissionSpeakerSync", Tokens.Color.permissionSpeakerSync)]
+    }
+
+    private func assertMutuallyDistinct(appearance: NSAppearance.Name,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        let tokens = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
+        for i in 0..<tokens.count {
+            for j in (i + 1)..<tokens.count {
+                XCTAssertNotEqual(tokens[i].color, tokens[j].color,
+                                  "\(tokens[i].name) collapsed onto \(tokens[j].name) under "
+                                  + "\(Tokens.accentStyle)/\(appearance.rawValue)",
+                                  file: file, line: line)
+            }
+        }
+    }
+
+    // MARK: 1 — Distinctness in both dial columns (Q1)
+
+    func testFourTokensAreMutuallyDistinctInFullGold() {
+        Tokens.accentStyle = .fullGold
+        assertMutuallyDistinct(appearance: .darkAqua)
+        assertMutuallyDistinct(appearance: .aqua)
+    }
+
+    func testFourTokensAreMutuallyDistinctInSubtle() {
+        Tokens.accentStyle = .subtle
+        assertMutuallyDistinct(appearance: .darkAqua)
+        assertMutuallyDistinct(appearance: .aqua)
+    }
+
+    // MARK: 2 — >=3:1 own-theme contrast floor, both dial columns, both appearances
+
+    /// Checked against BOTH `panel` and `raised` (the two own-theme surfaces
+    /// T1's doc comments measure against for every one of these four
+    /// tokens), across `.fullGold`/`.subtle` and `.darkAqua`/`.aqua` — the
+    /// full 4 tokens x 2 columns x 2 appearances x 2 surfaces sweep.
+    func testContrastFloorClearsInBothDialColumnsBothAppearancesBothSurfaces() {
+        let floor: CGFloat = 3.0
+        for style: AccentStyle in [.fullGold, .subtle] {
+            Tokens.accentStyle = style
+            for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+                let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
+                let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
+                for (name, color) in permissionTokens {
+                    let resolvedColor = resolved(color, appearanceName: appearance)
+                    let panelRatio = contrastRatio(resolvedColor, panel)
+                    let raisedRatio = contrastRatio(resolvedColor, raised)
+                    XCTAssertGreaterThanOrEqual(panelRatio, floor,
+                        "\(name) \(style)/\(appearance.rawValue) vs panel: \(panelRatio):1 under the \(floor):1 floor")
+                    XCTAssertGreaterThanOrEqual(raisedRatio, floor,
+                        "\(name) \(style)/\(appearance.rawValue) vs raised: \(raisedRatio):1 under the \(floor):1 floor")
+                }
+            }
+        }
+    }
+
+    // MARK: 3 — the dial genuinely mutes all four in .subtle (Q5)
+
+    func testSubtleActuallyChangesAllFourFromFullGold() {
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            Tokens.accentStyle = .fullGold
+            let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
+
+            Tokens.accentStyle = .subtle
+            let subtle = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
+
+            for (fullEntry, subtleEntry) in zip(full, subtle) {
+                XCTAssertNotEqual(fullEntry.color, subtleEntry.color,
+                    "\(fullEntry.name)/\(appearance.rawValue): .subtle failed to change the resolved colour "
+                    + "from .fullGold — Q5 requires the dial to genuinely mute these four")
+            }
+        }
+    }
+
+    // MARK: 4 — .systemAccent stays at the Full-gold hues AND stays distinct (NEW-1)
+
+    /// The executable guard against a later regression routing these four
+    /// through `accentDynamic`'s `.systemAccent` branch (which resolves
+    /// `controlAccentColor` scaled by a constant — a value that depends on
+    /// the LIVE SYSTEM ACCENT, not on which token asked for it, so all four
+    /// would silently collapse onto the same hue the moment a user picks
+    /// Follow System).
+    func testSystemAccentStaysAtFullGoldValuesAndStaysDistinct() {
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            Tokens.accentStyle = .fullGold
+            let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
+
+            Tokens.accentStyle = .systemAccent
+            let systemAccent = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
+
+            for (fullEntry, systemEntry) in zip(full, systemAccent) {
+                XCTAssertEqual(fullEntry.color, systemEntry.color,
+                    "\(fullEntry.name)/\(appearance.rawValue): .systemAccent must resolve the authored Full "
+                    + "column unchanged (NEW-1) — it must NOT remap to the live system accent")
+            }
+        }
+
+        // Still mutually distinct under .systemAccent (currently the active
+        // style from the loop above, both appearances re-checked explicitly).
+        Tokens.accentStyle = .systemAccent
+        assertMutuallyDistinct(appearance: .darkAqua)
+        assertMutuallyDistinct(appearance: .aqua)
+    }
+
+    // MARK: 5/6 — granting still gold-lights the glyph; the tile fill never recolours (Q2/Q3)
+
+    /// Forces a layer-backed, off-window tile through one real display pass:
+    /// `updateLayer()` (which paints `test_fillColor`) only runs on an actual
+    /// draw, and a freshly constructed view has never been asked to draw.
+    /// Pinning `.appearance` first makes the dynamic tokens it paints resolve
+    /// deterministically off-window — the same combination
+    /// `ControlPanelBackingViewTests`/`WarmFaderCellTests` pin `.appearance`
+    /// for, and `AccessibilitySignalSweepTests`'s
+    /// `testWarmCanvasRepaintsOnDisplayOptionsChange` (~lines 242-243) uses
+    /// `layer?.displayIfNeeded()` for on an off-window layer-backed view.
+    private func settle(_ tile: IconTileView, appearance: NSAppearance.Name) {
+        tile.appearance = NSAppearance(named: appearance)
+        tile.layoutSubtreeIfNeeded()
+        tile.layer?.displayIfNeeded()
+    }
+
+    /// `PermissionRowView.update(status:)` and `PTPHelperRowView.update(status:)`
+    /// both forward straight to `IconTileView.setLit(status == .granted / .enabled)`
+    /// on their own PRIVATE `iconTile` field (verified via `git grep -n
+    /// "iconTile.setLit" Sources/AudiouterOnboardingUI/`). `iconTile` stays
+    /// `private` on both row types — T2's own report flags this: only
+    /// `IconTileView`'s hooks were in scope for T2, not exposing the field —
+    /// and Swift's `private` is not reachable from a different file even
+    /// under `@testable import`. So this test exercises `IconTileView.setLit`
+    /// directly on a tile constructed exactly the way both rows build theirs
+    /// (`color:` = one of the four permission tokens) — the identical call
+    /// each row's `update(status:)` makes on its own private field, just
+    /// reached through a tile this test owns instead of the row's.
+    func testGrantedLightsGlyphGoldWithoutRecoloringTileFill() {
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            for (name, color) in permissionTokens {
+                let tile = IconTileView(symbolName: "waveform", accessibility: name, color: color)
+                settle(tile, appearance: appearance)
+
+                XCTAssertFalse(tile.isLit, "\(name)/\(appearance.rawValue): a freshly-built tile starts ungranted")
+                assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well "
+                             + "before granting")
+
+                tile.setLit(true)   // == what update(status: .granted) does to its own iconTile
+
+                XCTAssertTrue(tile.isLit, "\(name)/\(appearance.rawValue): granting must light the glyph")
+                // `test_litTint` is itself a dynamic (unresolved) `NSColor` —
+                // a bare `.usingColorSpace(.sRGB)` (inside `assertSameRGB`)
+                // would resolve it against the process's ambient appearance,
+                // not the one under test, so it must go through `resolved(_:
+                // appearanceName:)` explicitly first, same as the `gold`
+                // reference on the other side.
+                assertSameRGB(resolved(tile.test_litTint ?? .clear, appearanceName: appearance),
+                             resolved(Tokens.Color.gold, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): the lit glyph tint must be gold for every "
+                             + "row (Q2, unchanged)")
+                assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): granting must NOT recolour the tile fill (Q3)")
+            }
+        }
+    }
+}

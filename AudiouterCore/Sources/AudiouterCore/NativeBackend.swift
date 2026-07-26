@@ -2642,6 +2642,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func performRebindRecovery(outputID: OutputID, scope: RebindScope) async -> Bool {
         let label = Self.rebindScopeLabel(scope)
         Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
+
+        // F-REANCHOR spike (2026-07-26): a tap rebuild's recovery is a full
+        // removeOutput→addOutput (fresh RTSP/RTP session = the audible Sonos drop
+        // the user hears on every headphone mode-change). Gated behind
+        // AIRPLAY_REBUILD_RECOVERY=flush, try an RTSP FLUSH re-anchor FIRST for
+        // whole-system scope: it keeps the session alive and only re-syncs the
+        // receiver's timeline. If FLUSH throws (or the device wasn't streaming so
+        // it no-op'd without curing the stall), fall through to the proven
+        // teardown+rebuild — so a failed spike can never leave the device silent.
+        // razor: whole-system only (that's the reported bug); per-app rebinds keep
+        // the teardown path until the spike proves out. Remove the gate + the
+        // teardown fallback once a live test confirms FLUSH cures the stale
+        // timeline.
+        if case .wholeSystem = scope, Self.rebuildRecoveryMode == .flush {
+            do {
+                try await engine.flushOutput(outputID)
+                Telemetry.log(.airplay, "rebind_recover_flush", [
+                    "output": "\(outputID)", "scope": label, "outcome": "issued",
+                ])
+                return true
+            } catch {
+                Telemetry.log(.airplay, "rebind_recover_flush", [
+                    "output": "\(outputID)", "scope": label, "outcome": "failed_fallback",
+                    "error": "\(error)",
+                ])
+                // fall through to teardown+rebuild
+            }
+        }
+
         try? await engine.removeOutput(outputID)
         do {
             switch scope {
@@ -2656,6 +2685,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return false
         }
     }
+
+    /// Which recovery a whole-system tap-rebuild issues. `reset` (default) is the
+    /// proven removeOutput→addOutput; `flush` is the F-REANCHOR spike. Read once
+    /// from `AIRPLAY_REBUILD_RECOVERY` so a live A/B is a relaunch, not a rebuild.
+    private enum RebuildRecoveryMode { case reset, flush }
+    private static let rebuildRecoveryMode: RebuildRecoveryMode =
+        ProcessInfo.processInfo.environment["AIRPLAY_REBUILD_RECOVERY"] == "flush" ? .flush : .reset
 
     /// `lastRoutes` resolved for the mixer: unreachable-target `.device` routes
     /// demoted (R5, ``effectiveAppRoutesLocked(_:)``), then any bundle ID currently
@@ -5363,6 +5399,11 @@ protocol EngineControlling: Sendable {
     /// third stream. Default is the historical stop-then-re-add pair.
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws
     func removeOutput(_ id: OutputID) async throws
+    /// Re-anchor `id`'s receiver timeline in place via RTSP FLUSH, WITHOUT tearing
+    /// down the session (F-REANCHOR — see ``AirPlayEngine/AirPlayEngine/flushOutput(_:)``).
+    /// Default is a no-op success so every existing test spy compiles unchanged;
+    /// ``EngineAdapter`` overrides it with the real flush.
+    func flushOutput(_ id: OutputID) async throws
     func setVolume(_ id: OutputID, _ volume: Double) async throws
     func setStartBufferMs(_ ms: Int) async
     /// Feed one finished mixed per-app buffer tagged with its `streamId` (T2/T6).
@@ -5442,6 +5483,11 @@ extension EngineControlling {
         if streamId == 0 { try await addOutput(id) } else { try await addOutput(id, streamId: streamId) }
     }
 
+    /// Default: no-op success (F-REANCHOR). A conformer with no live receiver
+    /// timeline to re-anchor — every existing test spy — treats a flush as a
+    /// clean no-op; ``EngineAdapter`` overrides this to forward to the real engine.
+    func flushOutput(_ id: OutputID) async throws {}
+
     /// Default: drop the buffer. ``EngineAdapter`` overrides this to forward to the
     /// real engine; a conformer that never receives per-app mixed audio ignores it.
     func write(pcm: Data, streamId: UInt32, pts: timespec) {}
@@ -5495,6 +5541,7 @@ struct EngineAdapter: EngineControlling {
         try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
+    func flushOutput(_ id: OutputID) async throws { try await engine.flushOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
     func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
     func write(pcm: Data, streamId: UInt32, pts: timespec) {

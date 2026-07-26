@@ -969,25 +969,43 @@ public actor AirPlayEngine {
         device.pointee.session != nil
     }
 
-    /// Flush any buffered/in-flight audio for `id` — the primitive a future
-    /// pause/seek feature builds on (AirPlay FLUSH: RTSP FLUSH re-anchors the
-    /// receiver's RTP position so playback can resume from a new point).
+    /// Flush any buffered/in-flight audio for `id` and re-anchor the receiver's
+    /// RTP position WITHOUT tearing down the RTSP session (AirPlay FLUSH). The
+    /// vendored `airplay_device_flush` (airplay.c:4294) sends an RTSP FLUSH via
+    /// `sequence_start(AIRPLAY_SEQ_FLUSH…)` and — unlike `device_stop` —
+    /// deliberately does NOT `session_cleanup`: the session stays STREAMING and
+    /// the connection lives, only the playback timeline re-anchors.
     ///
-    /// NO-OP SEAM (first-light hardening #5): pause/seek is explicitly OUT OF
-    /// SCOPE for this phase, so this deliberately does NOT call the vendored
-    /// `output_airplay.device_flush` yet — it only validates the engine/output
-    /// state and returns, giving `NativeBackend` and a later pause/seek task a
-    /// stable API surface to target without a redesign. When pause/seek lands,
-    /// the body becomes a `startOp` over `output_airplay.device_flush` (which
-    /// already exists in the vendored sender, `airplay_device_flush`), mirroring
-    /// `removeOutput` — including its `stopSessionIsLive` guard, since
-    /// `airplay_device_flush` also dereferences device->session unconditionally
-    /// (airplay.c:4187). Throws `unknownOutput` if `id` isn't registered so a
-    /// caller can't silently flush a device the engine never saw.
+    /// F-REANCHOR (2026-07-26): this is the lightweight recovery a whole-system
+    /// tap rebuild wants. A rate-change tap rebuild leaves the process tap
+    /// delivering again but the receiver pinned to a now-stale RTP timeline
+    /// (silent forever — Apple Dev Forums 825780); today `NativeBackend` recovers
+    /// with a full `removeOutput`→`addOutput` (a fresh RTSP/RTP session — audible
+    /// drop). A FLUSH re-anchors in place, so the connection never drops. Whether
+    /// FLUSH alone fully cures the stale timeline after a *capture* rebuild (vs a
+    /// deliberate pause/seek, which is what FLUSH was designed for) is empirical —
+    /// `NativeBackend` gates the swap behind `AIRPLAY_REBUILD_RECOVERY=flush`.
+    ///
+    /// Mirrors `unbind`'s guards: the vendored flush is a no-op (returns 0, arms no
+    /// completion) unless the device is STREAMING, and it dereferences
+    /// `device->session` unconditionally (airplay.c:4296), so a device that isn't
+    /// live is skipped here and the null-session guard runs on the engine thread.
+    /// Throws `unknownOutput` if `id` isn't registered.
     public func flushOutput(_ id: OutputID) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
-        // Intentionally no device_flush issue: seam only (pause/seek deferred).
+        // Only a live stream can be flushed; anything else has no session to
+        // re-anchor (and the vendored call would no-op or deref a NULL session).
+        let liveState = await liveDeviceState(id)
+        guard liveState == .streaming || liveState == .connected else { return }
+        _ = try await startOp(id: id, serialize: true) { device, cbId in
+            // Same TOCTOU/NULL-session guard removeOutput uses: a receiver-side
+            // RTSP drop can NULL device->session between the check above and this
+            // closure running on the engine thread. airplay_device_flush derefs
+            // session unconditionally, so short-circuit to a clean no-op (N<=0).
+            guard device.pointee.session != nil else { return 0 }
+            return output_airplay.device_flush?(device, cbId) ?? 0
+        }
     }
 
     /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and

@@ -584,27 +584,45 @@ extension SerializedEngineState {
             #expect(state == .stopped)
         }
 
-        // MARK: - device_flush NO-OP seam (first-light hardening #5f).
+        // MARK: - device_flush re-anchor (F-REANCHOR, 2026-07-26).
         //
-        // flushOutput is a stable API surface for a FUTURE pause/seek feature; in
-        // this phase it must NOT issue the vendored device_flush. Prove it resolves
-        // immediately (no waiter armed -> would hang if it did) and that its state
-        // guard rejects an unknown output.
+        // flushOutput now WIRES the vendored device_flush: an RTSP FLUSH that
+        // re-anchors the receiver's timeline WITHOUT tearing down the session
+        // (unlike removeOutput). On a streaming device it issues exactly one op and
+        // awaits its completion, leaving the session STREAMING; on a non-streaming
+        // device it issues nothing (the vendored flush would no-op / deref a NULL
+        // session); an unknown output still throws.
 
-        @Test func flushOutputIsNoOpSeamForKnownOutput() async throws {
+        @Test func flushOutputIssuesDeviceFlushAndKeepsSessionStreaming() async throws {
             let id = OutputID(rawValue: 0xF1)
-            makeRegistryDevice(id: id.rawValue)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in
-                Issue.record("flushOutput is a no-op seam and must not issue any backend op")
-                return 1
-            })
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })  // flush issues one op
             await engine.registerKnownOutputForTest(id, state: .streaming)
 
-            // Resolves immediately (no completion fired). State is untouched.
+            async let op: Void = engine.flushOutput(id)
+            // Re-anchor keeps the session STREAMING — the completion is NOT a stop.
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+            try await op
+
+            let state = await engine.stateOf(id)
+            #expect(state == .streaming, "flush must re-anchor in place, never tear the session down")
+        }
+
+        @Test func flushOutputSkipsWhenNotStreaming() async throws {
+            let id = OutputID(rawValue: 0xF2)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in
+                Issue.record("flush must not issue an op on a non-streaming device")
+                return 1
+            })
+            await engine.registerKnownOutputForTest(id, state: .stopped)
+
+            // Resolves immediately — nothing to re-anchor, no waiter armed.
             try await engine.flushOutput(id)
             let state = await engine.stateOf(id)
-            #expect(state == .streaming, "flush seam must not alter output state")
+            #expect(state == .stopped)
         }
 
         @Test func flushOutputRejectsUnknownOutput() async {

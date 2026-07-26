@@ -397,4 +397,122 @@ import AudiouterProtocol
         #expect(after == baseline,
                 "RemoteSession must never persist routing/session state on the phone; new keys: \(after.subtracting(baseline))")
     }
+
+    // MARK: - Late subscriber
+
+    @MainActor
+    @Test func aSessionConstructedAfterTheLinkWentLiveStillGetsTheSnapshot() async throws {
+        // Live FIRST, RemoteSession second: the welcome is long gone and an
+        // idle Mac never rebroadcasts (identical snapshots are suppressed),
+        // so only the controller's replay-on-subscribe can populate this.
+        let defaults = try makeDefaults()
+        let box = TransportBox()
+        let controller = ConnectionController(
+            defaults: defaults,
+            clientName: "TestPhone",
+            transportFactory: { _ in
+                let transport = FakeTransport()
+                box.store(transport)
+                return transport
+            }
+        )
+        controller.connect(to: makeMac())
+        controller.queue.sync {}
+        let transport = try #require(box.transport)
+        try controller.queue.sync {
+            transport.events?(.ready)
+            transport.events?(.message(try encoded(
+                .welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot())
+            )))
+        }
+
+        let session = RemoteSession(controller: controller)
+        #expect(await waitUntilMain { session.snapshot == makeSnapshot() },
+                "a late subscriber on a healthy idle link must not render blank forever")
+        #expect(await waitUntilMain { session.connectionStatus == .live })
+    }
+
+    // MARK: - FIFO event delivery
+
+    @MainActor
+    @Test func rapidSnapshotsLandInOrderAndTheNewestSticks() async throws {
+        let (session, controller, transport, _) = try makeLiveSession()
+        #expect(await waitUntilMain { session.connectionStatus == .live })
+
+        // A burst of distinct snapshots delivered back-to-back on the
+        // controller queue: FIFO main-queue delivery means the LAST one is
+        // what remains — an unordered Task-per-event hop could leave a
+        // stale interior value stuck.
+        try controller.queue.sync {
+            for volume in 1...20 {
+                transport.events?(.message(try encoded(.state(snapshot: makeSnapshot(volume: volume)))))
+            }
+        }
+        #expect(await waitUntilMain { session.snapshot == makeSnapshot(volume: 20) })
+        // And it STAYS the newest — no late out-of-order delivery reverts it.
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(session.snapshot == makeSnapshot(volume: 20))
+    }
+
+    // MARK: - Per-request timeout
+
+    @MainActor
+    @Test func anUnansweredCommandSurfacesAToastInsteadOfVanishing() async throws {
+        let (session, _, transport, _) = try makeLiveSession()
+        #expect(await waitUntilMain { session.connectionStatus == .live })
+        session.commandTimeout = 0.05
+
+        session.setDeviceMuted(id: "d1", muted: true)
+        #expect(await waitUntilMain { try! commandMessages(transport.sentFrames).count == 1 })
+
+        // No commandResult ever arrives (the Mac app is hung; the socket —
+        // and therefore the ping/pong layer — still looks healthy).
+        #expect(await waitUntilMain { session.toasts.current != nil },
+                "silence past the deadline must be surfaced, not swallowed")
+        #expect(session.toasts.current?.message == RemoteSession.commandTimeoutToastText)
+    }
+
+    @MainActor
+    @Test func anAnsweredCommandNeverFiresTheTimeoutToast() async throws {
+        let (session, controller, transport, _) = try makeLiveSession()
+        #expect(await waitUntilMain { session.connectionStatus == .live })
+        session.commandTimeout = 0.1
+
+        session.setDeviceMuted(id: "d1", muted: true)
+        #expect(await waitUntilMain { try! commandMessages(transport.sentFrames).count == 1 })
+        let requestID = try commandMessages(transport.sentFrames)[0].requestID
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(.commandResult(
+                requestID: requestID, applied: true, refusalReason: nil, autoSwappedCurrentDevice: false
+            ))))
+        }
+
+        // Outlive the deadline: the answered request must not toast.
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(session.toasts.current == nil,
+                "an answered command must clear its pending-timeout tracking")
+    }
+
+    @MainActor
+    @Test func aDisconnectClearsPendingTimeoutsAndTheSnapshot() async throws {
+        let (session, controller, transport, _) = try makeLiveSession()
+        #expect(await waitUntilMain { session.snapshot != nil })
+        session.commandTimeout = 0.1
+
+        session.setDeviceMuted(id: "d1", muted: true)
+        #expect(await waitUntilMain { try! commandMessages(transport.sentFrames).count == 1 })
+
+        controller.queue.sync { transport.events?(.failed("socket died")) }
+        #expect(await waitUntilMain {
+            if case .disconnected = session.connectionStatus { return true }
+            return false
+        })
+        #expect(session.snapshot == nil,
+                "the staleness contract: no snapshot may be rendered after a disconnect")
+
+        // The in-flight command's deadline passes AFTER the disconnect: the
+        // disconnect is the surface — no redundant timeout toast on top.
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(session.toasts.current == nil)
+    }
 }

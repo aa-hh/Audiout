@@ -14,25 +14,80 @@ import AudiouterProtocol
 /// actor. The ONLY persisted value is the last-used Mac id — routing state
 /// is never persisted on the phone (house rule).
 ///
-/// Reconnect policy: while foregrounded, if the connection drops for any
-/// reason other than `.closedByUs` and the last-used Mac is still being
-/// browsed, reconnect — first attempt immediately (eager), then capped
-/// exponential backoff (`NetworkBackoff`). If the Mac is not currently
-/// browsed, the next browse result that contains it triggers the attempt.
-/// Reconnect is seamless for the UI because every successful handshake's
-/// welcome republishes a full snapshot through `onSnapshot`.
+/// Reconnect policy: while foregrounded, if the connection drops for a
+/// RETRYABLE reason (see `MacDisconnectReason.reconnectClass`) and the
+/// last-used Mac is still being browsed, reconnect — first attempt
+/// immediately (eager), then capped exponential backoff (`NetworkBackoff`).
+/// If the Mac is not currently browsed, the next browse result that
+/// contains it triggers the attempt. Terminal reasons (`protoMismatch`,
+/// `incompatiblePeer`) settle instead: `connectionState` stays
+/// `.disconnected(reason)` with NO redial until the next explicit
+/// `connect(to:)`. `serverFull` retries on a long fixed delay;
+/// `"disabled"` waits for the Mac's advertisement to disappear and come
+/// back. Reconnect is seamless for the UI because every successful
+/// handshake's welcome republishes a full snapshot through `onSnapshot`.
 final class ConnectionController: @unchecked Sendable {
 
     // MARK: App-facing callbacks (fired on `queue`)
 
-    var onMacsChanged: (@Sendable ([DiscoveredMac]) -> Void)?
-    var onBrowserStateChanged: (@Sendable (MacBrowserState) -> Void)?
-    var onConnectionStateChanged: (@Sendable (MacConnectionState) -> Void)?
-    var onWiFiChanged: (@Sendable (Bool) -> Void)?
-    /// Fired for the welcome snapshot AND every subsequent state broadcast —
-    /// the app layer only ever renders the latest one.
-    var onSnapshot: (@Sendable (Snapshot) -> Void)?
-    var onCommandResult: (@Sendable (_ requestID: String, _ applied: Bool, _ refusalReason: String?, _ autoSwappedCurrentDevice: Bool) -> Void)?
+    /// All callbacks are queue-confined: assign them ONLY through the
+    /// `set…` methods below, which hop to `queue` (assignment from main
+    /// while the queue is mid-connect was a data race) and immediately
+    /// replay the current value where one exists — a subscriber attaching
+    /// AFTER the welcome landed must not stare at nil until the server
+    /// happens to broadcast again (it suppresses identical broadcasts, so
+    /// on an idle Mac "again" is never).
+    private var onMacsChanged: (@Sendable ([DiscoveredMac]) -> Void)?
+    private var onBrowserStateChanged: (@Sendable (MacBrowserState) -> Void)?
+    private var onConnectionStateChanged: (@Sendable (MacConnectionState) -> Void)?
+    private var onWiFiChanged: (@Sendable (Bool) -> Void)?
+    /// Fired for the welcome snapshot AND every subsequent state broadcast.
+    /// Staleness contract: a snapshot is only current while the connection
+    /// is `.live` — on ANY disconnect `latestSnapshot` is cleared, no
+    /// replay happens, and the app layer must treat the link as having no
+    /// data until the next welcome.
+    private var onSnapshot: (@Sendable (Snapshot) -> Void)?
+    private var onCommandResult: (@Sendable (_ requestID: String, _ applied: Bool, _ refusalReason: String?, _ autoSwappedCurrentDevice: Bool) -> Void)?
+
+    func setOnMacsChanged(_ handler: (@Sendable ([DiscoveredMac]) -> Void)?) {
+        queue.async {
+            self.onMacsChanged = handler
+            handler?(self.macs)
+        }
+    }
+
+    func setOnBrowserStateChanged(_ handler: (@Sendable (MacBrowserState) -> Void)?) {
+        queue.async {
+            self.onBrowserStateChanged = handler
+            handler?(self.browserState)
+        }
+    }
+
+    func setOnConnectionStateChanged(_ handler: (@Sendable (MacConnectionState) -> Void)?) {
+        queue.async {
+            self.onConnectionStateChanged = handler
+            handler?(self.connectionState)
+        }
+    }
+
+    func setOnWiFiChanged(_ handler: (@Sendable (Bool) -> Void)?) {
+        queue.async {
+            self.onWiFiChanged = handler
+            handler?(self.onWiFi)
+        }
+    }
+
+    func setOnSnapshot(_ handler: (@Sendable (Snapshot) -> Void)?) {
+        queue.async {
+            self.onSnapshot = handler
+            if let snapshot = self.latestSnapshot { handler?(snapshot) }
+        }
+    }
+
+    /// No replay — command results are events, not state.
+    func setOnCommandResult(_ handler: (@Sendable (_ requestID: String, _ applied: Bool, _ refusalReason: String?, _ autoSwappedCurrentDevice: Bool) -> Void)?) {
+        queue.async { self.onCommandResult = handler }
+    }
 
     // MARK: State (touched on `queue` only, except reads via `queue.sync`)
 
@@ -43,9 +98,26 @@ final class ConnectionController: @unchecked Sendable {
     /// Optimistic until the first path update, so launch doesn't flash a
     /// "no Wi-Fi" warning before the monitor reports.
     private(set) var onWiFi = true
+    /// Non-nil ONLY while the current connection has seen its welcome and
+    /// has not disconnected — cleared on every disconnect so nothing can
+    /// render (or be replayed) an hour-old fleet as if it were current.
     private(set) var latestSnapshot: Snapshot?
     private(set) var isForegrounded = true
     private(set) var reconnectAttempts = 0
+    /// Terminal disconnect (protoMismatch / incompatiblePeer): auto-redial
+    /// is off until the next explicit `connect(to:)` — redialing a Mac that
+    /// speaks a newer protocol can only ever produce the same goodbye.
+    private(set) var reconnectSuppressed = false
+    /// `goodbye("disabled")`: the user unticked the Mac's checkbox. No
+    /// redial until the Mac's advertisement DISAPPEARS from the browse list
+    /// and comes back (re-ticking re-advertises) — hammering a Mac that
+    /// told us it is turned off is noise.
+    private(set) var awaitingReadvertise = false
+
+    /// Fixed retry delay after `goodbye("serverFull")` — much longer than
+    /// the capped backoff; a full server does not free a slot on our
+    /// schedule.
+    static let serverFullRetryDelay: TimeInterval = 60
 
     private let defaults: UserDefaults
     private let clientName: String
@@ -77,10 +149,10 @@ final class ConnectionController: @unchecked Sendable {
         // there is nothing remembered yet.
         self.wantsConnection = defaults.string(forKey: Self.lastUsedMacIDKey) != nil
 
-        browser.onMacsChanged = { [weak self] macs in
+        browser.setOnMacsChanged { [weak self] macs in
             self?.handleMacsChanged(macs)
         }
-        browser.onStateChange = { [weak self] state in
+        browser.setOnStateChange { [weak self] state in
             guard let self else { return }
             self.browserState = state
             self.onBrowserStateChanged?(state)
@@ -123,8 +195,12 @@ final class ConnectionController: @unchecked Sendable {
 
     /// scenePhase → `.active`: eagerly reconnect to the last-used Mac
     /// (immediately once it is browsed; capped backoff after failures).
+    /// Also the recovery point for a Local Network grant made in Settings
+    /// while we were backgrounded: a suspended browser is recreated so the
+    /// grant takes effect without an app relaunch.
     func enterForeground() {
         queue.async {
+            self.browser.recreateIfPermissionSuspected()
             guard !self.isForegrounded else { return }
             self.isForegrounded = true
             self.reconnectAttempts = 0
@@ -138,7 +214,19 @@ final class ConnectionController: @unchecked Sendable {
         queue.async {
             self.wantsConnection = true
             self.reconnectAttempts = 0
+            self.reconnectSuppressed = false
+            self.awaitingReadvertise = false
             self.defaults.set(mac.id, forKey: Self.lastUsedMacIDKey)
+            // Refuse-forward, enforced: a Mac advertising a NEWER protocol
+            // is shown but never dialed — dialing it just burns one of its
+            // slots to be told `protoMismatch`. Settle in the same state
+            // the goodbye would have produced, minus the round trip.
+            guard !mac.isIncompatible else {
+                self.reconnectSuppressed = true
+                self.connectionState = .disconnected(.incompatiblePeer)
+                self.onConnectionStateChanged?(self.connectionState)
+                return
+            }
             self.openConnection(to: mac)
         }
     }
@@ -162,8 +250,17 @@ final class ConnectionController: @unchecked Sendable {
     // MARK: On `queue`
 
     func handleMacsChanged(_ macs: [DiscoveredMac]) {
+        let previous = self.macs
         self.macs = macs
         onMacsChanged?(macs)
+        // `goodbye("disabled")` resolution: the Mac's advertisement going
+        // away and coming back is the "user re-ticked the checkbox" signal.
+        if awaitingReadvertise, let id = lastUsedMacID,
+           !previous.contains(where: { $0.id == id }),
+           macs.contains(where: { $0.id == id }) {
+            awaitingReadvertise = false
+            reconnectAttempts = 0
+        }
         // The Mac we want may have just (re)appeared.
         scheduleReconnectIfNeeded()
     }
@@ -196,8 +293,20 @@ final class ConnectionController: @unchecked Sendable {
                 reconnectAttempts = 0
             case .disconnected(let reason):
                 connection = nil
-                if reason != .closedByUs {
+                // Staleness: whatever snapshot this session delivered is
+                // no longer current the instant the session is gone.
+                latestSnapshot = nil
+                switch reason.reconnectClass {
+                case .retry:
                     scheduleReconnectIfNeeded()
+                case .longBackoff:
+                    scheduleReconnectIfNeeded(minimumDelay: Self.serverFullRetryDelay)
+                case .waitForReadvertise:
+                    awaitingReadvertise = true
+                case .terminal:
+                    reconnectSuppressed = true
+                case .quiet:
+                    break
                 }
             default:
                 break
@@ -213,23 +322,31 @@ final class ConnectionController: @unchecked Sendable {
         }
     }
 
-    private func scheduleReconnectIfNeeded() {
+    private func scheduleReconnectIfNeeded(minimumDelay: TimeInterval = 0) {
         guard isForegrounded, wantsConnection,
+              !reconnectSuppressed, !awaitingReadvertise,
               connection == nil, pendingReconnect == nil,
               let id = lastUsedMacID,
-              macs.contains(where: { $0.id == id })
+              let mac = macs.first(where: { $0.id == id }),
+              // Refuse-forward applies to auto-redial too: a Mac that
+              // upgraded past us mid-session must not be hammered.
+              !mac.isIncompatible
         else { return }
 
-        // Eager first attempt, then the shared capped backoff.
+        // Eager first attempt, then the shared capped backoff;
+        // `minimumDelay` floors it (serverFull's long fixed delay).
         let attempt = reconnectAttempts
-        let delay = attempt == 0 ? 0 : NetworkBackoff.delay(afterAttempt: attempt - 1)
+        let delay = max(minimumDelay, attempt == 0 ? 0 : NetworkBackoff.delay(afterAttempt: attempt - 1))
         reconnectAttempts = attempt + 1
 
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingReconnect = nil
-            guard self.isForegrounded, self.wantsConnection, self.connection == nil,
-                  let mac = self.macs.first(where: { $0.id == id })
+            guard self.isForegrounded, self.wantsConnection,
+                  !self.reconnectSuppressed, !self.awaitingReadvertise,
+                  self.connection == nil,
+                  let mac = self.macs.first(where: { $0.id == id }),
+                  !mac.isIncompatible
             else { return }
             self.openConnection(to: mac)
         }
@@ -241,13 +358,60 @@ final class ConnectionController: @unchecked Sendable {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
         monitor.pathUpdateHandler = { [weak self] path in
-            guard let self else { return }
-            let wifi = path.status == .satisfied
-            guard wifi != self.onWiFi else { return }
-            self.onWiFi = wifi
-            self.onWiFiChanged?(wifi)
+            self?.handlePathUpdate(satisfied: path.status == .satisfied)
         }
         monitor.start(queue: queue)
         pathMonitor = monitor
+    }
+
+    /// On `queue`. Internal (not private) so tests can drive path changes
+    /// without a real `NWPathMonitor`.
+    func handlePathUpdate(satisfied wifi: Bool) {
+        guard wifi != onWiFi else { return }
+        onWiFi = wifi
+        onWiFiChanged?(wifi)
+        if wifi {
+            // Wi-Fi came back: any backoff in flight was priced for a
+            // network that no longer exists — reset it and retry now.
+            pendingReconnect?.cancel()
+            pendingReconnect = nil
+            reconnectAttempts = 0
+            scheduleReconnectIfNeeded()
+        }
+    }
+}
+
+/// Terminal-vs-retryable classification of a disconnect reason — the
+/// controller's redial policy in one switch. The catch-alls default to
+/// `.retry` ON PURPOSE: an unknown goodbye reason from a newer server is
+/// not proof that retrying is wrong, and this switch is the extension
+/// point for future non-error states (e.g. a per-phone approval flow's
+/// "waiting for the user to answer on the Mac" would be a new, long-lived,
+/// non-redialing case here — not `.terminal`).
+enum ReconnectClass: Equatable, Sendable {
+    /// Eager-then-capped-backoff redial (transport failures, keepalive
+    /// death, `"shutdown"`, unknown goodbye reasons).
+    case retry
+    /// `"serverFull"`: retry on `serverFullRetryDelay`, never eagerly.
+    case longBackoff
+    /// `"disabled"`: settle until the Mac re-advertises.
+    case waitForReadvertise
+    /// `"protoMismatch"` / `.incompatiblePeer`: redialing can never
+    /// succeed with this app version — settle until an explicit connect.
+    case terminal
+    /// `.closedByUs`: we hung up; no redial, no error surface.
+    case quiet
+}
+
+extension MacDisconnectReason {
+    var reconnectClass: ReconnectClass {
+        switch self {
+        case .closedByUs: return .quiet
+        case .incompatiblePeer: return .terminal
+        case .goodbye(CompanionGoodbyeReason.protoMismatch): return .terminal
+        case .goodbye(CompanionGoodbyeReason.serverFull): return .longBackoff
+        case .goodbye(CompanionGoodbyeReason.disabled): return .waitForReadvertise
+        case .goodbye, .failed, .keepaliveTimeout: return .retry
+        }
     }
 }

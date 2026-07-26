@@ -61,10 +61,13 @@ enum MacBrowserState: Equatable, Sendable {
 struct PermissionDenialDetector {
     /// kDNSServiceErr_PolicyDenied.
     static let policyDeniedCode: Int32 = -65570
-    /// How long the denial must persist before we call it. Shorter would
-    /// misfire while the permission prompt is still up; much longer just
-    /// delays the "check Settings" hint.
-    static let threshold: TimeInterval = 3
+    /// How long the denial must persist before we call it. The floor is
+    /// set by the system permission alert: -65570 is emitted the whole
+    /// time the prompt is ON SCREEN, and a user reading the alert text
+    /// takes well over 3s — calling "denied" while they're still deciding
+    /// is a false accusation the UI acts on. 8s trades a slower "check
+    /// Settings" hint for not misfiring on a slow reader.
+    static let threshold: TimeInterval = 8
 
     private(set) var deniedSince: Date?
 
@@ -103,8 +106,17 @@ struct PermissionDenialDetector {
 /// connection + controller transitions are all serialized together).
 final class MacBrowser: @unchecked Sendable {
 
-    var onMacsChanged: (@Sendable ([DiscoveredMac]) -> Void)?
-    var onStateChange: (@Sendable (MacBrowserState) -> Void)?
+    /// Queue-confined — assign only through the `set…` methods below.
+    private var onMacsChanged: (@Sendable ([DiscoveredMac]) -> Void)?
+    private var onStateChange: (@Sendable (MacBrowserState) -> Void)?
+
+    func setOnMacsChanged(_ handler: (@Sendable ([DiscoveredMac]) -> Void)?) {
+        queue.async { self.onMacsChanged = handler }
+    }
+
+    func setOnStateChange(_ handler: (@Sendable (MacBrowserState) -> Void)?) {
+        queue.async { self.onStateChange = handler }
+    }
 
     private let queue: DispatchQueue
     private var browser: NWBrowser?
@@ -143,6 +155,26 @@ final class MacBrowser: @unchecked Sendable {
             self.browser = nil
             self.publish(.idle)
             self.onMacsChanged?([])
+        }
+    }
+
+    /// Recovery path for a Local Network grant made in Settings AFTER the
+    /// denial was called: a denied `NWBrowser` sits in `.waiting` and does
+    /// not reliably pick the new grant up, so `permissionSuspected` would
+    /// otherwise stick until an app relaunch. Called on foreground return
+    /// (`ConnectionController.enterForeground`); a no-op unless the
+    /// published state is actually `.permissionSuspected`.
+    func recreateIfPermissionSuspected() {
+        queue.async {
+            guard self.publishedState == .permissionSuspected else { return }
+            self.browser?.cancel()
+            self.browser = nil
+            self.detector.cleared()
+            self.pendingDenialCheck?.cancel()
+            self.pendingDenialCheck = nil
+            self.failureAttempt = 0
+            self.publish(.browsing)
+            self.makeBrowser()
         }
     }
 

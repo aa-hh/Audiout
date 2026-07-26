@@ -121,10 +121,11 @@ import AudiouterProtocol
     /// completes once the server side is started, so acceptance happens
     /// in here — waiting for client `.ready` before returning proves the
     /// full upgrade round-tripped.
-    private func connectClient(via hub: LoopbackHub, to server: CompanionServer) throws -> (client: NWConnection, log: MessageLog) {
+    private func connectClient(via hub: LoopbackHub, to server: CompanionServer, autoReplyPing: Bool = false) throws -> (client: NWConnection, log: MessageLog) {
         let port = try #require(hub.listener.port)
         let params = NWParameters.tcp
         let ws = NWProtocolWebSocket.Options()
+        ws.autoReplyPing = autoReplyPing // the liveness tests' live/dead knob
         params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         // A WebSocket CLIENT must connect to a `ws://` URL endpoint — with a
         // plain host/port endpoint the upgrade handshake aborts
@@ -376,9 +377,14 @@ import AudiouterProtocol
         let (kept, keptLog) = try connectClient(via: hub, to: server)
         defer { kept.cancel() }
         try sendHello(over: kept, name: "first")
+        try #require(waitUntil { server.test_clientNames() == ["first"] },
+                     "the first client was never promoted")
 
+        // The cap is enforced at HELLO (promotion), not at accept — merely
+        // connecting must not trip it (that's the pre-hello ghost fix).
         let (refused, refusedLog) = try connectClient(via: hub, to: server)
         defer { refused.cancel() }
+        try sendHello(over: refused, name: "second")
         #expect(waitUntil { refusedLog.contains(.goodbye(reason: "serverFull")) },
                 "the over-cap client never got its polite goodbye")
         #expect(waitUntil { refusedLog.closed },
@@ -417,7 +423,212 @@ import AudiouterProtocol
         server.stop()
         #expect(waitUntil { logA.closed && logB.closed },
                 "stop() left a client connection alive")
-        #expect(counts.value.last == 0, "stop() must report the count dropping to 0")
+        #expect(waitUntil { counts.value.last == 0 }, "stop() must report the count dropping to 0")
+        // The default stop reason is `shutdown` — every promoted client gets
+        // the best-effort goodbye before its socket closes, so the phone
+        // never mistakes a deliberate stop for a transport failure.
+        for log in [logA, logB] {
+            #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.shutdown)) },
+                    "stop() closed a client without its goodbye")
+        }
+    }
+
+    @Test func stopSendsGoodbyeCarryingTheGivenReason() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
+
+        // The Settings-checkbox-off path: the phone must learn the server
+        // was DISABLED (settle quietly) rather than see a bare socket error
+        // (redial forever).
+        server.stop(reason: CompanionGoodbyeReason.disabled)
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.disabled)) },
+                "the disabled-stop never sent its goodbye")
+        #expect(waitUntil { log.closed }, "the disabled-stop never closed the connection")
+    }
+
+    // MARK: - Pre-hello connections never occupy client slots
+
+    /// Regression for the proven iOS-probe bug: a plain connection that
+    /// never hellos (the iOS client's own address-resolve probe does exactly
+    /// this) used to enter `clients` immediately and count against
+    /// `maxClients`, so a few reconnecting phones could exhaust the cap with
+    /// ghosts.
+    @Test func preHelloConnectionsDoNotConsumeClientSlots() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_maxClientsOverride = 1
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        // The ghost connects first and never says hello.
+        let (ghost, _) = try connectClient(via: hub, to: server)
+        defer { ghost.cancel() }
+
+        // A real phone arriving after the ghost must still get the one slot.
+        let (real, realLog) = try connectClient(via: hub, to: server)
+        defer { real.cancel() }
+        try sendHello(over: real, name: "real")
+        #expect(waitUntil { realLog.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                "an un-helloed ghost consumed the only client slot")
+
+        // And the cap still bites at promotion: a SECOND helloing client is
+        // refused.
+        let (late, lateLog) = try connectClient(via: hub, to: server)
+        defer { late.cancel() }
+        try sendHello(over: late, name: "late")
+        #expect(waitUntil { lateLog.contains(.goodbye(reason: CompanionGoodbyeReason.serverFull)) },
+                "the over-cap helloing client was never refused")
+    }
+
+    @Test func pendingFloodBeyondTheCapIsDroppedImmediately() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_pendingCapOverride = 1 // real cap is 32
+        defer { server.stop() }
+
+        // Occupies the only pending slot and never hellos.
+        let (ghost, _) = try connectClient(via: hub, to: server)
+        defer { ghost.cancel() }
+
+        // The next arrival must be cancelled on arrival (no goodbye, no held
+        // fd) — connect raw because the WS upgrade will never complete.
+        let port = try #require(hub.listener.port)
+        let params = NWParameters.tcp
+        let ws = NWProtocolWebSocket.Options()
+        params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
+        let url = try #require(URL(string: "ws://127.0.0.1:\(port.rawValue)"))
+        let flooder = NWConnection(to: .url(url), using: params)
+        defer { flooder.cancel() }
+        let dropped = LockedBox(false)
+        flooder.stateUpdateHandler = { state in
+            switch state {
+            case .cancelled, .failed, .waiting: dropped.value = true
+            default: break
+            }
+        }
+        flooder.start(queue: hub.netQueue)
+        try #require(waitUntil { hub.hasPending }, "the loopback listener never saw the flooder")
+        let serverSide = try #require(hub.popPending())
+        server.accept(serverSide)
+        #expect(waitUntil { dropped.value },
+                "the over-pending-cap connection was never dropped")
+    }
+
+    // MARK: - Liveness
+
+    /// A phone that vanishes without a FIN (airplane mode, out of range)
+    /// answers no pings; the server must reap it — releasing its slot and
+    /// firing `onClientDisconnected` so the wiring can end an orphaned drag.
+    @Test func silentDeadClientIsReapedByLivenessPings() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_pingIntervalOverride = 0.1  // real default is 20 s
+        server.test_livenessTimeoutOverride = 0.3 // real default is 60 s
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let disconnected = LockedBox<[UUID]>([])
+        server.onClientDisconnected = { id in disconnected.withLock { $0.append(id) } }
+
+        // autoReplyPing defaults to FALSE in this harness — the client
+        // upgrades and hellos, then never answers a ping: the dead-phone
+        // shape (a real live client's stack auto-pongs).
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
+
+        #expect(waitUntil { !disconnected.value.isEmpty },
+                "the server never reaped the client that stopped answering pings")
+    }
+
+    @Test func pongAnsweringClientSurvivesLivenessPings() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_pingIntervalOverride = 0.1
+        // Generous vs. the 0.1 s ping cadence: several agents' suites share
+        // this machine, and a scheduling stall must not read as death.
+        server.test_livenessTimeoutOverride = 1.5
+        defer { server.stop() }
+        server.broadcast(makeSnapshot(volume: 10))
+
+        let disconnected = LockedBox<[UUID]>([])
+        server.onClientDisconnected = { id in disconnected.withLock { $0.append(id) } }
+
+        let (client, log) = try connectClient(via: hub, to: server, autoReplyPing: true)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
+
+        // Observe past several ping cycles; the auto-ponging client must
+        // never be reaped, and must still be receiving broadcasts at the end.
+        _ = waitUntil(timeout: 2) { !disconnected.value.isEmpty }
+        #expect(disconnected.value.isEmpty, "a pong-answering client was reaped as dead")
+        let snap2 = makeSnapshot(volume: 20)
+        server.broadcast(snap2)
+        #expect(waitUntil { log.contains(.state(snapshot: snap2)) },
+                "the surviving client stopped receiving broadcasts")
+        #expect(!log.closed, "the surviving client's connection must stay open")
+    }
+
+    // MARK: - Hostile input hygiene
+
+    @Test func clientNameIsTruncatedAtParse() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client, name: String(repeating: "a", count: 200))
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the long-named client was never welcomed")
+        #expect(server.test_clientNames() == [String(repeating: "a", count: 64)],
+                "the attacker-controlled clientName was not truncated at parse")
+    }
+
+    /// Refuse-forward must hold on EVERY frame, not just the hello — a peer
+    /// that hellos at a compatible version and then sends newer-versioned
+    /// envelopes gets the same goodbye a newer hello would.
+    @Test func newerEnvelopeVersionOnALaterFrameIsRefused() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
+
+        let envelope = CompanionEnvelope(
+            message: .command(requestID: "r-newer", command: .beginMainOutDrag),
+            v: CompanionProto.version + 1
+        )
+        sendText(try envelope.encoded(), over: client)
+        #expect(waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.protoMismatch)) },
+                "the newer-versioned frame was never refused")
+        #expect(waitUntil { log.closed },
+                "the newer-versioned frame's sender was never closed")
     }
 
     @Test func disconnectReportsTheSameClientIDCommandsCarried() throws {

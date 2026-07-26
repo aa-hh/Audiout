@@ -18,10 +18,26 @@ public enum CompanionMessage: Equatable, Sendable {
     case welcome(serverName: String, protoVersion: Int, snapshot: Snapshot)
     case state(snapshot: Snapshot)
     case commandResult(requestID: String, applied: Bool, refusalReason: String?, autoSwappedCurrentDevice: Bool)
-    /// `reason` is one of `"disabled"` / `"shutdown"` / `"protoMismatch"`.
+    /// `reason` is one of `CompanionGoodbyeReason`'s constants.
     case goodbye(reason: String)
 
     case unknown(type: String)
+}
+
+/// Every `goodbye` reason the Mac server actually sends, so the phone can
+/// switch on them without string drift. A reason the client doesn't
+/// recognize (a newer server's) should be treated like `shutdown`: the
+/// server closed deliberately.
+public enum CompanionGoodbyeReason {
+    /// The user unticked "Allow remote control" — don't redial until the
+    /// service reappears in Bonjour.
+    public static let disabled = "disabled"
+    /// The Mac app is quitting (or the server restarted).
+    public static let shutdown = "shutdown"
+    /// The client's protocol version is newer than the server's.
+    public static let protoMismatch = "protoMismatch"
+    /// The server is at its client cap.
+    public static let serverFull = "serverFull"
 }
 
 /// The wire envelope every WebSocket text frame carries:

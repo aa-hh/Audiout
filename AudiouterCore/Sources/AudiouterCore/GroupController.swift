@@ -1040,6 +1040,7 @@ public final class GroupController {
     private func applySilence(for id: String, state: inout MemberState, wasSilent: Bool) {
         let isSilent = state.explicitMute
         guard isSilent != wasSilent else { return }
+        // Fires BEFORE the caller writes `state` back into `memberState`, so an observer reading `isMuted(id)` from this hook still sees the pre-toggle value.
         onStateDidChange?()
 
         if isSilent {

@@ -13,22 +13,33 @@ import AudiouterProtocol
 /// ``onCommand``/``onClientDisconnected``.
 ///
 /// ## Session shape
-/// 1. Client connects; it has ``handshakeTimeout`` seconds to send `hello`
-///    or it is cancelled (idle-peer hardening, mirroring `DACPServer`'s
-///    idle-receive timeout).
+/// 1. Client connects; it enters a bounded PENDING pool — it does NOT count
+///    against ``maxClients`` until it completes a valid `hello`, so
+///    pre-upgrade probes (the iOS client's own address-resolve probe, port
+///    scanners, half-opens) can never exhaust the client cap. It has
+///    ``preHelloTimeout`` seconds to say `hello` or it is cancelled; beyond
+///    ``pendingCap`` simultaneous un-helloed connections, new ones are
+///    dropped immediately (flood backstop — every refused socket is a
+///    process-wide fd this app's AirPlay/PTP/DACP work also needs).
 /// 2. `hello` with a protocol version NEWER than ours →
 ///    `goodbye("protoMismatch")` and close (refuse-forward,
-///    `CompanionProto.isIncompatible`). Otherwise the client is welcomed
-///    with the latest cached snapshot — or, if no snapshot has been
-///    broadcast yet, the `welcome` is deferred until the first
+///    `CompanionProto.isIncompatible`). At the client cap →
+///    `goodbye("serverFull")` and close. Otherwise the client is PROMOTED
+///    into `clients` (see ``promote(_:name:)`` — the single decision point)
+///    and welcomed with the latest cached snapshot — or, if no snapshot has
+///    been broadcast yet, the `welcome` is deferred until the first
 ///    ``broadcast(_:)`` (the wiring broadcasts immediately after start, so
 ///    this window is milliseconds).
 /// 3. Thereafter: `command` frames flow to ``onCommand``; every
 ///    ``broadcast(_:)`` fans a `state` frame out to all welcomed clients,
-///    suppressed when `Equatable`-identical to the previous snapshot.
+///    suppressed when `Equatable`-identical to the previous snapshot. The
+///    server pings each promoted client every ``pingInterval`` and reaps any
+///    with no inbound activity (frame or pong) for ``livenessTimeout`` — a
+///    phone that vanishes without a FIN (airplane mode, out of range) must
+///    not hold its slot, its fd, or an orphaned Main Out drag forever.
 ///
 /// ## Structure (mirrors `DACPServer` deliberately)
-/// All mutable state (`listener`, `clients`, `refused`, `latestSnapshot`)
+/// All mutable state (`listener`, `pending`, `clients`, `latestSnapshot`)
 /// is confined to ``queue``: the listener and every connection are started
 /// with `queue: queue` so their callbacks already run there, and the public
 /// entry points (`start(name:)`/`stop()`/`broadcast(_:)`/`accept(_:)`)
@@ -52,10 +63,13 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: - Wiring surface
     //
-    // ALL callbacks are invoked on ``queue``. The wiring layer must hop to
-    // main ASYNCHRONOUSLY (`DispatchQueue.main.async`) — a synchronous hop
-    // from a callback could deadlock against `stop()`, which blocks the
-    // caller (typically main) on this queue.
+    // ALL callbacks are invoked on ``queue``, and always via a fresh
+    // `queue.async` hop — never inline from a section that may be holding
+    // the queue while another thread blocks in `stop()`'s `queue.sync`. That
+    // makes even a SYNCHRONOUS main-thread hop inside a callback unable to
+    // deadlock against `stop()` (the callback only runs after the sync
+    // section has returned). Wirings should still hop to main
+    // asynchronously (`DispatchQueue.main.async`) as a matter of hygiene.
 
     /// One `command` frame from a client. `reply` may be called once from
     /// ANY thread (the wiring executes on main and replies from there); it
@@ -63,14 +77,17 @@ public final class CompanionServer: @unchecked Sendable {
     /// if it is still connected.
     public var onCommand: (@Sendable (_ requestID: String, _ command: CompanionCommand, _ clientID: UUID, _ reply: @escaping @Sendable (CommandResult) -> Void) -> Void)?
 
-    /// A client went away for any reason — clean close, error, handshake
-    /// timeout, or `stop()` — after being accepted. Carries the same
-    /// `clientID` that `onCommand` reported, so the wiring can end an
-    /// orphaned Main Out drag held by exactly that client (plan T7 item 5).
+    /// A client went away for any reason — clean close, error, liveness
+    /// reaping, or `stop()` — after being accepted (helloed + promoted;
+    /// connections that die before their `hello` are removed silently).
+    /// Carries the same `clientID` that `onCommand` reported, so the wiring
+    /// can end an orphaned Main Out drag held by exactly that client (plan
+    /// T7 item 5).
     public var onClientDisconnected: (@Sendable (UUID) -> Void)?
 
     /// Observability: fired with the new total whenever the set of accepted
-    /// clients grows or shrinks (including to 0 on `stop()`).
+    /// clients grows or shrinks (including to 0 on `stop()`). Pending
+    /// (un-helloed) connections are never counted.
     public var onClientCountChanged: (@Sendable (Int) -> Void)?
 
     // MARK: - State (queue-confined)
@@ -78,40 +95,52 @@ public final class CompanionServer: @unchecked Sendable {
     private let log = Logger(subsystem: "com.audiouter.Audiouter", category: "companion")
     private let queue = DispatchQueue(label: "CompanionServer")
 
-    /// One accepted connection's lifecycle state. Mutated only on ``queue``.
+    /// One connection's lifecycle state (pending or promoted). Mutated only
+    /// on ``queue``.
     private final class Client {
         let id = UUID()
         let connection: NWConnection
-        /// From `hello`; nil until then.
+        /// From `hello`, truncated to ``maxClientNameLength``; nil until then.
         var clientName: String?
-        /// `hello` accepted (name + compatible version).
-        var isHelloed = false
-        /// `welcome` sent (requires a cached snapshot; may lag `isHelloed`).
+        /// `welcome` sent (requires a cached snapshot; may lag promotion).
         var isWelcomed = false
-        /// Pending handshake-deadline work; cancelled by `hello`.
+        /// Pending pre-hello deadline work; cancelled on promotion. For a
+        /// connection refused AT hello (proto mismatch / server full) it is
+        /// deliberately left armed as the close backstop in case the goodbye
+        /// send never flushes.
         var handshakeTimeout: DispatchWorkItem?
+        /// Last inbound sign of life — any frame, ping, or pong. Basis of
+        /// the liveness reaper.
+        var lastActivity = Date()
 
         init(connection: NWConnection) { self.connection = connection }
     }
 
     private var listener: NWListener?
+    /// Accepted but not yet helloed. Bounded by ``pendingCap``; never
+    /// counted against ``maxClients``; reaped by the pre-hello deadline.
+    private var pending: [UUID: Client] = [:]
+    /// Helloed + promoted clients — the only connections that count, get
+    /// broadcasts, and may send commands.
     private var clients: [UUID: Client] = [:]
-    /// Connections refused at the client cap: kept alive just long enough to
-    /// deliver their `goodbye`, then cancelled. Never counted as clients.
-    private var refused: [ObjectIdentifier: NWConnection] = [:]
     /// The latest snapshot ``broadcast(_:)`` saw — replayed to each new
     /// client in its `welcome`.
     private var latestSnapshot: Snapshot?
+    /// Fires ``livenessTick()`` every ``pingInterval`` while the server has
+    /// (or has had) clients; torn down by `stop()`.
+    private var livenessTimer: DispatchSourceTimer?
 
     // MARK: - Limits
 
     /// How long an accepted connection may sit without completing its
     /// `hello` before it's treated as an idle/misbehaving peer (a scanner, a
     /// probing client, a half-open) and closed. A real companion app says
-    /// hello within milliseconds of connecting.
-    private static let handshakeTimeout: TimeInterval = 10
-    /// Test-only: overrides ``handshakeTimeout`` so a cancellation test
-    /// doesn't wait 10 real seconds. Nil (default) uses the real value.
+    /// hello within milliseconds of connecting; the iOS app's own
+    /// address-resolve probe never upgrades at all and is exactly what this
+    /// deadline reaps.
+    private static let preHelloTimeout: TimeInterval = 5
+    /// Test-only: overrides ``preHelloTimeout`` so a cancellation test
+    /// doesn't wait real seconds. Nil (default) uses the real value.
     /// Same seam as `DACPServer.test_idleReceiveTimeoutOverride`.
     public var test_handshakeTimeoutOverride: TimeInterval?
 
@@ -122,12 +151,49 @@ public final class CompanionServer: @unchecked Sendable {
     /// real sockets.
     public var test_maxClientsOverride: Int?
 
+    /// Hard bound on simultaneous un-helloed connections. Beyond it, new
+    /// connections are cancelled on arrival with no courtesy goodbye — under
+    /// a connect-flood the priority is not exhausting this process's file
+    /// descriptors (which AirPlay RTP, PTP, DACP and Bonjour also draw on).
+    /// razor: a fancier accept-rate limiter (token bucket) was considered
+    /// and skipped — this cap already bounds fds at pendingCap + maxClients,
+    /// and each over-cap socket is closed immediately.
+    private static let pendingCap = 32
+    /// Test-only: overrides ``pendingCap`` so the flood test doesn't need
+    /// 33 real sockets.
+    public var test_pendingCapOverride: Int?
+
     /// Per-frame size cap. The largest legitimate frame is a `command`
     /// (well under 1 KB); snapshots only ever travel server→client. Enforced
     /// both in the WebSocket options and in code (the in-code check also
     /// covers connections injected via the ``accept(_:)`` test seam, whose
     /// listener options we don't control).
     private static let maxMessageBytes = 64 * 1024
+
+    /// The iOS client caps INBOUND messages at 1 MB — a server frame larger
+    /// than this deterministically kills the phone's connection, so it is
+    /// loudly logged (see `sendRaw`). Snapshot size is the dispatcher/
+    /// builder's to bound; the server can only observe it.
+    private static let iosInboundCapBytes = 1_048_576
+
+    /// `hello.clientName` is attacker-controlled input; bound it at parse so
+    /// no downstream consumer (logs, future UI) ever sees an unbounded string.
+    private static let maxClientNameLength = 64
+
+    /// Server-initiated WebSocket ping cadence per promoted client. A live
+    /// phone's stack auto-pongs; the pong (or any frame) refreshes
+    /// `lastActivity`.
+    private static let pingInterval: TimeInterval = 20
+    /// Test-only: overrides ``pingInterval`` (read when the liveness timer
+    /// is created, i.e. at the first client promotion after start/stop).
+    public var test_pingIntervalOverride: TimeInterval?
+
+    /// A promoted client with no inbound activity for this long is dead —
+    /// with ``pingInterval`` 20 s that is ~3 unanswered pings — and is
+    /// cancelled, which fires ``onClientDisconnected`` like any other death.
+    private static let livenessTimeout: TimeInterval = 60
+    /// Test-only: overrides ``livenessTimeout``.
+    public var test_livenessTimeoutOverride: TimeInterval?
 
     public init() {}
 
@@ -149,9 +215,15 @@ public final class CompanionServer: @unchecked Sendable {
     /// recursively sync onto the queue we're already on and deadlock (the
     /// exact hazard `DACPServer.startLocked` documents).
     private func startLocked(name: String) {
-        stopLocked()
+        stopLocked(reason: CompanionGoodbyeReason.shutdown)
 
-        let params = NWParameters.tcp
+        // TCP keepalive is defense in depth under the WebSocket-level
+        // liveness reaper: it lets the kernel notice a peer that vanished
+        // without a FIN even if this process's timer logic ever regresses.
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        let params = NWParameters(tls: nil, tcp: tcp)
         params.includePeerToPeer = false
         let ws = NWProtocolWebSocket.Options()
         ws.autoReplyPing = true
@@ -190,31 +262,64 @@ public final class CompanionServer: @unchecked Sendable {
     /// handful of local objects is cheap, there is no network I/O to wait
     /// for. Do NOT call from ``queue`` (i.e. from inside a callback) — that
     /// would deadlock; callbacks have no reason to stop the server anyway.
-    public func stop() {
+    ///
+    /// `reason` becomes a best-effort `goodbye` to every promoted client, so
+    /// the phone learns the close was deliberate instead of seeing a bare
+    /// transport error and redialing forever. Pass
+    /// `CompanionGoodbyeReason.disabled` when the user turned remote control
+    /// off, `shutdown` (the default) when the app is quitting — the phone
+    /// treats them differently (settle quietly vs. reconnect on
+    /// re-advertise). Best-effort: `stop()` still returns synchronously with
+    /// the listener cancelled and all state cleared, but each connection is
+    /// cancelled from its goodbye-send completion (an immediate cancel would
+    /// abort the enqueued frame), with a 250 ms backstop cancel so a wedged
+    /// send can never hold a socket — quit is never blocked waiting for any
+    /// of it.
+    public func stop(reason: String = CompanionGoodbyeReason.shutdown) {
         queue.sync { [weak self] in
-            self?.stopLocked()
+            self?.stopLocked(reason: reason)
         }
     }
 
     /// MUST only run on ``queue``. Also called directly by
     /// `startLocked(name:)` — see its doc comment for why never via `stop()`.
-    private func stopLocked() {
+    private func stopLocked(reason: String) {
         listener?.cancel()
         listener = nil
+        livenessTimer?.cancel()
+        livenessTimer = nil
+        let droppedPending = pending
+        pending.removeAll()
+        for (_, client) in droppedPending {
+            client.handshakeTimeout?.cancel()
+            client.connection.cancel()
+        }
         let dropped = clients
         clients.removeAll()
         for (_, client) in dropped {
-            client.handshakeTimeout?.cancel()
-            client.connection.cancel()
-            onClientDisconnected?(client.id)
+            // Cancel from the send's completion, not inline — an immediate
+            // cancel aborts the just-enqueued goodbye (observed on loopback).
+            let connection = client.connection
+            sendRaw(.goodbye(reason: reason), over: connection) {
+                connection.cancel()
+            }
+            // Bounded backstop for a send that never completes. A bare
+            // asyncAfter is safe HERE (unlike the old `refused` timer bug):
+            // it captures this exact connection object — no key reuse — and
+            // a second cancel is a no-op.
+            queue.asyncAfter(deadline: .now() + 0.25) { connection.cancel() }
         }
-        for (_, connection) in refused { connection.cancel() }
-        refused.removeAll()
         // A restarted server must not welcome new clients with a snapshot
         // from its previous life; the wiring re-seeds on start.
         latestSnapshot = nil
         if !dropped.isEmpty {
-            onClientCountChanged?(0)
+            let ids = Array(dropped.keys)
+            let disconnected = onClientDisconnected
+            let countChanged = onClientCountChanged
+            queue.async {
+                for id in ids { disconnected?(id) }
+                countChanged?(0)
+            }
         }
     }
 
@@ -235,7 +340,7 @@ public final class CompanionServer: @unchecked Sendable {
     private func broadcastLocked(_ snapshot: Snapshot) {
         let changed = snapshot != latestSnapshot
         latestSnapshot = snapshot
-        for client in clients.values where client.isHelloed {
+        for client in clients.values {
             if !client.isWelcomed {
                 sendWelcome(snapshot, to: client)
             } else if changed {
@@ -263,15 +368,19 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    /// MUST only run on ``queue``.
+    /// MUST only run on ``queue``. New connections enter `pending` only —
+    /// they are counted, broadcast to, and command-eligible strictly after
+    /// ``promote(_:name:)``.
     private func acceptLocked(_ connection: NWConnection) {
-        guard clients.count < (test_maxClientsOverride ?? Self.maxClients) else {
-            refuse(connection)
+        guard pending.count < (test_pendingCapOverride ?? Self.pendingCap) else {
+            // Flood: drop on arrival, no courtesy goodbye — see pendingCap.
+            log.notice("companion connection dropped: pending pool full")
+            connection.cancel()
             return
         }
 
         let client = Client(connection: connection)
-        clients[client.id] = client
+        pending[client.id] = client
         let id = client.id
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -287,70 +396,139 @@ public final class CompanionServer: @unchecked Sendable {
         connection.start(queue: queue)
         receiveLoop(client)
 
-        // Handshake deadline: a peer that connects and never says hello
-        // would otherwise sit in `clients` — and hold its kernel socket —
-        // for as long as this server runs. Cancelled by `hello`; if it
+        // Pre-hello deadline: a peer that connects and never says hello
+        // would otherwise sit in `pending` — and hold its kernel socket —
+        // for as long as this server runs. Cancelled on promotion; if it
         // fires, the state handler above cleans up like any other death.
-        let timeout = test_handshakeTimeoutOverride ?? Self.handshakeTimeout
+        // A cancellable work item (not a bare closure) so no timer can
+        // outlive the connection it guards.
+        let timeout = test_handshakeTimeoutOverride ?? Self.preHelloTimeout
         let work = DispatchWorkItem { [weak self] in
-            self?.clients[id]?.connection.cancel()
+            self?.pending[id]?.connection.cancel()
         }
         client.handshakeTimeout = work
         queue.asyncAfter(deadline: .now() + timeout, execute: work)
-
-        onClientCountChanged?(clients.count)
     }
 
-    /// Client-cap refusal: start the connection just long enough to deliver
-    /// `goodbye("serverFull")`, then close. Held in `refused` (not
-    /// `clients`) so it never counts against the cap it just hit, with its
-    /// own deadline in case the WebSocket handshake never completes and the
-    /// send can therefore never flush. MUST only run on ``queue``.
-    private func refuse(_ connection: NWConnection) {
-        log.notice("companion client refused: at capacity")
-        let key = ObjectIdentifier(connection)
-        refused[key] = connection
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .cancelled, .failed:
-                self?.queue.async { self?.refused[key] = nil }
-            default:
-                break
+    /// THE single promotion decision point (pending → counted client),
+    /// reached only from a valid, compatible, within-cap `hello`. A future
+    /// per-phone approval gate slots in immediately before this call: hold
+    /// the client (deadline cancelled) until the Mac user answers, then
+    /// promote or refuse. MUST only run on ``queue``.
+    private func promote(_ client: Client, name: String) {
+        client.handshakeTimeout?.cancel()
+        client.handshakeTimeout = nil
+        pending[client.id] = nil
+        clients[client.id] = client
+        client.clientName = name
+        client.lastActivity = Date()
+        ensureLivenessTimer()
+        // `name` is attacker-controlled: already truncated, and logged at
+        // default (.private) privacy, never .public.
+        log.info("companion client connected: \(name)")
+        let count = clients.count
+        let countChanged = onClientCountChanged
+        queue.async { countChanged?(count) }
+        if let snapshot = latestSnapshot {
+            sendWelcome(snapshot, to: client)
+        }
+        // else: welcome deferred to the first broadcast (see class doc).
+    }
+
+    /// MUST only run on ``queue``. Cancels unconditionally: Apple requires
+    /// cancelling even a FAILED connection to release it, and the
+    /// receive-loop and state-handler paths can race such that this is the
+    /// only place that still holds the object. Cancelling an
+    /// already-cancelled connection is a no-op.
+    private func removeClient(_ id: UUID) {
+        if let waiting = pending.removeValue(forKey: id) {
+            waiting.handshakeTimeout?.cancel()
+            waiting.connection.cancel()
+            return // never promoted: no disconnect signal, never counted
+        }
+        guard let client = clients.removeValue(forKey: id) else { return }
+        client.connection.cancel()
+        let count = clients.count
+        let disconnected = onClientDisconnected
+        let countChanged = onClientCountChanged
+        queue.async {
+            disconnected?(id)
+            countChanged?(count)
+        }
+    }
+
+    // MARK: - Liveness
+
+    /// Lazily created at the first promotion (the test seam never calls
+    /// `start`, so the timer can't live there); torn down in `stopLocked`.
+    /// An idle tick over zero clients is harmless.
+    private func ensureLivenessTimer() {
+        guard livenessTimer == nil else { return }
+        let interval = test_pingIntervalOverride ?? Self.pingInterval
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(Int(interval * 100)))
+        timer.setEventHandler { [weak self] in self?.livenessTick() }
+        timer.resume()
+        livenessTimer = timer
+    }
+
+    /// MUST only run on ``queue``. Reap the silent, ping the rest.
+    private func livenessTick() {
+        let timeout = test_livenessTimeoutOverride ?? Self.livenessTimeout
+        let now = Date()
+        for client in clients.values {
+            if now.timeIntervalSince(client.lastActivity) > timeout {
+                log.notice("companion client reaped: no activity for \(Int(now.timeIntervalSince(client.lastActivity))) s")
+                client.connection.cancel() // state handler → removeClient
+            } else {
+                sendPing(to: client)
             }
         }
-        connection.start(queue: queue)
-        sendRaw(.goodbye(reason: "serverFull"), over: connection) {
-            connection.cancel()
-        }
-        let timeout = test_handshakeTimeoutOverride ?? Self.handshakeTimeout
-        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-            self?.refused[key]?.cancel()
-        }
     }
 
-    /// MUST only run on ``queue``.
-    private func removeClient(_ id: UUID) {
-        guard let client = clients.removeValue(forKey: id) else { return }
-        client.handshakeTimeout?.cancel()
-        onClientDisconnected?(client.id)
-        onClientCountChanged?(clients.count)
+    /// One WebSocket ping. The pong handler (the canonical Network.framework
+    /// pong-observation seam) refreshes `lastActivity`; inbound frames in
+    /// `receiveLoop` refresh it too, so a chatty client is never pinged into
+    /// suspicion. Non-empty payload on purpose: some receive loops (our own
+    /// tests' included) treat an empty delivery as EOF.
+    private func sendPing(to client: Client) {
+        let id = client.id
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
+        metadata.setPongHandler(queue) { [weak self] error in
+            guard error == nil else { return }
+            self?.clients[id]?.lastActivity = Date()
+        }
+        let context = NWConnection.ContentContext(identifier: "companionPing", metadata: [metadata])
+        client.connection.send(content: Data("hb".utf8), contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
     }
+
+    // MARK: - Receiving
 
     /// Re-arming per-message receive. Completion runs on ``queue``.
     private func receiveLoop(_ client: Client) {
         let id = client.id
         client.connection.receiveMessage { [weak self] data, context, _, error in
-            guard let self, self.clients[id] != nil else { return }
+            guard let self, self.pending[id] != nil || self.clients[id] != nil else { return }
             // Close, error, EOF, and oversize are all just "this client is
             // done": cancel and let the state handler do the one cleanup.
             if error != nil {
                 client.connection.cancel()
                 return
             }
-            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
-               metadata.opcode == .close {
-                client.connection.cancel()
-                return
+            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata {
+                switch metadata.opcode {
+                case .close:
+                    client.connection.cancel()
+                    return
+                case .ping, .pong:
+                    // Control frames are liveness, not payload — and may
+                    // carry empty data, which must not read as EOF below.
+                    client.lastActivity = Date()
+                    self.receiveLoop(client)
+                    return
+                default:
+                    break
+                }
             }
             guard let data, !data.isEmpty else {
                 client.connection.cancel()
@@ -361,12 +539,13 @@ public final class CompanionServer: @unchecked Sendable {
                 client.connection.cancel()
                 return
             }
+            client.lastActivity = Date()
             self.handle(data, from: client)
             // `handle` may have cancelled the connection (malformed frame /
-            // proto mismatch); its removal from `clients` is async via the
-            // state handler, so a re-armed receive on a dying connection can
-            // still happen — it just completes with an error and cancels a
-            // second time, harmlessly.
+            // proto mismatch); its removal is async via the state handler,
+            // so a re-armed receive on a dying connection can still happen —
+            // it just completes with an error and cancels a second time,
+            // harmlessly.
             self.receiveLoop(client)
         }
     }
@@ -381,31 +560,47 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
+        // Refuse-forward on EVERY frame's envelope version, symmetric with
+        // the iOS client (see `CompanionEnvelope`'s doc): a peer that said
+        // hello at a compatible version must not smuggle newer-versioned
+        // frames past the handshake check.
+        guard !CompanionProto.isIncompatible(peerVersion: envelope.v) else {
+            log.notice("companion client refused: frame v\(envelope.v) > \(CompanionProto.version)")
+            send(.goodbye(reason: CompanionGoodbyeReason.protoMismatch), to: client) {
+                client.connection.cancel()
+            }
+            return
+        }
+
         switch envelope.message {
-        case .hello(let clientName, let protoVersion):
-            client.handshakeTimeout?.cancel()
-            client.handshakeTimeout = nil
+        case .hello(let rawName, let protoVersion):
+            guard clients[client.id] == nil else { return } // duplicate hello: ignore
+            guard pending[client.id] != nil else { return } // lost a race with its own death
             guard !CompanionProto.isIncompatible(peerVersion: protoVersion) else {
                 // Refuse-forward: a NEWER peer might mean things we can't
-                // interpret; tell it why, then close (its state handler
-                // cleans up as usual).
+                // interpret; tell it why, then close. The pre-hello deadline
+                // stays armed as the close backstop if this send never
+                // flushes.
                 log.notice("companion client refused: proto \(protoVersion) > \(CompanionProto.version)")
-                send(.goodbye(reason: "protoMismatch"), to: client) {
+                send(.goodbye(reason: CompanionGoodbyeReason.protoMismatch), to: client) {
                     client.connection.cancel()
                 }
                 return
             }
-            client.clientName = clientName
-            guard !client.isHelloed else { return } // duplicate hello: ignore
-            client.isHelloed = true
-            log.info("companion client connected: \(clientName, privacy: .public)")
-            if let snapshot = latestSnapshot {
-                sendWelcome(snapshot, to: client)
+            guard clients.count < (test_maxClientsOverride ?? Self.maxClients) else {
+                // The cap is checked HERE, not at accept, so an un-helloed
+                // probe can never occupy a slot a real phone needs. Same
+                // deadline-backstop as the proto refusal above.
+                log.notice("companion client refused: at capacity")
+                send(.goodbye(reason: CompanionGoodbyeReason.serverFull), to: client) {
+                    client.connection.cancel()
+                }
+                return
             }
-            // else: welcome deferred to the first broadcast (see class doc).
+            promote(client, name: String(rawName.prefix(Self.maxClientNameLength)))
 
         case .command(let requestID, let command):
-            guard client.isHelloed else {
+            guard clients[client.id] != nil else {
                 // Commands before hello are a protocol violation, and the
                 // sender's version was never checked — close it.
                 client.connection.cancel()
@@ -425,7 +620,7 @@ public final class CompanionServer: @unchecked Sendable {
                 }
             }
             if let onCommand {
-                onCommand(requestID, command, clientID, reply)
+                queue.async { onCommand(requestID, command, clientID, reply) }
             } else {
                 reply(CommandResult(applied: false, refusalReason: "server not ready"))
             }
@@ -461,10 +656,24 @@ public final class CompanionServer: @unchecked Sendable {
             log.error("companion frame failed to encode; dropping it")
             return
         }
+        if data.count > Self.iosInboundCapBytes {
+            // Sent anyway (a future client may accept it), but this WILL
+            // kill the current iOS client's connection — the snapshot
+            // builder/dispatcher side must shrink what it broadcasts.
+            log.error("companion frame is \(data.count) bytes — over the iOS client's \(Self.iosInboundCapBytes)-byte inbound cap; the phone will drop the connection")
+        }
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "companionText", metadata: [metadata])
         connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { _ in
             whenDone?()
         })
+    }
+
+    // MARK: - Test seams
+
+    /// Test-only: the (truncated) names of the currently promoted clients —
+    /// truncation is otherwise observable only in logs.
+    func test_clientNames() -> [String] {
+        queue.sync { clients.values.compactMap(\.clientName) }
     }
 }

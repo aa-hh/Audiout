@@ -40,6 +40,20 @@ gap); connect volume needs no push — `NativeBackend.connectVolumeSeed` reads
 Scope fixed earlier: native iPhone app, public App Store, full popover surface + groups
 CRUD, live shared state, multiple clients, no VU meters, phone-native tab UI.
 
+### D2 REVISED 2026-07-26 — per-phone approval (supersedes open-LAN)
+
+Adversarial security review surfaced information D2 was not decided against: the
+snapshot broadcasts the names of apps currently playing audio to every connected
+peer. Sonos exposes speakers, not your running apps — so "open like Sonos" understates
+what open-LAN means here. Alec's call: **add a one-time approval per phone.** The Mac
+asks once ("Allow 'Alec's iPhone' to control?"), remembers the answer, and only
+approved phones are welcomed.
+
+Delivered as task T24 (below), after the review-fix wave. The wire already carries
+`hello.clientName`; T24 adds a stable per-phone identity, an approvals store, the Mac
+prompt, a revoke path in Settings, and an "awaiting approval" state on the phone.
+The pending-pool seam introduced by the FIX-A cap work is where the gate slots in.
+
 ## Architecture (end state)
 
 New dependency-free Swift package `AudiouterProtocol/` (repo-root sibling of
@@ -417,3 +431,47 @@ AGENTS.md files).
    `ios/` by reading `.githooks/pre-commit` during T10.
 8. **Research-vs-code delta (flagged, deliberate):** full-snapshot broadcasts replace
    the research doc's snapshot+delta design; envelope keeps deltas possible later.
+
+## Post-review additions (2026-07-26)
+
+Four adversarial reviews (Opus 4.8, one per lens: concurrency/lifecycle,
+protocol/state, hostile-LAN, iOS networking) ran against the Phase-1 + T11/T12 code.
+Verdicts: three of four said "not safe to gate/ship as-is". Findings were fixed in a
+five-batch wave (FIX-A server, FIX-B1 dispatcher, FIX-B2 wiring+snapshot, FIX-C
+settings honesty, FIX-D iOS). Highlights, for the record:
+
+- **P0/P1 — unbounded persisted state.** A LAN peer could append groups/app-routes
+  without limit; each write rewrites the whole file synchronously on the main thread,
+  and the damage survives relaunch. Fixed with caps + validation at the dispatcher.
+- **P1 — socket exhaustion.** Cap-refused connections were held in a second, uncapped
+  pool; a connect-flood could exhaust process-wide file descriptors, taking down
+  AirPlay/PTP/DACP with it. Fixed with a bounded pool + rate limiting.
+- **P1 — pre-upgrade connections consumed client slots** (proven experimentally by the
+  iOS reviewer): the phone's own address-resolve probe burned a slot for the full
+  handshake deadline, so reconnect storms self-DoS'd the 16-client cap.
+- **P1 — no post-handshake liveness either direction.** A vanished phone held its slot
+  (and latched an orphaned Main Out drag) forever; a wedged Mac left the phone showing
+  a healthy UI whose every command silently did nothing.
+- **P1 — phone-set audio buffer never broadcast its new value** (found independently
+  by two reviewers): "applied" with the old value still displayed, self-healing only
+  when speakers happened to be streaming.
+- **P1 — the Settings checkbox could lie**: with the dev env override set it showed
+  OFF while the server ran, and unticking did nothing. Would have shipped to everyone
+  if T22's default-flip were implemented via LSEnvironment.
+- **P1 — no terminal-failure classification on the phone**: a version-mismatched or
+  disabled Mac was redialed every 30s forever, flapping the UI.
+
+Reviewers also explicitly cleared: no deadlocks on any quit path, the coalescer is
+race-free, exactly-one-disconnect-signal holds, every app mutation path reaches a
+broadcast trigger, the snapshot mapping traps are correct in every branch, and no code
+injection reachable via attacker-supplied strings.
+
+**T24 — per-phone approval (new, from D2 REVISED).** Depends on the fix wave landing.
+Scope: stable per-phone identity persisted on the phone and sent in `hello`; an
+approvals store on the Mac (`{schemaVersion, payload}` idiom, alongside the other
+stores); an approval gate at the pending-pool promotion point in `CompanionServer`; a
+Mac prompt naming the phone; an "awaiting approval on your Mac" state on the phone
+(long-lived, non-error); a revoke/manage list in Settings › General; and tests both
+sides incl. approval-persists-across-relaunch and denial-is-remembered. Ships with the
+phone app, not before. Model: opus 4.8 / high (spans both sides + a new trust
+boundary); the iOS half may be sonnet 5 / medium once the Mac contract is fixed.

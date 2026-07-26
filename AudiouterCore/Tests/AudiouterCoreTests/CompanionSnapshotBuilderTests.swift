@@ -291,6 +291,9 @@ import Testing
         #expect(snapshot.liveRoutedAppNames == ["speaker-b": ["Some App"]])
         #expect(snapshot.localFallbackActive == true)
         #expect(snapshot.takeoverStatus == "taking over")
+        // FIX-B2 finding 7a: not passed above, so the default must be the
+        // safe "not double-pathed" reading, and passing true must survive.
+        #expect(snapshot.systemDefaultIsAirPlayActive == false)
         #expect(snapshot.settings.connectVolume == 42)
         #expect(snapshot.settings.connectVolumeMin == 5)
         #expect(snapshot.settings.connectVolumeMax == 100)
@@ -364,6 +367,118 @@ import Testing
             startBufferOptionsMs: defaultStartBufferOptionsMs
         )
         #expect(after.groups.first { $0.id == "g1" }?.isMuted == true)
+    }
+
+    // MARK: addableApps ordering (FIX-B2 finding 3 — array order is part of
+    // Snapshot's Equatable, and `runningApplications` order is unspecified,
+    // so an unsorted list defeats identical-snapshot suppression)
+
+    @Test func addableAppsAreSortedByBundleIDRegardlessOfInputOrder() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor,
+            addableApps: [
+                (bundleID: "com.zebra.app", displayName: "Zebra"),
+                (bundleID: "com.apple.Safari", displayName: "Safari"),
+                (bundleID: "com.middle.app", displayName: "Middle"),
+            ],
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(snapshot.addableApps.map(\.bundleID) ==
+                ["com.apple.Safari", "com.middle.app", "com.zebra.app"])
+    }
+
+    // MARK: Size ceilings (FIX-A handoff — an over-1MB snapshot kills the
+    // phone's connection deterministically, so the two running-app-scaled
+    // lists carry documented caps applied deterministically post-sort)
+
+    @Test func addableAppsAndLiveRoutedAppNamesAreCapped() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let manyApps = (0..<(CompanionSnapshotBuilder.maxAddableApps + 50)).map {
+            (bundleID: String(format: "com.app.%04d", $0), displayName: "App \($0)")
+        }
+        let manyNames = (0..<(CompanionSnapshotBuilder.maxLiveRoutedAppNamesPerDevice + 10)).map { "App \($0)" }
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor,
+            addableApps: manyApps.shuffled(),
+            runningRouted: noRunningRouted, liveRoutedAppNames: ["speaker-b": manyNames],
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        // Deterministic cut: the FIRST `maxAddableApps` in bundleID order,
+        // regardless of input order — so a capped snapshot still suppresses
+        // as identical between rebuilds.
+        #expect(snapshot.addableApps.count == CompanionSnapshotBuilder.maxAddableApps)
+        #expect(snapshot.addableApps.map(\.bundleID) ==
+                manyApps.prefix(CompanionSnapshotBuilder.maxAddableApps).map(\.bundleID))
+        #expect(snapshot.liveRoutedAppNames["speaker-b"] ==
+                Array(manyNames.prefix(CompanionSnapshotBuilder.maxLiveRoutedAppNamesPerDevice)))
+    }
+
+    // MARK: systemDefaultIsAirPlayActive passthrough (FIX-B2 finding 7a)
+
+    @Test func systemDefaultIsAirPlayActiveReachesTheSnapshot() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil,
+            systemDefaultIsAirPlayActive: true, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(snapshot.systemDefaultIsAirPlayActive == true)
+    }
+
+    // MARK: Group member names (FIX-B2 finding 7b — the Groups tab must be
+    // able to label a member that is not currently discovered)
+
+    @Test func groupMemberNamesCoverOfflineMembersAndPreferLiveNames() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        // "ghost" is a saved member no longer discovered; "never-seen" has no
+        // name anywhere. The caller's map also carries a STALE name for the
+        // live speaker-b, which the live device list must override.
+        try controller.saveGroup(Group(
+            id: "g1", name: "Group 1",
+            memberIDs: ["speaker-b", "ghost", "never-seen"], memberVolumes: [:]))
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil,
+            knownDeviceNames: ["ghost": "Old Kitchen", "speaker-b": "Stale Name"],
+            serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let group = try #require(snapshot.groups.first { $0.id == "g1" })
+        #expect(group.memberNames == ["speaker-b": "Speaker B", "ghost": "Old Kitchen"],
+                "offline member keeps its last-known name; live name wins; unnamed member is absent")
     }
 }
 

@@ -243,4 +243,70 @@ import Testing
         settings.allowRemoteControl = false
         #expect(!AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUTER_COMPANION": "banana"], settings: settings))
     }
+
+    // MARK: Companion — resolution source (FIX-C)
+    //
+    // The Settings › General checkbox must render the EFFECTIVE state and
+    // disable itself while an override is in force, rather than showing the
+    // raw persisted setting while a different value actually runs — these
+    // assert the source-carrying resolver `resolvedAllowRemoteControl` is
+    // built on gets every case right.
+
+    @Test func resolutionSourceIsSettingWhenEnvUnset() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(environment: [:], settings: settings)
+        #expect(resolution == .setting(true))
+        #expect(resolution.value)
+        #expect(!resolution.isForced)
+    }
+
+    @Test(arguments: [
+        ("1", true), ("0", false),
+        ("on", true), ("off", false),
+        ("ON", true), ("OFF", false),
+    ])
+    func resolutionSourceIsForcedForEveryRecognizedEnvValue(raw: String, expected: Bool) {
+        let settings = AppSettings(defaults: defaults)
+        // The setting disagrees with every expected outcome, so a pass proves
+        // the env var actually won rather than merely matching the default.
+        settings.allowRemoteControl = !expected
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: ["AUDIOUTER_COMPANION": raw], settings: settings)
+        #expect(resolution == .forced(expected))
+        #expect(resolution.value == expected)
+        #expect(resolution.isForced)
+    }
+
+    @Test func resolutionSourceIsSettingWhenEnvGarbage() {
+        // Garbage still falls back to the setting AND reports the source as
+        // `.setting` — the checkbox must stay editable, not lock up over a typo.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: ["AUDIOUTER_COMPANION": "banana"], settings: settings)
+        #expect(resolution == .setting(true))
+        #expect(!resolution.isForced)
+    }
+
+    @Test func resolutionSourceIsForcedForExplicit() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = false
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            explicit: true, environment: [:], settings: settings)
+        #expect(resolution == .forced(true))
+        #expect(resolution.isForced)
+    }
+
+    @Test func resolvedAllowRemoteControlAgreesWithSourceVariant() {
+        // The plain-Bool convenience must always equal `.value` on the
+        // source-carrying resolver — it's implemented in terms of it.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        for environment in [[:], ["AUDIOUTER_COMPANION": "off"], ["AUDIOUTER_COMPANION": "garbage"]] as [[String: String]] {
+            let plain = AppSettings.resolvedAllowRemoteControl(environment: environment, settings: settings)
+            let withSource = AppSettings.resolvedAllowRemoteControlWithSource(environment: environment, settings: settings)
+            #expect(plain == withSource.value)
+        }
+    }
 }

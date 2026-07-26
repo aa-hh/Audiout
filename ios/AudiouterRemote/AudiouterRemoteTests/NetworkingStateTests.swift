@@ -149,11 +149,19 @@ import AudiouterProtocol
 
     @Test func denialIsSuspectedOnlyAfterItPersistsPastTheThreshold() {
         var detector = PermissionDenialDetector()
+        let threshold = PermissionDenialDetector.threshold
         let t0 = Date(timeIntervalSinceReferenceDate: 1000)
         detector.browserWaiting(dnsErrorCode: PermissionDenialDetector.policyDeniedCode, at: t0)
         #expect(!detector.isSuspected(at: t0))
-        #expect(!detector.isSuspected(at: t0.addingTimeInterval(2.9)))
-        #expect(detector.isSuspected(at: t0.addingTimeInterval(3.1)))
+        #expect(!detector.isSuspected(at: t0.addingTimeInterval(threshold - 0.1)))
+        #expect(detector.isSuspected(at: t0.addingTimeInterval(threshold + 0.1)))
+    }
+
+    @Test func theThresholdOutlastsAUserReadingThePermissionAlert() {
+        // -65570 is emitted the whole time the system permission prompt is
+        // on screen; calling "denied" in under a few seconds accuses a user
+        // who is still reading. 3s was measured too short — pin the floor.
+        #expect(PermissionDenialDetector.threshold >= 8)
     }
 
     @Test func aDifferentWaitingErrorClearsThePendingDenial() {
@@ -179,10 +187,11 @@ import AudiouterProtocol
         detector.cleared()
         #expect(!detector.isSuspected(at: t0.addingTimeInterval(10)))
 
+        let threshold = PermissionDenialDetector.threshold
         let t1 = t0.addingTimeInterval(20)
         detector.browserWaiting(dnsErrorCode: PermissionDenialDetector.policyDeniedCode, at: t1)
-        #expect(!detector.isSuspected(at: t1.addingTimeInterval(2)))
-        #expect(detector.isSuspected(at: t1.addingTimeInterval(4)))
+        #expect(!detector.isSuspected(at: t1.addingTimeInterval(threshold - 1)))
+        #expect(detector.isSuspected(at: t1.addingTimeInterval(threshold + 1)))
     }
 
     @Test func repeatedDenialEventsKeepTheOriginalStart() {
@@ -190,7 +199,7 @@ import AudiouterProtocol
         let t0 = Date(timeIntervalSinceReferenceDate: 1000)
         detector.browserWaiting(dnsErrorCode: PermissionDenialDetector.policyDeniedCode, at: t0)
         detector.browserWaiting(dnsErrorCode: PermissionDenialDetector.policyDeniedCode, at: t0.addingTimeInterval(2))
-        #expect(detector.isSuspected(at: t0.addingTimeInterval(3.5)))
+        #expect(detector.isSuspected(at: t0.addingTimeInterval(PermissionDenialDetector.threshold + 0.5)))
     }
 
     // MARK: - MacConnection state machine
@@ -405,7 +414,7 @@ import AudiouterProtocol
         let defaults = try makeDefaults()
         let (controller, factory) = makeController(defaults: defaults)
         let received = LockedSnapshots()
-        controller.onSnapshot = { received.append($0) }
+        controller.setOnSnapshot { received.append($0) }
 
         controller.connect(to: makeMac())
         controller.queue.sync {}
@@ -501,5 +510,330 @@ import AudiouterProtocol
         #expect(factory.count == 1, "a user who hung up must not be auto-redialed")
         // The Mac stays remembered for the next explicit connect/foreground.
         #expect(defaults.string(forKey: "lastUsedMacID") == mac.id)
+    }
+
+    // MARK: - Handshake deadline + app-level liveness
+
+    @Test func handshakingEscapesWhenWelcomeNeverArrives() throws {
+        let queue = DispatchQueue(label: "NetworkingStateTests.welcomeTimeout")
+        let transport = FakeTransport()
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        conn.welcomeTimeout = 0.05
+        conn.start()
+        queue.sync { transport.events?(.ready) }
+        #expect(queue.sync { conn.state } == .handshaking)
+
+        #expect(waitUntil { queue.sync { conn.state } == .disconnected(.failed("welcome timed out")) },
+                "a Mac whose main thread never produces the welcome must not hold the phone in handshaking forever")
+        #expect(transport.cancelled)
+    }
+
+    @Test func aPromptWelcomeCancelsTheDeadline() throws {
+        let queue = DispatchQueue(label: "NetworkingStateTests.welcomeInTime")
+        let transport = FakeTransport()
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        conn.welcomeTimeout = 0.05
+        conn.start()
+        let welcome = try encoded(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot()))
+        queue.sync {
+            transport.events?(.ready)
+            transport.events?(.message(welcome))
+        }
+        #expect(queue.sync { conn.state } == .live)
+        Thread.sleep(forTimeInterval: 0.1) // outlive the (cancelled) deadline
+        #expect(queue.sync { conn.state } == .live,
+                "the deadline must be cancelled the moment welcome lands")
+    }
+
+    @Test func aHungMacAppIsDetectedEvenWhenEveryPingIsPonged() throws {
+        // Pongs prove the socket, not the app: the peer's Network.framework
+        // answers pings with no app code running. App-level liveness rides
+        // on inbound frames instead.
+        let queue = DispatchQueue(label: "NetworkingStateTests.appLiveness")
+        let transport = FakeTransport()
+        let conn = MacConnection(mac: makeMac(), transport: transport, clientName: "TestPhone", queue: queue)
+        conn.appLivenessTimeout = 0.2
+        conn.start()
+        let welcome = try encoded(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot()))
+        queue.sync {
+            transport.events?(.ready)
+            transport.events?(.message(welcome))
+        }
+        try #require(queue.sync { conn.state } == .live)
+
+        // Fresh inbound activity (the server's ping) + an immediate tick:
+        // alive, and stays alive despite the ponged ping.
+        queue.sync {
+            transport.events?(.activity)
+            conn.keepaliveTick()
+            transport.pong()
+        }
+        #expect(queue.sync { conn.state } == .live)
+
+        // Now the Mac app goes silent (no frames, no pings) while the
+        // socket keeps ponging: past the window, the tick calls it dead.
+        Thread.sleep(forTimeInterval: 0.3)
+        queue.sync { conn.keepaliveTick() }
+        #expect(queue.sync { conn.state } == .disconnected(.keepaliveTimeout),
+                "no app-level inbound traffic within the window must read as a dead peer")
+    }
+
+    // MARK: - Terminal-vs-retryable classification
+
+    @Test func disconnectReasonsClassifyTerminalVsRetryable() {
+        #expect(MacDisconnectReason.goodbye("protoMismatch").reconnectClass == .terminal)
+        #expect(MacDisconnectReason.incompatiblePeer.reconnectClass == .terminal)
+        #expect(MacDisconnectReason.goodbye("serverFull").reconnectClass == .longBackoff)
+        #expect(MacDisconnectReason.goodbye("disabled").reconnectClass == .waitForReadvertise)
+        #expect(MacDisconnectReason.goodbye("shutdown").reconnectClass == .retry)
+        #expect(MacDisconnectReason.goodbye("some-future-reason").reconnectClass == .retry,
+                "unknown goodbye reasons from a newer server must default to retryable")
+        #expect(MacDisconnectReason.failed("socket died").reconnectClass == .retry)
+        #expect(MacDisconnectReason.keepaliveTimeout.reconnectClass == .retry)
+        #expect(MacDisconnectReason.closedByUs.reconnectClass == .quiet)
+    }
+
+    @Test func protoMismatchGoodbyeStopsAutoRedialAndSettles() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "protoMismatch"))))
+        }
+        // A retryable drop redials eagerly (0-delay); give that window time
+        // to prove nothing fires here.
+        Thread.sleep(forTimeInterval: 0.2)
+        controller.queue.sync {}
+        #expect(factory.count == 1, "a proto-mismatched Mac must not be redialed — every attempt gets the same goodbye")
+        #expect(controller.queue.sync { controller.connectionState } == .disconnected(.goodbye("protoMismatch")),
+                "the settled state is what the UI renders the 'update the app' message from")
+
+        // Browse refreshes must not resurrect the redial loop.
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        Thread.sleep(forTimeInterval: 0.1)
+        controller.queue.sync {}
+        #expect(factory.count == 1)
+
+        // An explicit user connect is the ONE way back in.
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        #expect(factory.count == 2)
+    }
+
+    @Test func anIncompatibleMacIsNeverDialedAtAll() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let newer = DiscoveredMac(
+            id: "Future._audiouter._tcplocal.",
+            endpoint: .service(name: "Future", type: CompanionProto.serviceType, domain: "local.", interface: nil),
+            name: "Future",
+            protoVersion: CompanionProto.version + 1,
+            isIncompatible: true
+        )
+
+        controller.connect(to: newer)
+        controller.queue.sync {}
+        #expect(factory.count == 0, "refuse-forward means refusing the DIAL, not just documenting it")
+        #expect(controller.queue.sync { controller.connectionState } == .disconnected(.incompatiblePeer))
+
+        // Browse events must not auto-redial it either.
+        controller.queue.sync { controller.handleMacsChanged([newer]) }
+        Thread.sleep(forTimeInterval: 0.1)
+        controller.queue.sync {}
+        #expect(factory.count == 0)
+    }
+
+    @Test func serverFullBacksOffLongInsteadOfHammering() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "serverFull"))))
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        controller.queue.sync {}
+        #expect(factory.count == 1, "serverFull must not be redialed eagerly — a slot does not free on our schedule")
+        #expect(controller.queue.sync { controller.reconnectAttempts } == 1,
+                "a retry IS scheduled (on the long fixed delay), not abandoned")
+        #expect(controller.queue.sync { controller.connectionState } == .disconnected(.goodbye("serverFull")))
+    }
+
+    @Test func disabledSettlesUntilTheMacReadvertises() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+
+        try controller.queue.sync {
+            factory.transports[0].events?(.message(try encoded(.goodbye(reason: "disabled"))))
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+        controller.queue.sync {}
+        #expect(factory.count == 1, "a Mac that said it is turned off must not be hammered")
+
+        // Still advertised (withdrawal lags): a refresh with the Mac
+        // present must NOT redial.
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        Thread.sleep(forTimeInterval: 0.1)
+        controller.queue.sync {}
+        #expect(factory.count == 1)
+
+        // Advertisement disappears, then comes back (checkbox re-ticked):
+        // NOW reconnect.
+        controller.queue.sync { controller.handleMacsChanged([]) }
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        #expect(waitUntil { factory.count == 2 },
+                "the Mac re-advertising is the resume signal")
+    }
+
+    // MARK: - Late subscriber + snapshot staleness (controller level)
+
+    @Test func aLateSnapshotSubscriberIsReplayedTheCurrentValue() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+
+        // Live FIRST, subscriber second — the welcome already happened and
+        // the server suppresses identical broadcasts, so without replay
+        // this subscriber would stare at nil forever.
+        controller.connect(to: makeMac())
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+
+        let received = LockedSnapshots()
+        controller.setOnSnapshot { received.append($0) }
+        controller.queue.sync {}
+        #expect(received.all == [makeSnapshot()],
+                "subscribing after live must deliver the current snapshot immediately")
+
+        let states = LockedStates()
+        controller.setOnConnectionStateChanged { states.append($0) }
+        controller.queue.sync {}
+        #expect(states.all == [.live],
+                "the status subscriber gets the current state on attach too")
+    }
+
+    private final class LockedStates: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _all: [MacConnectionState] = []
+        func append(_ state: MacConnectionState) { lock.withLock { _all.append(state) } }
+        var all: [MacConnectionState] { lock.withLock { _all } }
+    }
+
+    @Test func aDisconnectClearsTheSnapshotAndNothingStaleIsReplayed() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+
+        controller.connect(to: makeMac())
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+        #expect(controller.queue.sync { controller.latestSnapshot } != nil)
+
+        controller.queue.sync { factory.transports[0].events?(.failed("socket died")) }
+        #expect(controller.queue.sync { controller.latestSnapshot } == nil,
+                "an hour-old fleet must never be rendered as current after a drop")
+
+        // A subscriber attaching while disconnected gets NO stale replay.
+        let received = LockedSnapshots()
+        controller.setOnSnapshot { received.append($0) }
+        controller.queue.sync {}
+        #expect(received.all.isEmpty)
+    }
+
+    // MARK: - Wi-Fi return
+
+    @Test func wifiReturnCancelsTheBackoffAndRetriesImmediately() throws {
+        let defaults = try makeDefaults()
+        let (controller, factory) = makeController(defaults: defaults)
+        let mac = makeMac()
+
+        controller.queue.sync { controller.handleMacsChanged([mac]) }
+        controller.connect(to: mac)
+        controller.queue.sync {}
+        try goLive(controller, transport: factory.transports[0])
+
+        // Two consecutive failures: the eager attempt (transport 2) fires,
+        // fails too, and the NEXT retry is pending on a 1s backoff.
+        controller.queue.sync { factory.transports[0].events?(.failed("socket died")) }
+        try #require(waitUntil { factory.count == 2 })
+        controller.queue.sync { factory.transports[1].events?(.failed("still down")) }
+        controller.queue.sync {}
+        try #require(factory.count == 2, "the second retry must be waiting out its backoff")
+
+        // Wi-Fi drops and returns: the backoff was priced for a network
+        // that no longer exists — retry must fire well inside the 1s delay.
+        controller.queue.sync { controller.handlePathUpdate(satisfied: false) }
+        controller.queue.sync { controller.handlePathUpdate(satisfied: true) }
+        #expect(waitUntil(timeout: 0.5) { factory.count == 3 },
+                "path-satisfied must reset the backoff and redial immediately")
+    }
+
+    // MARK: - Resolve probe cost + hygiene
+
+    private final class UptimeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value: TimeInterval = 0
+        var value: TimeInterval {
+            get { lock.withLock { _value } }
+            set { lock.withLock { _value = newValue } }
+        }
+    }
+
+    @Test func resolvedAddressCacheHonorsTTLAndInvalidation() throws {
+        let uptime = UptimeBox()
+        let cache = ResolvedAddressCache(now: { uptime.value })
+        let url = try #require(URL(string: "ws://192.168.1.20:7000/"))
+
+        #expect(cache.url(forMacID: "mac-1") == nil)
+        cache.store(url, forMacID: "mac-1")
+        #expect(cache.url(forMacID: "mac-1") == url)
+        #expect(cache.url(forMacID: "mac-2") == nil, "entries are per Mac id")
+
+        uptime.value = ResolvedAddressCache.ttl - 1
+        #expect(cache.url(forMacID: "mac-1") == url, "fresh inside the TTL")
+        uptime.value = ResolvedAddressCache.ttl + 1
+        #expect(cache.url(forMacID: "mac-1") == nil, "expired entries must force a re-probe")
+
+        uptime.value = 100
+        cache.store(url, forMacID: "mac-1")
+        cache.invalidate(macID: "mac-1")
+        #expect(cache.url(forMacID: "mac-1") == nil, "a failed dial invalidates immediately")
+    }
+
+    @Test func aFailedResolveProbeIsCancelledNotLeaked() throws {
+        // Real localhost networking: a TCP probe to a port nothing listens
+        // on is refused/stalled fast, exercising the probe's failure exit.
+        let mac = DiscoveredMac(
+            id: "probe-test",
+            endpoint: .hostPort(host: "127.0.0.1", port: 1),
+            name: "probe-test",
+            protoVersion: CompanionProto.version,
+            isIncompatible: false
+        )
+        let queue = DispatchQueue(label: "NetworkingStateTests.probeCancel")
+        let transport = ResolvedWebSocketTransport(mac: mac, cache: ResolvedAddressCache())
+        let failed = UptimeBox() // 0 = not failed, 1 = failed
+        transport.events = { event in
+            if case .failed = event { failed.value = 1 }
+        }
+        transport.start(queue: queue)
+        #expect(waitUntil { failed.value == 1 }, "the probe's failure must surface as a transport failure")
+        #expect(queue.sync { transport.probe == nil },
+                "every probe exit funnels through abandonProbe — the NWConnection must be cancelled and released")
     }
 }

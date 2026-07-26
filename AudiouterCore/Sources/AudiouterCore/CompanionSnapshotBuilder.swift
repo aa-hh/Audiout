@@ -15,6 +15,28 @@ import AudiouterProtocol
 /// could affect the snapshot and broadcasts the result.
 public enum CompanionSnapshotBuilder {
 
+    // MARK: Size ceilings (FIX-A handoff — snapshot bounding is builder-side)
+    //
+    // The iOS client caps inbound frames at 1 MB (`CompanionServer.
+    // iosInboundCapBytes`); an over-cap snapshot deterministically kills the
+    // phone's connection, which then reconnect-loops on the same snapshot.
+    // Everything else in the snapshot is bounded by reality (device fleet) or
+    // by the dispatcher's input caps — only these two lists scale with the
+    // Mac's running-app count, so they get documented ceilings. Truncation is
+    // deterministic (sorted prefix / stable prefix), so a capped snapshot
+    // still compares Equatable-identical between rebuilds and the server's
+    // identical-snapshot suppression keeps working.
+
+    /// Ceiling on `Snapshot.addableApps` — applied AFTER the bundleID sort,
+    /// so which apps survive the cut is stable. ~100 bytes per entry keeps
+    /// even the cap far under the frame budget; no real Mac runs anywhere
+    /// near this many `.regular` apps.
+    public static let maxAddableApps = 100
+
+    /// Ceiling on names per device in `Snapshot.liveRoutedAppNames`
+    /// (stable prefix of the backend's confirmed-streaming list).
+    public static let maxLiveRoutedAppNamesPerDevice = 20
+
     /// - Parameters:
     ///   - devices: the live device list (already resolved by the caller —
     ///     this mapper never talks to a backend directly).
@@ -48,6 +70,15 @@ public enum CompanionSnapshotBuilder {
     ///   - liveRoutedAppNames: passthrough to `Snapshot.liveRoutedAppNames`.
     ///   - localFallbackActive: passthrough to `Snapshot.localFallbackActive`.
     ///   - takeoverStatus: passthrough to `Snapshot.takeoverStatus`.
+    ///   - systemDefaultIsAirPlayActive: passthrough to
+    ///     `Snapshot.systemDefaultIsAirPlayActive` (FIX-B2 finding 7a — the
+    ///     caller caches it from `BackendEvent.systemDefaultIsAirPlayActive`
+    ///     like `localFallbackActive`).
+    ///   - knownDeviceNames: last-known display name per `Device.id`,
+    ///     INCLUDING devices no longer discovered (FIX-B2 finding 7b — the
+    ///     caller keeps names across `deviceRemoved`). Backs each
+    ///     `GroupState.memberNames` so the phone can label an offline group
+    ///     member; the live `devices` list's names win over this map.
     ///   - serverName: passthrough to `Snapshot.serverName`.
     ///   - connectVolume/connectVolumeMin/connectVolumeMax/startBufferMs/
     ///     startBufferOptionsMs: the Mac-authoritative settings slice —
@@ -64,6 +95,8 @@ public enum CompanionSnapshotBuilder {
         liveRoutedAppNames: [String: [String]],
         localFallbackActive: Bool,
         takeoverStatus: String?,
+        systemDefaultIsAirPlayActive: Bool = false,
+        knownDeviceNames: [String: String] = [:],
         serverName: String,
         connectVolume: Int,
         connectVolumeMin: Int,
@@ -75,6 +108,11 @@ public enum CompanionSnapshotBuilder {
             deviceState(for: device, groupController: groupController, iconFor: iconFor)
         }
 
+        // Live names win over the caller's last-known map — a rename arriving
+        // via `deviceUpdated` must not be shadowed by a stale cached name.
+        var deviceNames = knownDeviceNames
+        for device in devices { deviceNames[device.id] = device.name }
+
         let groupStates = groupController.groups.map { group in
             GroupState(
                 id: group.id,
@@ -82,7 +120,13 @@ public enum CompanionSnapshotBuilder {
                 memberIDs: group.memberIDs,
                 memberVolumes: group.memberVolumes,
                 iconSymbolName: group.iconSymbolName,
-                isMuted: groupController.isGroupMuted(group.id)
+                isMuted: groupController.isGroupMuted(group.id),
+                // FIX-B2 finding 7b: names for members that are NOT currently
+                // discovered come from `knownDeviceNames`; a member with no
+                // known name at all is simply absent from the map.
+                memberNames: Dictionary(uniqueKeysWithValues: group.memberIDs.compactMap { id in
+                    deviceNames[id].map { (id, $0) }
+                })
             )
         }
 
@@ -109,12 +153,23 @@ public enum CompanionSnapshotBuilder {
             groups: groupStates,
             activeGroupID: groupController.activeGroupID,
             appRoutes: appRouteStates,
-            liveRoutedAppNames: liveRoutedAppNames,
+            liveRoutedAppNames: liveRoutedAppNames.mapValues {
+                $0.count > maxLiveRoutedAppNamesPerDevice
+                    ? Array($0.prefix(maxLiveRoutedAppNamesPerDevice)) : $0
+            },
+            // Sorted by bundleID (FIX-B2 finding 3): `runningApplications`
+            // order is documented as unspecified, and array order is part of
+            // `Snapshot`'s Equatable — an order flap would defeat the
+            // server's identical-snapshot suppression AND reshuffle the
+            // phone's add-app list under the user's finger.
             addableApps: addableApps
                 .filter { !excludedBundleIDs.contains($0.bundleID) }
+                .sorted { $0.bundleID < $1.bundleID }
+                .prefix(maxAddableApps)
                 .map { Snapshot.AddableApp(bundleID: $0.bundleID, displayName: $0.displayName) },
             localFallbackActive: localFallbackActive,
             takeoverStatus: takeoverStatus,
+            systemDefaultIsAirPlayActive: systemDefaultIsAirPlayActive,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,

@@ -20,12 +20,21 @@ enum MacConnectionState: Equatable, Sendable {
 }
 
 enum MacDisconnectReason: Equatable, Sendable {
-    /// Transport-level error (dial failed, socket died, malformed frame).
+    /// Transport-level error (dial failed, socket died, malformed frame,
+    /// welcome never arrived within ``MacConnection/welcomeTimeout``).
     case failed(String)
-    /// Two consecutive unanswered keepalive pings.
+    /// Peer liveness lost: either two consecutive unanswered socket-level
+    /// pings (detected on the third keepalive tick, so up to
+    /// 3 × `keepaliveInterval` ≈ 45s after the peer died), or no app-level
+    /// inbound frame within ``MacConnection/appLivenessTimeout`` — the
+    /// socket ponged but the Mac APP stopped producing frames (pings from
+    /// its reaper, state broadcasts, command results), i.e. a hung app on a
+    /// healthy socket.
     case keepaliveTimeout
-    /// The server said goodbye; carries its reason
-    /// (`"disabled"` / `"shutdown"` / `"protoMismatch"`).
+    /// The server said goodbye; carries its reason (`"disabled"` /
+    /// `"shutdown"` / `"protoMismatch"` / `"serverFull"`). See
+    /// `MacDisconnectReason.reconnectClass` (ConnectionController.swift)
+    /// for how each is treated; unknown reasons are retryable by design.
     case goodbye(String)
     /// The peer speaks a NEWER protocol than us (refuse-forward).
     case incompatiblePeer
@@ -38,6 +47,16 @@ enum MacDisconnectReason: Equatable, Sendable {
 enum MacTransportEvent: Sendable {
     case ready
     case message(Data)
+    /// An inbound WebSocket control frame (the server's ping, or a pong).
+    /// Carries no payload the app cares about, but it is PROOF the peer's
+    /// app code is alive — the server pings from its client-reaper loop, so
+    /// a ping is app-level traffic, unlike the pongs our own pings elicit
+    /// (those are answered inside Network.framework). Feeds the
+    /// app-liveness clock and nothing else. Verified experimentally: with
+    /// `autoReplyPing = true` inbound pings still surface in
+    /// `receiveMessage` (opcode `.ping`, possibly nil data) AND get
+    /// auto-answered.
+    case activity
     case failed(String)
     case closed
 }
@@ -71,7 +90,25 @@ final class MacConnection: @unchecked Sendable {
     /// After this many unanswered pings the peer is treated as dead.
     static let maxMissedPings = 2
 
+    /// Bound on `handshaking → live`: the server defers `welcome` until its
+    /// first broadcast runs on its main actor, so a Mac with a stalled main
+    /// thread would otherwise leave us in `.handshaking` FOREVER (the
+    /// socket is healthy — no transport event will ever save us). `var` so
+    /// tests shrink it; set before `start()`. Deliberately a plain deadline
+    /// today: a future "waiting for the user to approve this phone" server
+    /// signal would cancel/extend `welcomeDeadline` on arrival.
+    var welcomeTimeout: TimeInterval = 10
+    /// App-level liveness bound after `.live`: the server pings every
+    /// client (its reaper loop) and those pings surface here as
+    /// `.activity`, so a healthy-but-idle link still produces inbound
+    /// frames well inside this window. No inbound frame of ANY kind for
+    /// this long means the Mac app is hung even though the socket pongs.
+    /// `var` so tests shrink it; set before `start()`.
+    var appLivenessTimeout: TimeInterval = 60
+
     let mac: DiscoveredMac
+    /// Set on `queue` (or before `start()` — dispatch's enqueue barrier
+    /// makes pre-start assignment safe); never reassigned mid-session.
     var onEvent: (@Sendable (MacConnectionEvent) -> Void)?
 
     private let queue: DispatchQueue
@@ -81,6 +118,9 @@ final class MacConnection: @unchecked Sendable {
     private(set) var state: MacConnectionState = .idle
     private(set) var missedPings = 0
     private var keepaliveTimer: DispatchSourceTimer?
+    private var welcomeDeadline: DispatchWorkItem?
+    /// Uptime of the last inbound frame (`.message` or `.activity`).
+    private var lastInboundUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     init(mac: DiscoveredMac, transport: MacTransport, clientName: String, queue: DispatchQueue) {
         self.mac = mac
@@ -146,10 +186,15 @@ final class MacConnection: @unchecked Sendable {
                 return
             }
             transport.send(hello)
+            lastInboundUptime = ProcessInfo.processInfo.systemUptime
             transition(to: .handshaking)
+            startWelcomeDeadline()
             startKeepalive()
         case .message(let data):
+            lastInboundUptime = ProcessInfo.processInfo.systemUptime
             handleFrame(data)
+        case .activity:
+            lastInboundUptime = ProcessInfo.processInfo.systemUptime
         case .failed(let message):
             tearDown(.failed(message))
         case .closed:
@@ -180,6 +225,8 @@ final class MacConnection: @unchecked Sendable {
                 tearDown(.incompatiblePeer)
                 return
             }
+            welcomeDeadline?.cancel()
+            welcomeDeadline = nil
             transition(to: .live)
             onEvent?(.welcome(serverName: serverName, snapshot: snapshot))
         case .state(let snapshot):
@@ -200,17 +247,27 @@ final class MacConnection: @unchecked Sendable {
         }
     }
 
-    /// App-level keepalive: every `keepaliveInterval`, if the previous
+    /// Keepalive tick: every `keepaliveInterval`, if the previous
     /// `maxMissedPings` pings all went unanswered, the peer is dead;
-    /// otherwise send another ping. A pong resets the miss count. The
-    /// server's `autoReplyPing` answers our pings without app code on its
-    /// side.
+    /// otherwise send another ping. A pong resets the miss count. Timing
+    /// honesty: a dead SOCKET is detected on the third tick after it died
+    /// (ping, ping, verdict — up to 45s, not 30). The pings-and-pongs prove
+    /// only the socket: the server's `autoReplyPing` answers our pings
+    /// without app code on its side, which is why the tick ALSO enforces
+    /// `appLivenessTimeout` over inbound frames (see `.activity`).
     func keepaliveTick() {
+        dispatchPrecondition(condition: .onQueue(queue))
         switch state {
         case .handshaking, .live: break
         default: return
         }
         if missedPings >= Self.maxMissedPings {
+            tearDown(.keepaliveTimeout)
+            return
+        }
+        // App-level liveness (independent of socket pongs, which the peer's
+        // Network.framework answers even when the Mac app is hung).
+        if ProcessInfo.processInfo.systemUptime - lastInboundUptime > appLivenessTimeout {
             tearDown(.keepaliveTimeout)
             return
         }
@@ -220,6 +277,17 @@ final class MacConnection: @unchecked Sendable {
             if case .disconnected = self.state { return }
             self.missedPings = 0
         }
+    }
+
+    private func startWelcomeDeadline() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.welcomeDeadline = nil
+            guard case .handshaking = self.state else { return }
+            self.tearDown(.failed("welcome timed out"))
+        }
+        welcomeDeadline = item
+        queue.asyncAfter(deadline: .now() + welcomeTimeout, execute: item)
     }
 
     private func startKeepalive() {
@@ -237,6 +305,8 @@ final class MacConnection: @unchecked Sendable {
         if case .disconnected = state { return }
         keepaliveTimer?.cancel()
         keepaliveTimer = nil
+        welcomeDeadline?.cancel()
+        welcomeDeadline = nil
         transport.events = nil
         transport.cancel()
         transition(to: .disconnected(reason))
@@ -273,10 +343,54 @@ final class MacConnection: @unchecked Sendable {
 /// The probe is forced to IPv4, mirroring `NativeDiscovery.probeIPv4First`:
 /// an unconstrained probe on a dual-stack LAN can settle on an IPv6
 /// link-local address, whose zone index does not survive a URL round-trip.
+///
+/// Probe cost (remaining, by design): the first connect to a Mac — and the
+/// first after a TTL expiry or an invalidation — still costs one plain-TCP
+/// probe, which the Mac's listener sees as a hello-less connection held in
+/// its bounded pre-hello pending pool until its short pre-hello deadline
+/// reaps it. ``ResolvedAddressCache`` keeps that to one probe per Mac per
+/// TTL window instead of one per attempt.
 // razor: IPv6-only Wi-Fi LANs are unsupported (probe fails → normal
 // connection-failure surface + backoff retry). Upgrade path: bracketed
 // `ws://[addr]/` with a percent-encoded zone, gated on a real-hardware
 // interop test — same deferred-IPv6 posture as NativeDiscovery.
+/// Cache of resolve-probe results, keyed by `DiscoveredMac.id`. Each probe
+/// is not free on the SERVER either: the plain-TCP connect fires the Mac
+/// listener's `newConnectionHandler` and holds one of its (bounded)
+/// pre-hello pending-pool slots until its pre-hello deadline reaps it — so
+/// a reconnect storm must not re-probe every attempt. The TTL is short
+/// because a Mac's LAN address CAN change (DHCP renewal, interface flap),
+/// and a stale hit self-heals: the dial fails fast, the entry is
+/// invalidated, and the next attempt re-probes.
+final class ResolvedAddressCache: @unchecked Sendable {
+    static let shared = ResolvedAddressCache()
+    static let ttl: TimeInterval = 30
+
+    private let lock = NSLock()
+    private var entries: [String: (url: URL, storedAt: TimeInterval)] = [:]
+    private let now: () -> TimeInterval
+
+    /// `now` injected (uptime-based by default) so TTL expiry is testable.
+    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.now = now
+    }
+
+    func url(forMacID id: String) -> URL? {
+        lock.withLock {
+            guard let entry = entries[id], now() - entry.storedAt < Self.ttl else { return nil }
+            return entry.url
+        }
+    }
+
+    func store(_ url: URL, forMacID id: String) {
+        lock.withLock { entries[id] = (url, now()) }
+    }
+
+    func invalidate(macID id: String) {
+        lock.withLock { entries[id] = nil }
+    }
+}
+
 final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
 
     static let probeTimeout: TimeInterval = 10
@@ -286,20 +400,39 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
 
     var events: (@Sendable (MacTransportEvent) -> Void)?
 
+    private let macID: String
     private let endpoint: NWEndpoint
+    private let cache: ResolvedAddressCache
     private var queue: DispatchQueue?
-    private var probe: NWConnection?
+    /// Internal (not private) so tests can assert the probe is gone after
+    /// every exit path; all exits funnel through `abandonProbe()`.
+    private(set) var probe: NWConnection?
     private var probeTimeoutItem: DispatchWorkItem?
+    /// True while dialing an address served from `cache` — a dial failure
+    /// then invalidates the entry so the next attempt re-probes.
+    private var dialedFromCache = false
     private var connection: NWConnection?
     private var finished = false // failed once or cancelled — emit nothing more
 
-    init(mac: DiscoveredMac) {
+    init(mac: DiscoveredMac, cache: ResolvedAddressCache = .shared) {
+        self.macID = mac.id
         self.endpoint = mac.endpoint
+        self.cache = cache
     }
 
     func start(queue: DispatchQueue) {
         self.queue = queue
-        queue.async { self.startProbe(on: queue) }
+        queue.async {
+            guard !self.finished else { return }
+            // Skip the probe entirely when we already hold a fresh address
+            // for this Mac — the common reconnect case.
+            if let cached = self.cache.url(forMacID: self.macID) {
+                self.dialedFromCache = true
+                self.dial(url: cached, on: queue)
+            } else {
+                self.startProbe(on: queue)
+            }
+        }
     }
 
     func cancel() {
@@ -307,13 +440,22 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
         queue.async {
             self.finished = true
             self.events = nil
-            self.probeTimeoutItem?.cancel()
-            self.probeTimeoutItem = nil
-            self.probe?.cancel()
-            self.probe = nil
+            self.abandonProbe()
             self.connection?.cancel()
             self.connection = nil
         }
+    }
+
+    /// The ONE probe exit: every path out of the resolve phase — success,
+    /// `.failed`, `.waiting`, timeout, external cancel — must release the
+    /// probe connection promptly (an un-cancelled probe holds a server-side
+    /// pending slot until the server reaps it).
+    private func abandonProbe() {
+        probeTimeoutItem?.cancel()
+        probeTimeoutItem = nil
+        probe?.stateUpdateHandler = nil
+        probe?.cancel()
+        probe = nil
     }
 
     func send(_ data: Data) {
@@ -363,35 +505,32 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
             switch state {
             case .ready:
                 let remote = probe.currentPath?.remoteEndpoint
-                self.probeTimeoutItem?.cancel()
-                self.probeTimeoutItem = nil
-                probe.stateUpdateHandler = nil
-                probe.cancel()
-                self.probe = nil
+                self.abandonProbe()
                 if case let .hostPort(host, port) = remote,
                    let url = Self.wsURL(host: host, port: port) {
+                    self.cache.store(url, forMacID: self.macID)
                     self.dial(url: url, on: queue)
                 } else {
                     self.fail("resolved no usable IPv4 address for \(self.endpoint)")
                 }
             case .failed(let error):
-                self.probe = nil
+                // Cancel even though the connection already failed —
+                // Network.framework wants a cancel to release resources,
+                // and skipping it here leaked the NWConnection.
+                self.abandonProbe()
                 self.fail("resolve failed: \(error)")
             case .waiting(let error):
                 // A probe to a vanished service can wait forever; treat it
                 // as failure now — the reconnect backoff owns retrying.
-                probe.cancel()
-                self.probe = nil
+                self.abandonProbe()
                 self.fail("resolve stalled: \(error)")
             default:
                 break
             }
         }
         let timeout = DispatchWorkItem { [weak self] in
-            guard let self, let probe = self.probe else { return }
-            self.probeTimeoutItem = nil
-            probe.cancel()
-            self.probe = nil
+            guard let self, self.probe != nil else { return }
+            self.abandonProbe()
             self.fail("resolve timed out")
         }
         probeTimeoutItem = timeout
@@ -435,12 +574,16 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
                 self.receiveLoop(connection)
                 self.events?(.ready)
             case .failed(let error):
+                // The address we dialed didn't pan out — don't let the
+                // cache serve it to the next attempt.
+                self.cache.invalidate(macID: self.macID)
                 self.fail("\(error)")
             case .waiting(let error):
                 // We dialed a freshly resolved address; if it isn't
                 // accepting NOW, fail fast and let the backoff retry rather
                 // than sitting in `.waiting` (the exact hang the ws:// URL
                 // requirement produces when violated — never wait it out).
+                self.cache.invalidate(macID: self.macID)
                 connection.cancel()
                 self.fail("dial stalled: \(error)")
             case .cancelled:
@@ -459,11 +602,24 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
                 self.fail("receive failed")
                 return
             }
-            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
-               metadata.opcode == .close {
-                self.finished = true
-                self.events?(.closed)
-                return
+            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata {
+                switch metadata.opcode {
+                case .close:
+                    self.finished = true
+                    self.events?(.closed)
+                    return
+                case .ping, .pong:
+                    // The server's app-level ping (auto-answered by
+                    // `autoReplyPing`; delivery verified experimentally).
+                    // It can arrive with nil/empty data — falling through
+                    // to the empty-frame check below would misread it as a
+                    // CLOSE and kill a healthy session.
+                    self.events?(.activity)
+                    self.receiveLoop(connection)
+                    return
+                default:
+                    break
+                }
             }
             guard let data, !data.isEmpty else {
                 self.finished = true

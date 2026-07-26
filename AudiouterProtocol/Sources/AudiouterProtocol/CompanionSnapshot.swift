@@ -89,6 +89,14 @@ public struct GroupState: Codable, Equatable, Sendable {
     public var memberVolumes: [String: Int]
     public var iconSymbolName: String?
     public var isMuted: Bool
+    /// Last-known display name per member, keyed by `Device.id` (FIX-B2
+    /// finding 7b). Groups can name members that are not currently
+    /// discovered — without this the phone's Groups tab could not label an
+    /// offline member at all. A member absent from this map has no known
+    /// name (never seen this Mac session); render a placeholder. Optional
+    /// so a peer built before this field decodes cleanly (additive change,
+    /// no protocol break).
+    public var memberNames: [String: String]?
 
     public init(
         id: String,
@@ -96,7 +104,8 @@ public struct GroupState: Codable, Equatable, Sendable {
         memberIDs: [String],
         memberVolumes: [String: Int],
         iconSymbolName: String? = nil,
-        isMuted: Bool
+        isMuted: Bool,
+        memberNames: [String: String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -104,6 +113,7 @@ public struct GroupState: Codable, Equatable, Sendable {
         self.memberVolumes = memberVolumes
         self.iconSymbolName = iconSymbolName
         self.isMuted = isMuted
+        self.memberNames = memberNames
     }
 }
 
@@ -194,6 +204,13 @@ public struct Snapshot: Codable, Equatable, Sendable {
     public var addableApps: [AddableApp]
     public var localFallbackActive: Bool
     public var takeoverStatus: String?
+    /// Whether the macOS system default output is AirPlay-class while the Mac
+    /// is actively streaming (double-path/echo risk — the popover's W3-T3
+    /// note). FIX-B2 finding 7a: cached Mac-side like `localFallbackActive`.
+    /// Optional so a peer built before this field decodes cleanly (additive
+    /// change, no protocol break); `nil` means "not reported" — treat as
+    /// `false`.
+    public var systemDefaultIsAirPlayActive: Bool?
     public var settings: SettingsState
 
     public init(
@@ -209,6 +226,7 @@ public struct Snapshot: Codable, Equatable, Sendable {
         addableApps: [AddableApp],
         localFallbackActive: Bool,
         takeoverStatus: String? = nil,
+        systemDefaultIsAirPlayActive: Bool? = nil,
         settings: SettingsState
     ) {
         self.serverName = serverName
@@ -223,6 +241,7 @@ public struct Snapshot: Codable, Equatable, Sendable {
         self.addableApps = addableApps
         self.localFallbackActive = localFallbackActive
         self.takeoverStatus = takeoverStatus
+        self.systemDefaultIsAirPlayActive = systemDefaultIsAirPlayActive
         self.settings = settings
     }
 }

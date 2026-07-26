@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 /// Settings › **General** pane. Step 1: a single "Launch at login" switch wired
 /// to the `LoginItemManaging` seam. Also the entry point to **About Audiouter…**
@@ -23,9 +24,17 @@ public final class GeneralSettingsViewController: NSViewController {
     private let settings: AppSettings
     private let launchSwitch = NSSwitch()
     private let remoteControlCheckbox = NSButton()
+    private let remoteControlOverrideNote = SettingsForm.label("")
     private let setupButton = NSButton()
     private let aboutButton = NSButton()
     private let aboutWindowController: AboutWindowController
+
+    /// Resolved once at init (the env var, if any, can't change for the life of
+    /// this process) — what the checkbox must honestly reflect: the EFFECTIVE
+    /// state, not the raw persisted ``AppSettings/allowRemoteControl`` (FIX-C).
+    /// When ``AppSettings/RemoteControlResolution/isForced`` the checkbox
+    /// renders disabled and ``remoteControlOverrideNote`` explains why.
+    private let remoteControlResolution: AppSettings.RemoteControlResolution
 
     /// Fired when "Check Permissions…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
@@ -42,6 +51,9 @@ public final class GeneralSettingsViewController: NSViewController {
     /// - Parameters:
     ///   - settings: backs the "Allow control from iPhone" checkbox; injectable
     ///     so tests use a throwaway `UserDefaults` suite, never `.standard`.
+    ///   - environment: resolves ``AppSettings/RemoteControlResolution`` alongside
+    ///     `settings` (the `AUDIOUTER_COMPANION` dev knob); defaults to the real
+    ///     process environment, injected as a fixed dictionary in tests.
     ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
@@ -51,10 +63,13 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     test run never actually launches a browser.
     public init(loginItem: LoginItemManaging,
                 settings: AppSettings = AppSettings(),
+                environment: [String: String] = ProcessInfo.processInfo.environment,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.loginItem = loginItem
         self.settings = settings
+        self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: environment, settings: settings)
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
         super.init(nibName: nil, bundle: nil)
         title = "General"
@@ -73,10 +88,14 @@ public final class GeneralSettingsViewController: NSViewController {
             control: launchSwitch)
 
         // AppKit checkbox (matches DeviceRowView/MembershipRowView's boolean
-        // idiom) — no inline title, the row label carries it.
+        // idiom) — no inline title, the row label carries it. Reflects the
+        // EFFECTIVE state (`remoteControlResolution.value`), not the raw
+        // persisted setting, and is disabled while an override is in force —
+        // toggling it must be IMPOSSIBLE, not silently ineffective (FIX-C).
         remoteControlCheckbox.setButtonType(.switch)
         remoteControlCheckbox.title = ""
-        remoteControlCheckbox.state = settings.allowRemoteControl ? .on : .off
+        remoteControlCheckbox.state = remoteControlResolution.value ? .on : .off
+        remoteControlCheckbox.isEnabled = !remoteControlResolution.isForced
         remoteControlCheckbox.target = self
         remoteControlCheckbox.action = #selector(remoteControlToggled)
         remoteControlCheckbox.setAccessibilityLabel("Allow control from iPhone on this network")
@@ -84,6 +103,20 @@ public final class GeneralSettingsViewController: NSViewController {
             title: "Allow control from iPhone on this network",
             subtitle: "Lets the Audiouter companion app on your iPhone see and control this Mac's speakers.",
             control: remoteControlCheckbox)
+
+        // Same idiom as the Audio pane's `AIRPLAY_START_BUFFER_MS` override
+        // note: `.warning`-colored caption, wrapping, explicit
+        // `preferredMaxLayoutWidth` (an unset one drags the fixed-width pane
+        // wider — see `SettingsForm.hintLabel`'s doc comment). Only mounted
+        // when an override is actually in force.
+        remoteControlOverrideNote.stringValue =
+            "Controlled by the \(AppSettings.allowRemoteControlEnvironmentVariableName) "
+            + "setting for this launch — the checkbox can't change it."
+        remoteControlOverrideNote.font = Tokens.Font.caption
+        remoteControlOverrideNote.textColor = Tokens.Color.warning
+        remoteControlOverrideNote.lineBreakMode = .byWordWrapping
+        remoteControlOverrideNote.maximumNumberOfLines = 0
+        remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
 
         // "Check Permissions…" re-opens the first-run permission-priming window —
         // the way a user re-checks the System Audio / Local Network grants after
@@ -109,7 +142,12 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Version, license, and third-party credits.",
             control: aboutButton)
 
-        view = SettingsForm.paneView(rows: [launchRow, remoteControlRow, setupRow, aboutRow])
+        var rows = [launchRow, remoteControlRow]
+        if remoteControlResolution.isForced {
+            rows.append(remoteControlOverrideNote)
+        }
+        rows.append(contentsOf: [setupRow, aboutRow])
+        view = SettingsForm.paneView(rows: rows)
     }
 
     public override func viewDidLoad() {
@@ -128,6 +166,15 @@ public final class GeneralSettingsViewController: NSViewController {
     }
 
     @objc private func remoteControlToggled() {
+        // Toggling while overridden must be IMPOSSIBLE, not silently
+        // ineffective (FIX-C) — the checkbox is disabled so a real click
+        // never reaches here, but a `test_` hook drives the action directly,
+        // so the guard lives here too: bounce back to the effective value
+        // rather than persisting a setting that can't take effect.
+        guard !remoteControlResolution.isForced else {
+            remoteControlCheckbox.state = remoteControlResolution.value ? .on : .off
+            return
+        }
         settings.allowRemoteControl = remoteControlCheckbox.state == .on
         onAllowRemoteControlChanged?()
     }
@@ -176,15 +223,34 @@ public final class GeneralSettingsViewController: NSViewController {
         runSetupAgainTapped()
     }
 
-    // MARK: Test-support hooks (Companion — T6)
+    // MARK: Test-support hooks (Companion — T6, FIX-C)
 
-    /// Whether the checkbox currently reads "on".
+    /// Whether the checkbox currently reads "on" — the EFFECTIVE state
+    /// (`remoteControlResolution.value`), not necessarily the raw persisted
+    /// `AppSettings.allowRemoteControl` (FIX-C: they can legitimately differ
+    /// while an override is in force).
     public var test_allowRemoteControlIsOn: Bool {
         _ = view
         return remoteControlCheckbox.state == .on
     }
 
-    /// Drive the checkbox to `on`/`off` and run the same action a real click would.
+    /// Whether the checkbox is currently clickable — `false` while
+    /// `AUDIOUTER_COMPANION` (or an explicit override) is in force (FIX-C).
+    public var test_allowRemoteControlIsEnabled: Bool {
+        _ = view
+        return remoteControlCheckbox.isEnabled
+    }
+
+    /// The override explanation line's text, or `nil` when no override is in
+    /// force (it isn't mounted in the pane at all in that case) — FIX-C.
+    public var test_allowRemoteControlOverrideNote: String? {
+        _ = view
+        return remoteControlResolution.isForced ? remoteControlOverrideNote.stringValue : nil
+    }
+
+    /// Drive the checkbox to `on`/`off` and run the same action a real click
+    /// would. While overridden this is a no-op on the persisted setting (the
+    /// action itself refuses, mirroring the disabled real control) — FIX-C.
     public func test_toggleAllowRemoteControl(_ on: Bool) {
         _ = view
         remoteControlCheckbox.state = on ? .on : .off

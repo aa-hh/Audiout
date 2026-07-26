@@ -215,6 +215,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// entry for that device, same discipline as the popover's copy.
     private var routedAppNamesByDeviceID: [String: [String]] = [:]
 
+    /// The iPhone-companion link (PLAN-COMPANION-APP T7): a Bonjour-advertised
+    /// WebSocket server the phone connects to. Created once; started/stopped
+    /// only by `updateCompanionServerState()` (launch + the Settings › General
+    /// checkbox, both funneled through `AppSettings.resolvedAllowRemoteControl`
+    /// so the `AUDIOUTER_COMPANION` env override wins). Off by default — a
+    /// fresh install never opens an always-on listener uninvited.
+    private let companionServer = CompanionServer()
+
+    /// Mirrors whether `companionServer` is currently running, so the many
+    /// broadcast triggers can no-op cheaply while the feature is off (the
+    /// default) and `updateCompanionServerState()` only acts on a real edge.
+    private var companionActive = false
+
+    /// Executes phone commands against the exact controllers the popover
+    /// drives. Built in `wireCompanionServer()` once those controllers exist.
+    private var companionDispatcher: CompanionCommandDispatcher!
+
+    /// The pending coalesced broadcast (~50 ms): every snapshot-affecting
+    /// trigger funnels through `scheduleCompanionBroadcast()`, which arms ONE
+    /// work item per window instead of rebuilding per event — a device burst
+    /// at connect would otherwise build dozens of near-identical snapshots.
+    private var companionBroadcastWork: DispatchWorkItem?
+
+    /// Snapshot inputs that exist only as transient backend events
+    /// (`.localFallbackActive` / `.takeoverStatus`) — cached in `apply(event:)`
+    /// so the coalescer can rebuild the FULL snapshot at any later moment.
+    private var companionLocalFallbackActive = false
+    private var companionTakeoverStatus: TakeoverStatus?
+
+    /// The companion client currently holding a phone-initiated Main Out drag
+    /// (plan T7 item 5): set on `beginMainOutDrag`, cleared on `endMainOutDrag`.
+    /// If that client disconnects mid-drag, `onClientDisconnected` ends the
+    /// drag so `GroupController`'s drag slot can't stay latched forever.
+    private var companionDragClientID: UUID?
+
+    /// One name for both the Bonjour advertisement (`start(name:)`) and
+    /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
+    /// two must agree (one source of truth, `CompanionServer.sendWelcome`).
+    private let companionServerName = Host.current().localizedName ?? "Mac"
+
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -390,7 +430,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // muted the Mac. `AppRoutingController` fires this on the change edge only, so
         // no-op mutations never reach the backend. Fired synchronously from a UI
         // mutation (no lock held) → no deadlock with the backend's internal queues.
-        appRouting.onRoutesDidChange = { [weak self] in self?.pushAppRoutesToBackend() }
+        appRouting.onRoutesDidChange = { [weak self] in
+            self?.pushAppRoutesToBackend()
+            // Companion (T7): a route add/remove/redirect/volume change moves
+            // `appRoutes` AND `addableApps` in the snapshot. Extended IN PLACE —
+            // this closure is single-assignment, never reassigned elsewhere.
+            self?.scheduleCompanionBroadcast()
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
@@ -470,6 +516,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { return }
             (self?.backend as? AppRouteConfiguring)?.handleAppTerminated(bundleID: bundleID)
             self?.appRouting.resetDeviceRoute(bundleID: bundleID)
+            // Companion (T7): the quit app leaves `addableApps` / flips its
+            // route row's `isRunning`. The reset above only fires
+            // `onRoutesDidChange` when a `.device` route actually existed, so
+            // this explicit schedule covers the routeless/`currentDevice` case.
+            self?.scheduleCompanionBroadcast()
         }
 
         // T4 (bug fix): a routed app that quit and relaunched got no capture
@@ -487,6 +538,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let bundleID = app.bundleIdentifier
             else { return }
             (self?.backend as? AppRouteConfiguring)?.handleAppLaunched(bundleID: bundleID)
+            // Companion (T7): the launched app joins `addableApps` (or flips
+            // its existing route row's `isRunning`).
+            self?.scheduleCompanionBroadcast()
         }
 
         // B6b: the app has ZERO sleep/wake awareness otherwise — sleep silently
@@ -634,6 +688,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.permissionObserver.kick(source: "wake")
             }
         }
+
+        // Companion server (PLAN-COMPANION-APP T7). Wired LAST: the broadcast
+        // triggers it claims (`onStateDidChange`, `excludedApps.onChange`, the
+        // icon-controller chain-wrap) must attach after the popover/controllers
+        // above are fully configured — in particular after
+        // `popoverController.deviceIconController = deviceIconController`,
+        // whose `didSet` installs the popover's own `onChange` wrapper that
+        // this wiring chains onto (risk R2; same idiom as
+        // `MixerWindowController`, which chain-wraps later, on first open, and
+        // therefore wraps this wiring's closure in turn).
+        wireCompanionServer()
     }
 
     /// Register the PTP helper daemon once at launch, outside onboarding
@@ -1037,6 +1102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // window; the backend is already running, so its onFinished is a
             // guarded no-op.
             controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+            // Companion (T7): the two panes reached through the window's
+            // pane accessors — `SettingsWindowController` forwards its other
+            // callbacks as computed properties but grew none for these two
+            // (T6 landed them on the panes; adding forwarders is out of this
+            // wave's file scope — follow-up alongside the takeover-text nit).
+            // General's checkbox starts/stops the server; an Audio-pane
+            // connect-volume/buffer commit re-broadcasts the settings slice.
+            controller.test_general.onAllowRemoteControlChanged = { [weak self] in
+                self?.updateCompanionServerState()
+            }
+            controller.test_audio.onSettingChanged = { [weak self] in
+                self?.scheduleCompanionBroadcast()
+            }
             settingsWindowController = controller
         }
         controller.showWindow()
@@ -1167,6 +1245,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         eventTask?.cancel()
         eventTask = nil
+        // Companion (T7): stop the server alongside the backend so connected
+        // phones see a clean close instead of a dead socket. `stop()` is a
+        // cheap synchronous cancel (see its doc comment) — safe inline here.
+        companionBroadcastWork?.cancel()
+        companionBroadcastWork = nil
+        companionActive = false
+        companionServer.stop()
         backend.stop()
         log("Audiouter terminating")
 
@@ -1187,6 +1272,205 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return .terminateLater
+    }
+
+    // MARK: Companion server (iPhone remote — PLAN-COMPANION-APP T7)
+
+    /// Attach every companion trigger + the command/disconnect callbacks, then
+    /// start the server if setting/env allow. Called once, at the END of
+    /// `applicationDidFinishLaunching` (see the call site's ordering comment).
+    /// `appRouting.onRoutesDidChange` and the two `NSWorkspace` app-lifecycle
+    /// observers are the exceptions — they are single-assignment closures the
+    /// launch path already owns, so the companion tail rides inside them at
+    /// their original sites rather than being reassigned here.
+    @MainActor
+    private func wireCompanionServer() {
+        companionDispatcher = CompanionCommandDispatcher(
+            groupController: groupController,
+            appRouting: appRouting,
+            settings: settings,
+            isExcluded: { [excludedApps] bundleID in excludedApps.isExcluded(bundleID) },
+            // Mirrors `popoverController.onSetLocalPlaybackVolume` above: a
+            // `.currentDevice` route's local stream moves immediately; no-ops
+            // on backends without per-app local playback.
+            setLocalPlaybackVolume: { [weak self] volume, bundleID in
+                (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
+                    volume: volume, bundleID: bundleID)
+            },
+            // Mirrors `makeLatencySettingModel()`'s apply closure: persist
+            // FIRST, then reconnect — a partial reconnect failure must not
+            // lose the chosen setting for the next launch.
+            applyStartBuffer: { [weak self] ms in
+                guard let self else { return }
+                self.settings.startBufferMs = ms
+                if let configurable = self.backend as? LatencyConfigurable {
+                    await configurable.applyStartBuffer(ms: ms)
+                }
+            })
+
+        // Group/Main-Out/mute state — the broadest snapshot input. This
+        // closure is otherwise unclaimed (both UI surfaces repaint via
+        // `update(devices:)` from `apply(event:)`, not via this hook).
+        groupController.onStateDidChange = { [weak self] in
+            self?.scheduleCompanionBroadcast()
+        }
+
+        // The denylist feeds `addableApps`/`appRoutes` filtering. Fires on the
+        // model's change edge, independent of which UI mutated it; the
+        // Settings pane's own `onExcludedAppsChanged` (prune + repaint) runs
+        // in the same turn, and the 50 ms coalescer folds both into one build.
+        excludedApps.onChange = { [weak self] in
+            self?.scheduleCompanionBroadcast()
+        }
+
+        // Icon overrides feed `DeviceState.iconSymbolName`. Chain-wrap AFTER
+        // the popover's `deviceIconController` didSet installed its wrapper
+        // (risk R2) — same previousIconChange idiom as
+        // `MixerWindowController`, which wraps whatever is installed when the
+        // mixer is first opened, i.e. this closure, keeping all three alive.
+        let previousIconChange = deviceIconController.onChange
+        deviceIconController.onChange = { [weak self] in
+            previousIconChange?()
+            self?.scheduleCompanionBroadcast()
+        }
+
+        // Command path: server queue → main (ASYNC — a sync hop can deadlock
+        // against `stop()`) → dispatcher → reply → immediate uncoalesced
+        // broadcast, so the phone that acted sees the result state without
+        // waiting out the coalescer window.
+        companionServer.onCommand = { [weak self] _, command, clientID, reply in
+            DispatchQueue.main.async {
+                guard let self else {
+                    reply(CompanionServer.CommandResult(applied: false, refusalReason: "Audiouter is shutting down."))
+                    return
+                }
+                // Drag safety (item 5): remember which client opened the Main
+                // Out drag bracket so its disconnect can close it.
+                switch command {
+                case .beginMainOutDrag:
+                    self.companionDragClientID = clientID
+                case .endMainOutDrag:
+                    if self.companionDragClientID == clientID { self.companionDragClientID = nil }
+                default:
+                    break
+                }
+                let result = self.companionDispatcher.execute(command)
+                reply(CompanionServer.CommandResult(
+                    applied: result.applied,
+                    refusalReason: result.refusalReason,
+                    autoSwappedCurrentDevice: result.autoSwappedCurrentDevice))
+                self.broadcastCompanionSnapshotNow()
+            }
+        }
+
+        // A client that vanished mid-drag would otherwise leave
+        // `GroupController`'s drag bracket open forever (R1).
+        companionServer.onClientDisconnected = { [weak self] clientID in
+            DispatchQueue.main.async {
+                guard let self, self.companionDragClientID == clientID else { return }
+                self.companionDragClientID = nil
+                self.groupController.endMainOutMasterDrag()
+            }
+        }
+
+        updateCompanionServerState()
+    }
+
+    /// Start or stop the companion server to match
+    /// `AppSettings.resolvedAllowRemoteControl` (env override → persisted
+    /// checkbox). Called at launch and from the Settings › General checkbox
+    /// callback; a no-op when nothing changed. On start, broadcasts an initial
+    /// snapshot IMMEDIATELY — the server defers a helloed client's `welcome`
+    /// until the first broadcast, so an early client would otherwise hang.
+    @MainActor
+    private func updateCompanionServerState() {
+        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
+        guard shouldRun != companionActive else { return }
+        companionActive = shouldRun
+        if shouldRun {
+            companionServer.start(name: companionServerName)
+            broadcastCompanionSnapshotNow()
+            log("companion server started (\(companionServerName))")
+        } else {
+            companionBroadcastWork?.cancel()
+            companionBroadcastWork = nil
+            companionServer.stop()
+            log("companion server stopped")
+        }
+    }
+
+    /// Coalesce every snapshot-affecting trigger into one build ~50 ms out.
+    /// Trailing edge only: the first trigger arms the work item, further
+    /// triggers inside the window ride it for free. The server additionally
+    /// suppresses identical snapshots, so a spurious trigger costs one build,
+    /// never a network frame.
+    @MainActor
+    private func scheduleCompanionBroadcast() {
+        guard companionActive, companionBroadcastWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.companionBroadcastWork = nil
+            self.broadcastCompanionSnapshotNow()
+        }
+        companionBroadcastWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+    }
+
+    /// Build the full snapshot from the live controllers and hand it to the
+    /// server (which owns encoding + identical-snapshot suppression).
+    /// `addableApps` mirrors the popover picker's own recipe
+    /// (`PopoverController.availableAppsForPicker`): running `.regular` apps,
+    /// minus already-routed, minus excluded. The same running-app read backs
+    /// each route row's `isRunning` — `NSWorkspace` is the ground truth the
+    /// backend's own `routedAppRunning` events are derived from, so no
+    /// separate event cache is needed for it.
+    @MainActor
+    private func broadcastCompanionSnapshotNow() {
+        guard companionActive else { return }
+        let running = PopoverController.defaultRunningAppsProvider()
+        let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
+        let addable = running
+            .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
+            .map { (bundleID: $0.bundleID, displayName: $0.displayName) }
+        let snapshot = CompanionSnapshotBuilder.build(
+            // Sorted for a deterministic wire order: `devicesByID` is a
+            // dictionary, and an order flap would defeat the server's
+            // identical-snapshot suppression.
+            devices: Array(devicesByID.values).sorted { $0.id < $1.id },
+            groupController: groupController,
+            appRouting: appRouting,
+            excludedBundleIDs: excludedApps.excludedBundleIDs,
+            iconFor: deviceIconController.symbolName(for:),
+            addableApps: addable,
+            runningRouted: routedIDs.intersection(running.map(\.bundleID)),
+            liveRoutedAppNames: routedAppNamesByDeviceID,
+            localFallbackActive: companionLocalFallbackActive,
+            takeoverStatus: companionTakeoverStatus.map(Self.companionTakeoverText),
+            serverName: companionServerName,
+            connectVolume: settings.connectVolume,
+            connectVolumeMin: AppSettings.minConnectVolume,
+            connectVolumeMax: AppSettings.maxConnectVolume,
+            startBufferMs: settings.startBufferMs,
+            startBufferOptionsMs: AppSettings.startBufferOptionsMs)
+        companionServer.broadcast(snapshot)
+    }
+
+    /// The wire copy for `Snapshot.takeoverStatus` — the same plain language
+    /// as the popover's takeover strip. Duplicated because
+    /// `PopoverController.takeoverStatusText(for:)` is internal to
+    /// `AudiouterPopoverUI` and this wave owns only this file; keep the two in
+    /// sync (follow-up: make that helper public and delete this copy).
+    private static func companionTakeoverText(_ status: TakeoverStatus) -> String {
+        switch status {
+        case .needsApproval:
+            return "Speaker Sync needs permission to run. Open Login Items to approve it."
+        case .helperMissing:
+            return "Speaker Sync is missing from this copy of Audiouter. Reinstall Audiouter to fix it."
+        case .takingOver:
+            return "Taking audio back from macOS…"
+        case .timedOut:
+            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
+        }
     }
 
     // MARK: Backend event plumbing
@@ -1282,6 +1566,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // clear the popover banner; the selection intent is untouched, so no device
             // model changed — handle it and return.
             popoverController.setLocalFallbackActive(active)
+            // Companion (T7): in the snapshot, and this case returns early
+            // (no device model changed), so it schedules its own broadcast.
+            companionLocalFallbackActive = active
+            scheduleCompanionBroadcast()
             log("event: \(describe(event))")
             return
         case .systemDefaultIsAirPlayActive(let active):
@@ -1306,6 +1594,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // popover's takeover strip; no device model changed, no audio path is
             // altered — handle it and return.
             popoverController.setTakeoverStatus(status)
+            // Companion (T7): in the snapshot, and this case returns early
+            // (no device model changed), so it schedules its own broadcast.
+            companionTakeoverStatus = status
+            scheduleCompanionBroadcast()
             log("event: \(describe(event))")
             return
         }
@@ -1324,6 +1616,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
+        // Companion (T7): every event that reaches this shared tail changed
+        // the device model (or the live-route map) — coalesce a broadcast.
+        // Early-return cases above schedule their own where snapshot-relevant.
+        scheduleCompanionBroadcast()
     }
 
     // MARK: stderr logging (T-U1 — real UI in T-U2)

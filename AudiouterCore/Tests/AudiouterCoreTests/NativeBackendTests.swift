@@ -3152,6 +3152,46 @@ extension SerializedSharedState {
 
         await pollUntil(timeout: 5) { !driftLines().isEmpty }
         #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
+        #expect(driftLines().allSatisfy { $0.contains("\"path\":\"perApp\"") },
+                      "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
+    }
+
+    /// The whole-system (stream 0) mirror of the test above, at the ACTUAL
+    /// production `EngineSink` (not `SpyEngine` — `EngineSink.init(engine:)`
+    /// takes the concrete `AirPlayEngine`, not the `EngineControlling` seam,
+    /// so this is the one place a real engine instance is the only way to
+    /// exercise this code at all). `AirPlayEngine.init(config:)` is
+    /// documented side-effect-free ("the engine thread is created lazily in
+    /// start(), not here"), and every `write` is a no-op while `startedFlag`
+    /// is false (never set, since `start()` is never called) — so this is
+    /// still a hermetic, no-hardware test: it proves `EngineSink`'s new
+    /// cadence sampler (mirroring `sampleWriteCadenceIfDue()` byte-for-byte)
+    /// runs across real per-buffer traffic without crashing and never
+    /// spuriously logs — the delta-gate half of the mirror. It can't
+    /// exercise the "logs on real degradation" half the way the per-app test
+    /// does above, because that needs the engine's OWN wall-clock-driven
+    /// counters to move, and this spy has no way to script the concrete
+    /// `AirPlayEngine` the way `SpyEngine.scriptCadenceSnapshot` scripts the
+    /// seam — the same reason `write_backlog_drop`'s whole-system sampler
+    /// (9965bd9) has never had a dedicated unit test either. The "fires on
+    /// degradation" arithmetic itself is proven above; this test's job is
+    /// only to prove THIS call site's wiring doesn't crash and respects the
+    /// same gate.
+    @Test func engineSinkWriteCadenceStaysSilentWithRealUnstartedEngine() {
+        let engine = AirPlayEngine()
+        let sink = EngineSink(engine: engine)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        for i in 0..<520 {
+            let pcm = Data(repeating: 0xAA, count: 4 * 200)
+            sink.write(pcm: pcm, pts: timespec(tv_sec: i, tv_nsec: 0))
+        }
+
+        let driftLines = box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") }
+        #expect(driftLines.isEmpty, "a never-started engine's cadence counters never move, so EngineSink must never log write_cadence_drift for it")
     }
 
     // MARK: Sleep/wake (B6b)

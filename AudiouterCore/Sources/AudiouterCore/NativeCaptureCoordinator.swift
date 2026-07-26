@@ -1792,9 +1792,21 @@ final class EngineSink: PCMSink, @unchecked Sendable {
     private var backlogSampleCounter = 0
     private var lastReportedDroppedWrites: UInt64 = 0
 
+    /// Write-CADENCE sampling (T-ENG-CADENCE-1, whole-system-dropout
+    /// investigation): the mirror image of the backlog counters above, for
+    /// `writeCadenceSnapshot()` instead of `writeBacklogSnapshot()`. Its own
+    /// independent counter/baseline, same `backlogSampleInterval` — see
+    /// `NativeBackend.sampleWriteCadenceIfDue()`'s doc for the shape this
+    /// copies and why the per-app mixer's sampler alone couldn't cover this
+    /// (stream 0) path.
+    private var cadenceSampleCounter = 0
+    private var lastReportedCadenceDeficitSeconds: Double = 0
+    private var lastReportedCadenceOverrunSeconds: Double = 0
+
     func write(pcm: Data, pts: timespec) {
         engine.write(pcm: pcm, pts: pts)
         sampleWriteBacklogIfDue()
+        sampleWriteCadenceIfDue()
     }
 
     private func sampleWriteBacklogIfDue() {
@@ -1810,6 +1822,36 @@ final class EngineSink: PCMSink, @unchecked Sendable {
             "droppedDelta": String(delta),
             "maxInFlightSeconds": String(format: "%.3f", snap.maxInFlightSeconds),
             "streamsTracked": String(snap.streamsTracked),
+        ])
+    }
+
+    /// Mirrors `NativeBackend.sampleWriteCadenceIfDue()` exactly (own counter,
+    /// own last-reported baseline, same `backlogSampleInterval`, same
+    /// deficit-OR-overrun delta-gate) so the whole-system (stream 0) write
+    /// path gets the identical `write_cadence_drift` visibility the per-app
+    /// mixer path already has — closing the gap D3 flagged: a whole-system-
+    /// only session (no active `.device` route) never drove the per-app
+    /// sampler's trigger (`onMixedBuffer`) at all. `path: "wholeSystem"`
+    /// distinguishes this call site from the per-app one's `path: "perApp"`
+    /// in the same event.
+    private func sampleWriteCadenceIfDue() {
+        cadenceSampleCounter &+= 1
+        guard cadenceSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeCadenceSnapshot()
+        guard snap.deficitSeconds != lastReportedCadenceDeficitSeconds
+            || snap.overrunSeconds != lastReportedCadenceOverrunSeconds else { return }
+        let deficitDelta = snap.deficitSeconds - lastReportedCadenceDeficitSeconds
+        let overrunDelta = snap.overrunSeconds - lastReportedCadenceOverrunSeconds
+        lastReportedCadenceDeficitSeconds = snap.deficitSeconds
+        lastReportedCadenceOverrunSeconds = snap.overrunSeconds
+        Telemetry.log(.captureWS, "write_cadence_drift", [
+            "path": "wholeSystem",
+            "writeCount": String(snap.writeCount),
+            "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
+            "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
+            "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
+            "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
+            "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
         ])
     }
 }

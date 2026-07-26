@@ -1002,9 +1002,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // CADENCE VISIBILITY (T-ENG-CADENCE-1, whole-system-dropout
             // investigation): same rationale and throttling as the backlog
             // sample above, for the engine's write-cadence deficit/overrun
-            // counters instead of its backpressure-drop counter — see
-            // `sampleWriteCadenceIfDue()`'s doc for why this call site (per-app
-            // only) rather than the whole-system path.
+            // counters instead of its backpressure-drop counter, tagged
+            // `path: "perApp"` — `EngineSink.write` in
+            // `NativeCaptureCoordinator.swift` mirrors this for stream 0
+            // (`path: "wholeSystem"`), so this event now has full coverage
+            // whether or not any per-app route is active.
             self?.sampleWriteCadenceIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
@@ -2973,13 +2975,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the per-app mixer's buffer arrivals (`onMixedBuffer`, the only
     /// per-buffer-adjacent hook available inside `NativeBackend.swift` — the
     /// whole-system tap writes straight to `EngineSink` in
-    /// `NativeCaptureCoordinator.swift`, out of this file's reach). So a
-    /// session with no active `.device` route never fires this sampler at
-    /// all — the same shape of blind spot `write_backlog_drop` had for the
-    /// whole-system path before `9965bd9` closed it there. Closing it here too
-    /// would mean mirroring this same sampler into `EngineSink.write`, which
-    /// is out of scope for this change (see the file-ownership note at the top
-    /// of this investigation's task).
+    /// `NativeCaptureCoordinator.swift`). So a session with no active
+    /// `.device` route never fires THIS sampler — the same shape of blind
+    /// spot `write_backlog_drop` had for the whole-system path before
+    /// `9965bd9` closed it there. `EngineSink.write` (that file) now mirrors
+    /// this exact sampler for stream 0, tagged `path: "perApp"` here vs.
+    /// `path: "wholeSystem"` there so the two call sites of the same event
+    /// stay distinguishable — the discriminator `write_backlog_drop` itself
+    /// never got, added here for both so they're symmetrical and greppable.
     private func sampleWriteCadenceIfDue() {
         cadenceSampleCounter &+= 1
         guard cadenceSampleCounter % Self.backlogSampleInterval == 0 else { return }
@@ -2991,6 +2994,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         lastReportedCadenceDeficitSeconds = snap.deficitSeconds
         lastReportedCadenceOverrunSeconds = snap.overrunSeconds
         Telemetry.log(.airplay, "write_cadence_drift", [
+            "path": "perApp",
             "writeCount": String(snap.writeCount),
             "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
             "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),

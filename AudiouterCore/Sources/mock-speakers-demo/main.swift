@@ -70,6 +70,10 @@ func describe(_ event: BackendEvent) -> String? {
         // Also native-only (T6 takeover status strip); never under mock. Handled
         // so the switch stays exhaustive.
         return "♪ takeover status \(status.map { "\($0)" } ?? "cleared")"
+    case .routingBlockedNeedsDefault(let active):
+        // Native-only (Wave 3 T5 public-aggregate off-switch warning); never under
+        // mock. Handled so the switch stays exhaustive.
+        return "⚠ routing blocked needs default: \(active)"
     }
 }
 

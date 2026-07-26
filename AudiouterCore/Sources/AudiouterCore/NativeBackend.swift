@@ -312,6 +312,50 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// "must not touch the real machine from a test" reason.
     private let defaultOutputSwitcher: DefaultOutputSwitcher?
 
+    // MARK: Public aggregate device (Wave 3, T5)
+
+    /// The Core Audio operations for the PUBLIC, Sound-settings-visible "Audiouter"
+    /// aggregate. Injected (default the real HAL control) so T6 can drive the whole
+    /// lifecycle with a fake and never move the machine's real default output —
+    /// same "no test touches the real machine" discipline as ``defaultOutputSwitcher``.
+    /// ``publicAggregate`` is built FROM this exact control, so its
+    /// adopt/create/sweep/classify and our own resolve/set-default calls share one
+    /// seam. Distinct from the PRIVATE tap-capture aggregate
+    /// `NativeCaptureCoordinator.createAggregate()` builds (different UID).
+    private let aggregateControl: AggregateDeviceControlling
+
+    /// Lifecycle owner (adopt-or-create / off-switch classify / orphan sweep) for
+    /// the public aggregate — pure decision logic over ``aggregateControl``.
+    private let publicAggregate: AggregateOutputDevice
+
+    /// Reads the CURRENT system default output device's UID (`nil` if unreadable),
+    /// feeding the off-switch classification. Injectable (default the real HAL
+    /// read) exactly like ``systemDefaultOutputIsAirPlayClassProvider``, so T6 can
+    /// script "the user switched the default away" with no hardware.
+    private let currentDefaultOutputUIDProvider: @Sendable () -> String?
+
+    /// True once this session has pointed the Mac's default output at the public
+    /// aggregate (first activation, or the user's re-select). Gates the one-time
+    /// capture of ``priorDefaultUID`` and the quit-time restore. `stateQueue`.
+    private var aggregateDefaultActive = false
+
+    /// The default output UID in force at the moment we FIRST took over — restored
+    /// (by re-resolving it to a live id, never a cached one) on `stop()`/quit
+    /// before the aggregate is destroyed. `stateQueue`.
+    private var priorDefaultUID: String?
+
+    /// Echo-guard for our OWN default-output writes: the UID we just asked the HAL
+    /// to make default, pending its `defaultDeviceChanged` echo on
+    /// `systemVolume.onExternalChange`. When the listener reports this same UID we
+    /// consume it as our own write, NOT a user off-switch — ``SystemOutputVolume``'s
+    /// echo suppression covers only its VOLUME writes, not this default-device
+    /// write. `stateQueue`.
+    private var expectedDefaultWriteUID: String?
+
+    /// Last routing-blocked state pushed on the event stream, so the emit is
+    /// edge-triggered (idempotent) and can never thrash/loop. `stateQueue`.
+    private var routingBlockedEmitted = false
+
     /// The colon-hex `Device.id` ⟷ ``OutputID`` lookup, populated from discovery.
     /// Kept so `setOutputSet`/`setVolume` can translate the UI's string ids to the
     /// engine handle without reparsing (and without ever reformatting the id).
@@ -926,9 +970,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
-        defaultOutputSwitcher: DefaultOutputSwitcher? = nil
+        defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
+        aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
+        currentDefaultOutputUID: @escaping @Sendable () -> String? = NativeBackend.currentDefaultOutputUID
     ) {
         self.defaultOutputSwitcher = defaultOutputSwitcher
+        self.aggregateControl = aggregateControl
+        // Injectable init keeps the AggregateOutputDevice built from the SAME
+        // control we hold, so its pure decisions and our HAL writes never diverge.
+        self.publicAggregate = AggregateOutputDevice(control: aggregateControl)
+        self.currentDefaultOutputUIDProvider = currentDefaultOutputUID
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
         // so this queue only needs to time the delay — a plain serial queue is fine.
@@ -1095,6 +1146,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // output, not an AirPlay receiver (guarded everywhere by
             // `isLocalDevice`, and it has no `outputIDs` entry to add).
             self.surfaceLocalDevice(name: localName, volume: localVolume, muted: localMuted)
+
+            // Wave 3 T5: make the public "Audiouter" aggregate VISIBLE in Sound
+            // settings at launch (Q1) — SWEEP any orphan left by a prior crash or
+            // the spike tool FIRST (Q3), then adopt-or-create. Deliberately NOT
+            // made the Mac's default output here: that happens only once the user
+            // actually routes audio through the app (see `reconcileAggregateDefault`).
+            // razor: create-only at launch; no default takeover, no volume surface.
+            self.publicAggregate.sweepOrphans()
+            _ = self.publicAggregate.adoptOrCreate()
+            self.aggregateDefaultActive = false
+            self.priorDefaultUID = nil
+            self.expectedDefaultWriteUID = nil
+            self.routingBlockedEmitted = false
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. Every
@@ -1164,6 +1228,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !defaultDeviceChanged, let volume, volume != previousVolume {
                     self.emit(.systemVolumeChanged(volume: volume))
                 }
+                // razor: the volume/media KEYS themselves are still delivered by
+                // macOS to whatever the current default output is — they are NOT
+                // intercepted here. A CGEventTap key interceptor that gates on
+                // `AggregateOutputDevice.productUID` (so the keys drive Main Out only
+                // while Audiouter is the Mac's output) is a SEPARATE project,
+                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md` — not this file's job.
 
                 // 1d. W3-T3: the default output device itself may have just BECOME (or
                 //     stopped being) AirPlay-class — re-evaluate the double-path guard.
@@ -1172,6 +1242,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 //     frequent path.
                 if defaultDeviceChanged {
                     self.reconcileSystemAirPlayGuard()
+
+                    // 1e. Wave 3 T5: the default output DEVICE changed. Read its UID
+                    //     once. If it's the echo of our OWN set-default write (to the
+                    //     aggregate on activation, or the prior device on restore),
+                    //     CONSUME it — `SystemOutputVolume`'s echo suppression covers
+                    //     only its own volume writes, not this default-device write, so
+                    //     without this the app's own takeover would read as a user
+                    //     off-switch. Any other change is a real user action → classify
+                    //     it against the aggregate and (re)emit the routing-blocked
+                    //     warning for the new steady state.
+                    let newDefaultUID = self.currentDefaultOutputUIDProvider()
+                    if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
+                        self.expectedDefaultWriteUID = nil
+                    } else {
+                        self.evaluateRoutingBlocked()
+                    }
                 }
             }
         }
@@ -1447,6 +1533,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // scratch — reset to the same optimistic default `start()` reads
             // before its own engine.start() resolves.
             self.ptpClockAvailable = true
+
+            // Wave 3 T5: RESTORE the default output the user had before we took it
+            // over, THEN DESTROY the public aggregate (stop/quit teardown). Restore
+            // by RE-RESOLVING the captured UID to a live id — never a cached
+            // AudioObjectID (unstable across resolves, AggregateOutputDevice.swift
+            // header). `expectedSelected` is already cleared above, so any resulting
+            // default-device echo classifies as "not routing" (no stale warning).
+            // Destroying the aggregate while it's still the default makes macOS fall
+            // back on its own, so an unresolvable prior is still safe. `systemVolume
+            // .onExternalChange` was already detached at the top of `stop()`, so this
+            // write raises no echo to guard against.
+            if self.aggregateDefaultActive,
+               let priorUID = self.priorDefaultUID,
+               priorUID != AggregateOutputDevice.productUID,
+               let priorID = self.aggregateControl.resolveDeviceID(forUID: priorUID) {
+                _ = self.aggregateControl.setDefaultOutputDevice(priorID)
+            }
+            self.publicAggregate.sweepOrphans()   // destroys the productUID aggregate we own
+            self.aggregateDefaultActive = false
+            self.priorDefaultUID = nil
+            self.expectedDefaultWriteUID = nil
+            if self.routingBlockedEmitted {
+                self.routingBlockedEmitted = false
+                self.emit(.routingBlockedNeedsDefault(false))
+            }
+
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -1703,6 +1815,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
             return kicks
         }
+
+        // Wave 3 T5: the selection intent just changed — reconcile the public
+        // aggregate's default-output ownership off it. This is the ACTIVATION SEAM
+        // (Q1): the app takes the Mac's default output only when the user actually
+        // routes (whole-system selection becomes non-empty), never at launch. It
+        // also (re)evaluates the routing-blocked warning for the new steady state.
+        // Scheduled `async` (not inside the critical section above) so the HAL
+        // default-output write never extends the main-thread `sync` block; still
+        // serial on `stateQueue`, so it observes the just-written `expectedSelected`.
+        stateQueue.async { self.reconcileAggregateDefault() }
 
         // The synced-local transition is no longer enqueued here — it fires from
         // the debounced `fireSyncedLocalSettle` (scheduled inside the critical
@@ -3552,6 +3674,36 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return transportType == kAudioDeviceTransportTypeAirPlay
     }
 
+    /// The UID of the macOS SYSTEM default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice`), or `nil` if unreadable — the
+    /// production default for ``currentDefaultOutputUIDProvider``, feeding the
+    /// public aggregate's off-switch classification (Wave 3 T5). Same two-step HAL
+    /// read shape as ``currentDefaultOutputIsAirPlayClass()`` (resolve the default
+    /// device, then read one property on it), reused rather than re-derived.
+    static func currentDefaultOutputUID() -> String? {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID) == noErr,
+            deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var uid: CFString? = nil
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        let uidErr = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &uidAddr, 0, nil, &uidSize, ptr)
+        }
+        guard uidErr == noErr, let uid else { return nil }
+        return uid as String
+    }
+
     // MARK: LatencyConfigurable (PLAN-LATENCY-SETTING.md)
 
     /// The sender start buffer currently in force (ms). Seeded by
@@ -4013,6 +4165,110 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         systemAirPlayGuardActive = false
         emit(.systemDefaultIsAirPlayActive(false))
         return true
+    }
+
+    // MARK: Public aggregate default-output ownership + routing-blocked warning (Wave 3, T5)
+
+    /// Reconcile the public aggregate's default-output ownership off the current
+    /// selection intent, then (re)evaluate the routing-blocked warning. Called
+    /// whenever `expectedSelected` changes (the activation seam, Q1).
+    ///
+    /// AMBIGUITY FLAGGED (Q1): "actively routing" here is defined as
+    /// `!expectedSelected.isEmpty` — i.e. WHOLE-SYSTEM routing (≥1 AirPlay output
+    /// selected). That is the only path whose audio depends on the aggregate being
+    /// the Mac's default: the whole-system tap follows
+    /// `kAudioHardwarePropertyDefaultOutputDevice`, so it captures nothing unless
+    /// the default is our aggregate. Per-app `.device` redirects tap the app's
+    /// PROCESS directly (independent of the default output), so they deliberately
+    /// do NOT arm the aggregate takeover or the warning. On `stateQueue`.
+    private func reconcileAggregateDefault() {   // on stateQueue
+        if !expectedSelected.isEmpty {
+            takeOverDefaultAndReflect()
+        } else {
+            // Not routing: never take the Mac's default output (Q1), and the
+            // warning is off by definition.
+            evaluateRoutingBlocked()
+        }
+    }
+
+    /// Take the Mac's default output for the aggregate and reflect the resulting
+    /// steady state of the routing-blocked warning. Shared by the activation seam
+    /// and the user's ``reselectAggregateAsDefault()``.
+    ///
+    /// On a SUCCESSFUL set-default write we reflect the intended state
+    /// (`blocked = false`) OPTIMISTICALLY rather than reading the default straight
+    /// back: the HAL default-device change lands asynchronously, so an immediate
+    /// read can still return the PRE-write device and emit a transient `true` that
+    /// the echo-guard would then leave stuck. The listener's echo settles the real
+    /// change, and any genuine later user override re-evaluates to `true`. When no
+    /// write was issued (aggregate already default, or unresolvable) we evaluate
+    /// normally. On `stateQueue`.
+    private func takeOverDefaultAndReflect() {   // on stateQueue
+        if pointDefaultAtAggregate() {
+            setRoutingBlocked(false)
+        } else {
+            evaluateRoutingBlocked()
+        }
+    }
+
+    /// Point the Mac's default output at the public aggregate, capturing the prior
+    /// default ONCE (for the quit-time restore) the first time we take over.
+    /// Returns `true` iff it issued a SUCCESSFUL set-default write THIS call (so the
+    /// caller can reflect the intended state without racing the async change
+    /// notification); `false` when the aggregate is already the default or can't be
+    /// resolved. The write is echo-guarded via ``expectedDefaultWriteUID`` (set only
+    /// on success, so a refused write can't leave a stale guard). Used by both the
+    /// activation seam and the user's re-select — both legitimate (app routing vs.
+    /// the user's own click); neither is Q2's forbidden PROGRAMMATIC re-select
+    /// ("re-select without the user asking"). On `stateQueue`.
+    private func pointDefaultAtAggregate() -> Bool {   // on stateQueue
+        guard let aggregateID = aggregateControl.resolveDeviceID(forUID: AggregateOutputDevice.productUID) else { return false }
+        let current = currentDefaultOutputUIDProvider()
+        if !aggregateDefaultActive {
+            // Capture what the user had so `stop()` can restore it. Never remember
+            // the aggregate itself as the "prior" (we're about to destroy it).
+            if let current, current != AggregateOutputDevice.productUID {
+                priorDefaultUID = current
+            }
+            aggregateDefaultActive = true
+        }
+        guard current != AggregateOutputDevice.productUID else { return false }   // already ours
+        guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
+        expectedDefaultWriteUID = AggregateOutputDevice.productUID
+        return true
+    }
+
+    /// Compute the routing-blocked steady state — actively routing AND the current
+    /// default output is not our aggregate — and push it. Reuses the pure
+    /// ``AggregateOutputDevice/classifyOffSwitch(newDefaultUID:)`` decision. On
+    /// `stateQueue`.
+    private func evaluateRoutingBlocked() {   // on stateQueue
+        let blocked: Bool
+        if !expectedSelected.isEmpty {
+            let outcome = publicAggregate.classifyOffSwitch(newDefaultUID: currentDefaultOutputUIDProvider())
+            blocked = outcome != .stillOurs
+        } else {
+            blocked = false
+        }
+        setRoutingBlocked(blocked)
+    }
+
+    /// Edge-triggered emit of the routing-blocked warning: a repeat of the current
+    /// state is a no-op, so it can never thrash the event stream. On `stateQueue`.
+    private func setRoutingBlocked(_ blocked: Bool) {   // on stateQueue
+        guard blocked != routingBlockedEmitted else { return }
+        routingBlockedEmitted = blocked
+        emit(.routingBlockedNeedsDefault(blocked))
+    }
+
+    /// USER-INITIATED re-select of the aggregate as the Mac's default output — the
+    /// popover's "Use Audiouter" warning button (Q6). The user's own click IS their
+    /// intent, so this is the one sanctioned re-select and does NOT violate Q2's
+    /// "never programmatically re-select." Flips the warning off through the same
+    /// echo-guarded path as activation. Public so `AppDelegate` can wire
+    /// `PopoverController.onReselectAudiouter` to it.
+    public func reselectAggregateAsDefault() {
+        stateQueue.async { self.takeOverDefaultAndReflect() }
     }
 
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)

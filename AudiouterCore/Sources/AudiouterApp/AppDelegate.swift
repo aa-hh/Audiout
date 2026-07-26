@@ -68,14 +68,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
     private var statusItemController: StatusItemController!
 
-    /// Device IDs that currently have a non-empty CONFIRMED `.routedApps` app
-    /// list (T6's live "which app streams here now" signal, mirrored here off
-    /// the same events `PopoverController.applyRoutedApps` ingests — no new
-    /// polling). Feeds the menu-bar routing dot's predicate
-    /// (`StatusRoutingIndicator`, Warm Signal §5.5): a live per-app route
-    /// counts as broadcasting even when the Main Out target is passthrough.
-    private var liveRoutedDeviceIDs: Set<String> = []
-
     /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
     /// Wired with an explicit production `AppRoutingController` so app routes
@@ -214,6 +206,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
     private var devicesByID: [String: Device] = [:]
+
+    /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
+    /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
+    /// bookkeeping — kept here too because the status item's idle/streaming
+    /// decision (`MenuBarStatus.isStreaming`) needs it and has no other route
+    /// to it (the popover's copy is private). An empty `appNames` clears the
+    /// entry for that device, same discipline as the popover's copy.
+    private var routedAppNamesByDeviceID: [String: [String]] = [:]
 
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
@@ -356,17 +356,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
-        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO in
-        // "Selected Devices" (not just which AirPlay devices are) to detect
-        // "play everywhere" — `GroupController.applyRouting` always filters the
-        // local device out of what it hands `backend.setOutputSet`, so that call
-        // alone can't carry this. `GroupController.isSpeakerSelected(_:)` is the
-        // existing public read that does; wire it in once, here, right after
-        // both are constructed. `backend as? NativeBackend` is nil for
-        // `MockBackend`/`OwnToneBackend`, matching the `MeteringControlling`/
-        // `LatencyConfigurable` optional-capability pattern used below.
+        // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
+        // what Main Out points at (not just which AirPlay devices are) to detect
+        // "play everywhere" — neither `GroupController.applyRouting` nor
+        // `activateGroup` ever hands the local device to `backend.setOutputSet`,
+        // so that call alone can't carry this. `isMainOutMember(_:)` is the read
+        // that answers it for BOTH Main Out targets; wire it in once, here, right
+        // after both are constructed. Deliberately NOT `isSpeakerSelected(_:)`,
+        // which sees only the Selected Devices set: under a group target that
+        // both fails to arm the sink for a group containing the Mac and arms it
+        // for an AirPlay-only group whose Mac is merely still sitting in the
+        // untargeted Selected Devices set. For `.selectedDevices` the two are the
+        // same read, so this is a group-path-only change.
+        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // matching the `MeteringControlling`/`LatencyConfigurable`
+        // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
-            self?.groupController?.isSpeakerSelected(id) ?? false
+            self?.groupController?.isMainOutMember(id) ?? false
         }
         // T6-rev: every user action that routes audio funnels into exactly two
         // backend methods (`setOutputSet` / `updateAppRoutes`), and both fire
@@ -830,11 +836,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (the cold-prompt guard in the capture coordinators — see
             // `SystemAudioCaptureTCC`): `updateAppRoutes` starts only the
             // route-table DIFF, so re-pushing the SAME unchanged table yields an
-            // EMPTY start set and starts nothing. What actually resumes a refused
-            // route once the user has granted is `PermissionStateObserver` →
-            // `resumeCaptureAfterPermissionGrant()` → `resumeRefusedAppCaptures()`,
-            // triggered independently by the grant itself, not by this callback.
-            // Still a no-op push when nothing is routed, and still safe if they
+            // EMPTY start set and starts nothing. NOTHING revives a refused route
+            // mid-session any more — that auto-resume machinery was deleted
+            // (2026-07-25, see `AudiouterCore/AGENTS.md`); relaunching after the
+            // grant is the supported recovery, and launch clears `.device` routes
+            // anyway. Still a no-op push when nothing is routed, and still safe if they
             // finished WITHOUT granting: the guard simply refuses again, never
             // prompting.
             self.pushAppRoutesToBackend()
@@ -1237,12 +1243,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // every other event — this call only updates state, it doesn't repaint
             // itself.
             popoverController.applyRoutedApps(deviceID: deviceID, appNames: appNames)
-            // Mirror the same live-route signal for the status glyph's routing
-            // dot (empty list = the live set for this device went back to empty).
+            // The menu-bar glyph's streaming decision reads this same live-route
+            // signal (empty list = the live set for this device went back to empty).
             if appNames.isEmpty {
-                liveRoutedDeviceIDs.remove(deviceID)
+                routedAppNamesByDeviceID.removeValue(forKey: deviceID)
             } else {
-                liveRoutedDeviceIDs.insert(deviceID)
+                routedAppNamesByDeviceID[deviceID] = appNames
             }
             log("event: \(describe(event))")
         case .routedAppRunning(let bundleID, let isRunning):
@@ -1256,6 +1262,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // playback so the actual song responds. No device model to repaint — this
             // targets whatever app is playing — so handle it and return.
             mediaKeyController.handle(command)
+            log("event: \(describe(event))")
+            return
+        case .localFallbackActive(let active):
+            // The generalized silence watchdog (R11) un-gated (or re-gated) whole-system
+            // capture: nothing the user selected stayed connected, so the Mac fell back
+            // to local playback (or a device reconnected and audio moved back). Show or
+            // clear the popover banner; the selection intent is untouched, so no device
+            // model changed — handle it and return.
+            popoverController.setLocalFallbackActive(active)
+            log("event: \(describe(event))")
+            return
+        case .systemDefaultIsAirPlayActive(let active):
+            // W3-T3: the macOS system default output is (or stopped being)
+            // AirPlay-class while we're actively streaming — double-path/echo
+            // risk. Purely informational: show or clear the popover note; no
+            // device model changed, no audio path is altered — handle it and
+            // return.
+            popoverController.setSystemAirPlayNoteActive(active)
             log("event: \(describe(event))")
             return
         case .streamHealth:
@@ -1274,18 +1298,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // open), then drive the status symbol from the Main Out master.
         let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
-        // Warm Signal §5.5 — the status glyph is a truthful glance: the arc is
-        // the Main Out master (drained while master-muted), the corner dot is
-        // the shared routing-live predicate over this same snapshot. The
-        // routed-apps set is intersected with the known fleet so a device that
-        // vanished mid-stream can't keep the dot lit.
-        let hasLiveAppRoutes = liveRoutedDeviceIDs.contains { devicesByID[$0] != nil }
-        statusItemController.update(
-            masterVolume: popoverController.statusMasterVolume,
-            isMainOutMuted: groupController.isMainOutMuted,
-            isRoutingLive: StatusRoutingIndicator.isRoutingLive(
-                devices: devices,
-                hasLiveAppRoutes: hasLiveAppRoutes))
+        // The status glyph is a truthful glance: the arc is the Main Out master,
+        // and the symbol goes accent-coloured while anything is actually leaving
+        // the Mac (Main Out membership OR a live per-app redirect).
+        statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
     }
@@ -1312,6 +1329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "routedAppRunning(\(bundleID), isRunning: \(isRunning))"
         case .remoteTransport(let command):
             return "remoteTransport(\(command)) — driving Mac media playback"
+        case .localFallbackActive(let active):
+            return "localFallbackActive(\(active)) — \(active ? "speakers unreachable, playing on this Mac" : "device reconnected, resuming")"
+        case .systemDefaultIsAirPlayActive(let active):
+            return "systemDefaultIsAirPlayActive(\(active)) — \(active ? "system default output is also AirPlay, echo risk" : "no longer double-pathed")"
         case .streamHealth(let id, let recovering):
             return "streamHealth(\(id), recovering: \(recovering))"
         }

@@ -2973,6 +2973,19 @@ packet_send(struct raop_session *rs, struct rtp_packet *pkt)
   ret = send(rs->server_fd, pkt->data, pkt->data_len, 0);
   if (ret < 0)
     {
+      // [AirPlayEngine vendored change 2026-07-25: EAGAIN on non-blocking DGRAM
+      // send is a dropped packet, not a fatal session error — see
+      // docs/VENDORED-DIFFS.md Entry 4]
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+	{
+	  static uint64_t raop_dropped_packets;
+
+	  raop_dropped_packets++;
+	  DPRINTF(E_WARN, L_RAOP, "Dropped packet for '%s' (send would block): %s (total dropped: %" PRIu64 ")\n",
+	    rs->devname, strerror(errno), raop_dropped_packets);
+	  return -1;
+	}
+
       DPRINTF(E_LOG, L_RAOP, "Send error for '%s': %s\n", rs->devname, strerror(errno));
 
       // Can't free it right away, it would make the ->next in the calling

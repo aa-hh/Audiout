@@ -45,6 +45,7 @@
 #include "../shims/ptpd.h"
 #include "../shims/outputs.h"
 #include "../shims/engine_bridge.h" /* T-API-1: non-static discovery-in bridge */
+#include "../shims/engine_workgroup.h" /* T5: os_workgroup_join/leave, unreachable from Swift directly */
 
 /* Vendored, license-labeled clusters (see docs/license-inventory.md):
  * - sender/   GPL-2.0-or-later  (the extracted AirPlay 2 sender)

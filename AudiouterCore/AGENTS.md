@@ -132,13 +132,92 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   inside `updateAppRoutes` whenever routes/excluded change, and an app that
   becomes excluded has its metering tap stopped immediately. The metering-only
   taps NEVER start/stop the primary routing coordinators' taps.
+- **A whole-system capture-tap rebuild caused by a DEVICE/RATE change must reset
+  the stream-0 AirPlay session (R10) — but ONLY that cause.** When the tapped
+  output device changes or renegotiates its nominal sample rate (another app
+  grabbing the mic; a default-output-device change), the tap is rebuilt and keeps
+  delivering fresh PCM, but the whole-system RTP timeline anchor is left desynced,
+  so every Selected-Devices speaker goes permanently silent until the session is
+  reset. `NativeCaptureCoordinator` signals *that specific cause* via
+  `onDeviceRateRebuild` (NEVER on the first `start()`, and for an
+  `.exclusionChange` rebuild only when the tap that came back up is measurably on a
+  different device or nominal rate than the one that went down — see the trap
+  below);
+  `NativeBackend.resetAirPlaySessionForWholeSystem()` responds by rebinding each
+  streaming (`added`) device — claiming the same per-device `converging` slot
+  `convergeDevice` uses (so the removeOutput → addOutput can't interleave with a
+  concurrent converge), bumping `rebindRecoveryGen`, and enqueuing the shared
+  rebind-recovery chain (with `stillOwnsRebind` ownership bow-out, backoff retry,
+  and `.streamHealth` signal-only events). It is BOOKKEEPING-TRANSPARENT and a
+  no-op when nothing streams whole-system. This is the stream-0 analog of the
+  per-app `resetAirPlaySessionForRoutedApp`. Crucially, an EXCLUSION-set rebuild
+  (the synced-local sink attach on every Mac+AirPlay connect, or an app-route
+  change) leaves the device/clock — and thus the receivers' timeline — intact and
+  must NOT reset: resetting there added a redundant RTP re-establish to every
+  connect ("connects fast, then a long silence"). The live exclusion set is instead
+  kept correct by the debounced process-object-list membership diff (W1-T7 Gap 1) +
+  `refreshExcludedProcessSet` (relaunch, W1-T7 Fix 1), which recreate the tap as
+  `.exclusionChange` (compare-before-rebuild, no session reset).
+  **TRAP: the rebuild cause is an assumption, not evidence — never make the reset
+  decision from `RebuildCause` alone.** The old tap's `teardown()` takes its
+  default-device listener with it and the new tap arms its own only inside
+  `createAndStart`, so a default-output-device change landing in between is delivered
+  to nobody: an `.exclusionChange` rebuild can come back up on a different device's
+  clock while the receivers hold the old timeline, and a cause-only trigger leaves
+  them silent until some later device/rate event happens to reset them. `recreateTap`
+  therefore also compares the outgoing tap's `SystemAudioTap.tappedDeviceID` and rate
+  against the incoming one's and resets on a real move. A tap that reports `nil`
+  (the protocol default) abstains from the identity half rather than forcing a reset.
+- **The silence fallback (R11) has its OWN always-on delay, decoupled from the
+  wake-restore preference.** `armSilenceWatchdog` uses the always-on
+  `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be
+  disabled) for a dead-group/stranded condition during normal operation, and the
+  user's `wakeAudioRestoreDelay` (Settings › Audio, `nil` = "Never") ONLY while
+  `awaitingWakeReconnect` (the post-wake window `handleSystemDidWake` opens). So a
+  "Never" wake setting can't reopen R11's indefinite silence during normal use,
+  while the post-wake grace still honors the user's preference. The fallback's
+  banner-clear (`.localFallbackActive(false)`) is emitted from ONE helper,
+  `clearSilenceOverride()`, on the genuine true→false edge — every path that ends
+  the fallback (reconcile, `stop`, sleep, wake) routes through it so the banner
+  never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply. This binds the permission-grant
-  resume below: at LAUNCH a mid-session grant may resume per-app routes only
-  (`resumeRefusedAppCaptures()`); whole-system
-  (`forceCaptureGateReevaluation()`) is wake-only, because sleep preserves
-  `expectedSelected` and is a transient dropout, never a deselection.
+  Saved groups still persist and re-apply. A per-app `.device` route follows
+  the SAME discipline at launch: `AppRoutingController.clearAllDeviceRoutes()`
+  reverts every `.device` route to `.noRedirect` once, called before the
+  initial route push, so a redirect never silently survives a full restart
+  regardless of how long its target was gone for.
+- **A per-app `.device` route survives its target going merely UNREACHABLE
+  (`isAvailable == false`) — it does NOT survive the target DISAPPEARING
+  entirely.** These are different signals and only the second resets the
+  route (`AppRoutingController.handleDeviceDisappeared`, fired from
+  `PopoverController.update(devices:)`). While a kept route's target is
+  unreachable, `NativeBackend` computes an EFFECTIVE route table — a
+  `.device` route whose target can't currently carry audio reads as
+  `.noRedirect` for every per-app mechanism (capture start/stop, the
+  whole-system tap's exclusion set, the mixer, local playback, metering) —
+  so the app rejoins whatever the system is currently outputting to instead
+  of being excluded in favor of a stream that goes nowhere. The USER's real
+  route table (`lastRoutes`) is untouched throughout; the redirect re-engages
+  itself the instant the device is reachable again, with no route-table edit
+  in either direction. Never make this decision from discovery events alone —
+  reachability also changes via engine-state transitions and converge
+  failures, all of which must funnel through `NativeBackend.commitKnownDevice`
+  so the effective table never goes stale in the direction that hurts (an app
+  excluded from the whole-system tap with nowhere for its own stream to go is
+  silence with no visible cause).
+- **A saved GROUP containing the local Mac must reach the backend the same
+  way the Selected-Devices path already does: the Mac filtered OUT of
+  `setOutputSet`, and the synced-local sink armed by whether the Mac is a
+  member of whatever MAIN OUT currently targets** — `GroupController
+  .isMainOutMember(_:)`, not `isSpeakerSelected(_:)` (the latter reads
+  Selected Devices only and is blind to group membership; wrong in BOTH
+  directions under a group target — a group containing the Mac never arms
+  the sink, and the Mac can arm the sink wrongly while merely sitting
+  untargeted in Selected Devices during an AirPlay-only group). Under
+  `.selectedDevices` `isMainOutMember` and `isSpeakerSelected` are
+  *provably* the same read (`mainOutMemberIDs` is `Array(selectedDeviceIDs)`
+  in that branch) — so this only changes behavior on the group path.
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
   so a grant made after launch is invisible to any in-process read forever —
   and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
@@ -148,16 +227,17 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   and is EVENT-DRIVEN BY DECISION — no `Timer`, no polling; burst safety comes
   from `TCCProbeRunner`'s single-flighting. Only `.resolved(.granted)` may ever
   reach `recordFreshGrant(source:)`; every other answer means "still unknown."
-- **A refused capture strands BOTH paths permanently, each in its own way.**
-  Whole-system: `reconcileCaptureGate()` sets `captureRunning` before dispatching
-  a `start()` that cannot report failure, so every later reconcile
-  short-circuits — `forceCaptureGateReevaluation()` clears it, and ONLY in the
-  wants-capture-ON direction so it can never fabricate a `stop()` and mute the
-  Mac. Per-app: `updateAppRoutes` starts only the route-table DIFF, so an
-  unchanged table revives nothing, and the indefinite retry is
-  `.processNotYetAudible`-only — `resumeRefusedAppCaptures()` calls
-  `start(bundleID:)` directly instead. Both enqueue onto `captureControlQueue`
-  from INSIDE a `stateQueue` critical section, per the ordering contract.
+- **A refused capture strands BOTH paths, and NOTHING auto-revives them
+  mid-session — by decision.** Whole-system: `reconcileCaptureGate()` sets
+  `captureRunning` before dispatching a `start()` that cannot report failure, so
+  every later reconcile short-circuits. Per-app: `updateAppRoutes` starts only
+  the route-table DIFF, so re-pushing an unchanged table starts nothing, and the
+  indefinite retry is `.processNotYetAudible`-only. The auto-resume machinery
+  that used to paper over both was DELETED (2026-07-25): the app never
+  auto-connects at launch and `AppRoutingController.clearAllDeviceRoutes()`
+  clears every `.device` route there, so a fresh launch after granting is the
+  supported — and only — recovery path. Do not reintroduce a mid-session
+  resume without revisiting that decision.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
   always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.

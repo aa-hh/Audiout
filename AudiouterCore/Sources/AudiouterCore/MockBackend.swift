@@ -211,7 +211,15 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             for id in self.fleet.map(\.id) {
                 guard let device = self.live[id] else { continue }
                 let shouldSelect = ids.contains(id)
-                guard self.expectedSelected.contains(id) != shouldSelect else { continue }
+                let alreadyExpected = self.expectedSelected.contains(id)
+                // R12/W2-T3: `.failed` no longer drops an id from the caller's
+                // desired set (`OutputBackend.setOutputSet`'s doc covers the
+                // contract), so "Try again" now arrives as a same-membership
+                // re-select instead of a genuine off→on edge. Treat that as a
+                // retry too — otherwise the membership-delta guard below
+                // silently swallows it and the device never reconnects.
+                let isRetryOfFailed = shouldSelect && alreadyExpected && device.connectionState.isFailed
+                guard alreadyExpected != shouldSelect || isRetryOfFailed else { continue }
                 if shouldSelect { self.expectedSelected.insert(id) } else { self.expectedSelected.remove(id) }
 
                 if let script = self.connectScripts[id] {

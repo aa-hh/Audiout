@@ -17,6 +17,19 @@ public final class AppRoutingController {
     /// decision 2 / `AppRouteStore` doc). The UI renders rows in this order.
     private(set) public var appRoutes: [AppRoute]
 
+    /// `bundleID` → the `.device(id:)` target `resetDeviceRoute(bundleID:)` most
+    /// recently cleared it FROM (an app-quit-triggered reset, not a deliberate
+    /// user pick). IN-MEMORY ONLY, never persisted through `store` — no
+    /// `AppRouteStore` schema change — so it is forgotten for free when
+    /// Audiouter itself quits, same as any other plain property. Lets the
+    /// popover offer a one-click "Resume → <device>" pick when the app
+    /// relaunches (`PopoverController.appDestinations(devices:keeping:bundleID:)`)
+    /// instead of forcing a manual re-pick, without reversing the 2026-07-22
+    /// decision that a redirect itself does not survive the app's quit. Cleared
+    /// the moment it's consumed or made moot — see `setDestination(_:for:)` and
+    /// `removeRoute(bundleID:)`.
+    private var clearedDeviceRouteMemory: [String: String] = [:]
+
     /// Fired AFTER any mutation that actually changes `appRoutes` (add / remove /
     /// destination / volume / silent device-unavailable fallback), immediately
     /// after the change is persisted (T7). The coordinating layer hooks this to
@@ -65,8 +78,17 @@ public final class AppRoutingController {
 
     /// Change a route's redirect target. No-op (no persist, no state change)
     /// if the route is missing or already targets `destination`.
+    ///
+    /// ANY resolvable pick — the "Resume → <device>" offer, the same device
+    /// picked again, or a completely different destination — consumes
+    /// `clearedDeviceRouteMemory`'s entry for `bundleID` unconditionally, even
+    /// when the destination itself turns out to be a no-op: once the user has
+    /// touched this row's popup, the remembered target is stale/moot either
+    /// way, and there is no separate "Resume" mutation to special-case.
     public func setDestination(_ destination: AppRouteDestination, for bundleID: String) {
-        guard let i = index(of: bundleID), appRoutes[i].destination != destination else { return }
+        guard let i = index(of: bundleID) else { return }
+        clearedDeviceRouteMemory.removeValue(forKey: bundleID)
+        guard appRoutes[i].destination != destination else { return }
         appRoutes[i].destination = destination
         persist()
     }
@@ -81,10 +103,13 @@ public final class AppRoutingController {
         persist()
     }
 
-    /// Remove a route entirely. No-op if `bundleID` isn't present.
+    /// Remove a route entirely. No-op if `bundleID` isn't present. Also drops any
+    /// `clearedDeviceRouteMemory` entry for `bundleID` — a removed route has
+    /// nothing left to resume.
     public func removeRoute(bundleID: String) {
         guard let i = index(of: bundleID) else { return }
         appRoutes.remove(at: i)
+        clearedDeviceRouteMemory.removeValue(forKey: bundleID)
         persist()
     }
 
@@ -95,13 +120,29 @@ public final class AppRoutingController {
     /// the user re-picks it deliberately. No-op for a `.noRedirect`/`.currentDevice`
     /// route (only an involuntary device redirect is reset — a "play on this Mac"
     /// pick is left alone) or a bundle with no route, so it's safe to call on
-    /// every app termination. Mirrors ``handleDeviceUnavailable(id:)``'s
+    /// every app termination. Mirrors ``handleDeviceDisappeared(id:)``'s
     /// involuntary reset-to-`.noRedirect`, and reuses the same un-route path a
     /// manual change takes (persist → `onRoutesDidChange`).
+    ///
+    /// Also records the cleared target in `clearedDeviceRouteMemory` (in-memory
+    /// only) so a relaunch can offer a one-click way back — this does NOT
+    /// reverse the quit-clears-the-route decision above; it only remembers what
+    /// was cleared, kept entirely off disk.
     public func resetDeviceRoute(bundleID: String) {
-        guard let i = index(of: bundleID), appRoutes[i].destination.isDeviceRoute else { return }
+        guard let i = index(of: bundleID),
+              case .device(let deviceID) = appRoutes[i].destination else { return }
+        clearedDeviceRouteMemory[bundleID] = deviceID
         appRoutes[i].destination = .noRedirect
         persist()
+    }
+
+    /// The device id `resetDeviceRoute(bundleID:)` most recently cleared
+    /// `bundleID`'s route from, if any and if not yet consumed — `nil` once
+    /// the user picks any destination (`setDestination`) or removes the route
+    /// (`removeRoute`). `PopoverController` reads this to decide whether to
+    /// offer a "Resume → <device>" destination entry.
+    public func clearedDeviceRouteTarget(for bundleID: String) -> String? {
+        clearedDeviceRouteMemory[bundleID]
     }
 
     // MARK: Derived state
@@ -128,14 +169,24 @@ public final class AppRoutingController {
         }
     }
 
-    /// PLAN decision 7 (silent fallback): any route targeting the now-gone
-    /// device `id` resets to `.noRedirect`, NOT `.currentDevice`. A device
-    /// disappearing out from under a route isn't a deliberate choice to
-    /// switch to "play on this Mac" — `.currentDevice` is now a genuine user
-    /// pick (menu decision), and an involuntary reset shouldn't masquerade as
-    /// one. `.noRedirect` is the neutral/unset state this route effectively
-    /// reverts to. Persists only if something actually changed.
-    public func handleDeviceUnavailable(id: String) {
+    /// PLAN decision 7 (silent fallback), narrowed by R5: any route targeting the
+    /// device `id` — which has DISAPPEARED from the discovered fleet entirely —
+    /// resets to `.noRedirect`, NOT `.currentDevice`. A device disappearing out
+    /// from under a route isn't a deliberate choice to switch to "play on this
+    /// Mac" — `.currentDevice` is now a genuine user pick (menu decision), and an
+    /// involuntary reset shouldn't masquerade as one. `.noRedirect` is the
+    /// neutral/unset state this route effectively reverts to. Persists only if
+    /// something actually changed.
+    ///
+    /// GONE means gone from the snapshot, NOT merely `isAvailable == false`
+    /// (R5). A still-discovered receiver that reports itself unreachable (a
+    /// sticky-AP2 speaker powered off, a Wi-Fi blip) KEEPS its route: the user's
+    /// intent survives, the backend un-excludes the app so it rejoins the
+    /// whole-system mix meanwhile (`NativeBackend`'s effective route table), and
+    /// the redirect re-engages by itself when the device is reachable again. Only
+    /// the caller that observes an outright disappearance may call this — see
+    /// `PopoverController.update(devices:)`.
+    public func handleDeviceDisappeared(id: String) {
         var changed = false
         for i in appRoutes.indices {
             if case .device(let deviceID) = appRoutes[i].destination, deviceID == id {

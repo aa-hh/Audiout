@@ -315,6 +315,53 @@ public final class GroupController {
         }
     }
 
+    /// Force a fresh connection attempt for `id` — what the diagnosis panel's
+    /// "Try again" calls (R12/W2-T3).
+    ///
+    /// Before R12, retry rode `setDeviceSelected(id, true)`: a `.failed` id had
+    /// been dropped from the desired set as failure *cleanup*, so re-adding it
+    /// was a genuine off→on membership edge that reached `applyRouting()`
+    /// naturally. R12 stopped that cleanup — `.failed` keeps the id in the
+    /// desired set (Selected Devices OR an active group's members) so the
+    /// user's intent survives the failure — which means the id is usually
+    /// ALREADY present by the time "Try again" fires. `setDeviceSelected`'s own
+    /// no-op guard would swallow that call before it ever reached the backend.
+    /// This bypasses that guard and re-applies routing unconditionally, so
+    /// `OutputBackend.setOutputSet` is called again and can re-kick a `.failed`
+    /// id (see that method's doc for the "already-desired retry" contract each
+    /// backend implements).
+    ///
+    /// Handles both membership shapes identically (Groups and Selected Devices
+    /// behave the same under R12): `id` already in `selectedDeviceIDs`, or
+    /// already a member of the currently-active group. Falls back to the
+    /// ordinary add path (`setDeviceSelected(id, true)`) if `id` isn't
+    /// currently desired by either — shouldn't normally happen from the retry
+    /// button, but keeps this safe as a general-purpose entry point.
+    ///
+    /// `selectedDeviceIDs` and an active group's `memberIDs` are INDEPENDENT
+    /// sets — a device can sit in both at once (selected individually, then
+    /// also swept into a group that later becomes Main Out). What must decide
+    /// which re-kick fires is which routing is ACTUALLY live right now, i.e.
+    /// `mainOut` itself — not "which membership set happens to contain `id`
+    /// first". So the active-group check runs BEFORE the Selected-Devices
+    /// early return (R12 rediscovery fixup): a `.failed` device that is both
+    /// selected AND a member of the currently-active group must re-kick via
+    /// the group path, since that's the routing actually in effect.
+    @discardableResult
+    public func retryConnection(for id: String) -> SelectionResult {
+        if case .group(let groupID) = mainOut,
+           let group = groups.first(where: { $0.id == groupID }),
+           group.memberIDs.contains(id) {
+            applyRouting()
+            return .ok
+        }
+        if selectedDeviceIDs.contains(id) {
+            if mainOut == .selectedDevices { applyRouting() }
+            return .ok
+        }
+        return setDeviceSelected(id, true)
+    }
+
     /// Whether the local Mac may currently be toggled ON. Always `true` now: with
     /// the synced local sink the Mac may join any (including mixed) Selected
     /// Devices set (Q5 / T-GROUPCTL), so the pre-engine local-mix block is gone.
@@ -537,18 +584,38 @@ public final class GroupController {
     // MARK: Activation
 
     /// Make `id` the one active group: the output set becomes exactly its
-    /// members (SPEC.md §9 — "groups behave like output presets"). Also
+    /// AirPlay members (SPEC.md §9 — "groups behave like output presets"). Also
     /// applies the group's remembered per-member volumes and clears any
     /// mute bookkeeping left over from the previous active group.
+    ///
+    /// The local Mac is filtered out of both (see the body) — a group containing
+    /// the Mac still plays there, via the synced local sink, which arms off
+    /// ``isMainOutMember(_:)`` rather than off the output set.
     public func activateGroup(id: String) {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
         memberState.removeAll()
-        // Exactly the group's members reach the backend output set. App-route
-        // redirect targets are NOT unioned in (T7) — a redirected app reaches its
-        // device through the per-app capture path, not this whole-system set.
-        backend.setOutputSet(Set(group.memberIDs))
+        // Only the group's REAL (AirPlay) members reach the backend output set —
+        // the same local-device filter `applyRouting()`'s Selected-Devices branch
+        // applies, and the contract `NativeBackend.setOutputSet` documents ("the
+        // local Mac is never a real engine output; `GroupController` never hands
+        // it through"). Handing the Mac through made a Mac-only group look like
+        // "Mac + ≥1 AirPlay" to the synced-local-sink decision — a sink armed with
+        // nothing behind it — and left the Mac's own membership in a MIXED group
+        // indistinguishable from a plain AirPlay member.
+        // App-route redirect targets are still NOT unioned in (T7) — a redirected
+        // app reaches its device through the per-app capture path, not this
+        // whole-system set.
+        backend.setOutputSet(Set(group.memberIDs.filter { device($0)?.isLocalDevice == false }))
         for memberID in group.memberIDs {
+            // …and the Mac is skipped here too: its "volume" is the Mac's SYSTEM
+            // output level (`NativeBackend.setVolume`'s local branch writes Core
+            // Audio, not an engine output), so replaying a group's remembered
+            // level would silently move the user's system volume on every
+            // activation — and a remembered 0 would mute the Mac outright. The
+            // Selected-Devices path pushes no member volumes at all, so leaving
+            // the Mac's own level alone is the consistent behaviour.
+            guard device(memberID)?.isLocalDevice != true else { continue }
             if let volume = group.memberVolumes[memberID] {
                 backend.setVolume(volume, for: memberID)
             }
@@ -659,6 +726,26 @@ public final class GroupController {
         case .group(let id):   return groups.first { $0.id == id }?.memberIDs ?? []
         }
     }
+
+    /// Whether `id` is a member of whatever Main Out currently points at — the
+    /// Selected Devices set, or the active group's members.
+    ///
+    /// This — NOT ``isSpeakerSelected(_:)`` — is what
+    /// `NativeBackend.selectedDevicesQuery` is wired to (in `AppDelegate`), the
+    /// out-of-band signal behind the "Mac + ≥1 AirPlay ⇒ arm the synced local
+    /// sink" decision. It has to arrive out of band because neither
+    /// ``applyRouting()`` nor ``activateGroup(id:)`` ever hands the local Mac to
+    /// `backend.setOutputSet`. `isSpeakerSelected(_:)` reads `selectedDeviceIDs`
+    /// alone and so answers the wrong question under a GROUP target, in both
+    /// directions: a group containing the Mac would never arm the sink (the Mac
+    /// goes silent), and a Mac left behind in the untargeted Selected Devices set
+    /// would arm it while an AirPlay-only group plays (the Mac plays when it
+    /// shouldn't).
+    ///
+    /// Under `.selectedDevices` this is *exactly* ``isSpeakerSelected(_:)``, since
+    /// `mainOutMemberIDs` is `Array(selectedDeviceIDs)` in that branch — so the
+    /// two differ only on the group path.
+    public func isMainOutMember(_ id: String) -> Bool { mainOutMemberIDs.contains(id) }
 
     /// The Main Out master volume: the average of the target's members' volumes
     /// (0 when the target is empty).

@@ -2062,6 +2062,19 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
 
   if (sent < 0)
     {
+      // [AirPlayEngine vendored change 2026-07-25: EAGAIN on non-blocking DGRAM
+      // send is a dropped packet, not a fatal session error — see
+      // docs/VENDORED-DIFFS.md Entry 4]
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+	{
+	  static uint64_t airplay_dropped_packets;
+
+	  airplay_dropped_packets++;
+	  DPRINTF(E_WARN, L_AIRPLAY, "Dropped packet for '%s' (send would block): %s (total dropped: %" PRIu64 ")\n",
+	    session->devname, strerror(errno), airplay_dropped_packets);
+	  return -1;
+	}
+
       DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(errno));
 
       // Can't free it right away, it would make the ->next in the calling

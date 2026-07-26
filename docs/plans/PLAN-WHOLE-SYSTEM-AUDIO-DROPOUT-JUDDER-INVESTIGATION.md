@@ -194,3 +194,172 @@ specificity is real or incidental.
 - Do not fold `014` (volume-percentage desync) into this investigation's
   scope unless "First question to answer" above concludes they share a root
   cause. Keep them as separate roadmap entries otherwise.
+
+---
+
+## Wave 1 diagnostic run-book — Bluetooth nominal-rate flap (WH-1000XM3)
+
+Added for a related-but-distinct symptom found while continuing this
+investigation: a Sony WH-1000XM3 Bluetooth headset connects and becomes the
+Mac's default output, then its `kAudioDevicePropertyNominalSampleRate`
+oscillates 16000 ↔ 44100 roughly once a second for ~5 seconds (16 kHz =
+HFP/headset-mic profile, 44.1 kHz = A2DP/playback profile). Each flip makes
+Audiouter.app rebuild every audio tap and reset its AirPlay session — 11
+session resets in 14 seconds in the one capture so far, ending in judder
+then silence.
+
+**The decisive unknown: is the headset flapping on its own, or is the app's
+own aggregate-device churn provoking the profile switch?** The app creates
+and destroys four private aggregate devices per flip (one whole-system + one
+per routed app), each naming the Bluetooth device as a sub-device with no
+channel restriction. If the app is causing it, that's a feedback loop, and a
+debounce would only slow the symptom down, not fix it. **This can't be
+answered from the app's own logs** — during the one capture so far, nothing
+distinguishes "the headset did this to itself" from "we did this to
+ourselves" after the fact. It needs a control experiment with the app not
+running at all, which is what this run-book is for.
+
+### The tool: `dev/bt-rate-observer.swift`
+
+A standalone script, independent of Audiouter.app entirely (it does not
+import or launch it), that watches the Mac's default output device from
+outside the app. It prints one line per change plus one baseline line at
+startup, e.g.:
+
+```
++   0.068s 12:02:08.238 [baseline] device=82 name="MacBook Pro Speakers" transport=BuiltIn rateHz=44100 inputStreams=0 outputStreams=1
++ 145.430s 12:04:33.667 [rate] device=82 name="MacBook Pro Speakers" transport=BuiltIn rateHz=48000 inputStreams=0 outputStreams=1
+```
+
+Each line: elapsed time since the script started, wall-clock time (UTC),
+which change fired it (`baseline`/`default-device`/`rate`), the device's ID
+and name, its transport type (so Bluetooth is unambiguous), its current
+nominal sample rate, and its input/output stream counts. `inputStreams` is
+the HFP tell — non-zero only while the headset's mic profile is active — so
+a run where `rateHz` flips 16000/44100 in lockstep with `inputStreams`
+flipping 0/1+ is the HFP↔A2DP handoff, confirmed rather than inferred.
+
+### One-time setup, before Run A
+
+1. **Quit every copy of Audiouter.app.** Check what's actually running:
+   ```
+   pgrep -fl Audiouter
+   ```
+   This should print nothing. If it prints something, quit that app (its
+   menu-bar icon, or Activity Monitor) and check again. Only one copy of
+   Audiouter.app can ever run at a time on this Mac — it binds two
+   low-numbered network ports that only one process can hold at once — so if
+   a second copy is somehow already running, a newly launched one won't work
+   correctly anyway.
+2. **Check for other installed copies**, so that when you launch it again in
+   Run B/C you know which one you're getting (this Mac may have more than
+   one build sitting around — your everyday one in `/Applications`, plus
+   possibly others from development folders):
+   ```
+   find ~ /Applications -maxdepth 9 -iname "Audiouter.app" 2>/dev/null
+   ```
+   Use the same copy for Run B and Run C — whichever one you'd normally use
+   is fine, it just needs to be consistent across those two runs.
+3. **Have a Terminal window ready in the repo folder** (wherever this
+   project is checked out) — that's where `dev/bt-rate-observer.swift`
+   lives, and it's what you'll run for all three (or four) parts below.
+4. Know where the app's own diagnostic log is:
+   `~/Library/Logs/Audiouter/telemetry.jsonl` — a plain-text file, one JSON
+   entry per line, each with a `"ts"` timestamp in UTC (e.g.
+   `"ts":"2026-07-26T20:53:48.556Z"`). The observer script's own wall-clock
+   column is ALSO UTC, on purpose, so after the fact you can line the two
+   files up side by side just by matching the clock digits — no timezone
+   math needed.
+
+### Capturing each run's output
+
+For every run below, start the observer FIRST (before connecting the
+headset, so it captures the pre-connection baseline too), and redirect its
+output to its own file:
+
+```
+swift dev/bt-rate-observer.swift > ~/Desktop/bt-run-A.log 2>&1
+```
+
+(use `bt-run-B.log`, `bt-run-C.log`, `bt-run-mic.log` for the other parts).
+Leave that Terminal window running for the whole part; press Ctrl-C only
+once you're done with it, then move to the next part with a fresh command
+and a fresh log file.
+
+**When you launch Audiouter.app itself** (Runs B and C, not Run A), always
+launch it the normal way — double-click it in Finder/Applications, or use
+Spotlight. Do not run its binary directly from a Terminal command line;
+that hands it the Terminal's own permissions instead of its own, which can
+quietly change its behavior in ways that would contaminate this test.
+
+### Run A — app fully quit (does the headset do this on its own?)
+
+1. Finish the one-time setup above; confirm `pgrep -fl Audiouter` prints
+   nothing.
+2. Start the observer, redirecting to `bt-run-A.log`. Confirm one
+   `[baseline]` line prints immediately.
+3. Connect the WH-1000XM3 over Bluetooth.
+4. Let it sit, connected, doing nothing else, for about 30 seconds.
+5. Press Ctrl-C to stop the observer.
+
+### Run B — app running, nothing selected (no live captures)
+
+1. Disconnect the WH-1000XM3 (so this starts from the same clean state Run A
+   did).
+2. Launch Audiouter.app normally.
+3. In the app, leave everything unselected/idle — Main Out on "This Mac", no
+   AirPlay device picked, no per-app routing turned on for anything. The
+   app should be running and visible, but not moving any audio anywhere.
+4. Start the observer, redirecting to `bt-run-B.log`.
+5. Connect the WH-1000XM3, let it sit ~30 seconds, same as Run A.
+6. Ctrl-C the observer.
+
+### Run C — app streaming to the Sonos, same routing as the original repro
+
+1. Disconnect the WH-1000XM3.
+2. With Audiouter.app running, set up the same routing as the original
+   repro: Sonos selected as an output, with Spotify, Firefox, and Music each
+   redirected to it via per-app routing.
+3. Start playback in at least one of those apps so audio is actually
+   flowing to the Sonos.
+4. Start the observer, redirecting to `bt-run-C.log`.
+5. Connect the WH-1000XM3, let it sit ~30 seconds while audio keeps playing.
+6. Ctrl-C the observer.
+
+### The microphone-trigger case
+
+Separately reported: engaging the Mac's microphone makes the app itself
+seem to "go back and forth between enabling the mic and having the app
+running." Reproduce that with the observer running too, to see whether the
+mic alone (no Bluetooth involved) provokes the same kind of flapping — which
+would point at the same underlying mechanism as the headset case:
+
+1. With Audiouter.app running and streaming to the Sonos (same setup as Run
+   C), start the observer fresh, redirecting to `bt-run-mic.log`.
+2. Trigger the microphone the same way you did when you first noticed this
+   (start a call/recording, or however you engaged it originally).
+3. Let it run for about 30 seconds while you watch for the app's own
+   back-and-forth behavior.
+4. Ctrl-C the observer.
+
+### Reading the results — the decision rule
+
+- **Rate flaps in Run A** (app fully quit) ⇒ the headset does this on its
+  own, independent of Audiouter.app entirely. This is external Bluetooth/HFP
+  behavior; an app-side fix (debounce, etc.) could only ever soften the
+  symptom, not remove the cause.
+- **Flat in Run A and Run B, but flaps in Run C** ⇒ Audiouter.app's own
+  routing — specifically the aggregate devices it builds while actively
+  streaming — is provoking the profile switch: a feedback loop. The fix
+  then is to stop causing it, not to tolerate it better.
+- **Flaps in Run B too** (app running, nothing selected) ⇒ points at
+  something the app does merely by running/watching devices, before any
+  routing even starts — worth a closer look at whatever device enumeration
+  or monitoring happens at launch.
+- Once the logs exist, pull `~/Library/Logs/Audiouter/telemetry.jsonl` from
+  the same time window as each run and match timestamps against the
+  observer's `[rate]`/`[default-device]` lines. That shows whether any of
+  the app's own rebuild/reset events line up with a flap it's causing, or
+  whether — as happened with the volume-dragging bug earlier in this doc —
+  the app's telemetry stays clean straight through something it can't see.
+  Either result is itself a finding.

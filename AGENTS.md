@@ -78,6 +78,16 @@ symbol you cannot find in source, believe the source and fix the doc.
   repo's own path contains a space, which silently breaks unquoted loops.
 - **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
   guidance on scoping tests with `--filter`.
+- **Sweep stale PTP-helper daemons routinely — and always before a native live
+  test.** Old dev builds and side-by-side copies leave `*.ptphelper` launchd
+  jobs bound to UDP 319/320; a single stale one makes a healthy on-demand helper
+  look broken (they have piled up 16-deep). `scripts/purge-stale-ptp-helpers.sh`
+  lists them (dry-run, no sudo — safe to run anytime, so run it periodically);
+  `scripts/purge-stale-ptp-helpers.sh --apply` boots them out. `--apply` needs
+  `sudo`, so it prompts and cannot run unattended — an agent runs it only where a
+  human can enter the password. Never `--apply` while a live Audiouter session is
+  actively streaming: it unloads the running helper too. It only ever touches
+  `*.ptphelper` jobs.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 

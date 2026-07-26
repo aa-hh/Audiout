@@ -620,6 +620,14 @@ extension SerializedSharedState {
                 group.addTask { _ = await task.value }
                 group.addTask { try await Task.sleep(for: timeout) }
                 try await group.next()
+                // Cancel the STREAM task, not just the group's children. `cancelAll()`
+                // cancels the child that is `await task.value`, but `Task.value` does
+                // not observe its awaiter's cancellation — it waits for `task` itself.
+                // Without this the group's implicit scope-exit await never returns when
+                // the timeout wins, and the `defer { task.cancel() }` that would free it
+                // can't run because we are still inside this closure: a test whose
+                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+                task.cancel()
                 group.cancelAll()
             }
         }
@@ -6710,6 +6718,14 @@ private extension SerializedSharedState.NativeBackendTests {
                 group.addTask { _ = await task.value }
                 group.addTask { try await Task.sleep(for: timeout) }
                 try await group.next()
+                // Cancel the STREAM task, not just the group's children. `cancelAll()`
+                // cancels the child that is `await task.value`, but `Task.value` does
+                // not observe its awaiter's cancellation — it waits for `task` itself.
+                // Without this the group's implicit scope-exit await never returns when
+                // the timeout wins, and the `defer { task.cancel() }` that would free it
+                // can't run because we are still inside this closure: a test whose
+                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+                task.cancel()
                 group.cancelAll()
             }
         }

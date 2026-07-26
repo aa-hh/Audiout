@@ -88,6 +88,14 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// Fake start buffer for the `LatencyConfigurable` conformance (on `queue`).
     private var fakeStartBufferMs: Int = AppSettings.defaultStartBufferMs
 
+    /// The last master gain stages handed to `setMasterGain` (on `queue`). RECORDED
+    /// ONLY: the mock has no wire to attenuate, and it deliberately does NOT fold
+    /// this into any `Device.volume` — a stored level is always the user's own
+    /// setting for that device, on every backend. The mock stays a plain store; only
+    /// ``NativeBackend`` forms `Main × Group × Device`, and only at the moment it
+    /// writes a level out.
+    private var masterGain: (mainOut: Int, group: Int) = (100, 100)
+
     /// The popover-visibility gate (T-GATE, `MeteringControlling`). `false` until
     /// `setMeteringActive(true)` first fires — the level timer stays off until
     /// then, mirroring the native path's default-inactive metering.
@@ -204,6 +212,20 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
     public func setMuted(_ muted: Bool, for id: String) {
         mutate(id) { $0.isMuted = muted }
+    }
+
+    public func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {
+        // Recorded, not applied — see `masterGain`. `mirrorToSystemVolume` is
+        // ignored: the mock owns no system-volume helper (hence the `nil`
+        // `systemOutputVolume` it inherits from the protocol default) and must never
+        // touch real hardware.
+        queue.async { self.masterGain = (mainOut.clampedToVolume, group.clampedToVolume) }
+    }
+
+    /// The gain stages last set, for tests to assert against (`test_` prefix marks a
+    /// fixture hook, as with every other mock probe).
+    public var test_masterGain: (mainOut: Int, group: Int) {
+        queue.sync { masterGain }
     }
 
     public func setOutputSet(_ ids: Set<String>) {

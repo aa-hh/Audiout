@@ -43,12 +43,28 @@ flowchart TD
     PACC --> ARM[AppRouteMixer]
     NCC --> APR[AudioProcessResolver]
     PACC --> APR
+    NCC --> TRL[TapRebuildLifecycle]
+    PACC --> TRL
+    NCC --> DODM[DefaultOutputDeviceMonitor]
+    PACC --> DODM
+    LPE --> DODM
     NB --> LPE[LocalPlaybackEngine]
     NB --> ND[NativeDiscovery]
     GC --> RS[RoutingStore]
     GC --> GS[GroupStore]
     ARC --> ARS[AppRouteStore]
 ```
+
+`DefaultOutputDeviceMonitor` is the single process-wide owner of the shared
+default output device's identity and nominal sample rate: one HAL listener
+pair, fanned out to subscribers (both capture coordinators and
+`LocalPlaybackEngine`), watcher-only (never writes device config).
+`TapRebuildLifecycle.swift` holds the two pieces of the two coordinators'
+tap-rebuild machinery that are genuinely identical (`TapRebuildCoalescer`,
+`TapReanchor`); the claim/teardown/commit choreography itself is still two
+separate bodies, one per coordinator, by deliberate design (see
+`docs/notes/architecture-review-audio-routing-2026-07-26.md`,
+"Correction" section, defect A).
 
 `GroupController` and `AppRoutingController` are the two routing-decision
 owners; both talk to whichever `OutputBackend` is active only through the
@@ -87,6 +103,7 @@ Redirecting one app to a specific device:
 | Backend seam | `OutputBackend`, `NativeBackend`, `MockBackend`, `OwnToneBackend`, `makeBackend(_:)` |
 | Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver` |
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer` |
+| Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore` |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |

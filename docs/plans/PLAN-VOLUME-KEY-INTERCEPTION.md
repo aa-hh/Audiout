@@ -1,0 +1,174 @@
+# PLAN — Volume-key interception on the aggregate device
+
+**Status:** not started. Self-contained handoff — an agent should be able to execute
+this without the originating conversation. Everything it needs is below or cited by
+`file:line`. Verify each citation against current source before relying on it (docs
+orient, code decides); line numbers drift.
+
+**Origin:** follow-up owed by the volume-decoupling workstream (branch
+`claude/audio-volume-device-caps-f4ece7`, commits `7a3ed14..a85cc43`). Alec chose
+"follow-up run, right after" when asked whether to fold it into that run. See memory
+`volume-decoupling-main-as-ceiling.md` and `airplay-coexistence-plan.md`.
+
+---
+
+## Why this is needed (proven live, not hypothetical)
+
+The AirPlay-coexistence work (merged to main, `34655b8`) introduces a **Sound-settings
+aggregate device** ("Audiouter", wrapping the built-in speakers) as a Wave-3 basis.
+When that aggregate is the macOS default output, **the hardware volume keys do
+nothing** — Alec confirmed this on real hardware. macOS shows the crossed-out volume
+HUD on each press.
+
+**The trap that wasted time before, do not repeat it:** the aggregate *advertises*
+volume capability — `aggtool status` reports `vmvc=true scalarMain=true muteMain=true`
+— but does **not** deliver it. A capability check is NOT a safe gate. Test the actual
+behaviour (attempt a write, read back, or just treat "the default output is our
+aggregate" as the signal), never the advertised flags.
+
+macOS's own key handling being dead means the normal volume path (below) never fires
+on the aggregate. Closing that gap needs the app to intercept the keys itself.
+
+## Why it belongs to THIS workstream, not coexistence
+
+The coexistence plan assumed it could keep the old `GroupController` volume-key
+**mirror**. The volume-decoupling refactor **deleted that mirror entirely** (commit
+`7098868`, ~160 lines). So the gap the mirror used to paper over is now this
+workstream's to close. Do not go looking for the mirror — it is gone by design.
+
+---
+
+## What already exists (build on it; do not re-invent)
+
+### The normal (non-aggregate) volume path — WORKS, leave it alone
+On a normal output, macOS moves the system volume itself, and the app follows:
+
+```
+volume key → macOS moves system volume
+           → SystemOutputVolume listener fires
+           → NativeBackend emits .systemVolumeChanged(volume:)
+           → AppDelegate.swift:1241  groupController.applyExternalSystemVolume(volume)
+           → Main moves; every device follows via Main × Group × Device at the write boundary
+```
+
+This path is intact and tested (`NativeBackendTests`, `GroupControllerTests`). The
+interceptor must NOT double-drive it — see "only intercept when the keys are dead".
+
+### `GroupController.applyExternalSystemVolume(_ volume: Int)` — the seam to call
+`GroupController.swift:830`. Contract, written deliberately **source-agnostic** exactly
+so a key interceptor can call it: *"the system output volume is already at `volume`;
+bring Main into agreement and re-push every dependent gain. Writes NO hardware."* It is
+the read-back arm — it never writes the system volume, so it cannot feed back. This is
+almost certainly the right entry point for the interceptor (the aggregate can't take a
+hardware volume write anyway), but see the open question on mute below.
+
+### `systemOutputVolume: Int?` — the "keys are dead" signal
+`OutputBackend.swift:297` (protocol), `:315` (default `nil`). `NativeBackend` returns
+the Mac's readable system volume, or **`nil` when the default output exposes no
+settable volume** — which is exactly the aggregate/HDMI case. `nil` is a strong
+candidate for the gate: "if `systemOutputVolume == nil`, macOS can't move it, so we
+must." Confirm this holds for the specific aggregate (the spike proved the scalar is
+unsettable despite `scalarMain=true`).
+
+### `MediaKeyController` — an EMITTER, not the interceptor you need
+`AudiouterApp/MediaKeyController.swift`. It POSTS Now-Playing keys (play/pause/next) to
+the HID tap to drive Now Playing from the menu bar. It does NOT intercept volume keys.
+Do not confuse the two. **But reuse its two assets:**
+- The Accessibility grant seam: `RemoteControlPriming` (injected, not a raw
+  `AXIsProcessTrusted()` — see `MediaKeyController.swift:38-58`). The onboarding flow
+  already uses it, so the grant plumbing and the once-per-launch prompt exist. Wire the
+  interceptor through the same seam rather than adding a second Accessibility path.
+- The systemDefined/subtype-8 aux-key encoding recipe (`postAux`, `:72-95`) — the same
+  event shape you will be *reading* in the tap.
+
+---
+
+## The work
+
+### 0. Fix a prerequisite bug in the same machinery FIRST
+The write-boundary review of the decoupling work found: **`lastSeenSystemVolume` goes
+stale after a mirrored Main drag** (`NativeBackend.swift`, the `.systemVolumeChanged`
+emit basis). After the user drags Main (which writes hardware but whose echo
+`SystemOutputVolume` suppresses), `lastSeenSystemVolume` is never updated, so a later
+genuine external change back to the *exact pre-drag value* is compared equal and
+**silently dropped** — Main desyncs from the system. Fix: the `mirrorToSystemVolume`
+arm of `setMasterGain` must also set `lastSeenSystemVolume = main`. This is in the path
+the interceptor builds on, so fix it before layering on top. (One line; verify the
+field name against current source.)
+
+### 1. The interceptor
+A `CGEventTap` (session or annotated-session tap) that observes systemDefined events,
+filters to the aux volume-up / volume-down / mute keys (subtype 8, key codes
+`NX_KEYTYPE_SOUND_UP` / `_DOWN` / `MUTE` — the down transition, `0xA`, as in
+`MediaKeyController.postAux`). On a matching key **when the gate says the keys are
+dead**:
+- compute the target Main (current `mainOutMasterVolume` ± one step; pick a step that
+  matches macOS's 16-per-range feel, and honour the ⇧⌥ quarter-step modifier if cheap),
+- drive Main via `applyExternalSystemVolume(target)` (no hardware write — correct for
+  an unsettable output),
+- **consume the event** (return `nil` from the tap callback) so macOS doesn't also show
+  the crossed-out HUD.
+
+### 2. The gate — only intercept when the keys are actually dead
+When the default output is a normal, settable device, do NOT consume the key — let
+macOS handle it and let the existing `.systemVolumeChanged` path move Main. Only
+intercept when `systemOutputVolume == nil` (or a directly-observed unsettable state).
+Getting this wrong either double-moves Main on normal outputs or leaves the tap eating
+keys the OS should handle. Re-evaluate the gate when the default device changes
+(`SystemOutputVolume` already watches `kAudioHardwarePropertyDefaultOutputDevice`).
+
+### 3. Accessibility grant — now MANDATORY, was optional
+`MediaKeyController`'s posting degraded gracefully without the grant (`post` just
+no-ops). A CGEventTap **cannot be created at all** without Accessibility trust, so the
+grant stops being optional. Therefore:
+- surface a **revoked-grant state** in the UI (the keys silently die otherwise). The
+  onboarding permission rows are the natural home.
+- **cdhash-pinning gotcha** (memory `tcc-grants-cdhash-pinned-on-adhoc-builds.md`):
+  ad-hoc dev rebuilds silently lose the grant even though Settings shows it "on".
+  Toggling doesn't fix it; REMOVE (−) and re-add does. Expect this during live testing;
+  it is not a code bug.
+
+### 4. The HUD (open question — decide with Alec or by ear)
+Consuming the event kills the crossed-out HUD, but also means **no volume HUD at all**
+unless the app posts its own. Options: (a) live without a HUD on the aggregate; (b)
+post a synthetic volume HUD; (c) show the change in the app's own UI only. Flag this
+rather than silently shipping (a).
+
+### 5. Mute
+Decide whether the mute key maps to Main mute, or to the existing per-device/Main mute
+semantics. `applyExternalSystemVolume` carries no mute concept, so mute likely needs its
+own small entry point on `GroupController`. Do not overload the volume path for it.
+
+---
+
+## Testing
+
+- **Headless:** the interceptor's decision logic (gate on/off by
+  `systemOutputVolume` nil-ness; key → target-Main math; step size; modifier handling)
+  should be pure and unit-tested with an injected backend, the way the rest of this
+  codebase injects `OutputBackend`. The CGEventTap plumbing itself is not headlessly
+  testable — keep it a thin shell over the tested decision function.
+- **Live (owed to Alec, cannot be automated):**
+  - reproduce the dead keys with the aggregate active, then confirm the interceptor
+    moves Main and every routed device follows;
+  - confirm a normal output is UNAFFECTED (macOS handles the keys, Main still follows
+    via the existing path, the tap does not double-move);
+  - revoked-Accessibility state is visible, not silent;
+  - the HUD decision feels right.
+
+### Reproduction tooling (exists)
+`aggtool` in the aggregate-device spike: worktree
+`.claude/worktrees/agent-ae99ad2727f8097a1`, `dev/spikes/aggregate-device/aggtool.swift`
+(+ `build.sh`, `SPIKE-REPORT.md`). Verbs: `create | set-default | restore | destroy`
+(and `status`, which is what shows the misleading `vmvc=true` flags). Use it to put the
+machine into the dead-keys state without depending on the coexistence feature being
+wired up.
+
+---
+
+## Definition of done
+Volume keys move Main (and therefore every routed device) when the aggregate is the
+default output; normal outputs are untouched; a revoked Accessibility grant is visible
+rather than a silent failure; the `lastSeenSystemVolume` prerequisite is fixed; decision
+logic is unit-tested; Alec's live checklist above passes. Do NOT merge to main — hand
+back a committed branch for Alec to live-test (house rule).

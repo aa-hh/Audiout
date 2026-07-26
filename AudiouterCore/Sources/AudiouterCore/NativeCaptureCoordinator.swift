@@ -1157,13 +1157,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if !makeBeforeBreak { old?.teardown() }
         let newTap = makeTap()
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
-        // Guardrail: for make-before-break, delivery (`onBuffer`) is wired only AFTER
-        // the old tap is gone (below) so exactly ONE tap ever delivers buffers — no
-        // double-capture / echo to the receivers during the overlap. For break-
-        // before-make the old tap is already gone, so wiring it now is safe/unchanged.
-        if !makeBeforeBreak {
-            newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
-        }
+        // Wire delivery BEFORE createAndStart — the real IOProc snapshots `onBuffer`
+        // by value at start (`let onBuffer = self.onBuffer`), so a handler assigned
+        // AFTER createAndStart is never seen by the running IOProc and the tap
+        // delivers nothing forever. An earlier make-before-break "guardrail" deferred
+        // this to avoid double-capture during the old/new overlap, but that was both
+        // unnecessary and a permanent-silence bug: `handleBuffer` already drops every
+        // buffer while `snapshot.converter == nil` (nulled at claim, republished only
+        // at commit), so neither tap's delivery reaches the sink until commit — the
+        // empty-snapshot gate is the real single-delivery guarantee, on both paths.
+        newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
 
         do {
             let format = try newTap.createAndStart(
@@ -1171,11 +1174,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             try Self.validate(format)
             // MAKE-BEFORE-BREAK second half: the new aggregate is up and already mutes
             // the NEW device, so tear the OLD device's tap down only now (leak window
-            // = just the createAndStart above), THEN wire delivery — never while the
-            // old tap is still delivering (the no-double-capture guardrail).
+            // = just the createAndStart above). Delivery was already wired before the
+            // create; the converter gate (above) kept the overlap single-delivery.
             if makeBeforeBreak {
                 old?.teardown()
-                newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
             }
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber

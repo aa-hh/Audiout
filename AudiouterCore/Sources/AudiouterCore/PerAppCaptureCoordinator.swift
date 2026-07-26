@@ -100,13 +100,6 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // MARK: Injected dependencies
 
     private let makeTap: @Sendable () -> ProcessAudioTap
-    /// Resolves the CURRENT default output device id, or nil when unreadable. Used
-    /// by ``handleDeviceChange(bundleID:)`` to gate make-before-break to device-
-    /// IDENTITY changes only (audio-leak-on-device-switch fix — the per-app twin of
-    /// ``NativeCaptureCoordinator``'s seam of the same name). Injected for hermetic
-    /// testing; defaults to `{ nil }` (always break-before-make, today's behavior),
-    /// wired to `CoreAudioProcessTap.defaultOutputDeviceID()` in production.
-    private let resolveDefaultOutputDeviceID: @Sendable () -> AudioObjectID?
     private let processResolver: AudioProcessResolver
     private let muteBehavior: TapMuteBehavior
     /// This instance's short label — the SAME string that names its private
@@ -259,12 +252,6 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 }
             },
             processResolver: processResolver,
-            // Make-before-break identity gate (audio-leak-on-device-switch fix).
-            // Pre-14.2 has no live capture, so nil (-> break-before-make) is correct.
-            resolveDefaultOutputDeviceID: {
-                if #available(macOS 14.2, *) { return try? CoreAudioProcessTap.defaultOutputDeviceID() }
-                return nil
-            },
             muteBehavior: muteBehavior,
             name: name
         )
@@ -280,14 +267,12 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     init(
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
-        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID? = { nil },
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
         name: String = "AirPlayController",
         installsProcessListListener: Bool = true,
         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
-        self.resolveDefaultOutputDeviceID = resolveDefaultOutputDeviceID
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
         self.name = name
@@ -487,21 +472,18 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         // handleDeviceChange once it lands in `.capturing`. Rapid sample-rate
         // bounces (44.1 -> 48 -> 44.1) mean the LAST notification can be the one
         // that would otherwise be dropped, rebuilding against a stale rate.
-        let claim: (proceed: Bool, old: ProcessAudioTap?, oldFormat: TapFormat?, previousDeviceID: AudioObjectID?) = queue.sync {
-            guard let slot = slots[bundleID] else { return (false, nil, nil, nil) }
+        let claim: (proceed: Bool, old: ProcessAudioTap?, oldFormat: TapFormat?) = queue.sync {
+            guard let slot = slots[bundleID] else { return (false, nil, nil) }
             guard case .capturing(let oldFormat) = slot.state else {
                 if case .creatingTap = slot.state {
                     slot.rebuildCoalescer.markPending()
                 }
-                return (false, nil, nil, nil)
+                return (false, nil, nil)
             }
             let old = slot.tap
             slot.tap = nil
             transition(slot, bundleID: bundleID, to: .creatingTap)
-            // Snapshot the device the OUTGOING tap was anchored to, before teardown
-            // clears it — the baseline the make-before-break identity gate compares
-            // the fresh default-output-device read against (audio-leak fix).
-            return (true, old, oldFormat, old?.tappedDeviceID)
+            return (true, old, oldFormat)
         }
         guard claim.proceed else {
             // Pending-rebuild coalescing (STABILITY(C6)): this notification
@@ -515,37 +497,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             Telemetry.log(.capturePA, "device_change_coalesced", ["bundleID": bundleID, "pending": String(pendingNow)])
             return
         }
-        // MAKE-BEFORE-BREAK, gated to device-IDENTITY changes — the per-app twin of
-        // the audio-leak-on-device-switch fix in `NativeCaptureCoordinator`. This
-        // tap is `.mutedWhenTapped`: the mute that keeps the redirected app's audio
-        // OFF the default device is a property of the LIVE tap's aggregate and
-        // engages only once the NEW aggregate auto-starts. Break-before-make tears
-        // the old tap down first, so during the new aggregate's create the app's
-        // audio briefly leaks out the NEW default device. When the default device
-        // IDENTITY changed (new default != what the old tap was anchored to), build
-        // +start the new tap — which mutes the NEW device — BEFORE tearing the old
-        // one down (two aggregates on two DIFFERENT devices, a config the HAL already
-        // runs). SHRINKS, does not zero, the window (residual = the createAndStart).
-        // A SAME-device rate rebuild KEEPS break-before-make: two aggregates on ONE
-        // device mid-rate-renegotiation is the risky config we deliberately avoid.
-        // A nil on either side falls back to break-before-make.
-        let newDefaultDeviceID = resolveDefaultOutputDeviceID()
-        let makeBeforeBreak: Bool = {
-            guard let previous = claim.previousDeviceID, let current = newDefaultDeviceID
-            else { return false }
-            return previous != current
-        }()
-
-        // Break-before-make (same device / unknown identity): tear the old tap down
-        // first, exactly as before.
-        if !makeBeforeBreak { claim.old?.teardown() }
+        claim.old?.teardown()
 
         let processes = processResolver.resolve(bundleID: bundleID)
         guard !processes.isEmpty else {
-            // Bailing to `.failed`: the old tap must still be released. On the
-            // break-before-make path it was already torn down above; on make-before-
-            // break it is still alive, so tear it down now (teardown is idempotent).
-            if makeBeforeBreak { claim.old?.teardown() }
             // The subsequent .failed(.processNotYetAudible) transition below
             // already carries this reason in its "transition"/"error" telemetry
             // field (see `transition(_:bundleID:to:)`).
@@ -557,24 +512,12 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         }
 
         let newTap = makeTap()
+        newTap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
-        // Guardrail: for make-before-break, delivery is wired only AFTER the old tap
-        // is gone (below), so exactly ONE tap ever delivers buffers (no double-
-        // capture). For break-before-make the old tap is already gone — wire now.
-        if !makeBeforeBreak {
-            newTap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
-        }
 
         do {
             let format = try newTap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
             try Self.validate(format)
-            // MAKE-BEFORE-BREAK second half: the new aggregate already mutes the NEW
-            // device, so tear the OLD tap down only now, THEN wire delivery — never
-            // while the old tap is still delivering (the no-double-capture guardrail).
-            if makeBeforeBreak {
-                claim.old?.teardown()
-                newTap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
-            }
             // The subsequent .capturing(format) transition below already carries
             // the new format in its "transition"/"format" telemetry field.
             // The single highest-value event in PLAN-TELEMETRY-SYSTEM.md's T3:
@@ -630,12 +573,6 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             }
         } catch {
             newTap.teardown()
-            // MAKE-BEFORE-BREAK failure unwind: on this path the old tap is STILL
-            // ALIVE (its teardown was deferred until after a successful create), so
-            // tear it down too — never leave two taps or a dangling one. On break-
-            // before-make the old tap is already gone; teardown is idempotent, but
-            // this stays guarded to keep that path byte-identical.
-            if makeBeforeBreak { claim.old?.teardown() }
             let mapped: PerAppCaptureError = (error as? PerAppCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
             // The subsequent .failed(mapped) transition below already carries
@@ -906,19 +843,6 @@ public protocol ProcessAudioTap: AnyObject {
     /// Stop and destroy the IOProc, aggregate device, and tap (in that
     /// order). Idempotent and non-throwing so teardown always completes.
     func teardown()
-
-    /// The output device this tap's aggregate is currently pinned to, or nil when
-    /// it isn't running / can't say. Read by ``PerAppCaptureCoordinator`` across a
-    /// rebuild to gate make-before-break to device-IDENTITY changes only (the
-    /// audio-leak-on-device-switch fix — see `handleDeviceChange(bundleID:)`).
-    /// Defaulted to nil so a fake that doesn't model device identity keeps working
-    /// (the gate then simply abstains -> break-before-make). Mirrors
-    /// ``SystemAudioTap/tappedDeviceID`` on the whole-system twin.
-    var tappedDeviceID: AudioObjectID? { get }
-}
-
-public extension ProcessAudioTap {
-    var tappedDeviceID: AudioObjectID? { nil }
 }
 
 /// Every way per-app capture can fail. Shaped so a UI can render an
@@ -1059,13 +983,6 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     /// subscription can report ITS identity/rate as what this tap is built on
     /// (see `subscribeToDefaultOutput(bundleID:)`).
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
-
-    /// The device this tap is anchored to (``ProcessAudioTap/tappedDeviceID``), or
-    /// nil before `createAndStart` resolved one / after `teardown()` cleared it —
-    /// the make-before-break identity gate reads it across a rebuild.
-    var tappedDeviceID: AudioObjectID? {
-        tappedOutputDeviceID == kAudioObjectUnknown ? nil : tappedOutputDeviceID
-    }
 
     /// The process-wide default-output watcher this tap observes through, and the
     /// handle for its one subscription (nil until `createAndStart`, and again
@@ -1316,7 +1233,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     /// NOT `kAudioHardwarePropertyDefaultSystemOutputDevice` (the alert-sound
     /// device). See the file-level doc comment on ``PerAppCaptureCoordinator``
     /// for why this selector matters.
-    static func defaultOutputDeviceID() throws -> AudioObjectID {
+    private static func defaultOutputDeviceID() throws -> AudioObjectID {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,

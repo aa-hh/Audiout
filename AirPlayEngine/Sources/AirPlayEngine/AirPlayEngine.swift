@@ -981,32 +981,45 @@ public actor AirPlayEngine {
     /// delivering again but the receiver pinned to a now-stale RTP timeline
     /// (silent forever — Apple Dev Forums 825780); today `NativeBackend` recovers
     /// with a full `removeOutput`→`addOutput` (a fresh RTSP/RTP session — audible
-    /// drop). A FLUSH re-anchors in place, so the connection never drops — live
-    /// testing confirmed it cures the stall after a *capture* rebuild (not just the
-    /// deliberate pause/seek FLUSH was designed for), so `NativeBackend` now uses it
-    /// as the default whole-system rebuild recovery, with the teardown+rebuild kept
-    /// only as an automatic fallback when a flush throws.
+    /// drop). A FLUSH re-anchors in place, so the connection never drops — observed
+    /// to cure the stall on the tested Sonos after a *capture* rebuild (not just the
+    /// deliberate pause/seek FLUSH was designed for); whether it re-anchors on every
+    /// receiver model is not yet proven, so `NativeBackend` uses it as the default
+    /// whole-system rebuild recovery WITH `removeOutput`→`addOutput` as an automatic
+    /// fallback (and the silence watchdog as a further backstop).
     ///
-    /// Mirrors `unbind`'s guards: the vendored flush is a no-op (returns 0, arms no
-    /// completion) unless the device is STREAMING, and it dereferences
-    /// `device->session` unconditionally (airplay.c:4296), so a device that isn't
-    /// live is skipped here and the null-session guard runs on the engine thread.
-    /// Throws `unknownOutput` if `id` isn't registered.
-    public func flushOutput(_ id: OutputID) async throws {
+    /// ## Returns `true` only if a flush was actually ISSUED
+    /// The vendored `airplay_device_flush` is a silent NO-OP (returns 0, arms no
+    /// completion) unless `device->session->state == STREAMING` (airplay.c:4298) —
+    /// and that inner session state is a DIFFERENT field from `device->state`
+    /// (`liveDeviceState`), which only updates at sequence completion, so the two
+    /// diverge during normal streaming and across a just-completed flush. Guarding
+    /// on `device->state` here would therefore let a no-op masquerade as success.
+    /// So this makes NO device-state pre-guard: it lets the vendored call decide,
+    /// and returns whether it actually issued a flush (`n > 0`). A caller MUST treat
+    /// `false` as "did not re-anchor" and fall back to a real teardown+re-add —
+    /// otherwise a swept-in non-streaming device is left silent with no recovery
+    /// (the exact regression an adversarial review caught). Throws `unknownOutput`
+    /// if `id` isn't registered.
+    @discardableResult
+    public func flushOutput(_ id: OutputID) async throws -> Bool {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
-        // Only a live stream can be flushed; anything else has no session to
-        // re-anchor (and the vendored call would no-op or deref a NULL session).
-        let liveState = await liveDeviceState(id)
-        guard liveState == .streaming || liveState == .connected else { return }
-        _ = try await startOp(id: id, serialize: true) { device, cbId in
+        // No device->state pre-guard (see doc): it reads a field that diverges from
+        // the session->state the vendored flush acts on. Let the engine-thread
+        // closure decide and report back whether a flush was truly issued.
+        final class IssuedBox: @unchecked Sendable { var value = false }
+        let issued = IssuedBox()
+        _ = try await startOp(id: id, serialize: true, onIssue: { issued.value = $0 > 0 }) { device, cbId in
             // Same TOCTOU/NULL-session guard removeOutput uses: a receiver-side
-            // RTSP drop can NULL device->session between the check above and this
-            // closure running on the engine thread. airplay_device_flush derefs
-            // session unconditionally, so short-circuit to a clean no-op (N<=0).
+            // RTSP drop can NULL device->session before this closure runs on the
+            // engine thread. airplay_device_flush derefs session unconditionally, so
+            // short-circuit to a clean no-op (0). A non-STREAMING session also makes
+            // the vendored call return 0. `onIssue` records whether n > 0.
             guard device.pointee.session != nil else { return 0 }
             return output_airplay.device_flush?(device, cbId) ?? 0
         }
+        return issued.value
     }
 
     /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
@@ -1442,6 +1455,7 @@ public actor AirPlayEngine {
     private func startOp(
         id: OutputID,
         serialize: Bool = true,
+        onIssue: (@Sendable (Int32) -> Void)? = nil,
         issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32
     ) async throws -> OutputState {
         // B5.1: serialize ops per OutputID — a second op on the same id awaits the
@@ -1513,6 +1527,11 @@ public actor AirPlayEngine {
                     return
                 }
                 let n = effectiveIssue(device, cbId)
+                // Report the raw issue count to the caller (used by flushOutput to
+                // tell a real flush, n>0, from a silent no-op, n==0). Fires in both
+                // production and headless (issueOverride) paths since it reads
+                // `effectiveIssue`'s return.
+                onIssue?(n)
                 if n <= 0 {
                     // No callback promised -> no completion will arrive. Disarm
                     // and resolve immediately so we never hang (contract N<=0).

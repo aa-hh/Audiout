@@ -28,44 +28,9 @@ extension SerializedSharedState {
     /// inject the IOProc-thread callbacks. Records the resolved processes/bundleID
     /// it was started with and teardown calls, so leaks and cross-app bleed are
     /// observable.
-    /// A process-wide ordered log of create/teardown/onBuffer-wire events across
-    /// MULTIPLE ``FakeProcessTap`` instances — the only way to observe make-before-
-    /// break ordering (new created BEFORE old torn down; delivery wired only AFTER
-    /// old gone). Mirrors the whole-system suite's helper of the same name.
-    private final class EventLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private(set) var events: [String] = []
-        func record(_ e: String) { lock.withLock { events.append(e) } }
-        var all: [String] { lock.withLock { events } }
-        func index(of e: String) -> Int? { lock.withLock { events.firstIndex(of: e) } }
-    }
-
-    /// Hands out a fixed sequence of distinct ``FakeProcessTap`` instances; extra
-    /// calls reuse the last.
-    private final class SequencedTaps: @unchecked Sendable {
-        private let lock = NSLock()
-        private let taps: [FakeProcessTap]
-        private var i = 0
-        init(_ taps: [FakeProcessTap]) { self.taps = taps }
-        func next() -> FakeProcessTap { lock.withLock { let t = taps[min(i, taps.count - 1)]; i += 1; return t } }
-    }
-
     private final class FakeProcessTap: ProcessAudioTap, @unchecked Sendable {
-        /// Records `onBuffer#<id>=<wired?>` on every assignment (no-op when
-        /// `eventLog` is nil), so a test can prove delivery is wired only AFTER the
-        /// old tap is torn down.
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)? {
-            didSet { eventLog?.record("onBuffer#\(id)=\(onBuffer != nil)") }
-        }
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-
-        /// Optional shared ordering log + per-instance id + reported device identity
-        /// (defaults leave the single-reused-tap tests below unaffected).
-        var id = 0
-        var eventLog: EventLog?
-        private var _deviceID: AudioObjectID?
-        var tappedDeviceID: AudioObjectID? { lock.withLock { _deviceID } }
-        func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
 
         let lock = NSLock()
         var format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
@@ -85,7 +50,6 @@ extension SerializedSharedState {
 
         func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             lock.lock(); createCount += 1; lastProcesses = processes; lastBundleID = bundleID; lock.unlock()
-            eventLog?.record("create#\(id)")
             onCreateAndStart?()
             if let startError { throw startError }
             return format
@@ -93,7 +57,6 @@ extension SerializedSharedState {
 
         func teardown() {
             lock.lock(); teardownCount += 1; lock.unlock()
-            eventLog?.record("teardown#\(id)")
         }
 
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
@@ -496,126 +459,6 @@ extension SerializedSharedState {
         #expect(tap.creates >= 2)
 
         coordinator.stop(bundleID: "com.example.music")
-    }
-
-    // MARK: - Make-before-break tap rebuild for device-IDENTITY changes
-    //         (audio-leak-on-device-switch fix — per-app twin).
-
-    /// Builds a coordinator over a SEQUENCE of distinct fake taps (old, then new)
-    /// with an injected default-output-device resolver — the seams a make-before-
-    /// break ordering test needs.
-    private func makeSequencedCoordinator(
-        _ taps: SequencedTaps,
-        processResolver: AudioProcessResolver,
-        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID?
-    ) -> PerAppCaptureCoordinator {
-        PerAppCaptureCoordinator(
-            makeTap: { taps.next() },
-            processResolver: processResolver,
-            resolveDefaultOutputDeviceID: resolveDefaultOutputDeviceID,
-            installsProcessListListener: false
-        )
-    }
-
-    /// A device-IDENTITY change (new default output device != the one the old tap was
-    /// anchored to) rebuilds MAKE-BEFORE-BREAK: the new tap/aggregate — which mutes
-    /// the redirected app on the NEW device — is created+started BEFORE the old tap
-    /// is torn down (so the app's audio doesn't leak out the new device for the whole
-    /// old-teardown gap), and delivery is wired only AFTER the old tap is gone.
-    @Test func identityChangeRebuildsMakeBeforeBreak() {
-        let log = EventLog()
-        let old = FakeProcessTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
-        let new = FakeProcessTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
-        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
-        let coordinator = makeSequencedCoordinator(
-            SequencedTaps([old, new]),
-            processResolver: resolver,
-            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
-
-        coordinator.start(bundleID: "com.example.music")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
-        #expect(old.creates == 1)
-
-        old.fireDeviceChange()   // identity change
-        waitFor {
-            if case .capturing = coordinator.state(for: "com.example.music") { return new.creates == 1 }
-            return false
-        }
-
-        guard let createNew = log.index(of: "create#2"),
-              let teardownOld = log.index(of: "teardown#1") else {
-            Issue.record("expected both a new-tap create and an old-tap teardown; log = \(log.all)")
-            return
-        }
-        #expect(createNew < teardownOld,
-                "MAKE-BEFORE-BREAK: the new tap must be created+started BEFORE the old is torn down (log = \(log.all))")
-
-        guard let wireNew = log.index(of: "onBuffer#2=true") else {
-            Issue.record("expected the new tap's delivery to be wired; log = \(log.all)")
-            return
-        }
-        #expect(wireNew > teardownOld,
-                "GUARDRAIL: the new tap's onBuffer must be wired only AFTER the old tap is torn down (log = \(log.all))")
-
-        coordinator.stop(bundleID: "com.example.music")
-    }
-
-    /// The deliberate scope limit: a SAME-device rebuild (rate-only renegotiation)
-    /// must KEEP break-before-make, so two aggregates for the same app never sit on
-    /// ONE physical device mid-rate-renegotiation. Old tap torn down BEFORE the new.
-    @Test func sameDeviceRateRebuildStaysBreakBeforeMake() {
-        let log = EventLog()
-        let old = FakeProcessTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
-        let new = FakeProcessTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(71))
-        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
-        let coordinator = makeSequencedCoordinator(
-            SequencedTaps([old, new]),
-            processResolver: resolver,
-            resolveDefaultOutputDeviceID: { AudioObjectID(71) })   // same device as old
-
-        coordinator.start(bundleID: "com.example.music")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
-
-        old.fireDeviceChange()   // same-device rebuild
-        waitFor {
-            if case .capturing = coordinator.state(for: "com.example.music") { return new.creates == 1 }
-            return false
-        }
-
-        guard let teardownOld = log.index(of: "teardown#1"),
-              let createNew = log.index(of: "create#2") else {
-            Issue.record("expected an old-tap teardown and a new-tap create; log = \(log.all)")
-            return
-        }
-        #expect(teardownOld < createNew,
-                "BREAK-BEFORE-MAKE (unchanged): a same-device rate rebuild must tear the old tap down BEFORE creating the new one (log = \(log.all))")
-
-        coordinator.stop(bundleID: "com.example.music")
-    }
-
-    /// Failure unwind on the make-before-break path: if the new tap's `createAndStart`
-    /// throws, the old tap is still alive — BOTH must be torn down and the slot lands
-    /// in `.failed`.
-    @Test func identityChangeCreateFailureTearsDownBothTaps() {
-        let log = EventLog()
-        let old = FakeProcessTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
-        let new = FakeProcessTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
-        new.startError = .deviceLost(reason: "gone")
-        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
-        let coordinator = makeSequencedCoordinator(
-            SequencedTaps([old, new]),
-            processResolver: resolver,
-            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
-
-        coordinator.start(bundleID: "com.example.music")
-        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
-
-        old.fireDeviceChange()   // identity change; the new createAndStart throws
-        waitFor { if case .failed = coordinator.state(for: "com.example.music") { return true }; return false }
-        #expect(coordinator.state(for: "com.example.music") == .failed(.deviceLost(reason: "gone")))
-        // No tap left dangling: the failed new tap AND the still-alive old tap are both torn down.
-        #expect(new.teardowns >= 1, "the failed new tap must be torn down")
-        #expect(old.teardowns >= 1, "the old tap (still alive on the make-before-break path) must be torn down too")
     }
 
     // MARK: - Telemetry (T3): a sample-rate-triggered rebuild emits a

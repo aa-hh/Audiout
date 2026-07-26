@@ -2644,23 +2644,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let label = Self.rebindScopeLabel(scope)
         Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
 
-        // F-REANCHOR (2026-07-26, live-verified): a tap rebuild's recovery used to
-        // be a full removeOutput→addOutput (fresh RTSP/RTP session = the audible
-        // Sonos drop the user hears on every headphone mode-change). For
-        // whole-system scope, try an RTSP FLUSH re-anchor FIRST instead: it keeps
-        // the session alive and only re-syncs the receiver's timeline. If FLUSH
-        // throws (or the device wasn't streaming so it no-op'd without curing the
-        // stall), fall through to the teardown+rebuild below — so a failed flush
-        // can never leave the device silent.
+        // F-REANCHOR (2026-07-26): a tap rebuild's recovery used to be a full
+        // removeOutput→addOutput (fresh RTSP/RTP session = the audible Sonos drop the
+        // user hears on every headphone mode-change). For whole-system scope, try an
+        // RTSP FLUSH re-anchor FIRST instead: it keeps the session alive and only
+        // re-syncs the receiver's timeline. Observed to hold on the tested Sonos; not
+        // yet proven across receiver models, so this is defended two ways: a flush
+        // that DIDN'T issue (returns false — device not streaming / session gone) or
+        // that throws falls through to the teardown+rebuild below, and the silence
+        // watchdog remains the backstop if an issued flush fails to re-anchor on some
+        // receiver. A flush can therefore never silently leave the device dead.
         // razor: whole-system only (that's the reported bug); per-app rebinds keep
-        // the teardown path — flush is unproven there.
+        // the teardown path — per-app has no delivery gate for a two-tap overlap.
         if case .wholeSystem = scope {
             do {
-                try await engine.flushOutput(outputID)
+                if try await engine.flushOutput(outputID) {
+                    // A flush was ACTUALLY issued (re-anchored in place) — done.
+                    Telemetry.log(.airplay, "rebind_recover_flush", [
+                        "output": "\(outputID)", "scope": label, "outcome": "issued",
+                    ])
+                    return true
+                }
+                // flushOutput returned false: the vendored flush no-op'd (device not
+                // STREAMING / session gone), so nothing re-anchored. Do NOT report
+                // success — fall through to the teardown+re-add, which re-establishes
+                // the session. Treating a no-op as success here was a silent-forever
+                // regression an adversarial review caught.
                 Telemetry.log(.airplay, "rebind_recover_flush", [
-                    "output": "\(outputID)", "scope": label, "outcome": "issued",
+                    "output": "\(outputID)", "scope": label, "outcome": "noop_fallback",
                 ])
-                return true
             } catch {
                 Telemetry.log(.airplay, "rebind_recover_flush", [
                     "output": "\(outputID)", "scope": label, "outcome": "failed_fallback",
@@ -5393,9 +5405,12 @@ protocol EngineControlling: Sendable {
     func removeOutput(_ id: OutputID) async throws
     /// Re-anchor `id`'s receiver timeline in place via RTSP FLUSH, WITHOUT tearing
     /// down the session (F-REANCHOR — see ``AirPlayEngine/AirPlayEngine/flushOutput(_:)``).
-    /// Default is a no-op success so every existing test spy compiles unchanged;
-    /// ``EngineAdapter`` overrides it with the real flush.
-    func flushOutput(_ id: OutputID) async throws
+    /// Returns `true` only if a flush was ACTUALLY issued; `false` means the vendored
+    /// flush no-op'd (device not streaming), and the caller MUST fall back to a real
+    /// teardown+re-add. Default returns `false` (didn't flush) so a conformer with no
+    /// real session safely drives the caller to teardown; ``EngineAdapter`` overrides
+    /// it with the real flush.
+    func flushOutput(_ id: OutputID) async throws -> Bool
     func setVolume(_ id: OutputID, _ volume: Double) async throws
     func setStartBufferMs(_ ms: Int) async
     /// Feed one finished mixed per-app buffer tagged with its `streamId` (T2/T6).
@@ -5475,10 +5490,10 @@ extension EngineControlling {
         if streamId == 0 { try await addOutput(id) } else { try await addOutput(id, streamId: streamId) }
     }
 
-    /// Default: no-op success (F-REANCHOR). A conformer with no live receiver
-    /// timeline to re-anchor — every existing test spy — treats a flush as a
-    /// clean no-op; ``EngineAdapter`` overrides this to forward to the real engine.
-    func flushOutput(_ id: OutputID) async throws {}
+    /// Default: `false` — "did not flush" (F-REANCHOR). A conformer with no live
+    /// receiver timeline to re-anchor safely drives the caller to the teardown
+    /// fallback; ``EngineAdapter`` overrides this to forward to the real engine.
+    func flushOutput(_ id: OutputID) async throws -> Bool { false }
 
     /// Default: drop the buffer. ``EngineAdapter`` overrides this to forward to the
     /// real engine; a conformer that never receives per-app mixed audio ignores it.
@@ -5533,7 +5548,7 @@ struct EngineAdapter: EngineControlling {
         try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
-    func flushOutput(_ id: OutputID) async throws { try await engine.flushOutput(id) }
+    func flushOutput(_ id: OutputID) async throws -> Bool { try await engine.flushOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
     func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
     func write(pcm: Data, streamId: UInt32, pts: timespec) {

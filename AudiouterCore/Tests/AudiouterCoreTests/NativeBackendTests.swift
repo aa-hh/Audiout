@@ -89,8 +89,14 @@ extension SerializedSharedState {
         var removeFailures: Set<UInt64> = []
         /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
         /// recovery to fall through to the removeOutput→addOutput teardown, same
-        /// as a real receiver that NACKs or no-ops the FLUSH.
+        /// as a real receiver that NACKs the FLUSH.
         var flushFailures: Set<UInt64> = []
+        /// Ids whose `flushOutput` should return `false` WITHOUT throwing — models
+        /// the vendored flush's silent NO-OP (device in the set but not STREAMING /
+        /// session gone). The recovery must treat this like a failure and fall
+        /// through to teardown; before the discriminator fix a no-op was mistaken
+        /// for success and the teardown was skipped (silent-forever regression).
+        var flushNoOps: Set<UInt64> = []
 
         /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
         /// but before it returns successfully. Lets a test deterministically inject
@@ -170,11 +176,15 @@ extension SerializedSharedState {
         /// delay to model the removeOutput→addOutput fallback specifically, and a
         /// flush that fails does so immediately, same as a real receiver's fast
         /// NACK.
-        func flushOutput(_ id: OutputID) async throws {
+        func flushOutput(_ id: OutputID) async throws -> Bool {
             lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
             if lock.withLock({ flushFailures.contains(id.rawValue) }) {
                 throw AirPlayEngineError.sessionFailed
             }
+            // Silent no-op (returns false, no throw) — the vendored flush's
+            // not-STREAMING / NULL-session path. The caller must fall back to teardown.
+            if lock.withLock({ flushNoOps.contains(id.rawValue) }) { return false }
+            return true
         }
         private var flushed: [OutputID] = []
         var flushedIDs: [OutputID] { lock.withLock { flushed } }
@@ -3597,6 +3607,34 @@ extension SerializedSharedState {
                        "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == streamAddsBefore,
                        "whole-system reset must NOT use the per-app addOutput(_:streamId:)")
+    }
+
+    /// REGRESSION (adversarial review, 2026-07-26): a FLUSH that silently NO-OPs —
+    /// the vendored `airplay_device_flush` returns 0 because the session isn't
+    /// STREAMING (a device swept into the whole-system reset loop while momentarily
+    /// not streaming, or one whose session just dropped) — returns `false`, NOT a
+    /// throw. Before the discriminator fix, `performRebindRecovery` treated any
+    /// non-throw as success and SKIPPED the teardown, leaving that device silent
+    /// forever. The recovery must treat a no-op exactly like a failure: fall through
+    /// to the removeOutput→addOutput teardown that actually re-establishes the session.
+    @Test func wholeSystemDeviceRateRebuildFallsBackToTeardownWhenFlushNoOps() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        engine.flushNoOps = [device.outputID.rawValue]   // flush returns false, no throw
+
+        capture.fireDeviceRateRebuild()
+        await pollUntil { engine.removedIDs.contains(device.outputID) }
+
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                       "recovery must attempt the flush first")
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == 1,
+                       "a NO-OP flush must fall back to exactly one removeOutput — NOT be mistaken for success")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2,
+                       "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
     }
 
     /// T8: the signal-only `.streamHealth` echo of the same recapture/rebind

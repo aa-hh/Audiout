@@ -586,43 +586,46 @@ extension SerializedEngineState {
 
         // MARK: - device_flush re-anchor (F-REANCHOR, 2026-07-26).
         //
-        // flushOutput now WIRES the vendored device_flush: an RTSP FLUSH that
-        // re-anchors the receiver's timeline WITHOUT tearing down the session
-        // (unlike removeOutput). On a streaming device it issues exactly one op and
-        // awaits its completion, leaving the session STREAMING; on a non-streaming
-        // device it issues nothing (the vendored flush would no-op / deref a NULL
-        // session); an unknown output still throws.
+        // flushOutput WIRES the vendored device_flush: an RTSP FLUSH that re-anchors
+        // the receiver's timeline WITHOUT tearing down the session (unlike
+        // removeOutput). It makes NO device->state pre-guard (that field diverges
+        // from the session->state the vendored flush acts on — the mismatch that let
+        // a no-op masquerade as success); instead it returns whether a flush was
+        // ACTUALLY issued (the vendored call returned n>0), which the caller uses to
+        // decide whether the teardown fallback is still needed. These tests drive the
+        // issue count via the headless override.
 
-        @Test func flushOutputIssuesDeviceFlushAndKeepsSessionStreaming() async throws {
+        @Test func flushOutputReturnsTrueAndKeepsSessionWhenFlushIssues() async throws {
             let id = OutputID(rawValue: 0xF1)
             makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })  // flush issues one op
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })  // vendored flush issues one op
             await engine.registerKnownOutputForTest(id, state: .streaming)
 
-            async let op: Void = engine.flushOutput(id)
+            async let op: Bool = engine.flushOutput(id)
             // Re-anchor keeps the session STREAMING — the completion is NOT a stop.
             try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
-            try await op
+            let issued = try await op
 
+            #expect(issued, "a flush that issued (n>0) must report true")
             let state = await engine.stateOf(id)
             #expect(state == .streaming, "flush must re-anchor in place, never tear the session down")
         }
 
-        @Test func flushOutputSkipsWhenNotStreaming() async throws {
+        /// The load-bearing discriminator: when the vendored flush NO-OPs (returns 0
+        /// — device not STREAMING / session gone), flushOutput must return FALSE and
+        /// resolve immediately (no hang), so the caller falls back to a real teardown
+        /// instead of mistaking the no-op for a successful recovery.
+        @Test func flushOutputReturnsFalseWhenVendoredFlushNoOps() async throws {
             let id = OutputID(rawValue: 0xF2)
             makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in
-                Issue.record("flush must not issue an op on a non-streaming device")
-                return 1
-            })
-            await engine.registerKnownOutputForTest(id, state: .stopped)
+            await engine.enterHeadlessTestMode(issue: { _, _ in 0 })  // vendored no-op
+            await engine.registerKnownOutputForTest(id, state: .connected)
 
-            // Resolves immediately — nothing to re-anchor, no waiter armed.
-            try await engine.flushOutput(id)
-            let state = await engine.stateOf(id)
-            #expect(state == .stopped)
+            // Must NOT hang (n<=0 resolves inline) and must report "did not flush".
+            let issued = try await engine.flushOutput(id)
+            #expect(!issued, "a no-op flush (n==0) must report false so the caller tears down")
         }
 
         @Test func flushOutputRejectsUnknownOutput() async {

@@ -96,9 +96,17 @@ extension SerializedSharedState {
             eventLog?.record("create#\(id)")
             onCreateAndStart?()
             if let startError { throw startError }
-            lock.lock(); started = true; lock.unlock()
+            // Faithful to the real IOProc: it snapshots `onBuffer` BY VALUE at start
+            // (`let onBuffer = self.onBuffer`) and delivers through that snapshot, so a
+            // handler assigned AFTER createAndStart is NEVER seen. Capturing it here
+            // (not reading the live property in `pushBuffer`) is what lets a test catch
+            // the "onBuffer wired too late → permanent silence" class of bug.
+            lock.lock(); started = true; capturedOnBuffer = onBuffer; lock.unlock()
             return format
         }
+
+        /// The IOProc's start-time snapshot of `onBuffer` — see `createAndStart`.
+        private var capturedOnBuffer: (@Sendable (CapturedBuffer) -> Void)?
 
         func teardown() {
             lock.lock(); teardownCount += 1; started = false; lock.unlock()
@@ -115,7 +123,9 @@ extension SerializedSharedState {
         func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
         func setFormat(_ f: TapFormat) { lock.withLock { format = f } }
 
-        func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
+        /// Deliver through the START-TIME snapshot, not the live property — the real
+        /// IOProc only ever calls the handler it captured at createAndStart.
+        func pushBuffer(_ b: CapturedBuffer) { lock.withLock { capturedOnBuffer }?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
         var teardowns: Int { lock.withLock { teardownCount } }
@@ -518,11 +528,12 @@ extension SerializedSharedState {
     /// the seams a make-before-break ordering test needs.
     private func makeSequencedCoordinator(
         _ taps: SequencedTaps,
+        sink: PCMSink = SpySink(),
         resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID?
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(
             makeTap: { taps.next() },
-            sink: SpySink(),
+            sink: sink,
             makeConverter: { _ in FakeConverter() },
             resolveDefaultOutputDeviceID: resolveDefaultOutputDeviceID,
             muteBehavior: .mutedWhenTapped,
@@ -534,14 +545,19 @@ extension SerializedSharedState {
     /// anchored to) rebuilds MAKE-BEFORE-BREAK: the new tap/aggregate is created and
     /// started — muting the NEW device — BEFORE the old tap is torn down, so the new
     /// default device is never left untapped/unmuted for the whole old-teardown gap
-    /// (the `.mutedWhenTapped` leak). And its delivery (`onBuffer`) is wired only
-    /// AFTER the old tap is gone, so only ONE tap ever delivers (no double-capture).
+    /// (the `.mutedWhenTapped` leak). Delivery (`onBuffer`) is wired BEFORE
+    /// `createAndStart`, because the real IOProc snapshots the handler at start — a
+    /// handler wired later is never seen and the tap goes permanently silent (the
+    /// bug an adversarial review caught). Double-capture during the overlap is
+    /// prevented not by deferring `onBuffer` but by `handleBuffer`'s empty-converter
+    /// gate, so the new tap must ACTUALLY DELIVER once the rebuild commits.
     @Test func identityChangeRebuildsMakeBeforeBreak() {
         let log = EventLog()
+        let sink = SpySink()
         let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
         let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
         let coordinator = makeSequencedCoordinator(
-            SequencedTaps([old, new]),
+            SequencedTaps([old, new]), sink: sink,
             // The new default output device (72) differs from the old tap's (71).
             resolveDefaultOutputDeviceID: { AudioObjectID(72) })
 
@@ -553,19 +569,24 @@ extension SerializedSharedState {
         waitFor { self.stateIsCapturing(coordinator, sampleRate: new.format.sampleRate) && new.creates == 1 }
 
         guard let createNew = log.index(of: "create#2"),
-              let teardownOld = log.index(of: "teardown#1") else {
-            Issue.record("expected both a new-tap create and an old-tap teardown; log = \(log.all)")
+              let teardownOld = log.index(of: "teardown#1"),
+              let wireNew = log.index(of: "onBuffer#2=true") else {
+            Issue.record("expected new-tap create, old-tap teardown, and new-tap onBuffer wiring; log = \(log.all)")
             return
         }
         #expect(createNew < teardownOld,
                 "MAKE-BEFORE-BREAK: the new tap must be created+started BEFORE the old is torn down (log = \(log.all))")
+        #expect(wireNew < createNew,
+                "SNAPSHOT SAFETY: onBuffer must be wired BEFORE createAndStart — the real IOProc snapshots it at start (log = \(log.all))")
 
-        guard let wireNew = log.index(of: "onBuffer#2=true") else {
-            Issue.record("expected the new tap's delivery to be wired; log = \(log.all)")
-            return
-        }
-        #expect(wireNew > teardownOld,
-                "GUARDRAIL: the new tap's onBuffer must be wired only AFTER the old tap is torn down (log = \(log.all))")
+        // The regression guard for the permanent-silence bug: a buffer captured AFTER
+        // the make-before-break rebuild must actually reach the sink. Against the
+        // buggy (deferred-onBuffer) ordering the fake's start-time snapshot is nil, so
+        // this delivers nothing and the assertion fails.
+        let before = sink.writes.count
+        new.pushBuffer(buffer(hostTime: 1_000_000))
+        #expect(sink.writes.count > before,
+                "the rebuilt tap must DELIVER buffers to the sink, not go silent")
 
         coordinator.stop()
     }

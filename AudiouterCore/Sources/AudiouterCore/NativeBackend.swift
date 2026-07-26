@@ -1544,7 +1544,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // back on its own, so an unresolvable prior is still safe. `systemVolume
             // .onExternalChange` was already detached at the top of `stop()`, so this
             // write raises no echo to guard against.
+            //
+            // Guard on the aggregate STILL being the current default. `aggregateDefaultActive`
+            // only means "we took it over at some point" — if the user has since picked
+            // a different output in Sound settings (e.g. AirPods), the default is theirs,
+            // not ours, and `priorDefaultUID` is stale. Restoring then would yank the
+            // system output off the user's explicit later choice back to the pre-takeover
+            // device. Only restore when we genuinely still own the default; otherwise just
+            // destroy our (non-default) aggregate below and leave the user's choice intact.
             if self.aggregateDefaultActive,
+               self.currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID,
                let priorUID = self.priorDefaultUID,
                priorUID != AggregateOutputDevice.productUID,
                let priorID = self.aggregateControl.resolveDeviceID(forUID: priorUID) {

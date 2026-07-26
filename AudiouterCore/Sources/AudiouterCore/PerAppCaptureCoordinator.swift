@@ -1141,7 +1141,24 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.onDefaultDeviceChanged?()
+            guard let self else { return }
+            // Only rebuild if the RESOLVED effective device actually changed — mirror
+            // of the whole-system listener (CoreAudioSystemTap.installDefaultDeviceListener).
+            // `tappedOutputDeviceID` is pinned through `EffectiveCaptureDevice.resolve`, so
+            // when whole-system routing flips the default built-in <-> our public aggregate
+            // (which wraps built-in), the resolved device is unchanged and this no-ops —
+            // without it, every such flip tears down and rebuilds a live per-app tap,
+            // briefly dropping that route's audio for no reason. A failed read (`nil`)
+            // counts as "changed" and rebuilds, as in the whole-system path.
+            let current = (try? Self.defaultOutputDeviceID()).map {
+                EffectiveCaptureDevice.resolve(
+                    default: $0,
+                    uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                    mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
+            }
+            guard TapRebuildDecision.shouldRebuild(
+                currentDeviceID: current, trackedDeviceID: self.tappedOutputDeviceID) else { return }
+            self.onDefaultDeviceChanged?()
         }
         self.deviceChangeBlock = block
         AudioObjectAddPropertyListenerBlock(

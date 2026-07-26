@@ -2392,6 +2392,43 @@ import AppKit
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once the guard ends")
     }
 
+    // MARK: Routing-blocked warning (Wave 3 T-UI)
+
+    /// The "Audiouter isn't your output device" warning: shows the verbatim copy
+    /// with a "Use Audiouter" action button, OUTRANKS an active takeover status (it
+    /// sits at the top of the single note slot), fires `onReselectAudiouter` when the
+    /// button is tapped, and — once cleared — lets the lower-precedence note show
+    /// through. Guards the whole T-UI feature (adversarial review #3): a refactor
+    /// that inverts the precedence or unhooks the button now fails here.
+    @Test func routingBlockedWarningShowsOutranksTakeoverFiresReselectAndClears() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
+
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter isn't your Mac's output device — audio won't play until you switch back.",
+                "shows the verbatim warning copy")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "the warning offers the 'Use Audiouter' remedy")
+
+        // Precedence: even with a takeover status active, routing-blocked wins the slot.
+        popover.setTakeoverStatus(.takingOver)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter isn't your Mac's output device — audio won't play until you switch back.",
+                "routing-blocked outranks an active takeover status")
+
+        // Tapping "Use Audiouter" fires the user-initiated re-select callback.
+        var reselectFired = false
+        popover.onReselectAudiouter = { reselectFired = true }
+        popover.test_tapSystemAirPlayNoteAction()
+        #expect(reselectFired, "the action button invokes onReselectAudiouter")
+
+        // Clearing routing-blocked reveals the still-set (lower-precedence) takeover note.
+        popover.setRoutingBlockedNeedsDefault(false)
+        #expect(popover.test_systemAirPlayNoteText == "Taking audio back from macOS…",
+                "with routing-blocked cleared, the takeover status shows through")
+
+        popover.setTakeoverStatus(nil)
+        #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
+    }
+
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
 
     /// All four takeover states render their own copy, and the "Open Login

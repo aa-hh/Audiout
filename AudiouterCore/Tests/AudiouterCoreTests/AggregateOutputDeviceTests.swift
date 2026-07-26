@@ -505,6 +505,40 @@ extension SerializedSharedState {
         #expect(control.setDefaultCalls == [501, 501], "activation + re-select both wrote the aggregate")
     }
 
+    /// QUIT-RESTORE GUARD (adversarial review #1): once the app has taken over the
+    /// default with the aggregate, `stop()` restores the pre-takeover output ONLY
+    /// while the aggregate is STILL the current default. If the user has since
+    /// picked a different output in Sound settings, that default is THEIRS —
+    /// restoring the stale prior would silently yank them off their choice at quit.
+    /// Here the user moves to AirPods mid-session; quitting must NOT write the prior
+    /// (built-in) device back. Without the guard, `setDefaultCalls` would gain 601.
+    @Test func quitDoesNotRestorePriorWhenUserMovedDefaultAway() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            "com.builtin.speakers": 601])
+        let box = LockedBox<String?>("com.builtin.speakers")
+        let (backend, systemVolume) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        backend.start()
+
+        // Activation: captures prior = built-in speakers, takes over with the aggregate.
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        #expect(control.setDefaultCalls == [501], "activation points the default at the aggregate")
+
+        // The user picks a DIFFERENT output (AirPods) in Sound settings mid-session.
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+
+        // Quit. The aggregate is no longer the current default, so the prior-default
+        // restore must be SKIPPED — 601 (built-in) must never be written.
+        backend.stop()
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(!control.setDefaultCalls.contains(601),
+                "stop() must not restore the stale prior default after the user chose another output")
+        #expect(control.setDefaultCalls == [501], "only the activation write ever happened")
+    }
+
     /// ECHO-GUARD: the default-device-changed notification that arrives as a
     /// direct RESULT of the backend's OWN successful write must be consumed
     /// silently — never misread as a user off-switch — and the guard must not

@@ -988,6 +988,43 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// T2: every exclusion resolve emits `captureWS`/`exclusion_resolved` with
+    /// each resolved bundle's pids + attribution layer, AND calls out a bundle
+    /// that resolved to ZERO processes — the diagnostic gap the 2026-07-26
+    /// catch-all-attribution live leak exposed: `exclusion_changed` alone shows
+    /// only excluded bundle-id INTENT, never which concrete processes (or none)
+    /// a bundle id actually resolved to.
+    @Test func startEmitsExclusionResolvedTelemetryWithLayerDetailAndZeroBundles() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let coordinator = makeCoordinator(
+            tap: FakeTap(), sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.app.a": 111]))
+
+        coordinator.updateRouting(
+            appRoutes: [],
+            excludedBundleIDs: ["com.app.a", "com.app.missing"])
+        coordinator.start()
+
+        Telemetry._installTestSink(nil)
+
+        let lines = capturedLines.snapshot
+        let resolved = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"exclusion_resolved\"")
+        }
+        #expect(resolved != nil, "expected a captureWS/exclusion_resolved line, got: \(lines)")
+        #expect(
+            resolved?.contains("com.app.a=[111:own]") ?? false,
+            "expected the resolved pid + attribution layer, got: \(resolved ?? "nil")")
+        #expect(
+            resolved?.contains("\"zeroBundles\":\"com.app.missing\"") ?? false,
+            "expected the zero-resolution bundle called out explicitly, got: \(resolved ?? "nil")")
+
+        coordinator.stop()
+    }
+
     // MARK: - RMS metering (pure).
 
     @Test func rmsOfS16LE() {

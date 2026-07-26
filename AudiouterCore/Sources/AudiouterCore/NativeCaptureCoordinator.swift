@@ -697,12 +697,46 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// of the whole-system tap so its output isn't re-captured as an echo, and
     /// (since the tap is `.mutedWhenTapped`) stays audible.
     private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
-        var result = currentExcludedBundleIDs.reduce(into: Set<AudioObjectID>()) { result, bundleID in
-            result.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
-        }
+        var result = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: currentExcludedBundleIDs)
         if let renderPID = syncedLocalRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
+        return result
+    }
+
+    /// Shared core of both exclusion-resolve call sites
+    /// (``resolveExcludedProcessObjectIDs()`` and ``rebuildIfExclusionObjectsChanged()``'s
+    /// off-lock resolve): resolves every bundle id in `bundleIDs` via
+    /// ``processResolver/resolveWithAttribution(bundleID:)`` and emits ONE
+    /// `Telemetry(.captureWS)` line per call — T2, the diagnosability gap the
+    /// 2026-07-26 live catch-all-attribution fix left open. `exclusion_changed`
+    /// already logs which bundle ids are excluded (INTENT); this logs which
+    /// concrete pids each one actually resolved to and via which of the four
+    /// attribution layers, so "app X still leaks" is answerable from the log
+    /// alone. A bundle id resolving to ZERO processes is called out under
+    /// `zeroBundles` — exactly the Spotify-helper leak signature (an excluded
+    /// app whose helper the resolver still couldn't attribute reads as empty,
+    /// live, before this the only way to see that was manual `ps` correlation).
+    /// Cheap: one resolve per bundle id per call, same cost `resolve(bundleID:)`
+    /// already paid — this only adds string formatting, never a second HAL walk.
+    private func resolveExcludedObjectIDsLoggingAttribution(bundleIDs: Set<String>) -> Set<AudioObjectID> {
+        var result: Set<AudioObjectID> = []
+        var resolvedEntries: [String] = []
+        var zeroBundles: [String] = []
+        for bundleID in bundleIDs.sorted() {
+            let attributed = processResolver.resolveWithAttribution(bundleID: bundleID)
+            if attributed.isEmpty {
+                zeroBundles.append(bundleID)
+            } else {
+                let byPID = attributed.map { "\($0.process.pid):\($0.layer.rawValue)" }.sorted()
+                resolvedEntries.append("\(bundleID)=[\(byPID.joined(separator: ","))]")
+            }
+            result.formUnion(attributed.map(\.process.objectID))
+        }
+        Telemetry.log(.captureWS, "exclusion_resolved", [
+            "resolved": resolvedEntries.joined(separator: ";"),
+            "zeroBundles": zeroBundles.joined(separator: ","),
+        ])
         return result
     }
 
@@ -751,9 +785,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         // Resolve OUTSIDE the lock (enumerates the HAL) — the same off-lock
         // discipline `recreateTap` keeps for its create.
-        var newObjects = snapshot.bundleIDs.reduce(into: Set<AudioObjectID>()) { acc, bundleID in
-            acc.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
-        }
+        var newObjects = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: snapshot.bundleIDs)
         if let renderPID = snapshot.renderPID {
             newObjects.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }

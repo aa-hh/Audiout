@@ -32,6 +32,16 @@ import CoreAudio
 /// So the resolved value carries `AudioObjectID` (the object each consumer
 /// hands to Core Audio); the pid rides along for logging/diagnostics.
 ///
+/// ## Diagnosability (T2)
+/// The catch-all fix above closed the leak but left no record of WHICH layer
+/// actually attributed a given process — the 2026-07-26 live diagnosis had to
+/// manually correlate `ps` against telemetry that showed only exclusion
+/// INTENT (bundle ids), never the resolved processes or how they matched.
+/// ``resolveWithAttribution(bundleID:)`` is the same resolution as
+/// ``resolve(bundleID:)`` with that detail attached per process
+/// (``AttributedProcess.layer``); both coordinators log it at their
+/// resolution choke points via `Telemetry`.
+///
 /// ## Empty set is a valid, non-error result
 /// If no process object resolves to the bundle id — the app isn't running, or
 /// hasn't opened an audio stream yet — this returns an EMPTY set, never an
@@ -156,6 +166,28 @@ public struct AudioProcessResolver: Sendable {
             maxParentHops: maxParentHops)
     }
 
+    /// T2 diagnostic surface: same resolution as ``resolve(bundleID:)``, but
+    /// each returned process also carries WHICH of the four attribution layers
+    /// matched it. Exists because a live leak (2026-07-26, catch-all
+    /// attribution) could only be diagnosed by manually correlating `ps`
+    /// against telemetry that showed exclusion INTENT (`exclusion_changed`'s
+    /// bundle-id list) but never which concrete processes an excluded bundle
+    /// id actually resolved to, nor how. Never changes WHICH processes match —
+    /// that stays the ANY-of union ``resolve(bundleID:)`` computes — this only
+    /// reports, per process, the cheapest layer that fired (see
+    /// ``matchingLayer(process:target:pidToOwnBundle:parentPID:bundleIDForPID:responsiblePID:executablePath:targetBundlePath:maxParentHops:)``).
+    public func resolveWithAttribution(bundleID: String) -> Set<AttributedProcess> {
+        Self.resolveWithAttribution(
+            bundleID: bundleID,
+            processes: enumerator.enumerateProcesses(),
+            parentPID: enumerator.parentPID(of:),
+            bundleIDForPID: bundleIDForPID,
+            responsiblePID: responsiblePID,
+            executablePath: executablePath,
+            bundlePathForBundleID: bundlePathForBundleID,
+            maxParentHops: maxParentHops)
+    }
+
     /// The Core Audio process object(s) for an EXACT pid — no bundle id, no
     /// parent-chain walk. Used to self-exclude a process we already identify by
     /// pid directly (the synced local sink's own in-process `AVAudioEngine`
@@ -188,6 +220,32 @@ public struct AudioProcessResolver: Sendable {
         bundlePathForBundleID: (String) -> String? = { _ in nil },
         maxParentHops: Int
     ) -> Set<AudioProcess> {
+        Set(resolveWithAttribution(
+            bundleID: target,
+            processes: processes,
+            parentPID: parentPID,
+            bundleIDForPID: bundleIDForPID,
+            responsiblePID: responsiblePID,
+            executablePath: executablePath,
+            bundlePathForBundleID: bundlePathForBundleID,
+            maxParentHops: maxParentHops
+        ).map(\.process))
+    }
+
+    /// T2: the same ANY-of resolution as ``resolve(bundleID:processes:parentPID:bundleIDForPID:responsiblePID:executablePath:bundlePathForBundleID:maxParentHops:)``,
+    /// except each match also carries the ``AttributionLayer`` that fired —
+    /// `resolve` is now expressed in terms of this (map away `.layer`) so the
+    /// two entry points can never disagree on which processes match.
+    static func resolveWithAttribution(
+        bundleID target: String,
+        processes: [RawAudioProcess],
+        parentPID: (pid_t) -> pid_t?,
+        bundleIDForPID: (pid_t) -> String?,
+        responsiblePID: (pid_t) -> pid_t? = { _ in nil },
+        executablePath: (pid_t) -> String? = { _ in nil },
+        bundlePathForBundleID: (String) -> String? = { _ in nil },
+        maxParentHops: Int
+    ) -> Set<AttributedProcess> {
         // pid → bundle id for every process that reports one of its own, so the
         // responsibility and parent-walk layers can resolve a pid without AppKit
         // when that pid is itself in the audio process list.
@@ -203,37 +261,67 @@ public struct AudioProcessResolver: Sendable {
         // disables that layer.
         let targetBundlePath = bundlePathForBundleID(target)
 
-        var resolved: Set<AudioProcess> = []
+        var resolved: Set<AttributedProcess> = []
         for process in processes {
-            let matches =
-                // Layer 1 — the process reports the target's bundle id itself.
-                isTarget(process.bundleID, target)
-                // Layer 2 — responsibility: what TCC would blame this pid on.
-                || isTarget(
-                    responsibleBundleID(
-                        pid: process.pid,
-                        pidToOwnBundle: pidToOwnBundle,
-                        responsiblePID: responsiblePID,
-                        bundleIDForPID: bundleIDForPID),
-                    target)
-                // Layer 3 — the executable lives inside the target's bundle.
-                || isInside(bundlePath: targetBundlePath, executablePath: executablePath(process.pid))
-                // Layer 4 — parent walk, only for a process with no bundle id
-                // of its own (see the type's doc comment for why it stays gated).
-                || isTarget(
-                    inheritedBundleID(
-                        ownBundleID: process.bundleID,
-                        pid: process.pid,
-                        pidToOwnBundle: pidToOwnBundle,
-                        parentPID: parentPID,
-                        bundleIDForPID: bundleIDForPID,
-                        maxParentHops: maxParentHops),
-                    target)
-            if matches {
-                resolved.insert(AudioProcess(objectID: process.objectID, pid: process.pid))
-            }
+            guard let layer = matchingLayer(
+                process: process,
+                target: target,
+                pidToOwnBundle: pidToOwnBundle,
+                parentPID: parentPID,
+                bundleIDForPID: bundleIDForPID,
+                responsiblePID: responsiblePID,
+                executablePath: executablePath,
+                targetBundlePath: targetBundlePath,
+                maxParentHops: maxParentHops
+            ) else { continue }
+            resolved.insert(AttributedProcess(
+                process: AudioProcess(objectID: process.objectID, pid: process.pid),
+                layer: layer))
         }
         return resolved
+    }
+
+    /// The first (cheapest) of the four attribution layers that matches
+    /// `process` against `target`, or nil if none does. ANY-of, not
+    /// first-non-nil-wins — evaluation order here is purely an optimisation
+    /// (see the type's doc comment); which layer is *reported* when several
+    /// would independently match is therefore an implementation detail, never
+    /// something a caller should branch on.
+    private static func matchingLayer(
+        process: RawAudioProcess,
+        target: String,
+        pidToOwnBundle: [pid_t: String],
+        parentPID: (pid_t) -> pid_t?,
+        bundleIDForPID: (pid_t) -> String?,
+        responsiblePID: (pid_t) -> pid_t?,
+        executablePath: (pid_t) -> String?,
+        targetBundlePath: String?,
+        maxParentHops: Int
+    ) -> AttributionLayer? {
+        // Layer 1 — the process reports the target's bundle id itself.
+        if isTarget(process.bundleID, target) { return .own }
+        // Layer 2 — responsibility: what TCC would blame this pid on.
+        if isTarget(
+            responsibleBundleID(
+                pid: process.pid,
+                pidToOwnBundle: pidToOwnBundle,
+                responsiblePID: responsiblePID,
+                bundleIDForPID: bundleIDForPID),
+            target) { return .responsible }
+        // Layer 3 — the executable lives inside the target's bundle.
+        if isInside(bundlePath: targetBundlePath, executablePath: executablePath(process.pid)) { return .bundlePath }
+        // Layer 4 — parent walk, only for a process with no bundle id of its
+        // own (see the type's doc comment for why it stays gated).
+        if isTarget(
+            inheritedBundleID(
+                ownBundleID: process.bundleID,
+                pid: process.pid,
+                pidToOwnBundle: pidToOwnBundle,
+                parentPID: parentPID,
+                bundleIDForPID: bundleIDForPID,
+                maxParentHops: maxParentHops),
+            target) { return .parentWalk }
+        return nil
     }
 
     /// A layer matches only on a non-empty, exactly-equal bundle id — an empty
@@ -355,6 +443,26 @@ public struct AudioProcess: Hashable, Sendable {
     public init(objectID: AudioObjectID, pid: pid_t) {
         self.objectID = objectID
         self.pid = pid
+    }
+}
+
+/// Which of the four ANY-of attribution layers (see the type's doc comment)
+/// matched a process — T2 diagnostic detail only, never a factor in matching
+/// itself. `rawValue`s are the exact strings Telemetry writes to disk.
+public enum AttributionLayer: String, Sendable {
+    case own, responsible, bundlePath, parentWalk
+}
+
+/// One resolved process plus the layer that attributed it — the
+/// ``resolveWithAttribution(bundleID:)`` companion to plain ``AudioProcess``,
+/// for the T2 diagnostic path only.
+public struct AttributedProcess: Hashable, Sendable {
+    public let process: AudioProcess
+    public let layer: AttributionLayer
+
+    public init(process: AudioProcess, layer: AttributionLayer) {
+        self.process = process
+        self.layer = layer
     }
 }
 

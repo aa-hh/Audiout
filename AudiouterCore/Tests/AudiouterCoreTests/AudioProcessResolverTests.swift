@@ -267,4 +267,117 @@ import CoreAudio
             bundlePaths: [spotify: "/Applications/Spotify.app"])
         #expect(resolved.isEmpty)
     }
+
+    // MARK: - T2: attribution-layer reporting (Telemetry diagnosability)
+
+    /// Convenience over the pure static attributed entry point — mirrors
+    /// `resolve(...)` above exactly, but returns the `AttributedProcess` set so
+    /// a test can assert WHICH layer matched, not just which processes did.
+    private func resolveWithAttribution(
+        bundleID: String,
+        processes: [RawAudioProcess],
+        parents: [pid_t: pid_t] = [:],
+        bundleIDForPID: [pid_t: String] = [:],
+        responsible: [pid_t: pid_t] = [:],
+        executablePaths: [pid_t: String] = [:],
+        bundlePaths: [String: String] = [:],
+        maxParentHops: Int = 5
+    ) -> Set<AttributedProcess> {
+        AudioProcessResolver.resolveWithAttribution(
+            bundleID: bundleID,
+            processes: processes,
+            parentPID: { parents[$0] },
+            bundleIDForPID: { bundleIDForPID[$0] },
+            responsiblePID: { responsible[$0] },
+            executablePath: { executablePaths[$0] },
+            bundlePathForBundleID: { bundlePaths[$0] },
+            maxParentHops: maxParentHops)
+    }
+
+    // Layer 1: a process reporting the target's own bundle id is reported as `.own`.
+    @Test func attributionReportsOwnLayer() {
+        let processes = [
+            RawAudioProcess(objectID: 1, pid: mainPID, bundleID: firefox)
+        ]
+        let resolved = resolveWithAttribution(bundleID: firefox, processes: processes)
+        #expect(resolved == [AttributedProcess(process: AudioProcess(objectID: 1, pid: mainPID), layer: .own)])
+    }
+
+    // Layer 2: the reparented-Spotify-Helper case (see
+    // `reparentedHelperAttributedViaResponsibility` above) is reported as `.responsible`.
+    @Test func attributionReportsResponsibleLayer() {
+        let helper: pid_t = 953
+        let spotifyMain: pid_t = 739
+        let processes = [
+            RawAudioProcess(objectID: 1, pid: spotifyMain, bundleID: spotify),
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let resolved = resolveWithAttribution(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],
+            responsible: [helper: spotifyMain])
+        #expect(resolved == [
+            AttributedProcess(process: AudioProcess(objectID: 1, pid: spotifyMain), layer: .own),
+            AttributedProcess(process: AudioProcess(objectID: 2, pid: helper), layer: .responsible)
+        ])
+    }
+
+    // Layer 3: bundle-path containment (see
+    // `helperAttributedViaBundlePathWhenResponsibilityUnavailable` above) is reported as `.bundlePath`.
+    @Test func attributionReportsBundlePathLayer() {
+        let helper: pid_t = 953
+        let processes = [
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let resolved = resolveWithAttribution(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],
+            executablePaths: [helper: "/Applications/Spotify.app/Contents/Frameworks/"
+                              + "Spotify Helper.app/Contents/MacOS/Spotify Helper"],
+            bundlePaths: [spotify: "/Applications/Spotify.app"])
+        #expect(resolved == [AttributedProcess(process: AudioProcess(objectID: 2, pid: helper), layer: .bundlePath)])
+    }
+
+    // Layer 4: the nil-bundle-id parent walk (see `nilBundleChildAttributedToParent`
+    // above) is reported as `.parentWalk`.
+    @Test func attributionReportsParentWalkLayer() {
+        let processes = [
+            RawAudioProcess(objectID: 1, pid: mainPID, bundleID: firefox),
+            RawAudioProcess(objectID: 2, pid: childPID, bundleID: nil)
+        ]
+        let resolved = resolveWithAttribution(
+            bundleID: firefox,
+            processes: processes,
+            parents: [childPID: mainPID])
+        #expect(resolved == [
+            AttributedProcess(process: AudioProcess(objectID: 1, pid: mainPID), layer: .own),
+            AttributedProcess(process: AudioProcess(objectID: 2, pid: childPID), layer: .parentWalk)
+        ])
+    }
+
+    // `resolve(bundleID:)` and `resolveWithAttribution(bundleID:)` must never
+    // disagree on WHICH processes match — the latter is the former plus detail,
+    // never a different decision (guards against the two entry points drifting
+    // apart under future edits).
+    @Test func attributedAndPlainResolveAgreeOnMembership() {
+        let helper: pid_t = 953
+        let spotifyMain: pid_t = 739
+        let processes = [
+            RawAudioProcess(objectID: 1, pid: spotifyMain, bundleID: spotify),
+            RawAudioProcess(objectID: 2, pid: helper, bundleID: spotifyHelper)
+        ]
+        let plain = resolve(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],
+            responsible: [helper: spotifyMain])
+        let attributed = resolveWithAttribution(
+            bundleID: spotify,
+            processes: processes,
+            parents: [helper: 1],
+            responsible: [helper: spotifyMain])
+        #expect(plain == Set(attributed.map(\.process)))
+    }
 }

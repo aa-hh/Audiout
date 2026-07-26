@@ -166,7 +166,8 @@ public final class MainOutRowView: NSView {
     // MARK: Model
 
     /// Repopulate the selector, set the master slider + readout, and check the
-    /// current target. `master` is the proportional master of the current target.
+    /// current target. `master` is Main Out's own stored gain — NOT an average of
+    /// the target's members, which is what it used to be.
     ///
     /// `connectionState` is the AGGREGATE lifecycle of the active target's
     /// members (spec §3.2 Main Out note): `.off` → no ring; `.connecting` /

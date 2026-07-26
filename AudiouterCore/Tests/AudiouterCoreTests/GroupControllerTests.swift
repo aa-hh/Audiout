@@ -988,7 +988,11 @@ import Testing
         let c1 = GroupController(backend: mock1, store: GroupStore(directory: tempDirectory()),
                                  settings: settings, loadPersisted: false)
         c1.setMainOutMasterVolume(37)
-        try await Task.sleep(nanoseconds: 700_000_000)   // past the 0.5s trailing-coalesce persist delay
+        // No wait: the persist is a synchronous `UserDefaults` write. It used to be
+        // a 0.5s trailing DispatchWorkItem, and this test slept past that delay —
+        // which passed solo and failed under the full suite, because the work item
+        // needed a serviced main run loop that a loaded run never gave it.
+        #expect(settings.mainOutVolume == 37, "the level is persisted as soon as it is set")
 
         // A fresh controller/backend over the SAME settings store. MockBackend's
         // `systemOutputVolume` is always nil, so adoption falls through to the

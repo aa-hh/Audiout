@@ -107,7 +107,7 @@ private final class ApplicationsFooterView: NSView {
 ///
 /// Structure, top to bottom:
 /// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
-///    icon · "Main Out" · proportional master slider + `%` · a trailing
+///    icon · "Main Out" · master gain slider + `%` · a trailing
 ///    `NSPopUpButton` device selector. The selector is THE routing decision, with
 ///    two sections: "Selected Devices" and each saved Output Group.
 /// 2. **"Selected Devices" section** — every discovered device, split into

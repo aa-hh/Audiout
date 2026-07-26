@@ -801,7 +801,14 @@ public final class GroupController {
     private func setMain(_ volume: Int, writeBackToSystem: Bool) {
         mainOutMasterVolume = volume.clampedToVolume
         pushMasterGain(mirrorToSystemVolume: writeBackToSystem)
-        persistMainVolumeSoon()
+        // Written straight through, not debounced. `AppSettings.mainOutVolume` is a
+        // `UserDefaults` scalar — an in-memory set the framework already coalesces
+        // before it ever touches disk — so a fader drag's dozens of writes a second
+        // cost nothing worth batching. This used to sit behind a 0.5s trailing
+        // DispatchWorkItem, which bought two defects for no benefit: the write
+        // depended on the main run loop being serviced (it silently never landed
+        // under a loaded test run), and quitting inside the window dropped it.
+        settings.mainOutVolume = mainOutMasterVolume
     }
 
     /// The user moved Main (a fader drag, or anything else that means "make
@@ -822,27 +829,6 @@ public final class GroupController {
     /// the caller's job and stays upstream in `NativeBackend`/`SystemOutputVolume`.
     public func applyExternalSystemVolume(_ volume: Int) {
         setMain(volume, writeBackToSystem: false)
-    }
-
-    /// How long Main must sit still before its level is written to disk.
-    private static let mainVolumePersistDelay: TimeInterval = 0.5
-
-    private var pendingMainVolumePersist: DispatchWorkItem?
-
-    /// Persist Main on a TRAILING coalesce. A fader drag and a volume-key burst
-    /// each deliver dozens of changes a second on the main thread; only the value
-    /// Main settles at is worth storing, so every change cancels the pending write
-    /// and re-arms it. (`persistRouting()` — a directory create plus an atomic file
-    /// write, already carrying a STABILITY(D4) UI-stall marker — is deliberately
-    /// not on this path: Main's level is not part of the routing state.)
-    private func persistMainVolumeSoon() {
-        pendingMainVolumePersist?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.settings.mainOutVolume = self.mainOutMasterVolume
-        }
-        pendingMainVolumePersist = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.mainVolumePersistDelay, execute: work)
     }
 
     // MARK: Mute (Q4 — volume-based; see "Mute semantics" above)

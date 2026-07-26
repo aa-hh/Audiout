@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// persist to Application Support (T-11).
     private var popoverController: PopoverController!
 
-    /// UI-agnostic mixer model (groups, proportional master, mute) shared
+    /// UI-agnostic mixer model (groups, master gain, mute) shared
     /// by the menu and the mixer window (T-U4). Built lazily in
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!

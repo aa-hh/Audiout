@@ -56,8 +56,10 @@ public enum BackendEvent: Sendable, Equatable {
     /// streaming the capture tap MUTES that output — so the keys diligently
     /// adjusted a device nobody could hear while the AirPlay speakers actually
     /// playing ignored them. `AppDelegate` forwards this to
-    /// ``GroupController/mirrorSystemVolumeToMainOut(_:)``, which mirrors it
-    /// onto the Main Out master so the keys drive whatever is really playing.
+    /// ``GroupController/applyExternalSystemVolume(_:)``, which moves Main Out —
+    /// a master gain — so every device follows without any device's own level
+    /// being touched. That arm writes no hardware: the system volume is already
+    /// at this value, which is the whole premise of the event.
     ///
     /// Why an event rather than the backend calling the routing brain: the
     /// backend owns the system-volume listener but sits BELOW `GroupController`

@@ -6,8 +6,10 @@ import AudiouterSharedUI
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
 /// rows with the control right-aligned, standard insets, and a fitting height
-/// the tab controller resizes the window to. Deliberately minimal — panes stay
-/// small, so this is a few helpers, not a framework.
+/// that `SettingsWindowController` measures and applies to the window itself
+/// (AppKit's tab controller does NOT do that for you — see the sizing-trap note
+/// there). Deliberately minimal — panes stay small, so this is a few helpers,
+/// not a framework.
 enum SettingsForm {
 
     /// Fixed content width for every pane (settings windows don't reflow).
@@ -26,12 +28,32 @@ enum SettingsForm {
     /// owning pane RE-WRITES whenever its control's value changes, so the
     /// consequence of the current value is always spelled out beneath it.
     /// Styling only — the update-on-change contract is the caller's.
+    ///
+    /// **`preferredMaxLayoutWidth` is set here, not left to a later layout
+    /// pass.** A multi-line `NSTextField` with it unset has no width to wrap
+    /// against, so its intrinsic content size reports its natural, UNWRAPPED
+    /// single-line width — for a sentence-length hint, wider than a whole
+    /// pane. That width is a compression-resistance *preference*, not a
+    /// requirement, but it is enough to drag the fixed-`contentWidth` column
+    /// (and, once embedded in the real tab window, the window itself) wider
+    /// than the 460pt design — confirmed live: the Audio tab's window grew to
+    /// 561pt, matching this exact label's unwrapped width, and calling
+    /// `setContentSize` back down did not hold, because the label's own
+    /// unresolved intrinsic size was what wanted 561 in the first place.
+    /// `row(title:subtitle:control:)`'s labels dodge this because
+    /// `RowContainerView.layout()` resolves their wrap width on every real
+    /// layout pass; a full-bleed hint has no such container, so the value is
+    /// pinned here instead — `contentWidth` minus the standard 20pt insets on
+    /// each side (`SettingsForm.paneView(rows:)`, and `AudioSettingsViewController
+    /// .loadView()`'s equivalent hand-rolled insets), the usable width every
+    /// full-bleed line in a pane actually gets.
     static func hintLabel(_ string: String = "") -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.caption
         field.textColor = Tokens.Color.secondaryLabel
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
+        field.preferredMaxLayoutWidth = contentWidth - 40
         return field
     }
 
@@ -87,46 +109,6 @@ enum SettingsForm {
 
             control.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             control.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-        ])
-        return container
-    }
-
-    /// A bold, secondary-colored category label ("General", "Appearance", …) at
-    /// `contentWidth`, indented to align with the row content beneath it. Used by
-    /// the single-screen `SettingsWindowController` to delineate each merged
-    /// section — there's no tab bar to carry that label anymore.
-    static func sectionHeaderLabel(_ text: String) -> NSView {
-        let title = label(text)
-        title.font = Tokens.Font.bodyEmphasized
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(title)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: contentWidth),
-            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            title.topAnchor.constraint(equalTo: container.topAnchor),
-            title.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        return container
-    }
-
-    /// A full-width hairline divider between merged sections, inset to match the
-    /// row content's horizontal margins.
-    static func divider() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(line)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: contentWidth),
-            line.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            line.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            line.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            container.heightAnchor.constraint(equalToConstant: 1),
         ])
         return container
     }

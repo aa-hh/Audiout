@@ -265,8 +265,35 @@ extension SerializedSharedState {
     /// real system XPC round-trip. Tests that specifically want to exercise
     /// the PTP gate (`.needsApproval`/`.timingPortsUnavailable`) construct
     /// their own fake and pass it explicitly.
+    /// `willWaitForClock` is `false`: this double never really waits for
+    /// anything (T6) — it's a canned instant return, not a real bind race —
+    /// so it must never make `convergeDevice` emit a `.takeoverStatus` event.
     private struct AlwaysReadyPTPHelperActivator: PTPHelperActivating {
+        var willWaitForClock: Bool { false }
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
+    }
+
+    /// A scriptable ``PTPHelperActivating`` for the takeover status strip's (T6)
+    /// integration tests: reports a fixed `willWaitForClock` and resolves
+    /// `activate` to a fixed outcome, counting calls so a test can assert
+    /// exactly one Mach touch per connect attempt.
+    private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked Sendable {
+        let willWaitForClock: Bool
+        private let outcome: PTPHelperActivationOutcome
+        private let lock = NSLock()
+        private var _callCount = 0
+
+        init(willWaitForClock: Bool, outcome: PTPHelperActivationOutcome) {
+            self.willWaitForClock = willWaitForClock
+            self.outcome = outcome
+        }
+
+        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+            lock.withLock { _callCount += 1 }
+            return outcome
+        }
+
+        var callCount: Int { lock.withLock { _callCount } }
     }
 
     /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
@@ -6616,6 +6643,162 @@ extension SerializedSharedState {
                 "sleep must not emit a spurious note-clear when the note was never active (\(noteEvents.count) seen)")
     }
 
+    // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
+    //
+    // `convergeDevice` races macOS off the PTP timing ports via T5's switch-away
+    // + T4's bounded `ptpHelperActivator.activate(timeout:)` wait. These pin down
+    // that the strip's four states are emitted from that same sequence, in the
+    // ORDER the plan calls for: state 1/2 never show a transient wait, state 3
+    // only shows when a bounded wait genuinely starts, and it auto-clears.
+
+    private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
+        events.compactMap { event -> TakeoverStatus?? in
+            if case .takeoverStatus(let status) = event { return .some(status) }
+            return nil
+        }
+    }
+
+    /// State 1 (`.needsApproval`): `willWaitForClock == false` short-circuits
+    /// `activate` instantly (proven hermetically at the seam level in
+    /// `PTPHelperActivationTests`), so `convergeDevice` must resolve directly to
+    /// `.needsApproval` and NEVER emit the transient `.takingOver` state —
+    /// that's the "no waiting" guarantee at the integration level, not just the
+    /// activator's own timing.
+    @Test func takeoverStatusNeedsApprovalNeverShowsTakingOver() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B0", name: "Needs Approval Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        let statuses = takeoverEvents(in: events)
+        #expect(statuses == [.needsApproval(.requiresApproval)],
+                "state 1 must resolve directly, with no other takeover event before or after it")
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState
+                == .failed(ConnectionFailure(cause: .timingUnavailable)),
+                "the row-level failure (T4) still fires alongside the strip's explanation")
+    }
+
+    /// State 2 (`.helperMissing`): a `.notFound` status maps to the strip's
+    /// "missing from the bundle" vocabulary, not the raw `.needsApproval` case —
+    /// its remedy differs (reinstall, not open Login Items), same "no waiting"
+    /// discipline as state 1.
+    @Test func takeoverStatusHelperMissingResolvesDirectly() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .needsApproval(.notFound))
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B1", name: "Missing Helper Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == .helperMissing }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events) == [.helperMissing],
+                "a `.notFound` status must resolve to `.helperMissing`, and nothing else")
+    }
+
+    /// State 3 → ready: `willWaitForClock == true` means the strip shows
+    /// "taking over" WHILE the bounded wait is in flight, then auto-clears
+    /// (`nil`) the instant the outcome resolves `.ready` — mirroring
+    /// `reconcileSystemAirPlayGuard`'s edge-triggered discipline so the strip
+    /// can never strand on a stale spinner.
+    @Test func takeoverStatusTakingOverClearsOnReady() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B2", name: "Taking Over Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == nil }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events) == [.takingOver, nil],
+                "the strip must show 'taking over' then auto-clear once the clock is ready")
+        // The strip clears the INSTANT the clock is known ready — deliberately
+        // before `addOutput` itself resolves (T6 is about the ports, not the
+        // rest of the connect) — so `isSelected` flips true slightly LATER;
+        // poll rather than asserting immediately after `collect` returns.
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
+                "the connect itself must still succeed once the clock is ready")
+    }
+
+    /// State 3 → 4: the same transient "taking over" state precedes the
+    /// timeout backstop when the wait genuinely runs out with the helper
+    /// `.enabled`.
+    @Test func takeoverStatusTakingOverThenTimesOut() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .timingPortsUnavailable)
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B3", name: "Timed Out Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == .timedOut }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events) == [.takingOver, .timedOut],
+                "the strip must show 'taking over' before settling on the timeout backstop")
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState
+                == .failed(ConnectionFailure(cause: .timingUnavailable)))
+    }
+
+    /// Edge-triggered discipline (mirrors `reconcileSystemAirPlayGuard`): a
+    /// SECOND connect attempt that resolves to the exact same takeover status
+    /// must NOT re-emit it — only a genuine change fires.
+    @Test func takeoverStatusDoesNotReemitAnUnchangedState() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let deviceA = ap2Device(id: "AA:BB:CC:DD:EE:B4", name: "Repeat Speaker A")
+        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:B5", name: "Repeat Speaker B")
+        await startAndDiscover(backend, engine, discovery, deviceA)
+        await startAndDiscover(backend, engine, discovery, deviceB)
+
+        _ = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
+        }, after: { backend.setOutputSet([deviceA.id]) })
+
+        // A second, independent connect attempt resolving to the SAME status
+        // must be silent on this channel — give it a beat to (wrongly) fire.
+        let box = EventBox()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await e in stream { if case .takeoverStatus = e { _ = await box.append(e) } }
+        }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        backend.setOutputSet([deviceA.id, deviceB.id])
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        #expect(await box.snapshot().isEmpty,
+                "an unchanged takeover status must not re-emit on a second connect attempt")
+    }
+
+    /// Never-strand invariant: a `stop()` mid-takeover (or with a stale
+    /// terminal state still showing) must clear the strip — there is no more
+    /// connect for it to explain, mirroring `clearSystemAirPlayGuard()`'s
+    /// stop()-path clear.
+    @Test func takeoverStatusClearsOnStop() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .timingPortsUnavailable)
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B6", name: "Stranded Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        _ = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == .timedOut }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        let events = await collect(from: backend, until: { events in
+            self.takeoverEvents(in: events).contains { $0 == nil }
+        }, after: { backend.stop() })
+        #expect(takeoverEvents(in: events) == [nil], "stop() must clear a stranded takeover status")
+    }
 
     @Test func handleAppLaunchedRefreshesSystemTapExclusionForExcludedApp() async {
         let (backend, engine, _) = makeBackend()

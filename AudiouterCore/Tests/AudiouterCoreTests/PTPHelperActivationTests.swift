@@ -44,6 +44,7 @@ import Testing
     /// without re-deriving its own type.
     private struct FakeActivator: PTPHelperActivating {
         let outcome: PTPHelperActivationOutcome
+        var willWaitForClock: Bool { false }
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { outcome }
     }
 

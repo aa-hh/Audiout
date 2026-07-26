@@ -141,6 +141,15 @@ public enum PTPHelperActivationOutcome: Equatable, Sendable {
 /// decision (Q1=B, PLAN-AIRPLAY-COEXISTENCE.md) forbids. A protocol so tests
 /// inject a fake with no real Mach service, launchd, or root daemon involved.
 public protocol PTPHelperActivating: Sendable {
+    /// Cheap, synchronous peek at whether the NEXT `activate(timeout:)` call
+    /// will actually wait (status already `.enabled`) or short-circuit
+    /// instantly (T6, the takeover status strip) — the exact same read
+    /// `activate` itself performs first. Exposed separately so a caller can
+    /// decide whether to show a transient "taking over" state BEFORE
+    /// starting the (possibly-blocking) call, without duplicating the
+    /// outcome logic or ever showing that state for the instant-return cases.
+    var willWaitForClock: Bool { get }
+
     /// - Parameter timeout: total budget, after the Mach touch, to wait for
     ///   the clock to become readable.
     func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome
@@ -176,6 +185,8 @@ public struct PTPHelperActivator: PTPHelperActivating {
         self.machServiceName = machServiceName
         self.pollInterval = pollInterval
     }
+
+    public var willWaitForClock: Bool { ptpHelper.status == .enabled }
 
     public func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
         let status = ptpHelper.status

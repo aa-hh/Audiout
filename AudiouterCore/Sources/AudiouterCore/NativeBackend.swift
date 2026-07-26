@@ -422,6 +422,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private var systemAirPlayGuardActive = false
 
+    /// The takeover status strip's current state (T6, PLAN-AIRPLAY-COEXISTENCE.md),
+    /// or `nil` when there's nothing to explain. Set only from ``setTakeoverStatus(_:)``,
+    /// which is the edge-triggered emit point — mirrors ``systemAirPlayGuardActive``'s
+    /// discipline so the strip can never strand showing a stale "taking over" state.
+    /// Confined to `stateQueue`.
+    private var takeoverStatus: TakeoverStatus?
+
     /// Fix C (R11): whether we are in the immediate post-wake reconnection window,
     /// set by ``handleSystemDidWake()`` and cleared once a desired device reconnects,
     /// the user re-selects, the watchdog fires, or we sleep/stop. It selects which
@@ -1354,6 +1361,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // W3-T3: capture just stopped (above) — clear the double-path guard too,
             // on the true→false edge, so a stop mid-note can't strand the popover note.
             self.clearSystemAirPlayGuard()
+            // T6: a stop mid-takeover-attempt must not strand the strip either —
+            // there is no more connect for it to explain.
+            self.setTakeoverStatus(nil)
             // T1: drop any pending synced-local settle so a debounced transition
             // can't fire against a torn-down backend after stop(). Independent of
             // the watchdog above — this is the synced-local debounce, not R11.
@@ -3221,9 +3231,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // accepts the session but plays silence with no clock, so
                     // failing the connect now beats a "connected" row that never
                     // makes a sound.
+                    //
+                    // T6 (the takeover status strip): peek `willWaitForClock`
+                    // BEFORE calling `activate` so "taking over" only ever shows
+                    // when a bounded wait genuinely starts — never for the
+                    // (most common) unapproved-helper case, which resolves
+                    // `activate` instantly below with no suspension in between.
+                    if ptpHelperActivator.willWaitForClock {
+                        stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+                    }
                     let ptpOutcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
                     let ptpReady = (ptpOutcome == .ready)
-                    stateQueue.sync { self.ptpClockAvailable = ptpReady }
+                    stateQueue.sync {
+                        self.ptpClockAvailable = ptpReady
+                        self.setTakeoverStatus(TakeoverStatus.resolved(from: ptpOutcome))
+                    }
                     guard ptpReady else {
                         stateQueue.sync {
                             self.added.remove(id)
@@ -3957,6 +3979,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         systemAirPlayGuardActive = false
         emit(.systemDefaultIsAirPlayActive(false))
         return true
+    }
+
+    // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
+
+    /// Update the takeover-status strip, edge-triggered exactly like
+    /// ``reconcileSystemAirPlayGuard()``/``clearSystemAirPlayGuard()`` above: a
+    /// repeat of the current state (including repeated `nil`) is a no-op, so a
+    /// caller can call this unconditionally at every step of the T5+T4 sequence
+    /// without storming the event stream. Every path that could otherwise leave
+    /// the strip stuck — the wait resolving, `stop()` — routes through here, so
+    /// it can never strand showing a stale "taking over" state. On `stateQueue`.
+    private func setTakeoverStatus(_ status: TakeoverStatus?) {   // on stateQueue
+        guard status != takeoverStatus else { return }
+        takeoverStatus = status
+        emit(.takeoverStatus(status))
     }
 
     // MARK: Scheduling snapshot polling (T2)

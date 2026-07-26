@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 
 /// Regression test: ensures that the incorrect Core Audio selector
@@ -9,9 +9,9 @@ import Foundation
 /// current audio output device). This bug has drifted back into the codebase
 /// twice before and silently breaks audio routing. This test fails immediately
 /// if the bad selector ever appears in non-comment code again.
-final class OutputSelectorGuardTests: IsolatedTestCase {
+@Suite final class OutputSelectorGuardTests: IsolatedSuite {
 
-    func testDefaultSystemOutputDeviceSelectorNeverUsedInRealCode() throws {
+    @Test func defaultSystemOutputDeviceSelectorNeverUsedInRealCode() throws {
         // Resolve the source directories from this test file's location.
         let testFilePath = URL(fileURLWithPath: #filePath)
 
@@ -44,7 +44,7 @@ final class OutputSelectorGuardTests: IsolatedTestCase {
                 message += "  \(violation.line.trimmingCharacters(in: .whitespaces))\n"
             }
             message += "\nUSE kAudioHardwarePropertyDefaultOutputDevice INSTEAD (the actual current output device, not the alert-sound device)."
-            XCTFail(message)
+            Issue.record("\(message)")
         }
     }
 

@@ -1,5 +1,18 @@
 # Brief: migrating AudiouterCoreTests to swift-testing
 
+**Status (2026-07-26): DONE for the large majority of both `AudiouterCore` and
+`AirPlayEngine`'s test suites**, merged to `main`. See
+[swift-testing-conversion-cookbook.md](swift-testing-conversion-cookbook.md)
+for exactly how each XCTest idiom was converted, the shared seams
+(`IsolatedSuite`, `AudioHardwareTestGate.trait`, `SerializedSharedState`) that
+downstream conversions consume, and the AirPlayEngine-specific notes (Part
+III). A small number of files remain on the legacy `XCTestCase` base — current
+set via `git grep ': XCTestCase'` under `AudiouterCore/Tests/` and
+`AirPlayEngine/Tests/`. Everything below is the original pre-migration
+proposal, kept for history; it is no longer the plan of record.
+
+---
+
 Status: **not started, not scheduled** — written as a costed option per Alec's
 request, alongside the finding in
 [test-parallel-spawn-measurement.md](test-parallel-spawn-measurement.md) that

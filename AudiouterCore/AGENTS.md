@@ -488,7 +488,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |
 | `OwnToneBackend` | HTTP-polling backend against OwnTone; superseded. |
-| `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate. |
+| `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
+| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |

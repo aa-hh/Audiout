@@ -1761,9 +1761,57 @@ public enum NativeCaptureError: Error, Equatable, Sendable {
 
 /// The engine as a ``PCMSink``: forwards straight to
 /// ``AirPlayEngine/AirPlayEngine/write(pcm:pts:)`` (nonisolated, fire-and-forget).
-struct EngineSink: PCMSink {
+///
+/// LIVE BUG (2026-07-26): this is the WHOLE-SYSTEM (stream 0) write path, and it
+/// had ZERO backpressure visibility — `NativeBackend.sampleWriteBacklogIfDue()`
+/// (the diagnostic that reads `engine.writeBacklogSnapshot()` and logs
+/// `write_backlog_drop` when the engine's per-stream backpressure guard actually
+/// discards a write) is called ONLY from the per-app mixer's `onMixedBuffer`
+/// (stream ≥ 1). A session with no active `.device`-routed app therefore had
+/// this diagnostic never fire at all, so a genuine engine-side drop on stream 0
+/// was indistinguishable from a healthy stream: no rebuild, no error, no
+/// telemetry anywhere — audio simply stopped. `EngineSink` now samples its OWN
+/// backlog on the SAME throttled cadence, so stream 0 gets this visibility
+/// whether or not any per-app stream exists.
+///
+/// `final class` (not the original `struct`) so this per-instance counter state
+/// is a stored reference, not copied — `EngineSink` is constructed once and held
+/// by ``NativeCaptureCoordinator``. `@unchecked Sendable`: `write(pcm:pts:)` runs
+/// serially on the tap's IOProc delivery thread (Core Audio never invokes an
+/// IOProc concurrently with itself), so the counter needs no lock — the same
+/// single-caller discipline this file already uses for e.g.
+/// `machToMonotonicOffsetNanos`.
+final class EngineSink: PCMSink, @unchecked Sendable {
     let engine: AirPlayEngine
-    func write(pcm: Data, pts: timespec) { engine.write(pcm: pcm, pts: pts) }
+    init(engine: AirPlayEngine) { self.engine = engine }
+
+    /// Sample interval and delta-gating: identical to
+    /// `NativeBackend.sampleWriteBacklogIfDue()` — see that doc for why 500 and
+    /// why only on a genuine change to `droppedWrites`.
+    private static let backlogSampleInterval = 500
+    private var backlogSampleCounter = 0
+    private var lastReportedDroppedWrites: UInt64 = 0
+
+    func write(pcm: Data, pts: timespec) {
+        engine.write(pcm: pcm, pts: pts)
+        sampleWriteBacklogIfDue()
+    }
+
+    private func sampleWriteBacklogIfDue() {
+        backlogSampleCounter &+= 1
+        guard backlogSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeBacklogSnapshot()
+        guard snap.droppedWrites != lastReportedDroppedWrites else { return }
+        let delta = snap.droppedWrites &- lastReportedDroppedWrites
+        lastReportedDroppedWrites = snap.droppedWrites
+        Telemetry.log(.captureWS, "write_backlog_drop", [
+            "path": "wholeSystem",
+            "droppedTotal": String(snap.droppedWrites),
+            "droppedDelta": String(delta),
+            "maxInFlightSeconds": String(format: "%.3f", snap.maxInFlightSeconds),
+            "streamsTracked": String(snap.streamsTracked),
+        ])
+    }
 }
 
 /// The engine as the ``AudioIOWorkgroupJoining`` target (T7): both calls hand off

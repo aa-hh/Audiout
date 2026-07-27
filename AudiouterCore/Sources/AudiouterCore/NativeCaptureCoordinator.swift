@@ -585,12 +585,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // PAUSE-ON-CALL RE-DRIVE: reconcile the gate to the freshly-built tap's
             // ACTUAL profile. A `start()` that lands while the device is already in a
             // call (e.g. recovering from `.failed` mid-call) comes up on the 16 kHz HFP
-            // clock → isCallProfile true → apply(true) gates it from the first buffer;
-            // the normal A2DP case is apply(false), an idempotent no-op over the gate
-            // `start()` already cleared at claim. The coordinator, not any tap edge,
-            // owns this. Off the lock, orphan == nil (a racing stop() left nothing live).
+            // clock → `.call` → gates it from the first buffer; the normal A2DP case is
+            // `.notCall`, an idempotent no-op over the gate `start()` already cleared at
+            // claim; an `.inconclusive` read keeps whatever the gate already is. The
+            // coordinator, not any tap edge, owns this. Off the lock, orphan == nil (a
+            // racing stop() left nothing live).
             if orphan == nil {
-                applyCallActive(newTap.isCallProfile)
+                redriveCallGate(newTap.callProfileReading)
             }
         } catch {
             // createAndStart may have created the tap/aggregate before failing on a
@@ -1091,7 +1092,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///  1. the tap's `onCallActiveChanged`, which now reports the CURRENT profile on
     ///     every delivery (not an enter/exit edge); and
     ///  2. the RE-DRIVE after every freshly-built tap commits (`start()` /
-    ///     ``recreateTap(cause:)``), passing `newTap.isCallProfile`.
+    ///     ``recreateTap(cause:)``), passing `newTap.callProfileReading`.
     ///
     /// (2) is the crux: the enter/exit edge and the HFP-tracking state used to live on
     /// the `CoreAudioSystemTap` INSTANCE, which is destroyed and recreated on every
@@ -1115,19 +1116,50 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// re-anchor own the resumed timeline alone (no new recovery path here).
     ///
     /// Runs OFF `queue` (it takes `queue` itself) — never call it while holding `queue`.
+    ///
+    /// L2: the WHOLE flag+feeder transition runs under ONE `queue.sync`, so the two
+    /// callers — the tap's `onChange` (monitor queue) and the post-build re-drive
+    /// (rebuild thread) — serialize on this one serial queue and can never interleave
+    /// into a flag/feeder MISMATCH (e.g. `callActive == false` with the feeder still
+    /// running = silent-forever). The RT `handleBuffer` reads the gate lock-free via
+    /// `snapshotLock.try()` and never touches `queue`, so holding `queue` across
+    /// `feeder.stop()` (which briefly drains the feeder's own queue) never blocks the
+    /// audio path. `feeder.start`/`stop` never re-enter `queue`, so no cycle.
     private func applyCallActive(_ active: Bool) {
+        queue.sync { applyCallActiveLocked(active) }
+    }
+
+    /// Body of ``applyCallActive(_:)`` / ``redriveCallGate(_:)``; MUST run on `queue`.
+    /// Idempotent. ENTER: publish the gate BEFORE starting the feeder (so a captured
+    /// buffer can never race in ungated). EXIT: stop the feeder BEFORE un-gating (so
+    /// no in-flight silence buffer outlives the pause, and the exit rebuild's
+    /// re-anchor owns the resumed timeline alone).
+    private func applyCallActiveLocked(_ active: Bool) {
         if active {
-            let frames = queue.sync { () -> Int in
-                self.callActive = true
-                self.publishBufferSnapshot()
-                return self.lastObservedFrameCount
-            }
-            feeder.start(frameCount: frames)
+            callActive = true
+            publishBufferSnapshot()
+            feeder.start(frameCount: lastObservedFrameCount)
         } else {
             feeder.stop()
-            queue.sync {
-                self.callActive = false
-                self.publishBufferSnapshot()
+            callActive = false
+            publishBufferSnapshot()
+        }
+    }
+
+    /// Post-build re-drive of the call gate (L1 FAIL-SAFE + L2 atomicity). Reconciles
+    /// the gate to a freshly-built tap's ``CallProfileReading``, atomically with every
+    /// other gate mutation (same `queue`). RELEASES the pause only on positive
+    /// evidence (`.notCall`); an `.inconclusive` reading (low rate, transport
+    /// unreadable) while already paused KEEPS the pause rather than leaking call audio
+    /// on a transient HAL read failure — and, when NOT paused, does not spuriously
+    /// start pausing on it. Call OFF `queue`.
+    private func redriveCallGate(_ reading: CallProfileReading) {
+        queue.sync {
+            switch reading {
+            case .call:    applyCallActiveLocked(true)
+            case .notCall: applyCallActiveLocked(false)
+            case .inconclusive:
+                if !callActive { applyCallActiveLocked(false) }  // latched → keep the pause
             }
         }
     }
@@ -1340,7 +1372,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // NOT firing on a fresh tap was the stuck-silence bug. Off the lock,
             // orphan == nil (a racing stop() that won leaves nothing to reconcile).
             if commit.orphan == nil {
-                applyCallActive(newTap.isCallProfile)
+                redriveCallGate(newTap.callProfileReading)
             }
             // Fire the whole-system session-reset signal ONLY when this rebuild was
             // caused by a device/nominal-rate change AND actually committed a fresh
@@ -1695,14 +1727,17 @@ public protocol SystemAudioTap: AnyObject {
     var onCallActiveChanged: (@Sendable (Bool) -> Void)? { get set }
 
     /// PAUSE-ON-CALL re-drive seam: this tap's CURRENT call-profile classification
-    /// (rate + transport), read live from the committed format. The coordinator reads
-    /// it right after committing a freshly built tap (``NativeCaptureCoordinator``
-    /// `start()` / `recreateTap`) and calls ``NativeCaptureCoordinator/applyCallActive(_:)``
-    /// with it, so the pause gate is reconciled to reality after ANY rebuild — closing
-    /// the mid-call-rebuild stuck-silence hole where the tap's own enter/exit edge state
-    /// was lost across the tap swap. Defaulted to `false` so a fake that doesn't model
-    /// call profiles keeps working (the re-drive is then always a benign apply(false)).
-    var isCallProfile: Bool { get }
+    /// (rate + transport), read live from the committed format, as a FAIL-SAFE
+    /// 3-state (``CallProfileReading``). The coordinator reads it right after
+    /// committing a freshly built tap (``NativeCaptureCoordinator`` `start()` /
+    /// `recreateTap`) and calls ``NativeCaptureCoordinator/redriveCallGate(_:)`` with
+    /// it, so the pause gate is reconciled to reality after ANY rebuild — closing the
+    /// mid-call-rebuild stuck-silence hole where the tap's own enter/exit edge state
+    /// was lost across the tap swap. `.inconclusive` (a low rate whose transport read
+    /// failed) keeps a latched pause rather than un-gating into a call-audio leak.
+    /// Defaulted to `.notCall` so a fake that doesn't model call profiles keeps
+    /// working (the re-drive is then always a benign apply(false)).
+    var callProfileReading: CallProfileReading { get }
 
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
@@ -1747,7 +1782,7 @@ public protocol SystemAudioTap: AnyObject {
 public extension SystemAudioTap {
     var workgroupDeviceID: AudioObjectID? { nil }
     var tappedDeviceID: AudioObjectID? { nil }
-    var isCallProfile: Bool { false }
+    var callProfileReading: CallProfileReading { .notCall }
 }
 
 /// The audio I/O workgroup seam (T7). Implemented in production by
@@ -2275,6 +2310,15 @@ enum TapRebuildDecision {
 /// Audio, the same pure/live split ``TapRebuildDecision`` uses. `nil` rate or `nil`
 /// transport (an unreadable device) is NOT a call: we only ever pause on positive
 /// evidence of HFP, never on a failed read.
+/// Three-state result of the re-drive classification (L1 FAIL-SAFE). `.inconclusive`
+/// is a LOW rate whose transport could not be read — we can neither confirm nor
+/// deny a call. The re-drive treats it as "keep whatever the gate already is" so a
+/// transient HAL read failure during a real call can never un-gate and leak call
+/// audio (the un-gate direction was fail-open before). A rate above the HFP ceiling
+/// is conclusively `.notCall` regardless of transport, because the committed format
+/// rate is always readable — so a real call end (→ A2DP) always releases the pause.
+public enum CallProfileReading: Sendable, Equatable { case call, notCall, inconclusive }
+
 enum CallProfileDecision {
     static func isCallActive(rate: Double?, transport: UInt32?) -> Bool {
         guard let rate, let transport, Int(rate.rounded()) <= 16000 else { return false }
@@ -2283,6 +2327,22 @@ enum CallProfileDecision {
             || transport == kAudioDeviceTransportTypeBluetoothLE
         #else
         return false
+        #endif
+    }
+
+    /// The fail-safe 3-state used by the post-build re-drive. A rate above the HFP
+    /// ceiling (or missing) is `.notCall`; a low rate with an UNREADABLE transport is
+    /// `.inconclusive` (never un-gate a latched pause on it); a low rate with a
+    /// readable transport is `.call`/`.notCall` by whether it is Bluetooth.
+    static func reading(rate: Double?, transport: UInt32?) -> CallProfileReading {
+        guard let rate, Int(rate.rounded()) <= 16000 else { return .notCall }
+        guard let transport else { return .inconclusive }
+        #if canImport(CoreAudio)
+        let bluetooth = transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+        return bluetooth ? .call : .notCall
+        #else
+        return .notCall
         #endif
     }
 }
@@ -2377,8 +2437,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// rebuild is NOT suppressed and re-anchors onto the HFP clock) plus a live
     /// transport read, through the same pure ``CallProfileDecision`` the monitor's
     /// `onChange` uses. Read by ``NativeCaptureCoordinator`` right after a build commit.
-    var isCallProfile: Bool {
-        CallProfileDecision.isCallActive(
+    var callProfileReading: CallProfileReading {
+        CallProfileDecision.reading(
             rate: Double(format.sampleRate),
             transport: Self.readTransportType(tappedOutputDeviceID))
     }

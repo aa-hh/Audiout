@@ -126,13 +126,15 @@ extension SerializedSharedState {
 
         /// PAUSE-ON-CALL re-drive (``SystemAudioTap/isCallProfile``): what this fake
         /// reports as its current call profile when the coordinator reconciles the gate
-        /// after a build commit. Defaults to `false` (A2DP / not a call), so every
-        /// non-pause test's rebuild re-drives a benign `applyCallActive(false)`. A
-        /// pause-on-call test sets it `true` to model a tap that came up on the 16 kHz
-        /// HFP clock (a mid-call rebuild), and back to `false` to model the return to A2DP.
-        private var _isCallProfile = false
-        var isCallProfile: Bool { lock.withLock { _isCallProfile } }
-        func setCallProfile(_ v: Bool) { lock.withLock { _isCallProfile = v } }
+        /// after a build commit. Defaults to `.notCall` (A2DP), so every non-pause
+        /// test's rebuild re-drives a benign `applyCallActiveLocked(false)`. A
+        /// pause-on-call test sets it `.call` to model a tap that came up on the 16 kHz
+        /// HFP clock (a mid-call rebuild), `.notCall` for the return to A2DP, and
+        /// `.inconclusive` to model a transport-read failure at a low rate (the L1
+        /// fail-safe: keep a latched pause, don't un-gate).
+        private var _callProfileReading: CallProfileReading = .notCall
+        var callProfileReading: CallProfileReading { lock.withLock { _callProfileReading } }
+        func setCallProfile(_ v: CallProfileReading) { lock.withLock { _callProfileReading = v } }
 
         /// Deliver through the START-TIME snapshot, not the live property — the real
         /// IOProc only ever calls the handler it captured at createAndStart.
@@ -1555,8 +1557,8 @@ extension SerializedSharedState {
     /// latched into PERMANENT SILENCE: the swapped-in tap's edge read "not in a call",
     /// the coordinator's gate stayed true, and the exit never fired.
     @Test func midCallRebuildKeepsPauseAndExitStillClearsTheGate() {
-        let old = FakeTap(); old.id = 1; old.setCallProfile(false)
-        let new = FakeTap(); new.id = 2; new.setCallProfile(true)   // came up on the 16 kHz HFP clock
+        let old = FakeTap(); old.id = 1; old.setCallProfile(.notCall)
+        let new = FakeTap(); new.id = 2; new.setCallProfile(.call)   // came up on the 16 kHz HFP clock
         let sink = SpySink()
         let coordinator = makeSequencedCoordinator(
             SequencedTaps([old, new]), sink: sink, resolveDefaultOutputDeviceID: { nil })
@@ -1588,7 +1590,7 @@ extension SerializedSharedState {
         // bug, where a swapped-in tap never fires the exit edge. Post-fix the re-anchor's
         // commit re-drives `applyCallActive(false)` and self-heals the gate; pre-fix
         // nothing clears it and this is permanent silence.
-        new.setCallProfile(false)
+        new.setCallProfile(.notCall)
         new.fireDeviceChange()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
 
@@ -1603,6 +1605,39 @@ extension SerializedSharedState {
         let quiescent = sink.forwarded.count
         waitFor(timeout: 0.3) { sink.forwarded.count > quiescent }
         #expect(sink.forwarded.count == quiescent, "the feeder is stopped once the call ends — no writer left running")
+
+        coordinator.stop()
+    }
+
+    /// (L1 FAIL-SAFE) A mid-call rebuild whose transport read fails lands as
+    /// `.inconclusive`. While the gate is already latched (paused), the re-drive must
+    /// KEEP the pause — never un-gate into a call-audio leak on a transient HAL glitch.
+    /// Pre-fix (`isCallProfile: Bool`, transport-nil ⇒ false) this un-gated and leaked.
+    @Test func inconclusiveRedriveKeepsALatchedPause() {
+        let old = FakeTap(); old.id = 1; old.setCallProfile(.notCall)
+        let new = FakeTap(); new.id = 2; new.setCallProfile(.inconclusive)  // transport read failed
+        let sink = SpySink()
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink, resolveDefaultOutputDeviceID: { nil })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireCallActiveChanged(true)   // paused
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Mid-call rebuild; the fresh tap can't read transport → `.inconclusive`.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { new.creates >= 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // The pause is KEPT: captured audio through the new tap is still dropped.
+        let afterRebuild = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count > afterRebuild }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "an inconclusive re-drive must KEEP the latched pause — no captured payload leaks")
 
         coordinator.stop()
     }
@@ -1639,7 +1674,7 @@ extension SerializedSharedState {
         // Recover AFTER the call ended: the recovered tap is A2DP, so the re-drive clears
         // the gate and capture resumes (not stuck silent).
         tap.startError = nil
-        tap.setCallProfile(false)
+        tap.setCallProfile(.notCall)
         coordinator.start()
         waitFor { if case .capturing = coordinator.state { return true }; return false }
 

@@ -93,12 +93,21 @@ writer while active (capture drops, feeder writes — never both).
 
 **The COORDINATOR is the single owner of the call-active decision.** The gate +
 feeder are reconciled to `active` by one idempotent apply,
-`NativeCaptureCoordinator.applyCallActive(_:)` (enter: gate before feeder; exit:
-feeder-stop before un-gate). Two callers drive it: (1) the tap's
-`onCallActiveChanged`, which now reports its CURRENT profile on every delivery —
-NOT an enter/exit edge; and (2) a RE-DRIVE after EVERY freshly-built tap commits
-(both `start()`'s and `recreateTap`'s commit), passing `newTap.isCallProfile`
-(committed `format.sampleRate` + a live transport read). The re-drive is
+`NativeCaptureCoordinator.applyCallActive(_:)`/`applyCallActiveLocked(_:)` (enter:
+gate before feeder; exit: feeder-stop before un-gate). The WHOLE flag+feeder
+transition runs under ONE `queue.sync` on the coordinator's serial queue, so its two
+callers can never interleave into a flag/feeder MISMATCH (`callActive == false` with
+the feeder still running = silent-forever) — the RT `handleBuffer` reads the gate
+lock-free via `snapshotLock.try()` and never takes `queue`, so holding `queue` across
+`feeder.stop()` never blocks audio. Two callers drive it: (1) the tap's
+`onCallActiveChanged`, which reports its CURRENT profile on every delivery — NOT an
+enter/exit edge; and (2) a RE-DRIVE after EVERY freshly-built tap commits (both
+`start()`'s and `recreateTap`'s commit), via `redriveCallGate(newTap.callProfileReading)`
+(committed `format.sampleRate` + a live transport read, as the FAIL-SAFE 3-state
+`CallProfileReading`). An `.inconclusive` reading (a low rate whose transport read
+failed) while the gate is already latched KEEPS the pause rather than un-gating into a
+call-audio leak on a transient HAL glitch; it only releases on a positive `.notCall`.
+The re-drive is
 load-bearing, not defensive: the enter/exit edge and HFP-rate tracking live on the
 `CoreAudioSystemTap` INSTANCE, which is destroyed/recreated on every rebuild, while
 the gate + feeder live on the coordinator (survives rebuilds). A mid-call
@@ -121,7 +130,11 @@ into permanent silence. WHOLE-SYSTEM (stream 0) ONLY; per-app is untouched.
 **KNOWN LIMITATIONS** (documented from adversarial review; NOT fixed here):
 - (C) A call start that rides in behind an unrelated `F-SETTLE` settle burst can
   delay the pause by up to ~1.2 s, briefly leaking call audio to the receiver
-  before the gate engages.
+  before the gate engages. Same family: the ENTER classification in the tap's
+  `onChange` is still fail-CLOSED (a transport read failing exactly at call start →
+  no pause until the next notification). The RE-DRIVE is fail-SAFE (keeps a latched
+  pause on an inconclusive read); only the enter edge retains this delay-not-leak-
+  free window.
 - (D) LE-Audio media playing at `<= 16 kHz` on a Bluetooth-LE transport can be
   misclassified as a call by `CallProfileDecision` (rate+transport only).
 - (E) A speakerphone call routed through the Mac's OWN speakers is NOT paused —

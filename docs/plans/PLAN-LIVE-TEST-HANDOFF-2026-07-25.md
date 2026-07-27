@@ -57,7 +57,84 @@ Plan-doc-only commit: `cdb452d` corrected `PLAN-MEMORY-LEAK-LIVE-TESTS.md` (remo
 popover diagnostic counter that doesn't exist; pointed at Telemetry instead of the env-gated
 `AudioDiag`).
 
-## The open mystery — READ THIS CAREFULLY, this is the important part
+## The open mystery — **RESOLVED 2026-07-26 (T-DIAG). Read the resolution first.**
+
+> **RESOLUTION — it was a telemetry ATTRIBUTION artifact, not a state-machine or teardown bug.**
+>
+> The app runs **TWO** `PerAppCaptureCoordinator` instances over the same bundle IDs —
+> `NativeBackend.perAppCapture` (routing, `.mutedWhenTapped`,
+> `NativeBackend.swift:905`) and `NativeBackend.meteringCapture` (metering-only, `.unmuted`,
+> `NativeBackend.swift:910-911`) — and **both logged `capturePA` transitions with no field
+> saying which instance emitted the line.** Their two streams interleave in
+> `telemetry.jsonl` into a sequence no single state machine could produce.
+>
+> Re-reading the raw log for `sid 21205581-…` (still on disk) with that in mind, every line
+> below reconciles exactly, and the "25-minute gap" is not a gap at all — it is the ROUTING
+> instance sitting healthily in `.capturing` for 25 minutes while the METERING instance churns
+> around it with popover open/close:
+>
+> - `00:21:32.822` a `permission/probe_verdict` line — the **popover-open** trigger
+>   (`PermissionStateObserver`). Every metering start/stop below is preceded by one; that is the
+>   tell for which instance a line belongs to.
+> - `00:21:33.3` Firefox **and** Music go `idle→…→capturing` = the **metering** instance arming
+>   both listed apps' `.unmuted` meter taps on popover open.
+> - `00:21:48` Move 2 deselected → `captureWS` stops. Alec then sets Music's redirect → Move 2.
+> - `00:21:51.118→.151` Music `idle→resolvingProcess→creatingTap→capturing` = the **ROUTING**
+>   instance starting Music's redirect capture.
+> - `00:21:51.151→.160` Music `capturing→stopping→idle` = the **METERING** instance stopping
+>   Music's meter tap, because a `.device`-routed app leaves the metering-only target set
+>   (`listed − routed − local − excluded`, `AudiouterCore/AGENTS.md`). Two instances, same
+>   millisecond, opposite directions — read as one machine it looks like a rebuild that
+>   instantly re-stops.
+> - `00:21:51 → 00:46:24` no Music lines because the routing instance never changed state.
+>   `captureWS exclusion_changed excluded=[com.apple.Music]` at `00:21:51.161` independently
+>   confirms Music was routed (and therefore capturing) for the whole window. Firefox lines at
+>   `00:25`, `00:31`, `00:46` are each preceded by a popover-open probe — metering churn only.
+> - `00:46:24.998` Music `capturing→stopping→idle` = the **ROUTING** instance, Alec un-redirecting
+>   Music; `00:46:25.019→.048` `idle→…→capturing` = the **METERING** instance immediately
+>   re-arming Music's meter tap now that it is un-routed, corroborated by
+>   `captureWS exclusion_changed excluded=[]` in the same millisecond. `00:46:34` both stop =
+>   popover closed.
+>
+> **Verdict per hypothesis:**
+> 1. *Stale/delayed closure* — **RULED OUT.** `PerAppCaptureCoordinator.transition` reads
+>    `slot.state` live under `queue` (`PerAppCaptureCoordinator.swift:726-728`); no `State` value
+>    is ever captured into a closure. The only `DispatchWorkItem` is `membershipDiffWork`
+>    (`:658-664`), which carries no state, is cancel-and-rearmed per notification, and is
+>    cancelled in `deinit` (`:290`).
+> 2. *Whole-system `stop` doesn't stop* — **RULED OUT as the cause here.**
+>    `CoreAudioSystemTap.teardown` already checks and logs all four `OSStatus`
+>    (`NativeCaptureCoordinator.swift:2297-2315`), and `captureWS` genuinely went idle at
+>    `00:21:48.375`; Move 2 was being fed by the per-app route, exactly as designed.
+> 3. *Per-app teardown silently fails* — **RULED OUT as the cause here, but a real pre-existing
+>    gap stands.** `CoreAudioProcessTap.teardown`
+>    (`PerAppCaptureCoordinator.swift:1335-1352`) still discards all four `OSStatus` with bare
+>    `_ =` — `AudioDeviceStop`, `AudioDeviceDestroyIOProcID`,
+>    `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap` — and resets
+>    `aggregateID`/`tapID` unconditionally, so a failed destroy is invisible AND unretryable.
+>    This is the memory-leak audit's "12 silent-destroy sites" class (`PLAN-MEMORY-LEAK-AUDIT.md`
+>    §2, site `PAC:999-1008`): the whole-system half of that fix landed, the per-app half did
+>    **not**. NOT a regression, NOT this bug's cause (nothing here needed a failed destroy to
+>    explain it) — but it should be brought to parity with `CoreAudioSystemTap.teardown` in its
+>    own task.
+> 4. *The green "live" indicator is cosmetic* — **RULED IN, confirmed.** It is a PURE
+>    MODEL-STATE dot, never capture- or audio-derived: `RouteArmedDotView`'s own contract says so
+>    (`AudiouterSharedUI/RouteArmedDotView.swift:6-10`), `AppRowView` drives it from
+>    `!isNoRedirect && configuration.isRunning` (`AppRowView.swift:278`), and `DeviceRowView`
+>    from `mainMixArmed || hasLiveFeeds` (`DeviceRowView.swift:504-509`) where both terms are
+>    route/connection config. **Nothing in the popover reads
+>    `PerAppCaptureCoordinator.state(for:)`.** So "the UI showed green" is not evidence that
+>    capture was alive — though in this instance it happened to be.
+>
+> **Fix landed:** `PerAppCaptureCoordinator` now stores its `name` (already passed by
+> `NativeBackend` as `"AirPlayController"` vs `"AudiouterMeter"`, previously used only to name the
+> tap/aggregate devices) and stamps it on every `capturePA` transition as a `coordinator` field.
+> Regression test: `PerAppCaptureCoordinatorTests
+> .transitionTelemetryIdentifiesWhichCoordinatorInstanceEmittedIt`.
+>
+> **Consequence for step 5 below:** the `write_backlog_drop` / CPU-load data collected that night
+> is NOT invalidated by a bogus state machine — capture was genuinely alive throughout. The
+> judder/dropped-milliseconds claim is still open and still needs a live session.
 
 ### The claim being tested
 Alec reported: after playing a while, audio develops **judder and dropped milliseconds**

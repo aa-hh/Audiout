@@ -2431,14 +2431,24 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return id == kAudioObjectUnknown ? nil : id
     }
 
-    /// PAUSE-ON-CALL re-drive (``SystemAudioTap/isCallProfile``): classify the tapped
-    /// device's CURRENT profile from this tap's COMMITTED `format.sampleRate` (the rate
-    /// the aggregate actually came up on — 16 kHz during a call, since a mid-call
-    /// rebuild is NOT suppressed and re-anchors onto the HFP clock) plus a live
-    /// transport read, through the same pure ``CallProfileDecision`` the monitor's
-    /// `onChange` uses. Read by ``NativeCaptureCoordinator`` right after a build commit.
+    /// PAUSE-ON-CALL master switch — OFF by default (`AUDIOUTER_PAUSE_ON_CALL=1` to
+    /// enable). Rate+transport ("16 kHz + Bluetooth") classifies HFP, but HFP is NOT
+    /// the same as an active CALL: a BT headset sits in HFP with no call right after
+    /// connecting (live-confirmed 2026-07-27: connect → 16 kHz for ~36 s → all audio
+    /// silenced by the pause). Until call-detection keys on the MIC actually being in
+    /// use (not the HFP rate alone), the feature stays disabled so a plain BT connect
+    /// plays (degraded during HFP) instead of going silent.
+    static let pauseOnCallEnabled =
+        ProcessInfo.processInfo.environment["AUDIOUTER_PAUSE_ON_CALL"] == "1"
+
+    /// PAUSE-ON-CALL re-drive (``SystemAudioTap/callProfileReading``): classify the
+    /// tapped device's CURRENT profile from this tap's COMMITTED `format.sampleRate`
+    /// (the rate the aggregate came up on) plus a live transport read, through the
+    /// pure ``CallProfileDecision``. Read by ``NativeCaptureCoordinator`` right after
+    /// a build commit. Always `.notCall` while the feature is disabled.
     var callProfileReading: CallProfileReading {
-        CallProfileDecision.reading(
+        guard Self.pauseOnCallEnabled else { return .notCall }
+        return CallProfileDecision.reading(
             rate: Double(format.sampleRate),
             transport: Self.readTransportType(tappedOutputDeviceID))
     }
@@ -2998,7 +3008,9 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                 // transport read, and drive the call-active edge BEFORE any rebuild
                 // decision.
                 let transport = Self.readTransportType(self.tappedOutputDeviceID)
-                let nowCallActive = CallProfileDecision.isCallActive(
+                // Feature-gated OFF by default (see `pauseOnCallEnabled`): HFP rate is
+                // not proof of a call, so a plain BT connect must not pause.
+                let nowCallActive = Self.pauseOnCallEnabled && CallProfileDecision.isCallActive(
                     rate: snapshot.nominalRate, transport: transport)
                 // Telemetry keyed on the tap's OWN last-reported value, logged only on a
                 // genuine transition (the live-diagnosis workflow greps this line). This

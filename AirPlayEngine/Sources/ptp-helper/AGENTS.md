@@ -40,12 +40,15 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   not conflate the two. It is retried (`ptp_helper_bind_with_retry()`) because
   macOS frees the ports a second or three *after* the app switches the default
   output away — a single attempt loses that race.
-- **The Mach service carries no data.** `ptp_helper_mach_checkin()` opens an
-  XPC listener purely so launchd has something to demand-start the process on;
-  it accepts connections and ignores every message. shm + loopback-UDP stay
-  the only transport across the privilege boundary (design doc §4). Never grow
-  it into an IPC channel — that would put a message parser in the one root
-  process.
+- **The Mach service carries exactly one boolean, never a transport.**
+  `ptp_helper_mach_checkin()` opens an XPC listener so launchd has something to
+  demand-start the process on; every peer message is ignored except a
+  dictionary with `{"release": true}`, which is a shutdown trigger (seamless
+  handoff needs the ports freed in ~1s, not the ~15s idle window) — no reply,
+  no other key. shm + loopback-UDP remain the only data path across the
+  privilege boundary (design doc §4). This is a hard ceiling, not a start:
+  never grow it into a general IPC channel — that would put a message parser
+  in the one root process.
 - **XPC and libdispatch are libSystem, so they add no linked library** — the
   Library Validation constraint below is unaffected. `otool -L` on the built
   helper must keep showing `libSystem.B.dylib` and nothing else; treat any
@@ -107,7 +110,8 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
    record and starts the PTP master loop on its own thread. Needs no privilege
    itself; it consumes the fds `bind()` already stored in the handle.
 8. `ptp_helper_wait_until_idle_or_signal()` — poll `airptp_peer_active_count()`
-   until the peer table stays empty for the idle window, or a signal arrives.
+   until the peer table stays empty for the idle window, a signal arrives, or
+   the release verb is received.
 9. `airptp_end(hdl)` — clean shutdown, unlinks the shm segment.
 
 ## External Dependencies

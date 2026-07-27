@@ -169,7 +169,7 @@ final class AudiocapProcess: CaptureProcess, @unchecked Sendable {
 
 /// Accumulates stream bytes and yields complete newline-delimited lines.
 /// Thread-confined to the single `readabilityHandler` callback chain.
-private final class LineBuffer: @unchecked Sendable {
+final class LineBuffer: @unchecked Sendable {
     private var partial = Data()
 
     func append(_ data: Data) -> [String] {

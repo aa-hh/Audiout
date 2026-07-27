@@ -73,6 +73,30 @@ implementation and is the only one that wires up real Core Audio capture
 (`NativeCaptureCoordinator`, `PerAppCaptureCoordinator`) and local playback
 (`LocalPlaybackEngine`).
 
+### Pause-on-call (whole-system HFP handling)
+
+When the tapped output device enters a Bluetooth headset's CALL (HFP) profile —
+`DefaultOutputDeviceMonitor` delivers a settled nominal rate that rounds to
+`<= 16000` on a Bluetooth transport, classified by the pure `CallProfileDecision`
+— `CoreAudioSystemTap`'s monitor `onChange` fires a new `onCallActiveChanged(true)`
+edge and RETURNS EARLY, deliberately SUPPRESSING the usual rebuild (rebuilding
+would re-anchor the whole pipeline onto the 16 kHz HFP clock and capture the
+call). `NativeCaptureCoordinator` then gates captured audio off stream 0 (the
+`callActive` flag, mirrored into the RT `BufferSnapshot`) and starts a
+`SilenceFeeder`: a `DispatchSourceTimer` writing zero S16LE/44100/2ch buffers to
+the same `sink` at the capture cadence, with pts stamped off the shared
+`monotonicNowNanos()` (the SAME `CLOCK_MONOTONIC` timeline the captured pts are
+rebased onto). This keeps the RTP session fed — the engine's ~2 s buffer would
+otherwise underrun across the ~2 s HFP-switch capture starvation and clip the
+receiver — while never forwarding the call audio. The feeder is the SOLE stream-0
+writer while active (capture drops, feeder writes — never both). On the return to
+A2DP the monitor re-fires (`CoreAudioSystemTap` tracks the live HFP rate while
+paused precisely so this divergence is seen), the coordinator un-gates and stops
+the feeder, and the tap's existing `onDefaultDeviceChanged` rebuild re-anchors —
+no new recovery path. The `callActive` flag is set only on a real HFP-enter edge
+and cleared on the exit edge AND on `start()`/`stop()`/`deinit`, so it can never
+latch into permanent silence. WHOLE-SYSTEM (stream 0) ONLY; per-app is untouched.
+
 ## Feature Flow
 
 Selecting a device as a Main Out / Selected Device target:
@@ -101,7 +125,7 @@ Redirecting one app to a specific device:
 |---|---|
 | Domain models | `Device`, `ConnectionState`, `ConnectionFailure`, `BackendEvent` |
 | Backend seam | `OutputBackend`, `NativeBackend`, `MockBackend`, `OwnToneBackend`, `makeBackend(_:)` |
-| Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver` |
+| Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver`, `SilenceFeeder`, `CallProfileDecision` |
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |

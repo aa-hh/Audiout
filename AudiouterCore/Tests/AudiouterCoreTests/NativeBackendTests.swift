@@ -654,6 +654,7 @@ extension SerializedSharedState {
     private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onCallActiveChanged: (@Sendable (Bool) -> Void)?
         private let lock = NSLock()
         private var _excludedProcessObjectIDs: Set<AudioObjectID> = []
         private var _createCount = 0

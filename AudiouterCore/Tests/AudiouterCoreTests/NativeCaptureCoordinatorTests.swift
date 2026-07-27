@@ -65,6 +65,7 @@ extension SerializedSharedState {
             didSet { eventLog?.record("onBuffer#\(id)=\(onBuffer != nil)") }
         }
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onCallActiveChanged: (@Sendable (Bool) -> Void)?
 
         /// Optional shared ordering log + per-instance id (default 0 / nil → the
         /// single-reused-tap tests below are unaffected).
@@ -127,6 +128,9 @@ extension SerializedSharedState {
         /// IOProc only ever calls the handler it captured at createAndStart.
         func pushBuffer(_ b: CapturedBuffer) { lock.withLock { capturedOnBuffer }?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
+        /// Fire the PAUSE-ON-CALL edge the production `CoreAudioSystemTap.onChange`
+        /// drives on an HFP enter/exit transition.
+        func fireCallActiveChanged(_ active: Bool) { onCallActiveChanged?(active) }
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
@@ -1381,7 +1385,193 @@ extension SerializedSharedState {
     }
     #endif
 
+    // MARK: - PAUSE-ON-CALL (HFP): silence feeder + capture gate + resume
+
+    /// (T5-1) While a call (HFP) is active the feeder is the SOLE stream-0 writer:
+    /// captured buffers are dropped BEFORE conversion, and only clean silence — at
+    /// a monotonically non-decreasing pts — reaches the sink.
+    @Test func callActiveFeedsSilenceAndDropsCapturedAudio() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call profile (production: CoreAudioSystemTap.onChange fires this
+        // on the HFP edge). The gate is published synchronously before the feeder
+        // starts, so no captured buffer can race in.
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }   // silence starts flowing at cadence
+
+        // Captured audio pushed while the call is active must NOT reach the sink.
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        tap.pushBuffer(buffer(hostTime: 2_000_000_000))
+        waitFor { sink.forwarded.count >= 3 }   // a few more feeder ticks land
+
+        #expect(converter.converts == 0,
+                "captured buffers are dropped before conversion while call-active")
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "every stream-0 write while call-active is clean silence — no captured payload")
+        // pts strictly non-decreasing across the fed silence.
+        let ptsNanos = sink.forwarded.map { timespecToNanos($0.pts) }
+        #expect(zip(ptsNanos, ptsNanos.dropFirst()).allSatisfy { $0 <= $1 },
+                "silence pts must be monotonic non-decreasing")
+
+        coordinator.stop()
+    }
+
+    /// (T5-2) On the exit edge, captured audio resumes AND the existing rebuild path
+    /// re-anchors exactly once. Production's `onChange` fires `onCallActiveChanged(false)`
+    /// then falls through to `onDefaultDeviceChanged` on the same edge; the FakeTap
+    /// exposes those as separate hooks, so the test drives both.
+    @Test func callInactiveResumesCaptureAndReAnchorsOnce() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+        let lock = NSLock()
+        var rebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { rebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Exit: un-gate + stop feeder, then the fall-through rebuild re-anchors.
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 1 }
+        #expect(lock.withLock { rebuilds } == 1,
+                "the exit re-anchors via the EXISTING rebuild exactly once")
+
+        // Captured audio now reaches the sink again — real payload, not silence.
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 3_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "captured payload resumes after the call ends")
+        #expect(converter.converts >= 1, "the resumed buffer went through the converter")
+
+        coordinator.stop()
+    }
+
+    /// (T5-3) Flap enter→exit→enter→exit: no permanent silence (the gate never
+    /// latches), and exactly one re-anchor per SETTLED exit.
+    @Test func callFlapNeverLatchesAndReAnchorsPerExit() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+        let lock = NSLock()
+        var rebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { rebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // enter → exit (rebuild #1)
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 1 }
+
+        // enter again → the feeder MUST feed silence again (not stuck off).
+        let beforeReenter = sink.forwarded.count
+        tap.fireCallActiveChanged(true)
+        waitFor { sink.forwarded.count > beforeReenter }
+        #expect(isAllZero(sink.forwarded.last!.pcm), "silence flows again on the second enter — no permanent silence")
+        // captured audio still gated on the second call.
+        let convertsBefore = converter.converts
+        tap.pushBuffer(buffer(hostTime: 4_000_000_000))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        #expect(converter.converts == convertsBefore, "captured audio stays gated during the second call")
+
+        // exit again (rebuild #2) → capture resumes: the gate never latched.
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 2 }
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 5_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm), "capture resumes after the second exit")
+        #expect(lock.withLock { rebuilds } == 2, "exactly one re-anchor per settled exit")
+
+        coordinator.stop()
+    }
+
+    /// (T5-5) Tearing down (stop) while a call is active stops the feeder and leaves
+    /// NO writer — the gate is never left latched into permanent silence.
+    @Test func teardownWhileCallActiveStopsFeederAndLeavesNoWriter() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+
+        coordinator.stop()
+        // After stop, the feeder must be silent: no further writes over a window
+        // several feeder intervals wide.
+        let after = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > after }   // returns early only if it (wrongly) grows
+        #expect(sink.forwarded.count == after, "no writer after teardown while call-active")
+
+        // And the gate is cleared, so a fresh start captures normally (not stuck silent).
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 9_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture works after restart — the gate did not latch through teardown")
+        coordinator.stop()
+    }
+
+    /// (T5-4) The pure ``CallProfileDecision`` truth table: HFP only when the rate
+    /// rounds to `<= 16000` AND the transport is Bluetooth (classic or LE); nils and
+    /// the rate boundary are covered explicitly.
+    @Test func callProfileDecisionTruthTable() {
+        #if canImport(CoreAudio)
+        let bt = kAudioDeviceTransportTypeBluetooth
+        let btle = kAudioDeviceTransportTypeBluetoothLE
+        let builtIn = kAudioDeviceTransportTypeBuiltIn
+
+        // Positive: HFP rate on a Bluetooth transport (classic + LE).
+        #expect(CallProfileDecision.isCallActive(rate: 16000, transport: bt))
+        #expect(CallProfileDecision.isCallActive(rate: 16000, transport: btle))
+        #expect(CallProfileDecision.isCallActive(rate: 8000, transport: bt), "below-threshold HFP still counts")
+        #expect(CallProfileDecision.isCallActive(rate: 15999.6, transport: bt), "rounds to 16000")
+
+        // Rate boundary: A2DP rates are never a call.
+        #expect(!CallProfileDecision.isCallActive(rate: 16001, transport: bt), "just over the threshold")
+        #expect(!CallProfileDecision.isCallActive(rate: 44100, transport: bt))
+        #expect(!CallProfileDecision.isCallActive(rate: 48000, transport: bt))
+
+        // Transport: a 16 kHz non-Bluetooth device is NOT a call.
+        #expect(!CallProfileDecision.isCallActive(rate: 16000, transport: builtIn))
+
+        // Nils (unreadable device) are never a call — pause only on positive evidence.
+        #expect(!CallProfileDecision.isCallActive(rate: nil, transport: bt))
+        #expect(!CallProfileDecision.isCallActive(rate: 16000, transport: nil))
+        #expect(!CallProfileDecision.isCallActive(rate: nil, transport: nil))
+        #endif
+    }
+
     // MARK: - utils
+
+    /// True when every byte of `pcm` is zero — used to tell fed SILENCE (all zero
+    /// S16LE) apart from the ``FakeConverter``'s non-zero captured payload.
+    private func isAllZero(_ pcm: Data) -> Bool {
+        !pcm.isEmpty && pcm.allSatisfy { $0 == 0 }
+    }
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {
         UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)

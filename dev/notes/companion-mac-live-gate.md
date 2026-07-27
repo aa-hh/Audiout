@@ -38,10 +38,11 @@ approvals file. No phone required — websocat stands in for one throughout.*
 - [ ] **Confirm it is Developer-ID signed** — the firewall check in step 5 is only
   meaningful on a signed build.
   ```bash
-  codesign -dv build/Audiouter.app 2>&1 | grep -c "Developer ID Application"
+  codesign -dvvv build/Audiouter.app 2>&1 | grep -c "Authority=Developer ID Application"
   ```
-  Expected: `1`. An ad-hoc build will prompt for firewall access regardless and
-  tells you nothing about what users would see.
+  Expected: `1`. (Needs `-dvvv` — the authority chain isn't printed at `-dv`.)
+  An ad-hoc build will prompt for firewall access regardless and tells you
+  nothing about what users would see.
 
 ---
 

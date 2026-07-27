@@ -298,6 +298,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// unchanged; tests inject a fake.
     private let ptpHelperActivator: PTPHelperActivating
 
+    /// Fire-and-forget "let go of the PTP ports now" verb (Seamless handoff T2/T3).
+    /// Defaults to the real `PTPHelperReleaser`, so every existing caller of the
+    /// designated initializer compiles unchanged; tests inject a fake.
+    private let ptpHelperReleaser: PTPHelperReleasing
+
+    /// Builds the blocked-AirPlay-attempt watcher (Seamless handoff T1/T3), given
+    /// the callback to invoke on a detected blocked attempt. A factory (not a
+    /// stored instance) so `releaseForHandoff`/`reconcileHandoffWatcherLocked` can
+    /// create/destroy watcher instances across the backend's lifetime; tests inject
+    /// one that builds over a fake `LogStreamSpawning`.
+    private let handoffWatcherFactory: @Sendable (@escaping @Sendable () -> Void) -> AirPlayHandoffWatcher
+
     /// Bind-retry budget T2 gives the helper itself (~10 s) plus the connect
     /// click's own switch-away race — matches `AirPlayEngine/Sources/ptp-helper/main.c`'s
     /// default `AUDIOUTER_PTP_BIND_RETRY_SECS`.
@@ -438,6 +450,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// path re-adds an output — `handleSystemDidWake()` is the one thing that clears
     /// it and re-drives convergence.
     private var suspended = false
+
+    /// True while we have deliberately handed the PTP ports to macOS: sessions torn
+    /// down, selection INTENT preserved. Distinct from `suspended` (which is the
+    /// mechanism this reuses) so a sleep/wake cycle can't silently re-take the ports
+    /// behind the user's back. `stateQueue`.
+    private var handoffReleased = false
+
+    /// The blocked-AirPlay-attempt watcher (Seamless handoff T3) — runs only while
+    /// we might plausibly be holding the PTP ports against a real routing intent
+    /// (see `reconcileHandoffWatcherLocked`). `stateQueue`.
+    private var handoffWatcher: AirPlayHandoffWatcher?
+
+    /// The release's own `engine.removeOutput` teardown, as ONE task (D2, adversarial
+    /// review). Resume's `convergeDevice` kicks are unordered against the engine
+    /// actor relative to this — a stale removal could otherwise land after the
+    /// resumed add and kill the fresh session — so a resume kick awaits this task's
+    /// value FIRST (off `stateQueue`) before converging. Cleared by
+    /// `resumeFromHandoffLocked()` and `stop()`. `stateQueue`.
+    private var handoffTeardown: Task<Void, Never>?
 
     /// The silence watchdog's override on the capture gate. When the watchdog fires
     /// (no desired non-local device is `.connected`), this flips true and the gate
@@ -972,8 +1003,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
         defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
         aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
-        currentDefaultOutputUID: @escaping @Sendable () -> String? = NativeBackend.currentDefaultOutputUID
+        currentDefaultOutputUID: @escaping @Sendable () -> String? = NativeBackend.currentDefaultOutputUID,
+        ptpHelperReleaser: PTPHelperReleasing = PTPHelperReleaser(),
+        handoffWatcherFactory: @escaping @Sendable (@escaping @Sendable () -> Void) -> AirPlayHandoffWatcher = { AirPlayHandoffWatcher(onBlockedAttempt: $0) }
     ) {
+        self.ptpHelperReleaser = ptpHelperReleaser
+        self.handoffWatcherFactory = handoffWatcherFactory
         self.defaultOutputSwitcher = defaultOutputSwitcher
         self.aggregateControl = aggregateControl
         // Injectable init keeps the AggregateOutputDevice built from the SAME
@@ -1257,6 +1292,44 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         self.expectedDefaultWriteUID = nil
                     } else {
                         self.evaluateRoutingBlocked()
+
+                        // Seamless handoff T3.4: the user picked a DIFFERENT default
+                        // output in Sound settings while we were routing — that IS
+                        // their switch-away intent, so free the PTP ports proactively
+                        // rather than waiting for a blocked-attempt log line. A `nil`
+                        // UID (`.deviceVanished`) is an unplugged device, not a
+                        // handoff, and must NOT trigger this. `aggregateDefaultActive`
+                        // (mirrors the same guard `stop()`'s restore uses) is required
+                        // too: `classifyOffSwitch` reads "userDeselected" for ANY UID
+                        // that isn't our aggregate's, including the Mac's ordinary
+                        // default the whole time we never actually won the takeover
+                        // (aggregate resolve failed, or — in tests — a no-op aggregate
+                        // control) — without this an unrelated default-output change
+                        // would read as a handoff and tear down real streaming that was
+                        // never routed through our aggregate to begin with.
+                        if !self.expectedSelected.isEmpty, self.aggregateDefaultActive,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .userDeselected {
+                            self.releaseForHandoff(reason: "userDeselected")
+                        }
+
+                        // D1 (adversarial review): the user putting us back as
+                        // default — by ANY means, not just our own "Use Audiouter"
+                        // button (`reselectAggregateAsDefault`) — is the resume
+                        // intent. Without this, re-picking Audiouter directly in
+                        // Sound settings while a handoff release is in force clears
+                        // the routing-blocked banner (via `evaluateRoutingBlocked`
+                        // above) with no way left to un-stick `handoffReleased` /
+                        // `suspended` — permanent silence with no affordance.
+                        if self.handoffReleased,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .stillOurs {
+                            let (kicks, teardown) = self.resumeFromHandoffLocked()
+                            for (id, out) in kicks {
+                                Task { [weak self] in
+                                    await teardown?.value
+                                    await self?.convergeDevice(id: id, outputID: out)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1459,6 +1532,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.syncedLocalSinkEnabled = false
             self.syncedLocalSinkApplied = false
             self.suspended = false
+            // Seamless handoff T3.8-3: reset the release flag and stop/nil the
+            // watcher so no orphan `log` child survives quit (AppDelegate's quit
+            // path calls `stop()`).
+            self.handoffReleased = false
+            self.handoffWatcher?.stop()
+            self.handoffWatcher = nil
+            // D2 (adversarial review): drop the reference — `engine.stop()` below
+            // tears down every session anyway, so there is nothing left for a
+            // resume kick (there can be none post-stop) to order itself against.
+            self.handoffTeardown = nil
             // T2: stop the scheduling snapshot polling.
             self.schedulingSnapshotPollWork?.cancel()
             self.schedulingSnapshotPollWork = nil
@@ -1687,6 +1770,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // end of this critical section can log the actual added/removed diff.
             let previouslySelected = self.expectedSelected
             self.expectedSelected = ids
+            // Seamless handoff T3.8-2: an in-app routing action IS the user asking
+            // for Audiouter back — don't leave `suspended` set from a prior handoff
+            // release, which would connect speakers with the capture tap gated off
+            // (silent, since `convergeDevice` has no `suspended` guard of its own).
+            if self.handoffReleased, !ids.isEmpty {
+                self.handoffReleased = false
+                self.suspended = false
+            }
             // Fix C: an explicit (re)selection is a fresh normal-operation context, not
             // a post-wake reconnection — so a stranding from THIS selection falls back
             // on the always-on silence delay, not the wake-restore preference.
@@ -3170,6 +3261,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // one-shot CLEAR, exactly what prevents a stale value surviving into a
             // reopened popover.
             for deviceID in unboundDevices { self.emitCombinedLevel(forDevice: deviceID) }
+            // D4 (adversarial review): this is the sole `streamBindings` writer, and
+            // the handoff watcher's `shouldRun` condition reads `streamBindings` —
+            // without this, a per-app-only user (no whole-system selection) never
+            // arms the watcher, and the watcher never stops when the last route
+            // drops (`reconcileAggregateDefault`'s tail call is unreached with an
+            // empty `expectedSelected`).
+            self.reconcileHandoffWatcherLocked()
         }
     }
 
@@ -3314,6 +3412,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         while true {
             // Snapshot the current op to issue from the coalesced target.
             let step: (want: Bool, descriptor: DeviceDescriptor?)? = stateQueue.sync {
+                // D6 (adversarial review): a converge already in flight when a
+                // sleep/handoff release fires must not complete and silently
+                // re-insert into `added` — re-holding the ports (or streaming into
+                // dead sockets) mid-suspend with nobody the wiser. The requeue path
+                // above already re-kicks once `suspended` lifts (wake or resume), so
+                // bailing here costs nothing real work would have survived anyway.
+                guard !self.suspended else { return nil }
                 guard !self.failedGate.contains(id), let want = self.desiredOn[id] else { return nil }
                 let isOn = self.added.contains(id)
                 guard want != isOn else { return nil } // already at target
@@ -3395,6 +3500,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     try await engine.addOutput(outputID)
                     Telemetry.log(.airplay, "connect_addoutput_resolved", ["device": id, "output": "\(outputID)"])
                     stateQueue.sync {
+                        // Re-verify D6 (post-success half): a converge whose
+                        // `addOutput` was in flight when a handoff release (or sleep)
+                        // suspended us must NOT land in `added` — it would re-hold the
+                        // PTP ports mid-handoff with the capture tap gated off (a live,
+                        // silent session macOS still can't bind past). Hand the fresh
+                        // session to the teardown chain instead of dropping it
+                        // untracked, and bail before any state write.
+                        guard !self.suspended else {
+                            let engine = self.engine
+                            self.handoffTeardown = Task { [prev = self.handoffTeardown] in
+                                await prev?.value
+                                try? await engine.removeOutput(outputID)
+                            }
+                            return
+                        }
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
                         // write. `applyEngineState` will have set `failedGate` (device
@@ -3901,64 +4021,176 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let toRemove: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, !self.suspended else { return [] }
             self.suspended = true
-            // Abandon any in-flight silence-watchdog bookkeeping from a prior cycle:
-            // sleep re-decides everything on wake, and `suspended` already forces the
-            // gate off, so a fallback override must not linger across the sleep.
-            self.silenceWatchdog?.cancel()
-            self.silenceWatchdog = nil
-            self.awaitingWakeReconnect = false          // Fix C: sleep ends any post-wake window
-            self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
-            // Stop the whole-system tap (ordered on `captureControlQueue`, like every
-            // other gate decision) so the Mac isn't left muted by a tap streaming into
-            // dead sockets. `expectedSelected` is untouched.
-            self.captureRunning = false
-            // W3-T3: capture just stopped (above) — clear the double-path guard note on
-            // the true→false edge, exactly as `stop()` does. Sleep hits neither
-            // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
-            // the note would strand ON while nothing streams (a UI-truth lie) whenever a
-            // narrow wake-with-selection-gone sequence leaves `reconcileCaptureGate` an
-            // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
-            // the `clearSilenceOverride()` above.
-            self.clearSystemAirPlayGuard()
-            // Abandon any in-flight AirPlay-session rebind recovery, exactly as
-            // `stop()` does: the engine sessions are about to die, so completing a
-            // rebind — or waking one out of a backoff delay — on the far side of the
-            // sleep is meaningless. Clearing the generation supersedes a chain
-            // currently awaiting its engine op (it bows out on its own gen check) and
-            // cancelling the timers drops the backed-off attempts.
-            //
-            // Because a cancelled timer never runs, the whole-system `converging` slot
-            // those chains were holding has to be released HERE. Leaving it held is
-            // what stranded a selected speaker silent after wake with no
-            // self-recovery: `handleSystemDidWake` only re-kicks devices that are not
-            // already `converging`, so the device was never re-added. Release only the
-            // slots `rebindConverging` records — a slot a live `convergeDevice` loop
-            // owns is not ours to drop. No requeue here; the wake path issues the
-            // re-add for every still-desired device.
-            self.rebindRecoveryGen.removeAll()
-            for work in self.pendingRebindRecoveries.values { work.cancel() }
-            self.pendingRebindRecoveries.removeAll()
-            for deviceID in self.rebindConverging {
-                self.converging.remove(deviceID)
-                self.emit(.streamHealth(id: deviceID, recovering: false))
-            }
-            self.rebindConverging.removeAll()
-            if let coordinator = self.captureCoordinator {
-                self.captureControlQueue.async { coordinator.stop() }
-            }
-            // Snapshot the streaming set, then clear `added` SYNCHRONOUSLY: the engine
-            // sessions are about to die on sleep, so the bookkeeping must reflect
-            // "torn down" immediately — otherwise a fast wake could see them still
-            // `added` and skip the re-add, leaving silence. `desiredOn` is preserved.
-            let items: [(String, OutputID)] = self.added.compactMap { id in
-                guard let outputID = self.outputIDs[id] else { return nil }
-                return (id, outputID)
-            }
-            self.added.removeAll()
-            return items
+            return self.suspendSessionsKeepingIntentLocked()
         }
         for (_, outputID) in toRemove {
             Task { [weak self] in try? await self?.engine.removeOutput(outputID) }
+        }
+    }
+
+    /// Tear every streaming engine output down cleanly while PRESERVING the
+    /// selection intent (`expectedSelected` / `desiredOn`) — shared critical section
+    /// between the sleep path (`handleSystemWillSleep`, which sets `suspended` itself
+    /// first) and the AirPlay-handoff release path (`releaseForHandoff`, which sets
+    /// `handoffReleased` instead/as well). Extracted verbatim from the former
+    /// (Seamless handoff T3.2) with no behavior change — callers keep their own
+    /// guard + flag flip and just forward the returned removal list. On `stateQueue`.
+    private func suspendSessionsKeepingIntentLocked() -> [(id: String, outputID: OutputID)] {   // on stateQueue
+        // Abandon any in-flight silence-watchdog bookkeeping from a prior cycle:
+        // sleep re-decides everything on wake, and `suspended` already forces the
+        // gate off, so a fallback override must not linger across the sleep.
+        self.silenceWatchdog?.cancel()
+        self.silenceWatchdog = nil
+        self.awaitingWakeReconnect = false          // Fix C: sleep ends any post-wake window
+        self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
+        // Stop the whole-system tap (ordered on `captureControlQueue`, like every
+        // other gate decision) so the Mac isn't left muted by a tap streaming into
+        // dead sockets. `expectedSelected` is untouched.
+        self.captureRunning = false
+        // W3-T3: capture just stopped (above) — clear the double-path guard note on
+        // the true→false edge, exactly as `stop()` does. Sleep hits neither
+        // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
+        // the note would strand ON while nothing streams (a UI-truth lie) whenever a
+        // narrow wake-with-selection-gone sequence leaves `reconcileCaptureGate` an
+        // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
+        // the `clearSilenceOverride()` above.
+        self.clearSystemAirPlayGuard()
+        // Abandon any in-flight AirPlay-session rebind recovery, exactly as
+        // `stop()` does: the engine sessions are about to die, so completing a
+        // rebind — or waking one out of a backoff delay — on the far side of the
+        // sleep is meaningless. Clearing the generation supersedes a chain
+        // currently awaiting its engine op (it bows out on its own gen check) and
+        // cancelling the timers drops the backed-off attempts.
+        //
+        // Because a cancelled timer never runs, the whole-system `converging` slot
+        // those chains were holding has to be released HERE. Leaving it held is
+        // what stranded a selected speaker silent after wake with no
+        // self-recovery: `handleSystemDidWake` only re-kicks devices that are not
+        // already `converging`, so the device was never re-added. Release only the
+        // slots `rebindConverging` records — a slot a live `convergeDevice` loop
+        // owns is not ours to drop. No requeue here; the wake path issues the
+        // re-add for every still-desired device.
+        self.rebindRecoveryGen.removeAll()
+        for work in self.pendingRebindRecoveries.values { work.cancel() }
+        self.pendingRebindRecoveries.removeAll()
+        for deviceID in self.rebindConverging {
+            self.converging.remove(deviceID)
+            self.emit(.streamHealth(id: deviceID, recovering: false))
+        }
+        self.rebindConverging.removeAll()
+        if let coordinator = self.captureCoordinator {
+            self.captureControlQueue.async { coordinator.stop() }
+        }
+        // Snapshot the streaming set, then clear `added` SYNCHRONOUSLY: the engine
+        // sessions are about to die on sleep, so the bookkeeping must reflect
+        // "torn down" immediately — otherwise a fast wake could see them still
+        // `added` and skip the re-add, leaving silence. `desiredOn` is preserved.
+        let items: [(String, OutputID)] = self.added.compactMap { id in
+            guard let outputID = self.outputIDs[id] else { return nil }
+            return (id, outputID)
+        }
+        self.added.removeAll()
+        return items
+    }
+
+    // MARK: Seamless AirPlay handoff (T3) — release-on-deselect + resume
+
+    /// The user's system-output action means macOS wants the timing ports. Tear the
+    /// AirPlay sessions down (KEEPING selection intent) and free 319/320 fast, so
+    /// their next attempt in Sound settings succeeds. On `stateQueue`.
+    private func releaseForHandoff(reason: String) {   // on stateQueue
+        guard self.started, !self.handoffReleased, !self.suspended else { return }
+        // The gate below is "do we plausibly hold the ports at all" — a release
+        // with nothing streaming/converging would tear down zero sessions and just
+        // leave the watcher spinning for no reason; the watcher itself must never
+        // fire while this is false.
+        //
+        // D5 (adversarial review): `converging` is included because
+        // `ptpHelperActivator.activate` binds the ports (`convergeDevice`) BEFORE a
+        // device lands in `added` — during that connecting window `added` and
+        // `streamBindings` are both still empty, so without this a blocked attempt
+        // mid-connect would slip through unreleased. Chosen over `ptpClockAvailable`
+        // (the last activation's outcome, optimistically `true` before any attempt
+        // and not reset on release) because `converging` directly tracks "an engine
+        // op that might currently be holding the ports is in flight," which is
+        // exactly the condition this gate needs.
+        guard !self.added.isEmpty || !self.streamBindings.isEmpty || !self.converging.isEmpty else { return }
+
+        self.handoffReleased = true
+        self.suspended = true
+        let toRemove = self.suspendSessionsKeepingIntentLocked()
+        // D3 (adversarial review — corrects the T3.9 answer): a per-app-ONLY target
+        // never lands in `added`. `setOutputSet` writes `desiredOn[id] = wantOn` for
+        // every id in `order`, including one that's merely discovered, not selected
+        // (~1773); `applyEngineState`'s `.streaming`/`.connected` branch then sees
+        // `desiredOn[id] == false` for it and takes the "desired OFF" branch instead
+        // of inserting into `added` (~4846-4858). So `suspendSessionsKeepingIntentLocked`'s
+        // `added`-only removal leaves every per-app session — and its PTP hold —
+        // alive, and Option B's `.bind` resume would then no-op against a session
+        // the engine still considers live. Tear those down too, but leave
+        // `streamBindings` ITSELF intact — Option B's resume rebinds from it.
+        let perAppOutputIDs = self.streamBindings.keys.compactMap { self.outputIDs[$0] }
+        let allOutputIDs = toRemove.map(\.outputID) + perAppOutputIDs
+
+        self.reconcileHandoffWatcherLocked()
+
+        Telemetry.log(.airplay, "handoff_release", [
+            "reason": reason,
+            "devices": Self.telemetryDeviceList(Set(toRemove.map(\.id)), known: self.known),
+        ])
+
+        // D2 (adversarial review): ONE task for the whole removal, stored so a
+        // resume's `convergeDevice` kick can await it first — otherwise a stale
+        // `removeOutput` here is unordered against the engine actor relative to the
+        // resumed `addOutput` and could land after it, killing the fresh session.
+        let engine = self.engine
+        self.handoffTeardown = Task {
+            for outputID in allOutputIDs { try? await engine.removeOutput(outputID) }
+        }
+        // D8 (adversarial review): fire-and-forget, but off `stateQueue` — this is a
+        // real Mach IPC syscall, and `stateQueue` sits on the main thread's blocking
+        // path (the `devices` getter `sync`s on it).
+        let releaser = self.ptpHelperReleaser
+        DispatchQueue.global().async { releaser.release() }
+    }
+
+    /// A blocked macOS AirPlay attempt was observed in the unified log — treat it as
+    /// the user's switch-away intent. Called from the watcher's pipe I/O thread.
+    private func handleBlockedAirPlayAttempt() {
+        stateQueue.async { self.releaseForHandoff(reason: "blockedAttempt") }
+    }
+
+    /// Start/stop the blocked-attempt watcher to match whether we currently have
+    /// anything worth protecting. `streamBindings` is deliberately part of the
+    /// condition — per-app routes participate in the handoff too. On `stateQueue`.
+    private func reconcileHandoffWatcherLocked() {   // on stateQueue
+        let shouldRun = self.started && !self.handoffReleased
+            && (!self.expectedSelected.isEmpty || !self.streamBindings.isEmpty)
+        if shouldRun, self.handoffWatcher == nil {
+            let watcher = self.handoffWatcherFactory { [weak self] in
+                self?.handleBlockedAirPlayAttempt()
+            }
+            self.handoffWatcher = watcher
+            // D8 (adversarial review): `start()` posix_spawns /usr/bin/log
+            // synchronously — publish the instance on `stateQueue` first (so a
+            // concurrent reconcile sees it and doesn't double-start), then kick the
+            // actual spawn off queue so it can't block the main thread (which
+            // `sync`s on `stateQueue` via the `devices` getter).
+            // Re-verify D8: identity re-check on the owning queue before the
+            // off-queue spawn. Without it, a `stop()`/reconcile-flap landing
+            // between the publish above and this block running would be
+            // overwritten by `start()` (`running = true`), leaking an orphan
+            // `log stream` child nothing references. If the published watcher
+            // is no longer current by the time we get here, do nothing.
+            DispatchQueue.global().async { [weak self] in
+                guard let self,
+                      self.stateQueue.sync(execute: { self.handoffWatcher === watcher })
+                else { return }
+                watcher.start()
+            }
+        } else if !shouldRun, let watcher = self.handoffWatcher {
+            watcher.stop()
+            self.handoffWatcher = nil
         }
     }
 
@@ -3971,6 +4203,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func handleSystemDidWake() {
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, self.suspended else { return [] }
+            // Seamless handoff T3.8-1: a sleep/wake during a deliberate handoff
+            // release must not silently re-grab the PTP ports and break the macOS
+            // session the user just started — only `resumeFromHandoffLocked()`
+            // (the user asking for Audiouter back) may clear `handoffReleased`.
+            guard !self.handoffReleased else { return [] }
             self.suspended = false
             self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
             // Fix C: entering the post-wake reconnection window. A stranding evaluated
@@ -4198,6 +4435,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // warning is off by definition.
             evaluateRoutingBlocked()
         }
+        // Seamless handoff T3.6: `expectedSelected` just settled — re-decide
+        // whether the blocked-attempt watcher should be running.
+        reconcileHandoffWatcherLocked()
     }
 
     /// Take the Mac's default output for the aggregate and reflect the resulting
@@ -4276,8 +4516,86 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// "never programmatically re-select." Flips the warning off through the same
     /// echo-guarded path as activation. Public so `AppDelegate` can wire
     /// `PopoverController.onReselectAudiouter` to it.
+    ///
+    /// Seamless handoff T3.7: this is also the resume button — if a handoff release
+    /// is in force, put EVERYTHING back (whole-system AND per-app redirects).
     public func reselectAggregateAsDefault() {
-        stateQueue.async { self.takeOverDefaultAndReflect() }
+        stateQueue.async {
+            self.takeOverDefaultAndReflect()
+            let (kicks, teardown) = self.resumeFromHandoffLocked()
+            for (id, outputID) in kicks {
+                Task { [weak self] in
+                    // D2 (adversarial review): await the release's own teardown
+                    // before converging — otherwise a stale `removeOutput` is
+                    // unordered against the engine actor relative to this resumed
+                    // `addOutput` and could land after it, killing the fresh session.
+                    await teardown?.value
+                    await self?.convergeDevice(id: id, outputID: outputID)
+                }
+            }
+        }
+    }
+
+    /// Put every session a handoff release tore down back: mirrors
+    /// `handleSystemDidWake()`'s re-converge critical section minus the wake-specific
+    /// bits (no `awaitingWakeReconnect` — this isn't a wake), plus Option B: also
+    /// re-issues every still-recorded per-app stream binding, since a handoff release
+    /// tears per-app sessions down too (D3) but leaves `streamBindings` itself
+    /// untouched as the record of user intent. On `stateQueue`.
+    ///
+    /// Returns the release's own teardown task (D2) alongside the kicks so every
+    /// caller can await it before converging — see the doc on `handoffTeardown`.
+    private func resumeFromHandoffLocked() -> (kicks: [(String, OutputID)], teardown: Task<Void, Never>?) {   // on stateQueue
+        guard self.started, self.handoffReleased else { return ([], nil) }
+        self.handoffReleased = false
+        self.suspended = false
+        self.clearSilenceOverride()
+        let teardown = self.handoffTeardown
+        self.handoffTeardown = nil
+
+        var kicks: [(String, OutputID)] = []
+        let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
+        for id in desiredIDs {
+            guard let outputID = self.outputIDs[id] else { continue }
+            self.failedGate.remove(id)
+            self.setConnectionState(.connecting, for: id)
+            if !self.converging.contains(id) {
+                self.converging.insert(id)
+                kicks.append((id, outputID))
+            }
+        }
+
+        // Option B: re-issue every per-app redirect too. `streamBindings` still
+        // records the user's per-app intent (a handoff release never clears it,
+        // only `stop()` does) — reuse the same `.bind` op / `enqueueBindOps` FIFO
+        // `performBindOp` normally issues from topology changes.
+        var bindOps: [StreamBindOp] = []
+        for (deviceID, stream) in self.streamBindings {
+            if let outputID = self.outputIDs[deviceID] {
+                bindOps.append(.bind(outputID, stream))
+            }
+        }
+        // Re-verify D2 (per-app half): the release folded these same per-app
+        // outputs into `handoffTeardown`, and `enqueueBindOps` chains onto
+        // `bindTail` with no knowledge of it — a re-bind landing before the old
+        // teardown's `removeOutput` would be killed by it moments later. Splice
+        // the teardown into the bind FIFO as a barrier so every re-bind runs
+        // strictly after the teardown completes (same ordering the whole-system
+        // kicks get by awaiting `teardown` directly).
+        if !bindOps.isEmpty, let teardown {
+            self.bindTail = Task { [prev = self.bindTail] in
+                await prev.value
+                await teardown.value
+            }
+        }
+        self.enqueueBindOps(bindOps)
+
+        self.reconcileCaptureGate()
+        self.reconcileSilenceWatchdog()
+        self.reconcileHandoffWatcherLocked()
+
+        Telemetry.log(.airplay, "handoff_resume", ["kicked": String(kicks.count)])
+        return (kicks, teardown)
     }
 
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)

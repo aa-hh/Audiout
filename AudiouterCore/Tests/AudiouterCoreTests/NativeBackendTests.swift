@@ -486,8 +486,31 @@ extension SerializedSharedState {
             watchdogScheduler: watchdogScheduler,
             silenceFallbackDelay: silenceFallbackDelay,
             systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            // D7 (adversarial review, Seamless handoff T3): the real default
+            // factory posix_spawns `/usr/bin/log stream`. Every other collaborator
+            // this helper touches (`systemVolume`, `ptpHelperActivator`,
+            // `aggregateControl`, …) is already swapped for a hermetic fake for
+            // exactly this reason — this is that same convention, not a
+            // `HeadlessRuntime`-gated production default (there is no precedent in
+            // `NativeBackend`'s own init for auto-detecting tests at a production
+            // default; every other collaborator is always real in production and
+            // always swapped explicitly here).
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         return (backend, engine, discovery)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7): never spawns a real subprocess,
+    /// `isRunning` always false. Keeps this suite hermetic without exercising the
+    /// watcher's own logic — that's owed as a dedicated `AirPlayHandoffWatcherTests`
+    /// suite, out of scope here.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list

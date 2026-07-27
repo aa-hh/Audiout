@@ -370,8 +370,24 @@ extension SerializedSharedState {
             systemVolume: systemVolume,
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             aggregateControl: aggregateControl,
-            currentDefaultOutputUID: { currentDefaultOutputUIDBox.get() })
+            currentDefaultOutputUID: { currentDefaultOutputUIDBox.get() },
+            // D7 (adversarial review, Seamless handoff T3): this suite drives
+            // `expectedSelected` non-empty, which arms the handoff watcher
+            // (`reconcileHandoffWatcherLocked`, tail of `reconcileAggregateDefault`)
+            // — without this override the real default factory would posix_spawn
+            // `/usr/bin/log stream` here too. Same fix as `NativeBackendTests`.
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         return (backend, systemVolume)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7) — see `NativeBackendTests`' twin.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     private actor EventBox {

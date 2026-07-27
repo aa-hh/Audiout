@@ -124,6 +124,16 @@ extension SerializedSharedState {
         func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
         func setFormat(_ f: TapFormat) { lock.withLock { format = f } }
 
+        /// PAUSE-ON-CALL re-drive (``SystemAudioTap/isCallProfile``): what this fake
+        /// reports as its current call profile when the coordinator reconciles the gate
+        /// after a build commit. Defaults to `false` (A2DP / not a call), so every
+        /// non-pause test's rebuild re-drives a benign `applyCallActive(false)`. A
+        /// pause-on-call test sets it `true` to model a tap that came up on the 16 kHz
+        /// HFP clock (a mid-call rebuild), and back to `false` to model the return to A2DP.
+        private var _isCallProfile = false
+        var isCallProfile: Bool { lock.withLock { _isCallProfile } }
+        func setCallProfile(_ v: Bool) { lock.withLock { _isCallProfile = v } }
+
         /// Deliver through the START-TIME snapshot, not the live property — the real
         /// IOProc only ever calls the handler it captured at createAndStart.
         func pushBuffer(_ b: CapturedBuffer) { lock.withLock { capturedOnBuffer }?(b) }
@@ -1532,6 +1542,118 @@ extension SerializedSharedState {
         waitFor { sink.forwarded.count > base }
         #expect(!isAllZero(sink.forwarded[base].pcm),
                 "capture works after restart — the gate did not latch through teardown")
+        coordinator.stop()
+    }
+
+    /// (T5-6) THE mid-call-rebuild fix (the CONFIRMED silent-forever critical). A
+    /// mid-call `.exclusionChange` rebuild swaps in a fresh tap that came up on the
+    /// 16 kHz HFP clock; the coordinator's re-drive KEEPS the pause. Crucially, when the
+    /// call ends the fresh tap fires ONLY its device-change re-anchor — never an exit
+    /// `onCallActiveChanged(false)`, because a tap that never "saw" the enter can't
+    /// report the exit — and the re-anchor's commit re-drives `applyCallActive(false)`
+    /// to un-latch the gate. Pre-fix (tap owned the enter/exit edge, no re-drive) this
+    /// latched into PERMANENT SILENCE: the swapped-in tap's edge read "not in a call",
+    /// the coordinator's gate stayed true, and the exit never fired.
+    @Test func midCallRebuildKeepsPauseAndExitStillClearsTheGate() {
+        let old = FakeTap(); old.id = 1; old.setCallProfile(false)
+        let new = FakeTap(); new.id = 2; new.setCallProfile(true)   // came up on the 16 kHz HFP clock
+        let sink = SpySink()
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink, resolveDefaultOutputDeviceID: { nil })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call on the OLD tap → gate + feeder; silence flows.
+        old.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Mid-call `.exclusionChange` rebuild → the fresh 16 kHz tap commits. The
+        // re-drive reads its `isCallProfile == true` and KEEPS the pause (idempotent).
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { new.creates >= 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Silence continues, and a buffer captured through the NEW tap while still
+        // call-active is dropped before conversion (no non-zero payload ever appears).
+        let afterRebuild = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count > afterRebuild }   // more feeder ticks land
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "the mid-call rebuild keeps the pause — no captured payload leaks")
+
+        // Call ENDS: the fresh tap now reports A2DP and fires ONLY its device-change
+        // re-anchor. Deliberately NO `fireCallActiveChanged(false)` — modelling the real
+        // bug, where a swapped-in tap never fires the exit edge. Post-fix the re-anchor's
+        // commit re-drives `applyCallActive(false)` and self-heals the gate; pre-fix
+        // nothing clears it and this is permanent silence.
+        new.setCallProfile(false)
+        new.fireDeviceChange()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Gate cleared: captured audio resumes as REAL payload, not silence.
+        let base = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 2_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture resumes after the call ends — the gate did NOT latch (pre-fix: permanent silence)")
+
+        // Feeder stopped: no further silence writes appear on their own.
+        let quiescent = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > quiescent }
+        #expect(sink.forwarded.count == quiescent, "the feeder is stopped once the call ends — no writer left running")
+
+        coordinator.stop()
+    }
+
+    /// (T5-7) The related HIGH: a tap-build failure DURING a call must not strand the
+    /// feeder running with no tap to own it, and recovering after the call ended must
+    /// self-heal the gate. Pre-fix the feeder ran forever in `.failed` and the gate
+    /// stayed latched; post-fix `.failed` stops the feeder and the recovery `start()`'s
+    /// re-drive reconciles the gate to the recovered A2DP tap.
+    @Test func failedRebuildDuringCallStopsFeederAndRecoverySelfHeals() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call → gate + feeder; silence flows.
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // A mid-call `.exclusionChange` rebuild FAILS (createAndStart throws) → `.failed`.
+        tap.startError = .deviceLost(reason: "gone")
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+
+        // The feeder is stopped on entering `.failed` — no writer stranded.
+        let afterFail = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > afterFail }   // returns early only if it (wrongly) grows
+        #expect(sink.forwarded.count == afterFail,
+                "the feeder is stopped on `.failed` — pre-fix it ran forever with no owner")
+
+        // Recover AFTER the call ended: the recovered tap is A2DP, so the re-drive clears
+        // the gate and capture resumes (not stuck silent).
+        tap.startError = nil
+        tap.setCallProfile(false)
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 3_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture resumes after recovery — the gate self-healed, no permanent silence")
+
+        // And no feeder is left running after recovery.
+        let quiescent = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > quiescent }
+        #expect(sink.forwarded.count == quiescent, "no feeder left running after recovery")
+
         coordinator.stop()
     }
 

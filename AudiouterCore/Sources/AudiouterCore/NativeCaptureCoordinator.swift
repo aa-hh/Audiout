@@ -552,7 +552,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let newTap = makeTap()
         newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
-        newTap.onCallActiveChanged = { [weak self] active in self?.handleCallActiveChange(active) }
+        newTap.onCallActiveChanged = { [weak self] active in self?.applyCallActive(active) }
 
         do {
             // Blocking HAL work OUTSIDE the lock.
@@ -581,6 +581,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // state lock, like every other handler call in this file.
             if orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
+            }
+            // PAUSE-ON-CALL RE-DRIVE: reconcile the gate to the freshly-built tap's
+            // ACTUAL profile. A `start()` that lands while the device is already in a
+            // call (e.g. recovering from `.failed` mid-call) comes up on the 16 kHz HFP
+            // clock → isCallProfile true → apply(true) gates it from the first buffer;
+            // the normal A2DP case is apply(false), an idempotent no-op over the gate
+            // `start()` already cleared at claim. The coordinator, not any tap edge,
+            // owns this. Off the lock, orphan == nil (a racing stop() left nothing live).
+            if orphan == nil {
+                applyCallActive(newTap.isCallProfile)
             }
         } catch {
             // createAndStart may have created the tap/aggregate before failing on a
@@ -1073,8 +1083,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap(cause: .deviceOrRateChange)
     }
 
-    /// PAUSE-ON-CALL orchestration (T4). Driven by the tap's `onCallActiveChanged`
-    /// edge, on the monitor's serial queue.
+    /// PAUSE-ON-CALL: the coordinator's SINGLE, idempotent owner of the call-active
+    /// decision (T4). Makes the gate (`callActive`) + the ``SilenceFeeder`` MATCH
+    /// `active`, and is safe to call repeatedly with the same value — a duplicate
+    /// `true` keeps the running feeder, a duplicate `false` is a no-op. The
+    /// COORDINATOR, not the tap, owns the transition; two callers drive it:
+    ///  1. the tap's `onCallActiveChanged`, which now reports the CURRENT profile on
+    ///     every delivery (not an enter/exit edge); and
+    ///  2. the RE-DRIVE after every freshly-built tap commits (`start()` /
+    ///     ``recreateTap(cause:)``), passing `newTap.isCallProfile`.
+    ///
+    /// (2) is the crux: the enter/exit edge and the HFP-tracking state used to live on
+    /// the `CoreAudioSystemTap` INSTANCE, which is destroyed and recreated on every
+    /// rebuild. A mid-call `.exclusionChange` rebuild minted a fresh tap whose edge
+    /// state read "not in a call" while the coordinator's gate stayed latched true; the
+    /// new tap then never fired the exit edge and the gate stuck into permanent silence.
+    /// Reconciling the gate to the committed tap's ACTUAL profile after every build
+    /// closes that hole without relying on any edge firing.
     ///
     /// ENTER (`true`): gate captured audio off stream 0 FIRST — publish `callActive`
     /// synchronously so every subsequent `handleBuffer` drops its buffer — THEN
@@ -1084,11 +1109,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// captured frame count.
     ///
     /// EXIT (`false`): stop the feeder FIRST (synchronously — no silence buffer can
-    /// still be in flight once `stop()` returns), THEN un-gate. The tap's own
-    /// `onDefaultDeviceChanged` fires right after this on the exit edge and drives
-    /// the EXISTING rebuild → re-anchor; stopping the feeder before un-gating lets
-    /// that re-anchor own the resumed timeline alone (no new recovery path here).
-    private func handleCallActiveChange(_ active: Bool) {
+    /// still be in flight once `stop()` returns), THEN un-gate. On the exit edge the
+    /// tap's own `onDefaultDeviceChanged` fires right after this and drives the
+    /// EXISTING rebuild → re-anchor; stopping the feeder before un-gating lets that
+    /// re-anchor own the resumed timeline alone (no new recovery path here).
+    ///
+    /// Runs OFF `queue` (it takes `queue` itself) — never call it while holding `queue`.
+    private func applyCallActive(_ active: Bool) {
         if active {
             let frames = queue.sync { () -> Int in
                 self.callActive = true
@@ -1242,7 +1269,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if !makeBeforeBreak { old?.teardown() }
         let newTap = makeTap()
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
-        newTap.onCallActiveChanged = { [weak self] active in self?.handleCallActiveChange(active) }
+        newTap.onCallActiveChanged = { [weak self] active in self?.applyCallActive(active) }
         // Wire delivery BEFORE createAndStart — the real IOProc snapshots `onBuffer`
         // by value at start (`let onBuffer = self.onBuffer`), so a handler assigned
         // AFTER createAndStart is never seen by the running IOProc and the tap
@@ -1297,6 +1324,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // from no membership and cannot return `EALREADY`.
             if commit.orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
+            }
+            // PAUSE-ON-CALL RE-DRIVE — the crux of the mid-call-rebuild fix. Reconcile
+            // the gate to what the freshly-built tap ACTUALLY is. `callActive` is
+            // deliberately NOT cleared anywhere in this method (it persists across the
+            // swap so a mid-call rebuild's new 16 kHz capture is gated from its first
+            // buffer — no call-audio leak window), and reconciled here at commit:
+            //  * a mid-call `.exclusionChange` rebuild comes up on the 16 kHz HFP clock
+            //    → isCallProfile true → apply(true), an idempotent no-op that keeps the
+            //    pause;
+            //  * a rebuild that commits after the call already ended (or a `.failed`
+            //    recovery) comes up on A2DP → isCallProfile false → apply(false), which
+            //    self-heals a latched gate.
+            // This does NOT depend on the swapped-in tap's exit edge firing — that edge
+            // NOT firing on a fresh tap was the stuck-silence bug. Off the lock,
+            // orphan == nil (a racing stop() that won leaves nothing to reconcile).
+            if commit.orphan == nil {
+                applyCallActive(newTap.isCallProfile)
             }
             // Fire the whole-system session-reset signal ONLY when this rebuild was
             // caused by a device/nominal-rate change AND actually committed a fresh
@@ -1361,6 +1405,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // break-before-make path the old tap was already torn down above; teardown
             // is idempotent, but this stays guarded to keep that path byte-identical.
             if makeBeforeBreak { old?.teardown() }
+            // PAUSE-ON-CALL: a tap-build failure DURING a call must not leave the feeder
+            // running forever with no tap to own it (the related HIGH). Stop it here;
+            // the recovery `start()` from `.failed` re-drives `applyCallActive` at its
+            // commit and restarts the feeder if the device is still in a call. No leak
+            // window opens: there is no live tap capturing in `.failed` (converter nil),
+            // so nothing is gated off. Idempotent — a racing stop() already stopped it.
+            feeder.stop()
             let mapped: NativeCaptureError = (error as? NativeCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
             queue.sync {
@@ -1629,16 +1680,29 @@ public protocol SystemAudioTap: AnyObject {
     /// format may change and it must be recreated).
     var onDefaultDeviceChanged: (@Sendable () -> Void)? { get set }
 
-    /// Called on an EDGE of the tapped device's Bluetooth CALL (HFP) profile
-    /// (PAUSE-ON-CALL). `true` = the device just entered HFP (~16 kHz mic/call
-    /// mode): the coordinator gates captured audio OFF stream 0 and feeds clean
-    /// silence, so the call is never forwarded to the AirPlay receivers and the
-    /// ~2 s HFP-switch capture starvation never underruns the RTP session. `false`
-    /// = the device returned to A2DP: the coordinator un-gates and the tap's own
-    /// ``onDefaultDeviceChanged`` re-anchors via the existing rebuild. Fires only
-    /// on a genuine transition, never continuously. A fake that does not model
-    /// call profiles simply never invokes it.
+    /// Reports the tapped device's CURRENT Bluetooth CALL (HFP) profile
+    /// (PAUSE-ON-CALL) — `true` = in HFP (~16 kHz mic/call mode), `false` = A2DP /
+    /// not a call. The coordinator (``NativeCaptureCoordinator/applyCallActive(_:)``)
+    /// owns the gate decision and dedupes idempotently, so this reports the CURRENT
+    /// value on EVERY delivery rather than only on an enter/exit EDGE. Reporting the
+    /// current value (not an edge) is half the mid-call-rebuild fix: a tap swapped in
+    /// mid-call no longer needs to have "seen" the enter to correctly report the exit.
+    /// When `true` the coordinator gates captured audio OFF stream 0 and feeds clean
+    /// silence (so the call never reaches the receivers and the ~2 s HFP-switch capture
+    /// starvation never underruns the RTP session); when `false` it un-gates and the
+    /// tap's own ``onDefaultDeviceChanged`` re-anchors via the existing rebuild. A fake
+    /// that does not model call profiles simply never invokes it.
     var onCallActiveChanged: (@Sendable (Bool) -> Void)? { get set }
+
+    /// PAUSE-ON-CALL re-drive seam: this tap's CURRENT call-profile classification
+    /// (rate + transport), read live from the committed format. The coordinator reads
+    /// it right after committing a freshly built tap (``NativeCaptureCoordinator``
+    /// `start()` / `recreateTap`) and calls ``NativeCaptureCoordinator/applyCallActive(_:)``
+    /// with it, so the pause gate is reconciled to reality after ANY rebuild — closing
+    /// the mid-call-rebuild stuck-silence hole where the tap's own enter/exit edge state
+    /// was lost across the tap swap. Defaulted to `false` so a fake that doesn't model
+    /// call profiles keeps working (the re-drive is then always a benign apply(false)).
+    var isCallProfile: Bool { get }
 
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
@@ -1683,6 +1747,7 @@ public protocol SystemAudioTap: AnyObject {
 public extension SystemAudioTap {
     var workgroupDeviceID: AudioObjectID? { nil }
     var tappedDeviceID: AudioObjectID? { nil }
+    var isCallProfile: Bool { false }
 }
 
 /// The audio I/O workgroup seam (T7). Implemented in production by
@@ -2274,7 +2339,10 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// so no lock is needed — same queue-confinement discipline this file keeps
     /// elsewhere.
     ///
-    /// `lastCallActive` is the previous HFP classification, for computing edges.
+    /// `lastCallActive` is the previous HFP classification, kept ONLY to log the
+    /// `call_active_changed` telemetry once per transition — the coordinator
+    /// (``NativeCaptureCoordinator/applyCallActive(_:)``) now owns the gate decision,
+    /// and this tap reports its CURRENT profile on every delivery, not an edge.
     /// `hfpTrackedRate` is load-bearing, NOT cosmetic: while a call is active we
     /// deliberately suppress the tap rebuild (we do not want the pipeline rebuilt
     /// onto the 16 kHz HFP clock), so `format.sampleRate` stays frozen at the
@@ -2301,6 +2369,18 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     var tappedDeviceID: AudioObjectID? {
         let id = tappedOutputDeviceID
         return id == kAudioObjectUnknown ? nil : id
+    }
+
+    /// PAUSE-ON-CALL re-drive (``SystemAudioTap/isCallProfile``): classify the tapped
+    /// device's CURRENT profile from this tap's COMMITTED `format.sampleRate` (the rate
+    /// the aggregate actually came up on — 16 kHz during a call, since a mid-call
+    /// rebuild is NOT suppressed and re-anchors onto the HFP clock) plus a live
+    /// transport read, through the same pure ``CallProfileDecision`` the monitor's
+    /// `onChange` uses. Read by ``NativeCaptureCoordinator`` right after a build commit.
+    var isCallProfile: Bool {
+        CallProfileDecision.isCallActive(
+            rate: Double(format.sampleRate),
+            transport: Self.readTransportType(tappedOutputDeviceID))
     }
 
     /// The process-wide default-output watcher this tap observes through, and the
@@ -2860,16 +2940,23 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                 let transport = Self.readTransportType(self.tappedOutputDeviceID)
                 let nowCallActive = CallProfileDecision.isCallActive(
                     rate: snapshot.nominalRate, transport: transport)
-                let wasCallActive = self.lastCallActive
-                self.lastCallActive = nowCallActive
-                if nowCallActive != wasCallActive {
+                // Telemetry keyed on the tap's OWN last-reported value, logged only on a
+                // genuine transition (the live-diagnosis workflow greps this line). This
+                // is now the ONLY thing `lastCallActive` drives — the GATE decision moved
+                // to the coordinator (`applyCallActive`), which owns the edge.
+                if nowCallActive != self.lastCallActive {
                     Telemetry.log(.captureWS, "call_active_changed", [
                         "active": nowCallActive ? "true" : "false",
                         "rate": snapshot.nominalRate.map { String(Int($0.rounded())) } ?? "unreadable",
                         "transport": Self.describeTransportType(self.tappedOutputDeviceID),
                     ])
-                    self.onCallActiveChanged?(nowCallActive)
                 }
+                self.lastCallActive = nowCallActive
+                // Report the CURRENT profile on EVERY delivery — the coordinator dedupes
+                // via its idempotent `applyCallActive`. Reporting current (not an edge)
+                // is what lets a tap swapped in mid-call correctly report the exit even
+                // though it never "saw" the enter (the mid-call-rebuild stuck-silence bug).
+                self.onCallActiveChanged?(nowCallActive)
                 if nowCallActive {
                     // SUPPRESS the rebuild: rebuilding here would re-anchor the whole
                     // pipeline onto the 16 kHz HFP clock and capture the call. The

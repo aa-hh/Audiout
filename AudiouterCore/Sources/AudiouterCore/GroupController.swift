@@ -106,6 +106,17 @@ public final class GroupController {
     /// is passthrough.
     private(set) public var mainOut: MainOutTarget = .selectedDevices
 
+    /// Fired whenever Main Out membership is (re)applied to the backend, carrying
+    /// the AirPlay members now driving the whole-system mix. The coordinating
+    /// layer (`AppDelegate`) hooks this to clear any per-app redirect still
+    /// pointed at one of these speakers — a speaker carries one role at a time
+    /// (whole-system mix OR one app's redirect), and selecting it into Main Out
+    /// is the senior action that wins it (`AppRoutingController.clearRoutes(toDevices:)`).
+    /// Injected-closure idiom, same as `NativeBackend.onRoutingAction` — keeps
+    /// this controller ignorant of `AppRoutingController`. Fires on every apply
+    /// (even an unchanged set); the consumer no-ops when nothing conflicts.
+    public var onMainOutMembersChanged: ((Set<String>) -> Void)?
+
     /// - Parameters:
     ///   - backend: where volume/output-set changes actually go.
     ///   - store: persistence for saved groups. Defaults to the on-disk store
@@ -449,6 +460,9 @@ public final class GroupController {
             // members. Routing one app must never push the whole system mix to that
             // device (the original per-app-routing bug).
             backend.setOutputSet(routableOutputIDs)
+            // A speaker just selected into Main Out wins that speaker; any per-app
+            // redirect still pointed at it yields (one role per speaker).
+            onMainOutMembersChanged?(routableOutputIDs)
         case .group(let id):
             activateGroup(id: id)
         }
@@ -625,7 +639,11 @@ public final class GroupController {
         // App-route redirect targets are still NOT unioned in (T7) — a redirected
         // app reaches its device through the per-app capture path, not this
         // whole-system set.
-        backend.setOutputSet(routableOutputs(in: group.memberIDs))
+        let airplayMembers = routableOutputs(in: group.memberIDs)
+        backend.setOutputSet(airplayMembers)
+        // Activating a group wins every speaker it contains; per-app redirects
+        // still pointed at any of them yield (one role per speaker).
+        onMainOutMembersChanged?(airplayMembers)
         for memberID in group.memberIDs {
             // …and the Mac is skipped here too: its "volume" is the Mac's SYSTEM
             // output level (`NativeBackend.setVolume`'s local branch writes Core

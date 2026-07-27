@@ -34,17 +34,23 @@ func audiouterEmergencyWriteStderr(_ message: String) {
 }
 
 /// The real per-app-capture process resolver the native backend needs: Core
-/// can't import AppKit (`NSRunningApplication`), so the AppKit layer builds it
-/// and supplies it via `makeBackend(resolver:)`. `bundleIDForPID` is the one
-/// AppKit-only step (`AudioProcessResolver`'s own doc comment) — everything
-/// else (enumerating Core Audio process objects, walking parent pids) is pure
-/// Core Audio + Darwin and lives in `AudioProcessResolver` itself. A free
-/// value (not an instance property) so it can be used in `AppDelegate`'s
-/// `backend` property initializer, which runs before `self` exists.
+/// can't import AppKit, so the AppKit layer builds it and supplies it via
+/// `makeBackend(resolver:)`. `bundleIDForPID` (`NSRunningApplication`) and
+/// `bundlePathForBundleID` (`NSWorkspace`) are the two AppKit-only steps of the
+/// resolver's four-layer catch-all attribution (`AudioProcessResolver`'s own doc
+/// comment) — everything else (enumerating Core Audio process objects, walking
+/// parent pids, reading responsible pids and executable paths) is pure Core
+/// Audio + Darwin and lives in `AudioProcessResolver` itself, already wired by
+/// its own defaults. A free value (not an instance property) so it can be used
+/// in `AppDelegate`'s `backend` property initializer, which runs before `self`
+/// exists.
 private let audioProcessResolver = AudioProcessResolver(
     enumerator: CoreAudioProcessEnumerator(),
     bundleIDForPID: { pid in
         NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    },
+    bundlePathForBundleID: { bundleID in
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)?.path
     })
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
@@ -391,6 +397,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // no-op mutations never reach the backend. Fired synchronously from a UI
         // mutation (no lock held) → no deadlock with the backend's internal queues.
         appRouting.onRoutesDidChange = { [weak self] in self?.pushAppRoutesToBackend() }
+        // One role per speaker: when Main Out membership changes (a device
+        // selected, or a group activated), any per-app redirect still pointed at
+        // one of those speakers yields back to "follows main output" — selecting
+        // the speaker is the senior action (a receiver holds ONE AirPlay session;
+        // the two roles can't share it). `clearRoutes` no-ops when nothing
+        // conflicts, so this is cheap on every selection change; its change edge
+        // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing down the
+        // now-stale per-app tap. The popover's picker refuses the mirror-image
+        // conflict up front (a Main Out member is never offered as a redirect
+        // target), so the two directions can never build the overlap.
+        groupController.onMainOutMembersChanged = { [weak self] memberIDs in
+            self?.appRouting.clearRoutes(toDevices: memberIDs)
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
@@ -425,14 +444,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
-        // A persisted `.device` redirect must never survive a full Audiouter
-        // restart (simplification of the app-quit reset, scaled to every route
-        // at once) — mirrors the existing "the live routing set is not
-        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
-        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
-        // below so the backend never sees a stale `.device` route even
-        // transiently at launch.
-        appRouting.clearAllDeviceRoutes()
+        // NO persisted redirect of any kind survives a full Audiouter restart —
+        // every launch starts with every application on "Follows main output"
+        // (product decision, Alec 2026-07-26: live testing showed restored
+        // `.currentDevice` routes going live at launch, silently starting
+        // captures/exclusions the user never asked for that session). Mirrors
+        // the existing "the live routing set is not auto-resumed at launch"
+        // discipline (AudiouterCore/AGENTS.md) at the per-app level. Called
+        // BEFORE the initial `pushAppRoutesToBackend()` below so the backend
+        // never sees a stale redirect even transiently at launch.
+        appRouting.clearAllRedirectsAtLaunch()
         // Seed the backend with the persisted route table + excluded set (T7). A
         // prune/clear above would already have pushed via `onRoutesDidChange`, but
         // that fires only when something changed — this unconditional push syncs
@@ -599,7 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // invisible to it for the process's whole life (the TCC read is
         // process-lifetime cached). Nothing auto-resumes off the back of it:
         // the app deliberately starts empty, per-app `.device` routes are
-        // cleared at launch (`AppRoutingController.clearAllDeviceRoutes()`),
+        // cleared at launch (`AppRoutingController.clearAllRedirectsAtLaunch()`),
         // and the user re-picks a destination themselves. The latch is what
         // makes that re-pick actually produce audio without a relaunch.
         if SystemAudioCaptureTCC.effectiveStatus() != .granted {

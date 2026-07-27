@@ -241,26 +241,6 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var syncedLocalSink: SyncedLocalPCMSink?
     private var syncedLocalRenderPID: pid_t?
 
-    /// The SECOND in-process local-render source: ``LocalPlaybackEngine``, which
-    /// renders every `.currentDevice` ("play on this Mac") per-app route through
-    /// this app's own `AVAudioEngine` into the default output device — the very
-    /// device the whole-system tap taps. Set by
-    /// ``setLocalPlaybackRenderPID(_:)``; unioned into the exclusion set exactly
-    /// like ``syncedLocalRenderPID``.
-    ///
-    /// Deliberately a SEPARATE field from `syncedLocalRenderPID` rather than one
-    /// shared "our pid" flag: the two sources turn on and off independently
-    /// ("play everywhere" vs. a per-app local redirect), so a single field would
-    /// let whichever one switched off last clear an exclusion the other still
-    /// needs. Both are always `getpid()` or nil; unioning is idempotent.
-    ///
-    /// Without this the tap re-captures LocalPlaybackEngine's own output and —
-    /// because the tap is `.mutedWhenTapped` — MUTES it: a per-app route to the
-    /// Mac's speakers went silent locally and came out the AirPlay selection
-    /// instead, which is precisely the R2 echo failure `syncedLocalRenderPID`
-    /// was added to prevent, just via the other local-render path.
-    private var localPlaybackRenderPID: pid_t?
-
     /// T3 (Part B) base-rate converter for the fan-out: resamples the 44.1 kHz
     /// airplay feed UP to the sink's device-native `renderSampleRate` ONCE before
     /// the ring, so the sink's engine runs at the output device's own rate and
@@ -742,39 +722,66 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// of the whole-system tap so its output isn't re-captured as an echo, and
     /// (since the tap is `.mutedWhenTapped`) stays audible.
     private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
-        var result = currentExcludedBundleIDs.reduce(into: Set<AudioObjectID>()) { result, bundleID in
-            result.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
-        }
-        for renderPID in [syncedLocalRenderPID, localPlaybackRenderPID].compactMap({ $0 }) {
+        var result = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: currentExcludedBundleIDs)
+        if let renderPID = syncedLocalRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
         return result
     }
 
-    /// Declare whether ``LocalPlaybackEngine`` is currently rendering any
-    /// `.currentDevice` per-app route in THIS process — pass `getpid()` when it
-    /// is, `nil` when it isn't. See ``localPlaybackRenderPID`` for why this
-    /// exclusion is load-bearing rather than an optimization.
-    ///
-    /// Same discipline as ``setSyncedLocalSink(_:renderProcessPID:)``: stores the
-    /// pid, and if a tap is currently `.capturing` AND the pid actually changed,
-    /// recreates it immediately so the new exclusion takes effect without waiting
-    /// for a device change. An unchanged pid does nothing (the caller re-passes
-    /// the same value on every route update). The recreate is an
-    /// `.exclusionChange` — tapped device and clock are unchanged, so it does NOT
-    /// reset the AirPlay session or desync receivers.
-    public func setLocalPlaybackRenderPID(_ pid: pid_t?) {
-        let needsRecreate: Bool = queue.sync {
-            guard pid != localPlaybackRenderPID else { return false }
-            localPlaybackRenderPID = pid
-            if case .capturing = _state { return true }
-            return false
+    /// Shared core of both exclusion-resolve call sites
+    /// (``resolveExcludedProcessObjectIDs()`` and ``rebuildIfExclusionObjectsChanged()``'s
+    /// off-lock resolve): resolves every bundle id in `bundleIDs` via
+    /// ``processResolver/resolveWithAttribution(bundleID:)`` and emits ONE
+    /// `Telemetry(.captureWS)` line per call — T2, the diagnosability gap the
+    /// 2026-07-26 live catch-all-attribution fix left open. `exclusion_changed`
+    /// already logs which bundle ids are excluded (INTENT); this logs which
+    /// concrete pids each one actually resolved to and via which of the four
+    /// attribution layers, so "app X still leaks" is answerable from the log
+    /// alone. A bundle id resolving to ZERO processes is called out under
+    /// `zeroBundles` — exactly the Spotify-helper leak signature (an excluded
+    /// app whose helper the resolver still couldn't attribute reads as empty,
+    /// live, before this the only way to see that was manual `ps` correlation).
+    /// Cheap: one resolve per bundle id per call, same cost `resolve(bundleID:)`
+    /// already paid — this only adds string formatting, never a second HAL walk.
+    private func resolveExcludedObjectIDsLoggingAttribution(bundleIDs: Set<String>) -> Set<AudioObjectID> {
+        var result: Set<AudioObjectID> = []
+        var resolvedEntries: [String] = []
+        var zeroBundles: [String] = []
+        for bundleID in bundleIDs.sorted() {
+            let attributed = processResolver.resolveWithAttribution(bundleID: bundleID)
+            if attributed.isEmpty {
+                zeroBundles.append(bundleID)
+            } else {
+                let byPID = attributed.map { "\($0.process.pid):\($0.layer.rawValue)" }.sorted()
+                resolvedEntries.append("\(bundleID)=[\(byPID.joined(separator: ","))]")
+            }
+            result.formUnion(attributed.map(\.process.objectID))
         }
-        guard needsRecreate else { return }
-        Telemetry.log(.captureWS, "local_render_exclusion_changed", [
-            "excludingOwnProcess": pid == nil ? "false" : "true",
+        // Unconditional SELF-exclude — the echo guard, generalized. Any audio
+        // THIS process emits must never be re-captured into the whole-system
+        // mix: `LocalPlaybackEngine` renders every `.currentDevice` app's
+        // stream from THIS process onto the Mac's own output — the very device
+        // this tap is anchored to — so without this, a "play on this Mac"
+        // exception echoed straight back into the AirPlay mix the moment a
+        // receiver was actually live (found live 2026-07-26: Spotify routed to
+        // the Mac's speakers audibly replayed on the selected Sonos; earlier
+        // sessions never heard it only because either the attribution leak or
+        // a dead PTP clock masked it). The synced-local sink's R2 self-exclude
+        // (`syncedLocalRenderPID` — the same `getpid()`) covered only the
+        // play-everywhere path; this covers every path and makes that union
+        // redundant-but-harmless. Resolved fresh per call, never cached: our
+        // process object exists in the HAL list only while we are actually
+        // rendering, and the process-list membership diff (W1-T7) re-runs this
+        // the moment our render starts, so the tap rebuilds with us excluded.
+        let selfProcesses = processResolver.resolve(pid: getpid())
+        result.formUnion(selfProcesses.map(\.objectID))
+        Telemetry.log(.captureWS, "exclusion_resolved", [
+            "resolved": resolvedEntries.joined(separator: ";"),
+            "zeroBundles": zeroBundles.joined(separator: ","),
+            "self": selfProcesses.map { "\($0.pid)" }.sorted().joined(separator: ","),
         ])
-        recreateTap(cause: .exclusionChange)
+        return result
     }
 
     // MARK: - Live exclusion-membership diffing (W1-T7, Gap 1 / Fix 1)
@@ -814,30 +821,25 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// a stale baseline that suppresses a later one. Recreates as a benign
     /// `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
     private func rebuildIfExclusionObjectsChanged() {
-        let snapshot: (bundleIDs: Set<String>, renderPIDs: [pid_t])? = queue.sync {
+        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?)? = queue.sync {
             guard case .capturing = _state else { return nil }
-            return (currentExcludedBundleIDs,
-                    [syncedLocalRenderPID, localPlaybackRenderPID].compactMap { $0 })
+            return (currentExcludedBundleIDs, syncedLocalRenderPID)
         }
         guard let snapshot else { return }
 
         // Resolve OUTSIDE the lock (enumerates the HAL) — the same off-lock
         // discipline `recreateTap` keeps for its create.
-        var newObjects = snapshot.bundleIDs.reduce(into: Set<AudioObjectID>()) { acc, bundleID in
-            acc.formUnion(processResolver.resolve(bundleID: bundleID).map(\.objectID))
-        }
-        for renderPID in snapshot.renderPIDs {
+        var newObjects = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: snapshot.bundleIDs)
+        if let renderPID = snapshot.renderPID {
             newObjects.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
 
         let needsRecreate: Bool = queue.sync {
             guard case .capturing = _state else { return false }
             // Inputs unchanged since the snapshot, else a concurrent
-            // updateRouting/setSyncedLocalSink/setLocalPlaybackRenderPID already
-            // owns the rebuild.
+            // updateRouting/setSyncedLocalSink already owns the rebuild.
             guard currentExcludedBundleIDs == snapshot.bundleIDs,
-                  [syncedLocalRenderPID, localPlaybackRenderPID].compactMap({ $0 })
-                      == snapshot.renderPIDs else { return false }
+                  syncedLocalRenderPID == snapshot.renderPID else { return false }
             guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD
             return true
         }

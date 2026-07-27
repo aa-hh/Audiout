@@ -364,6 +364,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `isAvailable == false` keeps its route — see `update(devices:)`.
     private var lastValidDestinationIDs: Set<String>?
 
+    /// The set of device ids that were Main Out members at the last `update`
+    /// (`GroupController.isMainOutMember`). `nil` until the first snapshot.
+    /// A change here means a speaker joined or left the whole-system mix, which
+    /// changes what every app row's redirect menu may offer — a speaker now in
+    /// Main Out is dropped from the menus (one role per speaker), and one that
+    /// just left is offerable again. Without this, selecting a speaker into Main
+    /// Out (which fires an `update` but changes neither the route table, the
+    /// fleet, nor the valid-target set) would leave the redirect menus stale,
+    /// still offering a speaker that is now carrying the mix.
+    private var lastMainOutMemberIDs: Set<String>?
+
     /// The sentinel destination id the Applications card's "Current Device" entry
     /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device,
     /// but `AppRowView` works in plain string ids; this sentinel bridges the two
@@ -492,6 +503,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
         lastValidDestinationIDs = nowValid
 
+        // One role per speaker: a speaker joining or leaving Main Out changes what
+        // the app rows' redirect menus may offer (a Main Out member is excluded as
+        // a redirect target). Selecting a speaker fires an `update` but touches
+        // none of the three triggers below — no route reset, no fleet change, no
+        // valid-target change — so this membership diff is what keeps the menus
+        // from going stale (still offering a speaker now carrying the mix, which is
+        // the only remaining way to build the exact overlap the exclusion prevents).
+        let nowMainOutMembers = Set(devices.compactMap {
+            groupController?.isMainOutMember($0.id) == true ? $0.id : nil
+        })
+        let mainOutMembersChanged = lastMainOutMemberIDs != nil && lastMainOutMemberIDs != nowMainOutMembers
+        lastMainOutMemberIDs = nowMainOutMembers
+
         // A route reset (routesChanged) restructures the Applications card, so it
         // needs a full rebuild — but a rebuild here must NOT reset this open's
         // transient collapse state (it's a mid-open repaint, not a reopen), which
@@ -510,7 +534,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if isEffectivelyShown {
-            if routesChanged || deviceSetChanged || validTargetsChanged {
+            if routesChanged || deviceSetChanged || validTargetsChanged || mainOutMembersChanged {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
             } else {
@@ -1813,6 +1837,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   subtitle: "Plays locally with its own volume"),
         ])
         for device in available {
+            // One role per speaker: a device currently in Main Out (Selected
+            // Devices, or the active group's members) is carrying the
+            // whole-system mix, and a receiver holds ONE AirPlay session — it
+            // can't ALSO carry a private per-app redirect. So it's simply not
+            // offered as a redirect target, the same way an AirPlay-1 device
+            // isn't (`availableAirPlayDestinations`). The reverse conflict —
+            // selecting a speaker that already has a redirect — is resolved by
+            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
+            // by the time this renders, no kept route targets a Main Out member.
+            // Deliberately NOT filtered inside `availableAirPlayDestinations`:
+            // that set also drives R5 disappearance tracking, where a Main Out
+            // member must still count as present.
+            if groupController?.isMainOutMember(device.id) == true { continue }
             // R3 stopgap: a device already carrying a DIFFERENT app's redirect
             // gets an honest heads-up rather than a silent quality regression —
             // two independently-captured streams mixed onto one speaker warble

@@ -398,7 +398,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     }
 
     private func beginStart(bundleID: String) {
-        let processes = processResolver.resolve(bundleID: bundleID)
+        let processes = resolveProcessesLoggingAttribution(bundleID: bundleID)
         guard !processes.isEmpty else {
             queue.sync {
                 guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return }
@@ -440,6 +440,37 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 transition(slot, bundleID: bundleID, to: .failed(mapped))
             }
         }
+    }
+
+    /// Shared core of both places this coordinator resolves a bundle id to its
+    /// tapped process set (``beginStart(bundleID:)`` and
+    /// ``handleDeviceChange(bundleID:)``): resolves via
+    /// ``processResolver/resolveWithAttribution(bundleID:)`` and emits ONE
+    /// `Telemetry(.capturePA)` line per call — the per-app analog of
+    /// `NativeCaptureCoordinator`'s `exclusion_resolved` (T2). Reports each
+    /// resolved pid + the attribution layer that matched it, and calls out a
+    /// ZERO-process resolve explicitly (`processCount: "0"`) — the routed
+    /// app's own leak signature: a redirected/excluded bundle id that still
+    /// resolves to nothing here is exactly why its audio can't be found on the
+    /// per-app path. The subsequent `.processNotYetAudible` transition already
+    /// logs separately (`transition`'s `error` field); this adds the detail
+    /// that path lacked, without changing its behavior.
+    private func resolveProcessesLoggingAttribution(bundleID: String) -> Set<AudioProcess> {
+        let attributed = processResolver.resolveWithAttribution(bundleID: bundleID)
+        if attributed.isEmpty {
+            Telemetry.log(.capturePA, "process_resolved", [
+                "bundleID": bundleID,
+                "processCount": "0",
+            ])
+        } else {
+            let byPID = attributed.map { "\($0.process.pid):\($0.layer.rawValue)" }.sorted()
+            Telemetry.log(.capturePA, "process_resolved", [
+                "bundleID": bundleID,
+                "processCount": "\(attributed.count)",
+                "processes": byPID.joined(separator: ","),
+            ])
+        }
+        return Set(attributed.map(\.process))
     }
 
     /// The default output device changed under a capturing tap (its aggregate
@@ -499,7 +530,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         }
         claim.old?.teardown()
 
-        let processes = processResolver.resolve(bundleID: bundleID)
+        let processes = resolveProcessesLoggingAttribution(bundleID: bundleID)
         guard !processes.isEmpty else {
             // The subsequent .failed(.processNotYetAudible) transition below
             // already carries this reason in its "transition"/"error" telemetry
@@ -892,7 +923,7 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
     ///
     /// NOTE: nothing recovers a refused bundle automatically, by design. The app
     /// starts empty, per-app `.device` routes are cleared at launch
-    /// (`AppRoutingController.clearAllDeviceRoutes()`), and the user re-picks a
+    /// (`AppRoutingController.clearAllRedirectsAtLaunch()`), and the user re-picks a
     /// destination after granting — at which point the fresh-grant latch in
     /// ``SystemAudioCaptureTCC`` means the new tap is allowed straight away,
     /// with no relaunch.

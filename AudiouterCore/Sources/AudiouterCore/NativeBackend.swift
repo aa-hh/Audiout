@@ -2287,21 +2287,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //
             // R5: the EFFECTIVE table, so an app whose target is unreachable is NOT
             // excluded — that omission is exactly what puts it back in the system mix.
-            // ...and excluding OUR OWN process whenever any `.currentDevice` route
-            // is live, because `localPlaybackEngine` renders those routes through
-            // this app's AVAudioEngine INTO the very device the whole-system tap
-            // taps. Without this the tap re-captures that render and — being
-            // `.mutedWhenTapped` — mutes it: the app went silent on the Mac's
-            // speakers and came out the AirPlay selection instead. Exactly the R2
-            // self-exclude `attachSyncedLocalSink` already does for the "play
-            // everywhere" sink, via the other in-process render path.
             //
-            // Set BEFORE `updateRouting` so that when both change (the common
-            // empty↔non-empty transition) the pid is already staged and the tap is
-            // built once against the final exclusion set. Idempotent: re-passing an
-            // unchanged pid is a no-op, so the steady state never rebuilds.
-            self.captureCoordinator?.setLocalPlaybackRenderPID(
-                plan.localExcluded.isEmpty ? nil : getpid())
+            // OUR OWN render process needs no staging here: the coordinator's
+            // exclusion resolve unconditionally self-excludes `getpid()` (the
+            // generalized echo guard), which covers `localPlaybackEngine`'s
+            // `.currentDevice` render and the synced-local sink alike. An earlier
+            // version of this call also handed the coordinator a
+            // `.currentDevice`-conditional render pid; with the unconditional guard
+            // in place that only bought an extra tap rebuild whose exclusion set was
+            // byte-identical to the one already in force.
             self.captureCoordinator?.updateRouting(
                 appRoutes: plan.effectiveRoutes,
                 excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
@@ -2867,6 +2861,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
         }
 
+        // T5+T4 takeover gate, the same one every session-establishing engine op
+        // runs behind — and DELIBERATELY only in front of the teardown+re-add
+        // below, never the F-REANCHOR flush above it. The flush re-anchors the
+        // session that is already up; it establishes nothing, needs no clock, and
+        // gating it would have made the cheap in-place recovery inherit the gate's
+        // real side effects — a default-output switch-away, the "taking over" strip
+        // and a bounded activation wait — on a path whose entire point is to avoid
+        // the audible drop a fresh session costs. A re-add is a different animal: a
+        // clockless one re-establishes a session that plays silence, so it stays
+        // gated. Practically instant mid-session (the clock is already up); on a
+        // genuine refusal the `false` return feeds this chain's backoff/give-up.
+        guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            Telemetry.log(.airplay, "rebind_recover_failed", [
+                "output": "\(outputID)", "scope": label, "error": "timingUnavailable",
+            ])
+            return false
+        }
+
         try? await engine.removeOutput(outputID)
         do {
             switch scope {
@@ -3373,6 +3385,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func performBindOp(_ op: StreamBindOp) async {
         switch op {
         case .bind(let outputID, let stream):
+            // The same T5+T4 takeover gate `convergeDevice` runs — a per-app
+            // stream is a real AirPlay session and is just as silent without a
+            // clock (the ROOT of the redirect-order bug: redirect-first binds
+            // used to skip this entirely). `clearBinding` on failure is what
+            // lets the clock-recovery replay / discovery re-drive re-issue
+            // this op without a topology change.
+            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+                handleBindFailure(
+                    outputID: outputID, stream: stream, op: "bind",
+                    error: PTPClockUnavailableError(), clearBinding: true)
+                return
+            }
             Telemetry.log(.airplay, "engine_bind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream)
@@ -3380,6 +3404,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 handleBindFailure(outputID: outputID, stream: stream, op: "bind", error: error)
             }
         case .rebind(let outputID, let stream):
+            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+                handleBindFailure(
+                    outputID: outputID, stream: stream, op: "rebind",
+                    error: PTPClockUnavailableError(), clearBinding: true)
+                return
+            }
             Telemetry.log(.airplay, "engine_rebind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream, tearDownWhenBindingUnknown: true)
@@ -3390,6 +3420,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             Telemetry.log(.airplay, "engine_unbind", ["output": "\(outputID)"])
             try? await engine.removeOutput(outputID)
         }
+    }
+
+    /// The `Device.id` currently mapped to `outputID`, if any (reverse lookup
+    /// of `outputIDs`). Takes `stateQueue` itself — call only off it.
+    private func deviceID(for outputID: OutputID) -> String? {
+        stateQueue.sync { self.outputIDs.first(where: { $0.value == outputID })?.key }
+    }
+
+    /// A per-app bind was refused because no PTP clock is available (the T4
+    /// gate said not-ready). Distinct from an engine throw only so telemetry
+    /// reads the actual cause.
+    private struct PTPClockUnavailableError: Error, CustomStringConvertible {
+        var description: String { "timingUnavailable" }
     }
 
     /// THE single call site that puts a device's engine session onto a stream —
@@ -3458,16 +3501,109 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// truthful, intent-only rendering instead of the teal dot + sublabel lying about
     /// audio that never flowed. Runs on `stateQueue` to serialize against the same
     /// `.routedApps` bookkeeping `handleDestinationSetsChanged` mutates.
-    private func handleBindFailure(outputID: OutputID, stream: UInt32, op: String, error: Error) {
+    /// `clearBinding` additionally drops the device's recorded `streamBindings`
+    /// slot — used ONLY for the PTP-gate refusal, where no engine op ran at
+    /// all: clearing it makes the device eligible for the clock-recovery
+    /// replay and `addOrUpdate`'s discovery re-drive (both key on
+    /// `streamBindings[id] == nil`). An engine-op failure keeps the slot
+    /// (default `false`), preserving the existing "next topology change
+    /// re-binds idempotently" best-effort semantics.
+    private func handleBindFailure(
+        outputID: OutputID, stream: UInt32, op: String, error: Error, clearBinding: Bool = false
+    ) {
         stateQueue.sync {
             guard let deviceID = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
             Telemetry.log(.airplay, "bind_failed", [
                 "device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)",
             ])
+            if clearBinding { self.streamBindings.removeValue(forKey: deviceID) }
             guard self.routedAppNames[deviceID] != nil else { return }
             self.routedAppNames.removeValue(forKey: deviceID)
             self.emit(.routedApps(deviceID: deviceID, appNames: []))
         }
+    }
+
+    // MARK: Connect-time PTP takeover gate (T4+T5, PLAN-AIRPLAY-COEXISTENCE.md)
+
+    /// The one takeover sequence EVERY session-establishing engine op runs
+    /// behind — whole-system (`convergeDevice`) and per-app (`performBindOp`,
+    /// `performRebindRecovery`) alike. In order:
+    ///
+    ///  1. T5 switch-away: if the Mac's OWN default output is an AirPlay
+    ///     receiver, macOS is holding UDP 319/320 and will neither share them
+    ///     nor signal a yield (both measured — the plan's "Known asymmetry").
+    ///     It DOES release them ~1-3 s after the default output is switched
+    ///     away (G1), so the switch IS the takeover and must precede T4's
+    ///     wait — that wait is what races macOS's teardown while the helper
+    ///     retries the bind. The routing click is the consent (locked
+    ///     decision 2): no dialog. Inert unless the composition root opted in.
+    ///  2. T6 strip: `willWaitForClock` is peeked BEFORE `activate` so
+    ///     "taking over" only ever shows when a bounded wait genuinely
+    ///     starts — never for the (most common) unapproved-helper case, which
+    ///     resolves `activate` instantly with no suspension in between.
+    ///  3. T4 activation: wake the on-demand helper and wait, bounded, for
+    ///     its clock — never at `engine.start()` (Q1=B: woken only by an
+    ///     actual routing action, never at launch).
+    ///
+    /// Returns whether the clock is ready; the caller decides what its own
+    /// failure means (whole-system: park + `.timingUnavailable`; per-app:
+    /// walk the binding back so a later recovery re-binds).
+    ///
+    /// This gate originally ran inline in `convergeDevice` ONLY, which made a
+    /// per-app redirect ORDER-DEPENDENT: a redirect applied before any
+    /// Selected Devices connect (redirect-first, or right after launch) bound
+    /// its stream to a clockless receiver — session accepted, audio silent —
+    /// while select-then-redirect happened to work because the select had
+    /// already woken the helper. Funneling every `addOutput` through here is
+    /// what makes the redirect setup order irrelevant. Cheap once the clock
+    /// is up: `activate` short-circuits on its first probe.
+    ///
+    /// On the not-ready → ready EDGE it also replays the cached per-app
+    /// topology (``replayPerAppBindingsAfterClockRecovery``), so a redirect
+    /// that was refused clockless re-binds by itself the moment a later
+    /// connect wins the ports — no user re-pick.
+    private func ensurePTPTakeover(telemetryDeviceID: String) async -> Bool {
+        if let defaultOutputSwitcher {
+            let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
+            if takeover != .notAirPlay {
+                Telemetry.log(.airplay, "takeover_switch_away", [
+                    "device": telemetryDeviceID, "outcome": "\(takeover)",
+                ])
+            }
+        }
+        if ptpHelperActivator.willWaitForClock {
+            stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+        }
+        let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
+        let ready = (outcome == .ready)
+        let becameAvailable: Bool = stateQueue.sync {
+            let was = self.ptpClockAvailable
+            self.ptpClockAvailable = ready
+            self.setTakeoverStatus(TakeoverStatus.resolved(from: outcome))
+            return ready && !was
+        }
+        if becameAvailable { replayPerAppBindingsAfterClockRecovery() }
+        return ready
+    }
+
+    /// Re-run the cached per-app binding pass after the clock came back (the
+    /// not-ready → ready edge above). A device whose bind was refused while
+    /// clockless had its `streamBindings` slot cleared
+    /// (`handleBindFailure(clearBinding: true)`), so the topology diff
+    /// re-issues exactly those `.bind` ops; devices already bound are
+    /// untouched (same stream ⇒ no op). Guarded on there being something to
+    /// re-bind, so an ordinary ready connect never churns the mixer path.
+    /// Mirrors `addOrUpdate`'s discovery-time re-drive of the same pass.
+    private func replayPerAppBindingsAfterClockRecovery() {
+        let sets: [AppRouteMixer.DestinationSet] = stateQueue.sync {
+            guard self.lastDestinationSets.contains(where: { set in
+                set.deviceIDs.contains { self.outputIDs[$0] != nil && self.streamBindings[$0] == nil }
+            }) else { return [] }
+            return self.lastDestinationSets
+        }
+        guard !sets.isEmpty else { return }
+        Telemetry.log(.airplay, "app_route_rebind_on_clock_recovery", [:])
+        handleDestinationSetsChanged(sets)
     }
 
     // MARK: Per-device serial converge (best-effort, D4; coalesced, root cause 1)
@@ -3559,50 +3695,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         stateQueue.sync { self.fedDescriptors[id] = descriptor }
                     }
 
-                    // T5 (PLAN-AIRPLAY-COEXISTENCE.md): if the Mac's OWN default
-                    // output is an AirPlay receiver, macOS is holding UDP
-                    // 319/320 and will neither share them nor signal a yield
-                    // (both measured — see the plan's "Known asymmetry"). It
-                    // DOES release them ~1-3 s after its default output is
-                    // switched away (G1), so moving the default output to the
-                    // built-in speakers IS the takeover, and it must happen
-                    // BEFORE T4's bounded wait below — that wait is what races
-                    // macOS's teardown while the helper retries the bind. The
-                    // click is the consent (locked decision 2): no dialog.
-                    // Inert unless the composition root opted in.
-                    if let defaultOutputSwitcher {
-                        let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
-                        if takeover != .notAirPlay {
-                            Telemetry.log(.airplay, "takeover_switch_away", [
-                                "device": id, "outcome": "\(takeover)",
-                            ])
-                        }
-                    }
-
-                    // T4 (PLAN-AIRPLAY-COEXISTENCE.md): wake the on-demand PTP
-                    // helper and wait, bounded, for its clock HERE — immediately
-                    // before addOutput, never before engine.start() (Q1=B locks
-                    // that the helper is woken ONLY by an actual speaker click,
-                    // never at launch). A PTP-only receiver (Sonos/HomePod)
-                    // accepts the session but plays silence with no clock, so
-                    // failing the connect now beats a "connected" row that never
-                    // makes a sound.
-                    //
-                    // T6 (the takeover status strip): peek `willWaitForClock`
-                    // BEFORE calling `activate` so "taking over" only ever shows
-                    // when a bounded wait genuinely starts — never for the
-                    // (most common) unapproved-helper case, which resolves
-                    // `activate` instantly below with no suspension in between.
-                    if ptpHelperActivator.willWaitForClock {
-                        stateQueue.sync { self.setTakeoverStatus(.takingOver) }
-                    }
-                    let ptpOutcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
-                    let ptpReady = (ptpOutcome == .ready)
-                    stateQueue.sync {
-                        self.ptpClockAvailable = ptpReady
-                        self.setTakeoverStatus(TakeoverStatus.resolved(from: ptpOutcome))
-                    }
-                    guard ptpReady else {
+                    // T5+T4 takeover gate (PLAN-AIRPLAY-COEXISTENCE.md), shared
+                    // with the per-app bind paths — see ``ensurePTPTakeover``.
+                    // A PTP-only receiver (Sonos/HomePod) accepts the session
+                    // but plays silence with no clock, so failing the connect
+                    // now beats a "connected" row that never makes a sound.
+                    guard await ensurePTPTakeover(telemetryDeviceID: id) else {
                         stateQueue.sync {
                             self.added.remove(id)
                             self.failedGate.insert(id)
@@ -6012,13 +6110,6 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Default no-op so a capture-gate-only fake compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
-
-    /// Declare whether ``LocalPlaybackEngine`` is rendering any `.currentDevice`
-    /// route in this process (`getpid()` when it is, `nil` when it isn't), so the
-    /// whole-system tap excludes our own render. Default no-op so a fake that
-    /// doesn't exercise local playback compiles unchanged;
-    /// ``NativeCaptureCoordinator`` provides the real one.
-    func setLocalPlaybackRenderPID(_ pid: pid_t?)
 }
 
 extension CaptureControlling {
@@ -6039,9 +6130,6 @@ extension CaptureControlling {
     /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
     /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
-    /// Default no-op so a fake that doesn't exercise local playback compiles
-    /// unchanged; ``NativeCaptureCoordinator`` provides the real one.
-    func setLocalPlaybackRenderPID(_ pid: pid_t?) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}

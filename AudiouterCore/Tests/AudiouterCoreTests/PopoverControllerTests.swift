@@ -1383,6 +1383,39 @@ import AppKit
         #expect(titles.contains("Office"), "an AirPlay-2 device is still offered normally")
     }
 
+    /// One role per speaker: a device currently in Main Out (Selected Devices,
+    /// or the active group) is carrying the whole-system mix, so it must not be
+    /// offered as a per-app redirect target — a receiver holds ONE AirPlay
+    /// session. It reappears once it leaves Main Out. This is the "you can't
+    /// build the overlap from the redirect side" half; the reverse (selecting a
+    /// speaker that already has a redirect) is `AppRoutingController.clearRoutes`.
+    @Test func appRowDestinationMenuExcludesMainOutMembers() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, controller, backend) = try await makePopover(
+            appRouting: appRouting, runningAppsProvider: routedApps)
+
+        // Baseline: "Office" is offered while it's not in Main Out.
+        #expect(try #require(popover.test_appRowDestinationTitles(for: "com.example.music")).contains("Office"))
+
+        // Select "Office" into Main Out (Selected Devices target) → it's carrying
+        // the mix and drops out of the redirect menu.
+        controller.setMainOut(.selectedDevices)
+        _ = controller.setDeviceSelected("office", true)
+        popover.update(devices: backend.devices)
+        let titlesSelected = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(!titlesSelected.contains("Office"),
+                "a Main Out member must not be offered as a redirect target (one role per speaker)")
+        #expect(titlesSelected.contains("Living Room TV"),
+                "other, unselected AirPlay devices are still offered")
+
+        // Deselect it → it's a valid redirect target again.
+        _ = controller.setDeviceSelected("office", false)
+        popover.update(devices: backend.devices)
+        #expect(try #require(popover.test_appRowDestinationTitles(for: "com.example.music")).contains("Office"),
+                "leaving Main Out makes the speaker offerable again")
+    }
+
     /// Selecting an AirPlay destination on a row calls through to
     /// `AppRoutingController.setDestination` and repaints: the route is redirected,
     /// the row's selected id updates, and the slider un-dims.

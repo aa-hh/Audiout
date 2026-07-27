@@ -80,7 +80,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   app, and Core Audio reports no bundle id for those children. Shortcutting to
   single-pid resolution misses the real audio source — the routed app becomes
   inaudible and its audio leaks into the system mix. Both coordinators inject
-  `AudioProcessResolver` for this reason.
+  `AudioProcessResolver` for this reason. **Its four attribution layers are an
+  ANY-of union, never first-non-nil-wins:** a helper reporting a bundle id of its
+  OWN (`com.spotify.client.helper`) and reparented to launchd (`ppid == 1`) —
+  proven live 2026-07-26 — defeats both the own-bundle and parent-walk layers, so
+  the `responsibility_get_pid_responsible_for_pid` and bundle-path layers must
+  still be consulted. Collapsing them back to a single "effective bundle id"
+  reopens the exception leak.
+- **T2: resolving a bundle ID also emits a `Telemetry` line naming which
+  attribution layer matched each resolved pid** — `AudioProcessResolver
+  .resolveWithAttribution(bundleID:)` is the diagnostic companion to `resolve
+  (bundleID:)` (same ANY-of matches, each tagged with its ``AttributionLayer``:
+  `own`/`responsible`/`bundlePath`/`parentWalk`). `NativeCaptureCoordinator`
+  logs `.captureWS`/`exclusion_resolved` (bundleID -> `[pid:layer,...]`, plus a
+  `zeroBundles` field) at both its resolve choke points
+  (`resolveExcludedProcessObjectIDs`/`rebuildIfExclusionObjectsChanged`);
+  `PerAppCaptureCoordinator` logs `.capturePA`/`process_resolved` the same way
+  in `beginStart`/`handleDeviceChange`. Exists because the 2026-07-26 catch-all
+  leak could only be diagnosed by manually correlating `ps` against telemetry
+  that showed exclusion INTENT (`exclusion_changed`'s bundle-id list) but never
+  which concrete processes a bundle id resolved to, nor how — a bundle
+  resolving to ZERO processes is exactly that leak's signature and is now
+  visible in the log alone, no repro needed.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -197,11 +218,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply. A per-app `.device` route follows
-  the SAME discipline at launch: `AppRoutingController.clearAllDeviceRoutes()`
-  reverts every `.device` route to `.noRedirect` once, called before the
-  initial route push, so a redirect never silently survives a full restart
-  regardless of how long its target was gone for.
+  Saved groups still persist and re-apply. A per-app redirect follows
+  the SAME discipline at launch: `AppRoutingController.clearAllRedirectsAtLaunch()`
+  reverts EVERY non-`.noRedirect` destination — `.currentDevice` picks included —
+  once, called before the initial route push, so a redirect never silently
+  survives a full restart regardless of how long its target was gone for.
 - **A per-app `.device` route survives its target going merely UNREACHABLE
   (`isAvailable == false`) — it does NOT survive the target DISAPPEARING
   entirely.** These are different signals and only the second resets the
@@ -249,8 +270,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   the route-table DIFF, so re-pushing an unchanged table starts nothing, and the
   indefinite retry is `.processNotYetAudible`-only. The auto-resume machinery
   that used to paper over both was DELETED (2026-07-25): the app never
-  auto-connects at launch and `AppRoutingController.clearAllDeviceRoutes()`
-  clears every `.device` route there, so a fresh launch after granting is the
+  auto-connects at launch and `AppRoutingController.clearAllRedirectsAtLaunch()`
+  clears every redirect there, so a fresh launch after granting is the
   supported — and only — recovery path. Do not reintroduce a mid-session
   resume without revisiting that decision.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
@@ -499,7 +520,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
-| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |

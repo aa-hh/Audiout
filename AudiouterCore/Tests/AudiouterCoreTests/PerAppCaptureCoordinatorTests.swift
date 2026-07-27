@@ -577,6 +577,77 @@ extension SerializedSharedState {
         routing.stop(bundleID: "com.example.music")
     }
 
+    // MARK: - Telemetry (T2): a resolve emits a capturePA/process_resolved line
+    // with each resolved pid's attribution layer — the per-app analog of
+    // NativeCaptureCoordinator's exclusion_resolved. Diagnostic gap this closes:
+    // before this, telemetry showed a route/exclusion CHANGE happened but never
+    // which concrete processes (or none) a bundle id actually resolved to.
+
+    @Test func startEmitsCapturePAProcessResolvedTelemetry() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        Telemetry._installTestSink(nil)
+
+        let resolvedLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"process_resolved\"") },
+            "expected a capturePA/process_resolved line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(resolvedLine.utf8)) as? [String: Any],
+            "not a JSON object: \(resolvedLine)")
+        #expect(obj["cat"] as? String == "capturePA")
+        #expect(obj["bundleID"] as? String == "com.example.music")
+        #expect(obj["processCount"] as? String == "1")
+        #expect(obj["processes"] as? String == "500:own")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    /// A bundle id that resolves to ZERO processes — the exact leak signature
+    /// this whole task exists to surface — must be reported explicitly, not
+    /// silently folded into `.processNotYetAudible` with no detail.
+    @Test func startWithUnresolvableBundleEmitsZeroProcessCountTelemetry() throws {
+        let tap = FakeProcessTap()
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: emptyResolver(),
+            muteBehavior: .mutedWhenTapped
+        )
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        coordinator.start(bundleID: "com.example.ghost")
+        waitFor {
+            if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.ghost") { return true }
+            return false
+        }
+
+        Telemetry._installTestSink(nil)
+
+        let resolvedLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"process_resolved\"") },
+            "expected a capturePA/process_resolved line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(resolvedLine.utf8)) as? [String: Any],
+            "not a JSON object: \(resolvedLine)")
+        #expect(obj["bundleID"] as? String == "com.example.ghost")
+        #expect(obj["processCount"] as? String == "0")
+    }
+
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
     // (.creatingTap) must be coalesced (Slot.pendingDeviceChange) and replayed once the
     // rebuild lands in .capturing, not dropped.

@@ -816,45 +816,47 @@ extension SerializedSharedState {
     /// device the whole-system tap taps. If our own process isn't excluded, the
     /// `.mutedWhenTapped` tap re-captures that render and MUTES it — the app went
     /// silent on the Mac's speakers and came out the AirPlay selection instead.
-    /// Same R2 self-exclude `setSyncedLocalSink` does, via the other render path.
-    @Test func localPlaybackRenderProcessIsExcludedSoItsOutputIsNotRecapturedAndMuted() {
+    ///
+    /// The guard that closes this is the UNCONDITIONAL self-exclude in the shared
+    /// resolve helper, so the whole `.currentDevice` lifecycle is covered without
+    /// anyone staging a render pid. This pins the two properties that fall out of
+    /// that and that a conditional, separately-staged render pid would break:
+    /// the exclusion survives the route going AWAY (nothing has to remember to
+    /// re-arm it), and arming a `.currentDevice` route costs the tap EXACTLY ONE
+    /// rebuild — a second staging call for our own pid would rebuild the tap a
+    /// second time against a byte-identical exclusion set, which on this code path
+    /// is an audible dropout for nothing.
+    @Test func currentDeviceRouteLifecycleKeepsOwnProcessExcludedWithOneRebuild() {
         let tap = FakeTap()
-        // 999 stands in for THIS process — the fake resolver keys pid == objectID.
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let routedProcess = RawAudioProcess(objectID: 111, pid: 111, bundleID: "com.app.a")
         let coordinator = makeCoordinator(
             tap: tap, sink: SpySink(), converter: FakeConverter(),
-            processResolver: singleProcessResolver(["com.app.a": 111, "com.audiouter.self": 999]))
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, routedProcess])))
 
         coordinator.start()
-        #expect(tap.excludedProcessObjectIDs == [], "nothing rendering locally yet")
+        #expect(tap.excludedProcessObjectIDs == [900],
+                "our own process is excluded from the first tap on, before anything routes")
         let createsBeforeLocal = tap.creates
 
-        // A `.currentDevice` route goes live.
-        coordinator.setLocalPlaybackRenderPID(999)
-
-        #expect(tap.creates > createsBeforeLocal, "the exclusion change recreates the capturing tap")
-        #expect(
-            tap.excludedProcessObjectIDs.contains(999),
-            "our own render process must be excluded, else the .mutedWhenTapped tap re-captures and mutes local playback")
-
-        // Re-passing the same pid must not churn the tap (the caller re-passes it
-        // on every route update).
-        let createsAfterLocal = tap.creates
-        coordinator.setLocalPlaybackRenderPID(999)
-        #expect(tap.creates == createsAfterLocal, "an unchanged pid must not rebuild the tap")
-
-        // It unions with — never replaces — the routed-app exclusions.
+        // A `.currentDevice` route goes live. `NativeBackend` unions those bundle
+        // ids into the exclusion set (they play via `localPlaybackEngine`, not the
+        // AirPlay mix) — one call, one rebuild.
         coordinator.updateRouting(
-            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))],
-            excludedBundleIDs: [])
-        #expect(
-            tap.excludedProcessObjectIDs == [111, 999],
-            "a routed app's exclusion and our own render exclusion must coexist")
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .currentDevice)],
+            excludedBundleIDs: ["com.app.a"])
 
-        // Last `.currentDevice` route goes away: our process re-enters the mix.
-        coordinator.setLocalPlaybackRenderPID(nil)
-        #expect(
-            !tap.excludedProcessObjectIDs.contains(999),
-            "with nothing rendering locally, our process must not stay excluded")
+        #expect(tap.creates == createsBeforeLocal + 1,
+                "arming a .currentDevice route must rebuild the tap exactly once")
+        #expect(tap.excludedProcessObjectIDs == [111, 900],
+                "the locally-rendered app AND our own render process must both be excluded")
+
+        // The route goes away. Our own process stays excluded regardless — the
+        // guard is unconditional, so nothing can strand the echo back on.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        #expect(tap.excludedProcessObjectIDs == [900],
+                "the app re-enters the system mix; our own process never does")
         coordinator.stop()
     }
 
@@ -1203,6 +1205,71 @@ extension SerializedSharedState {
         #expect(
             creatingToCapturing?.contains("\"format\":\"\(tap.format.sampleRate)/\(tap.format.channels)\"") ?? false,
             "the capturing transition must carry the tap format, got: \(creatingToCapturing ?? "nil")")
+
+        coordinator.stop()
+    }
+
+    /// The generalized echo guard (live find, 2026-07-26): the whole-system
+    /// tap's exclusion set must ALWAYS contain THIS process's own audio
+    /// process objects — `LocalPlaybackEngine` renders `.currentDevice` apps
+    /// from this process onto the very device the tap captures, so without the
+    /// self-exclude a "play on this Mac" exception echoed into the AirPlay mix
+    /// (Spotify → Mac speakers audibly replayed on the selected Sonos). The
+    /// enumerator here lists a process at OUR pid alongside an unrelated one;
+    /// only ours must be excluded, with no excluded bundles configured at all.
+    @Test func exclusionAlwaysContainsOwnProcessObjects() {
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let otherProcess = RawAudioProcess(objectID: 901, pid: 4242, bundleID: "com.other.app")
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, otherProcess])))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        coordinator.start()
+
+        #expect(tap.excludedProcessObjectIDs.contains(900),
+                "our own process object must always be excluded from the whole-system tap (echo guard)")
+        #expect(!tap.excludedProcessObjectIDs.contains(901),
+                "an unrelated process must not be swept up by the self-exclude")
+
+        coordinator.stop()
+    }
+
+    /// T2: every exclusion resolve emits `captureWS`/`exclusion_resolved` with
+    /// each resolved bundle's pids + attribution layer, AND calls out a bundle
+    /// that resolved to ZERO processes — the diagnostic gap the 2026-07-26
+    /// catch-all-attribution live leak exposed: `exclusion_changed` alone shows
+    /// only excluded bundle-id INTENT, never which concrete processes (or none)
+    /// a bundle id actually resolved to.
+    @Test func startEmitsExclusionResolvedTelemetryWithLayerDetailAndZeroBundles() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let coordinator = makeCoordinator(
+            tap: FakeTap(), sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.app.a": 111]))
+
+        coordinator.updateRouting(
+            appRoutes: [],
+            excludedBundleIDs: ["com.app.a", "com.app.missing"])
+        coordinator.start()
+
+        Telemetry._installTestSink(nil)
+
+        let lines = capturedLines.snapshot
+        let resolved = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"exclusion_resolved\"")
+        }
+        #expect(resolved != nil, "expected a captureWS/exclusion_resolved line, got: \(lines)")
+        #expect(
+            resolved?.contains("com.app.a=[111:own]") ?? false,
+            "expected the resolved pid + attribution layer, got: \(resolved ?? "nil")")
+        #expect(
+            resolved?.contains("\"zeroBundles\":\"com.app.missing\"") ?? false,
+            "expected the zero-resolution bundle called out explicitly, got: \(resolved ?? "nil")")
 
         coordinator.stop()
     }

@@ -165,3 +165,41 @@ Hot file: `PopoverController.swift` (T-3, T-5, T-7, T-8, T-10) — serialize.
 From `AudiouterCore/`: `swift build`, `swift test`,
 `swift run popover-harness`, `swift run popover-snapshot` (PNGs must show no
 scrollbar sliver). Live look: `AIRPLAY_DEBUG_POPOVER_PNG` hook.
+
+## G. One-role-per-speaker (2026-07-26)
+
+An AirPlay receiver holds exactly ONE session, so a speaker can carry the
+whole-system "Main Out" mix OR one app's redirect, never both — a second engine
+bind to a live receiver is a silent no-op. Before this, the two roles could
+overlap in either order, and each overlap both broke audio and lied in the UI:
+selecting a speaker that already had a redirect left the app silent-everywhere
+while the row claimed it was streaming; redirecting to a selected speaker left
+the speaker playing only that app while the row showed it as a connected main
+device; and undoing either tore down the wrong session.
+
+**SHIPPED — prevent the overlap ("selection is senior"), branch
+`claude/audio-routing-exception-bug-1ef721`:**
+- The redirect picker never offers a Main Out member as a target
+  (`PopoverController.appDestinations`, filtered live — a Main-Out-membership
+  diff in `update(devices:)` forces the app rows to repaint so the menu can't go
+  stale). Same idiom as the existing AP1-not-offered filter.
+- Selecting a speaker into Main Out — or activating a group containing it —
+  clears any redirect still pointed at it back to `.noRedirect`
+  (`GroupController.onMainOutMembersChanged` → `AppRoutingController.clearRoutes(toDevices:)`).
+  The app then follows the main mix, so it still plays on that speaker, just as
+  part of Main Out rather than a private stream. Mirrors the involuntary
+  `handleDeviceDisappeared` reset.
+- Accepted limitation: you cannot have a speaker in the Main Out group AND
+  carrying an app exception at the same time.
+
+**ROADMAP — true both-at-once (option 3, NOT built).** Let a speaker play the
+Main Out mix *plus* a redirected app at its own volume — likely what a user
+actually wants when they set this up ("everything on the group, but pin Spotify
+louder on the kitchen speaker"). Requires a per-speaker combined stream in the
+mixer, new per-speaker volume semantics, and it runs straight into the existing
+**R3 mixing-quality follow-up** (`sameSpeakerQualitySubtitle`, "Already in use —
+may reduce quality"): two independently-captured streams re-gridded onto one
+receiver warble, because `AppRouteMixer`'s multi-contributor path uses a
+wall-clock frame index with no fractional interpolation. Plan option 3 together
+with that resampling fix (shared capture clock), not before — they are the same
+piece of engine work.

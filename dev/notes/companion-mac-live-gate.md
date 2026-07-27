@@ -14,18 +14,34 @@ approvals file. No phone required — websocat stands in for one throughout.*
 
 ## 1. Build and verify binary identity
 
-- [ ] **Build the app**
+- [ ] **Build the app — FROM THE WORKTREE, not the main checkout.** The primary
+  checkout sits on `main`, which has no companion code at all; building there
+  produces an app with no Bonjour service and no checkbox, and every later step
+  fails for the wrong reason.
   ```bash
-  cd /Users/alechenderson/Projects/AirPlay\ Controller
-  scripts/make-app.sh build/
+  cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
+  ./scripts/make-app.sh
   ```
+  Every command below assumes this directory.
 
-- [ ] **Verify which binary is running** (multiple Audiouter.app copies exist on this Mac;
-  the strings trick proves you're testing the right one)
+- [ ] **Verify the build actually contains the companion code.** Several
+  Audiouter.app copies exist on this Mac and they share a bundle id, so proving
+  identity matters. Check for companion symbols — NOT a version string, which
+  lives in `Info.plist` and never appears in the executable:
   ```bash
-  strings build/Audiouter.app/Contents/MacOS/AudiouterApp | grep -i "Audiouter 0.1.0" | head -1
+  strings build/Audiouter.app/Contents/MacOS/AudiouterApp | grep -c "_audiouter._tcp"
   ```
-  Expected: one line with the version marker. Note the binary location for the next step.
+  Expected: `1` or more. If it prints `0`, you built the wrong tree — go back to
+  the previous step. (Belt and braces: `strings … | grep -c CompanionServer`
+  should be non-zero too.)
+
+- [ ] **Confirm it is Developer-ID signed** — the firewall check in step 5 is only
+  meaningful on a signed build.
+  ```bash
+  codesign -dv build/Audiouter.app 2>&1 | grep -c "Developer ID Application"
+  ```
+  Expected: `1`. An ad-hoc build will prompt for firewall access regardless and
+  tells you nothing about what users would see.
 
 ---
 
@@ -209,7 +225,7 @@ CompanionSnapshotBuilder logs.
 
 - [ ] **Run the full test suite**
   ```bash
-  cd /Users/alechenderson/Projects/AirPlay\ Controller
+  cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
   scripts/run-tests.sh
   ```
   Expected: all tests pass, including CompanionMessageTests, CompanionSnapshotBuilderTests,

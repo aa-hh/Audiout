@@ -8,7 +8,7 @@ checked. Two builds run here: mock (fastest discovery validation) and native
 *Updated 2026-07-27 for the review-fix wave and the per-phone approval gate (D2 REVISED):
 step 4 now checks the checkbox cannot lie, step 6 needs a `clientID` and expects an
 approval alert, step 6b covers approval memory / denial / revoke, and step 8 checks the
-approvals file. No phone required — websocat stands in for one throughout.*
+approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) stands in for one throughout.*
 
 ---
 
@@ -128,43 +128,37 @@ Firewall prompt means the code is not shipping.
 
 ---
 
-## 6. Protocol poke — websocat or fallback
+## 6. Protocol poke — no websocat needed
 
 Companion server uses Bonjour + NWListener + WebSocket (JSON messages). Verify a poke
-reaches it and gets a snapshot response.
+reaches it, triggers the approval prompt, and returns a snapshot.
 
-**If websocat is installed:**
+**`websocat` is NOT required and is not installed here.** `dns-sd -B` only lists the
+service *name*, never the port — and `nc`/`curl` can't speak the WebSocket handshake.
+Use the dependency-free Python client checked in at
+`dev/notes/wspoke.py` (pure stdlib, does the WS upgrade + framing itself). *(Verified
+live 2026-07-27: this is exactly how the gate was passed.)*
 
-- [ ] **Keep Audiouter open** (Settings › General toggle ON, mock backend is fine)
-  and note the advertised server name from `dns-sd -B _audiouter._tcp` (usually the
-  host name, e.g., "Alec's Mac").
+- [ ] **Keep Audiouter open**, companion toggle ON.
 
-- [ ] **Discover the advertised WebSocket port** and connect
+- [ ] **Resolve the actual companion port** (browse gives the name, `-L` resolves the
+  port — substitute your advertised name from `dns-sd -B _audiouter._tcp`):
   ```bash
-  websocat ws://localhost:PORT
-  ```
-  (Replace PORT with the ephemeral port shown by `dns-sd`. The TXT record carries it.)
-
-- [ ] **Send the hello handshake**. Paste this exactly (the `clientID` must be a real
-  UUID — any one you invent is fine, but reuse the SAME one later in step 6b):
-  ```json
-  {"v": 1, "type": "hello", "payload": {"clientID": "11111111-2222-3333-4444-555555555555", "clientName": "TestClient", "protoVersion": 1}}
-  ```
-  Expected FIRST response: `"type":"awaitingApproval"` — because this identity is
-  unknown, the Mac is now prompting you. **A native alert should appear on the Mac**
-  naming "TestClient". Click **Allow**. Expected SECOND response: a frame starting with
-  `"type":"welcome"` containing a `snapshot` with devices, groups, settings, etc.
-
-  If the alert never appears but you get a `welcome` immediately, the approval gate is
-  not engaged — **stop and report**, that's the whole privacy feature bypassed.
-
-- [ ] **Trigger a state change in the popover** (e.g., toggle a speaker selected) and
-  **expect a state frame** from the server immediately:
-  ```json
-  {"v": 1, "type": "state", "payload": {"snapshot": {...}}}
+  dns-sd -L "$(scutil --get ComputerName)" _audiouter._tcp local
+  # → "…can be reached at <host>.local.:PORT"  — note PORT, then Ctrl+C
   ```
 
-- [ ] **Close websocat** (Ctrl+C).
+- [ ] **Send a hello as an UNKNOWN phone** (any fixed UUID; reuse it in 6b):
+  ```bash
+  python3 dev/notes/wspoke.py <PORT> AAAA1111-BBBB-2222-CCCC-333344445555
+  ```
+  Expected: `HANDSHAKE: … 101 Switching Protocols`, then `<- AWAITING APPROVAL`, and
+  **a native alert appears on the Mac** naming the client. Click **Allow**. (The script
+  waits 45 s; if you don't click in time it just exits — the approval is still saved,
+  and 6b's re-poke will show the welcome.)
+
+  If a `welcome` arrives with NO alert, the approval gate is bypassed — **stop and
+  report**, that's the whole privacy feature defeated.
 
 ### 6b. Approval memory, denial, and revoke
 
@@ -174,7 +168,7 @@ reaches it and gets a snapshot response.
 - [ ] **Settings › General now lists it.** A "Remembered iPhones" list should show
   "TestClient — Allowed" under the companion checkbox.
 
-- [ ] **Revoke it** (minus button on that row). Expected: the live websocat connection
+- [ ] **Revoke it** (minus button on that row). Expected: the live connection
   is dropped, and the row disappears.
 
 - [ ] **Connect with a DIFFERENT clientID** (change one digit) and click **Don't Allow**
@@ -188,15 +182,13 @@ reaches it and gets a snapshot response.
   client receives `goodbye` with reason `disabled` before the socket closes (not a bare
   connection drop — the phone uses this to settle quietly instead of redialling).
 
-**If websocat is not installed:**
-
-- [ ] **Run the AudiouterProtocol test suite** instead (proves wire format round-trips)
-  ```bash
-  cd AudiouterProtocol && swift test
-  ```
-  Expected: all CompanionMessageTests pass (hello, welcome, awaitingApproval, command,
-  state, goodbye round-trips + all 19 command cases). Note this does NOT exercise the
-  approval alert — that part of the gate is skipped, so say so when reporting.
+**Supplement (does NOT replace the live poke above):** the AudiouterProtocol suite
+proves the wire format round-trips, but exercises no socket and no approval alert:
+```bash
+cd AudiouterProtocol && swift test
+```
+Expected: all CompanionMessageTests pass (hello, welcome, awaitingApproval, command,
+state, goodbye + every command case).
 
 ---
 
@@ -217,7 +209,7 @@ CompanionSnapshotBuilder logs.
   - `settings.connectVolume` and `startBufferMs` (should match Settings › Audio values)
 
 - [ ] **Change one volume in the popover** (e.g., adjust a device slider) and **confirm
-  the snapshot reflects it** (via websocat state frame or logs; if using test suite,
+  the snapshot reflects it** (re-poke with wspoke.py, or watch the log; if using test suite,
   this was covered).
 
 ---
@@ -255,7 +247,7 @@ CompanionSnapshotBuilder logs.
 - [ ] **Report results to the session** before any merge attempt. Main is merge-only;
   no merge without Alec's explicit go-ahead. Include:
   - R4 firewall result (expected: no per-launch prompt on Developer-ID build)
-  - Any websocat discoveries or protocol anomalies
+  - Any protocol anomalies from the poke
   - Test suite pass/fail
   - Binary identity confirmed (strings check)
 

@@ -302,24 +302,39 @@ extension SerializedSharedState {
     // T5's aggregate wiring exercises (no discovery events, no engine ops).
 
     private final class MinimalEngine: EngineControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _addedOutputs: [OutputID] = []
+        private var _removedOutputs: [OutputID] = []
+
         var dacpID: UInt64 { 0 }
         func start() async throws {}
         func stop() async {}
         @discardableResult
         func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID { descriptor.parsedID ?? OutputID(rawValue: 0) }
         func removeDiscovery(_ descriptor: DeviceDescriptor) async {}
-        func addOutput(_ id: OutputID) async throws {}
-        func removeOutput(_ id: OutputID) async throws {}
+        func addOutput(_ id: OutputID) async throws { lock.lock(); _addedOutputs.append(id); lock.unlock() }
+        // T5: per-app stream bind overload (see the protocol default's doc) —
+        // recorded into the SAME `addedOutputs` list; no test in this file
+        // exercises per-app routing, so one list is enough.
+        func addOutput(_ id: OutputID, streamId: UInt32) async throws { lock.lock(); _addedOutputs.append(id); lock.unlock() }
+        func removeOutput(_ id: OutputID) async throws { lock.lock(); _removedOutputs.append(id); lock.unlock() }
         func setVolume(_ id: OutputID, _ volume: Double) async throws {}
         func setStartBufferMs(_ ms: Int) async {}
         func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { AsyncStream { _ in } }
         func makeRemoteEventStream() -> AsyncStream<RemoteEvent> { AsyncStream { _ in } }
+
+        // Thread-safe snapshots for assertions (T5).
+        var addedOutputs: [OutputID] { lock.lock(); defer { lock.unlock() }; return _addedOutputs }
+        var removedOutputs: [OutputID] { lock.lock(); defer { lock.unlock() }; return _removedOutputs }
     }
 
     private final class MinimalDiscovery: DiscoverySource, @unchecked Sendable {
         var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
         func start() {}
         func stop() {}
+        /// T5: feed a `DiscoveryEvent` synchronously, mirroring
+        /// `NativeBackendTests.FakeDiscovery.fire(_:)`.
+        func fire(_ event: DiscoveryEvent) { onEvent?(event) }
     }
 
     private final class MinimalDACPEndpoint: DACPEndpoint, @unchecked Sendable {
@@ -425,6 +440,14 @@ extension SerializedSharedState {
                 group.addTask { _ = await task.value }
                 group.addTask { try await Task.sleep(for: timeout) }
                 try await group.next()
+                // Cancel the CONSUMER before the group scope exits. `await
+                // task.value` does not respond to the group's own cancelAll — the
+                // group exit awaits that child, which awaits `task`, and the
+                // `defer { task.cancel() }` above only runs AFTER the group
+                // returns. Without this line, any predicate that never fires
+                // turned the 2s timeout into a permanent deadlock (found the hard
+                // way: it hid a real production bug behind an infinite hang).
+                task.cancel()
                 group.cancelAll()
             }
         }
@@ -614,6 +637,463 @@ extension SerializedSharedState {
             systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true)
         }
         #expect(secondEvents.isEmpty, "a repeat of the current routing-blocked state must never re-emit")
+    }
+
+    // MARK: - T5: Seamless handoff release/resume, end to end through a real NativeBackend
+
+    /// Records outbound PTP-release calls (D8, `NativeBackend.releaseForHandoff`)
+    /// so a test can assert exactly one per handoff release without touching a
+    /// real Mach service.
+    private final class FakeReleaser: PTPHelperReleasing, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        func release() { lock.lock(); _calls += 1; lock.unlock() }
+        var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+    }
+
+    /// Scriptable `LogStreamSpawning` double that captures whatever REAL
+    /// `AirPlayHandoffWatcher` instance is currently wired to it (via
+    /// `start(onLine:onTermination:)`) so a test can push a canned NDJSON line
+    /// straight through the production `BlockedAirPlayAttempt.matches` +
+    /// rate-limit logic — end to end, never a bypass of the watcher itself.
+    /// Shared across every `AirPlayHandoffWatcher` a test's backend creates
+    /// (`reconcileHandoffWatcherLocked` makes a fresh one per arm/resume
+    /// cycle), so `startCount`/`stopCount` double as the watcher's own
+    /// lifecycle trace (T5 case 9).
+    private final class FakeLogStream: LogStreamSpawning, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onLine: (@Sendable (String) -> Void)?
+        private var _startCount = 0
+        private var _stopCount = 0
+        private var _isRunning = false
+
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {
+            lock.lock(); _onLine = onLine; _startCount += 1; _isRunning = true; lock.unlock()
+        }
+        func stop() { lock.lock(); _isRunning = false; _stopCount += 1; lock.unlock() }
+        var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return _isRunning }
+
+        var startCount: Int { lock.lock(); defer { lock.unlock() }; return _startCount }
+        var stopCount: Int { lock.lock(); defer { lock.unlock() }; return _stopCount }
+
+        /// Push a canned NDJSON line to whichever watcher is currently attached.
+        /// A no-op (matching the real watcher's own silence) if nothing has
+        /// ever called `start`.
+        func pushLine(_ line: String) {
+            let handler = { lock.lock(); defer { lock.unlock() }; return _onLine }()
+            handler?(line)
+        }
+    }
+
+    /// Thread-safe accumulator for `Telemetry._installTestSink(_:)` lines.
+    private final class LinesBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ s: String) { lock.lock(); lines.append(s); lock.unlock() }
+        func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
+    }
+
+    /// The verified sample line `AirPlayHandoffWatcher`'s `BlockedAirPlayAttempt
+    /// .matches` requires (subsystem `com.apple.airplay`, category
+    /// `APSNetworkClockPTP`, `kIOReturnExclusiveAccess` in the message) — the
+    /// same canned line `AirPlayHandoffWatcherTests` uses.
+    private static let blockedAttemptLine =
+        #"{"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"[0xB198] Failed to add peer: -536870203/0xE00002C5 kIOReturnExclusiveAccess"}"#
+
+    /// A discovered AP2 receiver fixture — mirrors `NativeBackendTests.ap2Device()`.
+    private func handoffDevice(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move") -> DiscoveredDevice {
+        let txt = ["deviceid": id, "model": "S13", "features": "0x445F8A00,0x1C340"]
+        let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+        let desc = DeviceDescriptor(name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
+        return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
+    }
+
+    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    /// Extends `makeBackend` with the handoff-specific collaborators (T5): a
+    /// real engine/discovery pair (so a device can genuinely converge into
+    /// `added` — the release gate's usual arm), a `FakeReleaser`, and a
+    /// scriptable `FakeLogStream` wired into a REAL `AirPlayHandoffWatcher` via
+    /// `handoffWatcherFactory`. Kept as a SEPARATE helper (not a widened
+    /// `makeBackend` return tuple) so the four pre-existing wiring tests above
+    /// stay byte-for-byte unchanged.
+    private func makeHandoffBackend(
+        aggregateControl: FakeAggregateControl,
+        currentDefaultOutputUIDBox: LockedBox<String?>,
+        releaser: FakeReleaser = FakeReleaser(),
+        logStream: FakeLogStream = FakeLogStream()
+    ) -> (backend: NativeBackend, systemVolume: FakeSystemVolume, engine: MinimalEngine, discovery: MinimalDiscovery) {
+        let systemVolume = FakeSystemVolume()
+        let engine = MinimalEngine()
+        let discovery = MinimalDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine,
+            discoverySource: discovery,
+            dacpEndpoint: MinimalDACPEndpoint(),
+            systemVolume: systemVolume,
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            aggregateControl: aggregateControl,
+            currentDefaultOutputUID: { currentDefaultOutputUIDBox.get() },
+            ptpHelperReleaser: releaser,
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: logStream, onBlockedAttempt: onBlockedAttempt)
+            })
+        return (backend, systemVolume, engine, discovery)
+    }
+
+    /// Discover `device`, select it via `setOutputSet`, and wait until it has
+    /// GENUINELY converged (`Device.isSelected == true` — house rule: means
+    /// "currently in the backend's output set", i.e. `added` is non-empty).
+    /// This is the release gate's usual arm (`!added.isEmpty`), reached through
+    /// the real discovery → converge path rather than reaching into private
+    /// state. Every caller's `FakeAggregateControl` resolves the product UID
+    /// with `setDefaultSucceeds` true (the default), so this also performs a
+    /// SUCCESSFUL aggregate takeover (`aggregateDefaultActive` becomes true) —
+    /// the deselect trigger's extra guard.
+    private func armRouting(
+        backend: NativeBackend, engine: MinimalEngine, discovery: MinimalDiscovery, device: DiscoveredDevice
+    ) async {
+        discovery.fire(.appeared(device))
+        await pollUntil { backend.devices.contains { $0.id == device.id } }
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+    }
+
+    /// CASE 1 — deselect releases. Gate arm: `added` (the device genuinely
+    /// converged via `armRouting`). Trigger: `releaseForHandoff`'s
+    /// `.userDeselected` path (NativeBackend.swift ~1310-1313), which requires
+    /// BOTH `!expectedSelected.isEmpty` and `aggregateDefaultActive` — satisfied
+    /// here by a SUCCESSFUL takeover (`FakeAggregateControl`'s default
+    /// `setDefaultSucceeds: true`).
+    @Test func deselectReleasesAfterSuccessfulTakeover() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+        #expect(control.setDefaultCalls == [501], "activation must have taken over the default")
+
+        // Genuine off-switch while still actively routing.
+        box.set("com.airpods.whatever")
+        let events = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+
+        #expect(events.contains { self.isRoutingBlocked($0, true) }, ".userDeselected must still flip the warning on")
+        await pollUntil { releaser.calls == 1 }
+        #expect(releaser.calls == 1, "a genuine off-switch while routing must release the PTP ports exactly once")
+        #expect(!engine.removedOutputs.isEmpty, "the converged session must be torn down by the release")
+        #expect(backend.test_expectedSelected.contains(device.id),
+                "selection INTENT survives the release — it's what lets a resume restore it")
+    }
+
+    /// CASE 2 — `.deviceVanished` (a `nil` default-UID read) must NOT release:
+    /// `classifyOffSwitch`'s nil guard classifies this distinctly from
+    /// `.userDeselected`, and `releaseForHandoff` is only ever called for the
+    /// latter. Gate arm: `added` (same `armRouting` convergence as case 1).
+    @Test func deviceVanishedDoesNotRelease() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+
+        box.set(nil)
+        let events = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+
+        #expect(events.contains { self.isRoutingBlocked($0, true) }, "a vanished default still shows the warning — it isn't ours")
+        #expect(releaser.calls == 0, "deviceVanished must never release — only userDeselected does")
+        #expect(engine.removedOutputs.isEmpty, "no teardown for a vanished (not deselected) default")
+    }
+
+    /// CASE 3 — never having taken over the default must not release on
+    /// deselect. VARIANT IMPLEMENTED: the aggregate UID never RESOLVES, not a
+    /// write failure. Read `pointDefaultAtAggregate` (NativeBackend.swift
+    /// ~4473-4488): `aggregateDefaultActive = true` is set the moment
+    /// `resolveDeviceID` succeeds, BEFORE the `setDefaultOutputDevice` write is
+    /// even attempted — so a write-FAILURE variant (`setDefaultSucceeds: false`
+    /// with a resolvable UID) would still leave `aggregateDefaultActive == true`
+    /// and the deselect trigger's guard would pass anyway, defeating the point
+    /// of this case. Only a failed RESOLVE (the function's very first guard)
+    /// leaves `aggregateDefaultActive` false, the actual "we never took over"
+    /// state the trigger's guard (line ~1310) checks.
+    ///
+    /// Because the aggregate never resolves, `evaluateRoutingBlocked()` (called
+    /// unconditionally ahead of the deselect-trigger check, line ~1294) already
+    /// classifies `blocked = true` DURING activation itself — so the warning is
+    /// already on by the time the deselect stimulus fires, and it does NOT
+    /// re-emit (edge-triggered `setRoutingBlocked`). This case asserts
+    /// quiescence instead of waiting for a fresh event.
+    @Test func neverTookOverDoesNotReleaseOnDeselect() async {
+        let control = FakeAggregateControl(resolvable: [:])   // productUID never resolves
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+        #expect(control.setDefaultCalls.isEmpty, "an unresolvable aggregate never even attempts the write")
+
+        box.set("com.airpods.whatever")
+        let quiescent = await collectQuiescent(from: backend) {
+            systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true)
+        }
+        #expect(quiescent.isEmpty, "already blocked since activation (unresolvable aggregate) — no NEW edge to emit")
+        #expect(releaser.calls == 0, "never having taken over the default must never release")
+        #expect(engine.removedOutputs.isEmpty)
+    }
+
+    /// CASE 4 — a blocked-attempt log line releases the PTP ports the same way
+    /// a deselect does. Gate arm: `added` (armRouting). Unlike the deselect
+    /// trigger, this path (`handleBlockedAirPlayAttempt` → `releaseForHandoff
+    /// (reason: "blockedAttempt")`, NativeBackend.swift ~4101-4155) does NOT
+    /// check `aggregateDefaultActive` — it releases on any matching line while
+    /// the release gate holds. Drives the REAL `AirPlayHandoffWatcher`'s
+    /// line-matching + rate-limit logic via `FakeLogStream.pushLine`, not a
+    /// direct call to the backend's handler.
+    ///
+    /// DEVIATION FROM THE SPEC'S "same assertions as case 1": verified
+    /// `releaseForHandoff`'s body has NO call to `evaluateRoutingBlocked`/
+    /// `setRoutingBlocked` anywhere in it — only a genuine default-device-
+    /// change notification reaches those (the `else` arm at ~1294, which a log
+    /// line never goes through). So, unlike a deselect, a blocked-attempt
+    /// release does NOT itself flip the routing-blocked warning; this case
+    /// asserts quiescence on that event instead of waiting for one that never
+    /// comes, and keeps the release-mechanics assertions (releaser call,
+    /// teardown, telemetry reason) that DO hold.
+    @Test func blockedAttemptLineReleases() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let logStream = FakeLogStream()
+        let (backend, _, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser, logStream: logStream)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+        await pollUntil { logStream.startCount >= 1 }
+
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let quiescent = await collectQuiescent(from: backend) {
+            logStream.pushLine(Self.blockedAttemptLine)
+        }
+        #expect(quiescent.isEmpty, "a blocked-attempt release never touches the routing-blocked warning itself")
+        await pollUntil { releaser.calls == 1 }
+        #expect(releaser.calls == 1)
+        #expect(!engine.removedOutputs.isEmpty)
+        #expect(sink.snapshot().contains { $0.contains(#""evt":"handoff_release""#) && $0.contains(#""reason":"blockedAttempt""#) },
+                "Telemetry._installTestSink: the release's own log line records the blockedAttempt reason")
+    }
+
+    /// CASE 5 — a blocked-attempt line while NOT routing does nothing: with no
+    /// `setOutputSet` call, `expectedSelected`/`streamBindings` are both empty,
+    /// so `reconcileHandoffWatcherLocked`'s `shouldRun` is false and the watcher
+    /// never even starts — `pushLine` is a no-op against an unattached fake.
+    @Test func blockedAttemptLineDoesNothingWhenNotRouting() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let logStream = FakeLogStream()
+        let (backend, _, _, _) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser, logStream: logStream)
+        backend.start(); defer { backend.stop() }
+
+        let quiescent = await collectQuiescent(from: backend) {
+            logStream.pushLine(Self.blockedAttemptLine)
+        }
+        #expect(quiescent.isEmpty)
+        #expect(releaser.calls == 0)
+        #expect(logStream.startCount == 0, "the watcher never starts when nothing is routing")
+    }
+
+    /// CASE 6 — the popover's "Use Audiouter" button resumes: re-takes the
+    /// default (a second write) and re-kicks the whole-system device that a
+    /// prior release tore down.
+    @Test func buttonResumeRestoresAfterHandoffRelease() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+        await pollUntil { releaser.calls == 1 }
+
+        let events = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, false) }
+        }, after: { backend.reselectAggregateAsDefault() })
+
+        #expect(events.contains { self.isRoutingBlocked($0, false) }, ".stillOurs must flip the warning back off")
+        #expect(control.setDefaultCalls == [501, 501], "activation + the button both wrote the aggregate")
+        await pollUntil { engine.addedOutputs.filter { $0 == device.outputID }.count >= 2 }
+        #expect(engine.addedOutputs.filter { $0 == device.outputID }.count >= 2,
+                "the whole-system device is re-kicked (a second addOutput) by the resume")
+    }
+
+    /// CASE 7 — the D1 fix: re-picking Audiouter directly in Sound settings (no
+    /// button click) resumes identically. The default-device-changed listener's
+    /// own `.stillOurs` classification (NativeBackend.swift ~1323-1324) is what
+    /// triggers `resumeFromHandoffLocked()` here — NOT `takeOverDefaultAndReflect`
+    /// — so, unlike case 6, there is no SECOND `setDefaultOutputDevice` write:
+    /// the box simulates the user's own pick having already landed.
+    @Test func soundSettingsRepickResumesWithoutTheButton() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+        await pollUntil { releaser.calls == 1 }
+
+        // NOTE the trap this test caught: the activation write's echo never
+        // arrives in this fixture (the deselect above is the next event), so a
+        // stale `expectedDefaultWriteUID` would mis-consume this repick as our
+        // own echo and skip the D1 resume entirely. The else-arm now disarms the
+        // stale pending on any non-matching genuine change.
+        box.set(AggregateOutputDevice.productUID)
+        let events = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, false) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+
+        #expect(events.contains { self.isRoutingBlocked($0, false) }, "D1: re-picking Audiouter directly must resume too")
+        #expect(control.setDefaultCalls == [501], "no second write — the user's own pick is what landed, we never re-wrote it")
+        await pollUntil { engine.addedOutputs.filter { $0 == device.outputID }.count >= 2 }
+        #expect(engine.addedOutputs.filter { $0 == device.outputID }.count >= 2, "resumed without the button")
+    }
+
+    /// CASE 8 — sleep/wake during a handoff release must not silently re-take:
+    /// `handleSystemWillSleep` early-returns (`suspended` already true from the
+    /// release) and `handleSystemDidWake`'s T3.8-1 guard early-returns (`guard
+    /// !self.handoffReleased`) — only a resume affordance may clear
+    /// `handoffReleased`.
+    @Test func sleepWakeDuringHandoffDoesNotReTake() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser)
+        backend.start(); defer { backend.stop() }
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+        await pollUntil { releaser.calls == 1 }
+
+        let addedBefore = engine.addedOutputs.count
+        backend.handleSystemWillSleep()
+        backend.handleSystemDidWake()
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(engine.addedOutputs.count == addedBefore,
+                "T3.8-1: a sleep/wake mid-handoff-release must not re-grab the ports — only a resume affordance may")
+    }
+
+    /// CASE 9 — watcher lifecycle: started when routing arms, stopped by a
+    /// release, restarted by a resume, stopped by `backend.stop()`.
+    /// `FakeLogStream.startCount`/`stopCount` trace `AirPlayHandoffWatcher`'s
+    /// own `start()`/`stop()` calls (it is a thin pass-through to `spawn`).
+    @Test func watcherLifecycleTracksArmReleaseResumeAndStop() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let logStream = FakeLogStream()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser, logStream: logStream)
+        backend.start()
+
+        #expect(logStream.startCount == 0, "no routing yet — the watcher must not run")
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+        await pollUntil { logStream.startCount == 1 }
+        #expect(logStream.startCount == 1, "routing armed — the watcher starts")
+
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+        await pollUntil { logStream.stopCount == 1 }
+        #expect(logStream.stopCount == 1, "the release stops the watcher")
+
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, false) }
+        }, after: { backend.reselectAggregateAsDefault() })
+        await pollUntil { logStream.startCount == 2 }
+        #expect(logStream.startCount == 2, "the resume restarts the watcher")
+
+        backend.stop()
+        await pollUntil { logStream.stopCount == 2 }
+        #expect(logStream.stopCount == 2, "backend.stop() stops the watcher too")
+    }
+
+    /// CASE 10 — `stop()` clears handoff state after a release: must not
+    /// crash, and force-clears `handoffReleased` + the selection intent so a
+    /// fresh `start()` begins clean (NativeBackend.swift ~1538, ~1566).
+    @Test func stopClearsHandoffStateAfterARelease() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let box = LockedBox<String?>("com.other.speakers")
+        let releaser = FakeReleaser()
+        let logStream = FakeLogStream()
+        let (backend, systemVolume, engine, discovery) = makeHandoffBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, releaser: releaser, logStream: logStream)
+        backend.start()
+
+        let device = handoffDevice()
+        await armRouting(backend: backend, engine: engine, discovery: discovery, device: device)
+
+        box.set("com.airpods.whatever")
+        _ = await collect(from: backend, until: { events in
+            events.contains { self.isRoutingBlocked($0, true) }
+        }, after: { systemVolume.fireExternalChange(volume: nil, muted: nil, defaultDeviceChanged: true) })
+        await pollUntil { releaser.calls == 1 }
+        await pollUntil { logStream.stopCount == 1 }   // the release already stopped the watcher
+
+        backend.stop()   // must not crash
+
+        #expect(!backend.test_expectedSelected.contains(device.id),
+                "stop() clears the selection intent too — a fresh start() begins clean")
     }
 }
 

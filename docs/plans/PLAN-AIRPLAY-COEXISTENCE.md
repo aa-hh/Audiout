@@ -22,6 +22,8 @@ Problem being fixed: Audiouter's root PTP helper binds UDP 319/320 at boot (`Run
 
 **Remaining unexplored option, deliberately not built:** watching the unified log for macOS's AirPlay failure, then releasing the ports so a *second* user click succeeds. Rejected as a shipping mechanism — it depends on private log formats Apple can change in any update, and it still costs the user a second click. Revisit only if the accepted mitigation proves insufficient in practice.
 
+**SUPERSEDED — 2026-07-27:** Alec approved building it best-effort as Wave 3 T9+ (seamless handoff). Shipped with an explicit degrade-to-release-on-deselect contract: blocking signal captured via `AirPlayHandoffWatcher` (unified-log watcher for `subsystem com.apple.airplay category APSNetworkClockPTP error kIOReturnExclusiveAccess`), handoff initiated, ports released via `PTPHelperReleasing` (~1s), so the user's own second click succeeds (nothing auto-retries — macOS abandoned the first attempt before we could react). Accepted ceiling: fail-once-retry-works — macOS gives up ~0.9s after the click and does NOT retry (measured 6/6 over 24h in unified log, zero spurious hits).
+
 **Accepted mitigation (unchanged, and now the considered answer rather than a fallback):** the helper holds the ports *only while actually streaming* (Wave 1's idle-exit — verified live on real ports: bound 09:10:51, self-released 09:11:36, exactly the 30 s grace + 15 s idle window), so the system dropdown works in every case except during active Audiouter playback. Wave 3 then makes that remaining case *explicable* rather than mysterious: Sound settings shows "Audiouter" as the selected output, with deselecting it as the off switch.
 
 **The half of Alec's idea that DOES work — build it in Wave 3 (T9).** Switching to a **non-AirPlay** output (speakers, headphones, USB) needs no PTP, so that switch genuinely succeeds, the default output really changes, and our listener *does* fire. Use it: on losing the default-output selection, end the session and release the ports **immediately**, rather than waiting out the 15 s idle window. Same off-switch semantics T9 already planned, but prompt instead of delayed. Only the direct system-dropdown-to-AirPlay case is unreachable.
@@ -66,7 +68,7 @@ The problem, measured then explained by the code: with the aggregate as default 
 ## Wave 3 — virtual output device (gated on G2)
 
 - **T8 — driver bundle + lifecycle.** "Audiouter" AudioServerPlugIn in `/Library/Audio/Plug-Ins/HAL`, one-time admin install step (installer or in-app privileged copy — spike decides), uninstall hygiene, notarization wired into `make-app.sh`.
-- **T9 — default-output semantics.** Session starts → set default output to the Audiouter device (shows selected in Sound settings). User unselects it there (picks any other device) → that's the off switch: end the session gracefully, helper idles out, ports free. Next connect in-app → re-select automatically. Respect/merge with existing reverse auto-swap semantics.
+- **T9 — default-output semantics.** Session starts → set default output to the Audiouter device (shows selected in Sound settings). User unselects it there (picks any other device) → that's the off switch: end the session gracefully. Two halves: (1) restore-prior-default-then-destroy aggregate lifecycle (original plan, shipped), and (2) release the ports **immediately** on losing default-output selection for seamless handoff (BUILT 2026-07-27; only the warning had shipped before). Next connect in-app → re-select automatically. Respect/merge with existing reverse auto-swap semantics.
 - **T10 — capture-path integration.** Tap-follows-default now taps the virtual device during sessions; verify per-app routing, excluded apps, volume-keys→Main-Out, and synced-local/LocalPlaybackEngine interplay all hold. Regression risk is here, not in the driver itself.
 
 ## Wave 4 — combined live checklist (Alec, before merge)
@@ -74,10 +76,21 @@ The problem, measured then explained by the code: with the aggregate as default 
 Fresh boot →
 1. System dropdown → Sonos: works with Audiouter installed but unused (Direction A).
 2. While system-AirPlay plays: click a device in Audiouter → auto-takeover, "Taking over…" shown, audio moves, Sound settings now shows Audiouter selected.
-3. Unselect Audiouter in Sound settings → our session ends; ≤ ~45 s later the system dropdown works again.
+3. Unselect Audiouter in Sound settings → our session ends; ~1-2s later the system dropdown works again.
 4. Reconnect in Audiouter → virtual device re-selected automatically, no manual re-pick.
 5. Regression: per-app routing, excluded apps, volume keys, group connect, rapid toggle.
 6. Approval persistence: Login Items still shows the helper approved after the plist change (no re-approval trap).
+
+## Live checklist — seamless handoff (Alec, 2026-07-27)
+
+- FIRST: purge stale daemons — `scripts/purge-stale-ptp-helpers.sh --apply` (standing rule before native live tests).
+- Start streaming to a real speaker from Audiouter; Sound settings shows "Audiouter" selected.
+- (A) Pick the built-in speakers in Sound settings. Expect: session ends ~1s; popover warning with "Use Audiouter" appears; within ~2s `sudo lsof -nP -iUDP:319 -iUDP:320` shows nothing held. Then pick an AirPlay speaker in the Sound dropdown — expect it to connect on the FIRST try.
+- (B) Re-stream from Audiouter. Go STRAIGHT to the Sound dropdown and pick an AirPlay speaker. Expect: first attempt fails (macOS's own dialog), second attempt succeeds. Cross-check: `/usr/bin/log show --last 5m --predicate 'subsystem == "com.apple.airplay" AND category == "APSNetworkClockPTP"' --style compact` shows exactly one kIOReturnExclusiveAccess line for the failed attempt, none for the successful one.
+- (C) Click "Use Audiouter" in the popover. Expect: Audiouter becomes the Mac's output again AND the previously selected speakers reconnect on their own AND any per-app redirect resumes (Option B) — no manual re-picks.
+- (C2) Variant: instead of the button, re-pick "Audiouter" directly in Sound settings — expect the same full resume (this was review finding D1).
+- Regressions to sweep: rapid speaker toggle; switch speaker A→B; a per-app redirect live through an (A)/(B) handoff and resume; sleep/wake while handed over (Audiouter must stay quiet, not re-grab).
+- Known cosmetic (deferred decision D9): during a handoff the popover dots stay green/connected while audio is stopped — the warning banner is the explanation; judge whether that's acceptable live.
 
 ## Live-test findings (2026-07-26, first end-to-end pass)
 

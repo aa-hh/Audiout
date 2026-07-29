@@ -293,6 +293,15 @@ final class AirPlayHandoffWatcher: @unchecked Sendable {
         guard BlockedAirPlayAttempt.matches(ndjsonLine: line) else { return }
 
         lock.lock()
+        // A line can arrive AFTER stop(): SIGTERM is asynchronous, and buffered
+        // pipe data keeps flowing until the child actually exits. A stopped
+        // watcher must never fire — the consumer's release path treats a fire as
+        // live user intent (behavior table: "a line pushed after stop() fires
+        // nothing").
+        guard running else {
+            lock.unlock()
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         if let last = lastFireTime, now - last < rateLimit {
             lock.unlock()

@@ -1291,6 +1291,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
                         self.expectedDefaultWriteUID = nil
                     } else {
+                        // A genuine change that does NOT match the pending write
+                        // proves our echo is no longer the newest state — the HAL
+                        // coalesces rapid changes, so the echo of a successful write
+                        // can be swallowed entirely by a fast user switch-away. A
+                        // STALE pending left armed here would mis-consume the user's
+                        // NEXT genuine change back to the aggregate as "our own
+                        // echo", silently skipping the D1 resume — permanent silence
+                        // in exactly the scenario D1 exists for. Disarm it.
+                        self.expectedDefaultWriteUID = nil
                         self.evaluateRoutingBlocked()
 
                         // Seamless handoff T3.4: the user picked a DIFFERENT default

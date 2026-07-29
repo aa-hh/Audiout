@@ -153,4 +153,33 @@ import Testing
         #expect(dropped.count == 1)
         #expect(changed == 1)
     }
+
+    /// Revocation must truly FORGET the phone, not just drop it: a revoked
+    /// phone (even a previously DENIED one) is unknown again, so its next
+    /// connect re-prompts and the fresh answer replaces the old record. This
+    /// is the whole point of revoke being reachable for denials too — it's how
+    /// you give a phone you once refused a second chance.
+    @Test func revokingClearsMemorySoTheNextConnectRePromptsFresh() throws {
+        let store = makeStore()
+        try store.save([CompanionApproval(
+            clientID: Self.phoneID, lastKnownName: "iPhone",
+            decision: .denied, firstSeen: .distantPast, lastSeen: .distantPast)])
+        let controller = CompanionApprovalController(store: store)
+        controller.dropClient = { _ in }
+
+        controller.revoke(clientID: Self.phoneID)
+
+        // Now unknown again → the next connect must prompt (a remembered denial
+        // would NOT have), and approving replaces the forgotten record.
+        var prompts = 0
+        controller.presentPrompt = { _, respond in prompts += 1; respond(true) }
+        var decisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { decisions.append($0) }
+
+        #expect(prompts == 1, "a revoked phone must re-prompt on its next connect")
+        #expect(decisions == [.pending, .approved])
+        #expect(controller.approvals.map(\.clientID) == [Self.phoneID])
+        #expect(controller.approvals.first?.decision == .approved,
+                "the fresh answer replaces the revoked record, not stacks on it")
+    }
 }

@@ -635,4 +635,91 @@ import Foundation
         #expect(out2.allSatisfy { $0 == 0 })
     }
     #endif
+
+    // MARK: Ring-overflow drop counting
+
+    /// A ring-full drop is COUNTED, no longer just silently discarded
+    /// (whole-system dropout investigation): flooding a tiny ring past
+    /// capacity moves the producer-side drop counters; an enqueue that fits
+    /// counts nothing.
+    @Test func enqueue_ringOverflow_countsDroppedWrites() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            presentationDelayMs: { 5 }, localOutputLatency: { nil })
+
+        // A small chunk that fits counts nothing.
+        var small = [Float](repeating: 0.5, count: 8)
+        small.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                         pts: timespec(tv_sec: 10, tv_nsec: 0))
+        }
+        #expect(sink.ringOverflowDropsForTesting.writes == 0,
+                "an admitted chunk must not count as a drop")
+
+        // A chunk far larger than the ring is dropped wholesale — and counted.
+        var huge = [Float](repeating: 0.5, count: 50_000)
+        huge.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                         pts: timespec(tv_sec: 10, tv_nsec: 0))
+        }
+        let drops = sink.ringOverflowDropsForTesting
+        #expect(drops.writes == 1, "the ring-full drop must be counted")
+        #expect(drops.samples == 50_000)
+    }
+}
+
+/// `sync_ring_overflow` emission: session boundaries (`stop()` / lifecycle
+/// rebuild, via `clearSessionState()`) flush the ring's drop counters
+/// only-when-nonzero. Nested inside `SerializedSharedState` because it
+/// installs the process-global `Telemetry` test sink — same idiom and
+/// rationale as `NativeCaptureCoordinatorTests`'
+/// `startEmitsCaptureWSTransitionTelemetry`.
+extension SerializedSharedState {
+    @Suite struct SyncedLocalSinkRingOverflowTelemetryTests {
+
+        /// Thread-safe capture box (Telemetry's sink runs on its own writer
+        /// queue) — mirrors `NativeCaptureCoordinatorTests.TelemetryLineBox`.
+        private final class LineBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+        }
+
+        @Test func stopFlushesRingOverflowOnlyWhenNonzero() {
+            let captured = LineBox()
+            Telemetry._installTestSink { captured.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let sink = SyncedLocalSink(
+                renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+                presentationDelayMs: { 5 }, localOutputLatency: { nil })
+
+            func overflowLines() -> [String] {
+                captured.snapshot.filter { $0.contains("\"evt\":\"sync_ring_overflow\"") }
+            }
+
+            // A clean session boundary flushes nothing.
+            sink.stop()
+            Telemetry._installTestSink { captured.append($0) } // flush barrier
+            #expect(overflowLines().isEmpty, "a drop-free session must not log sync_ring_overflow")
+
+            // Overflow the tiny ring, then hit the boundary: exactly one line.
+            var huge = [Float](repeating: 0.5, count: 50_000)
+            huge.withUnsafeMutableBufferPointer { buf in
+                sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                             pts: timespec(tv_sec: 10, tv_nsec: 0))
+            }
+            sink.stop()
+            Telemetry._installTestSink { captured.append($0) } // flush barrier
+            #expect(overflowLines().count == 1, "got: \(captured.snapshot)")
+            #expect(overflowLines().first?.contains("\"droppedWritesDelta\":\"1\"") == true)
+            #expect(overflowLines().first?.contains("\"droppedFramesDelta\":\"50000\"") == true)
+
+            // Already-flushed drops must not re-emit on the next boundary.
+            sink.stop()
+            Telemetry._installTestSink(nil) // synchronous flush barrier
+            #expect(overflowLines().count == 1, "an already-flushed drop must not re-emit")
+        }
+    }
 }

@@ -128,24 +128,69 @@ extension SerializedSharedState {
         func removeDiscovery(_ descriptor: DeviceDescriptor) async {
             lock.withLock { discoveryRemoved.append(descriptor.name) }
         }
+        /// Which stream each device's LIVE session is actually on — the spy's model
+        /// of the vendored C `device->stream_id` (T7). This is what makes the
+        /// architecture review's defect B reproducible offline: `addOutput` on a
+        /// device that ALREADY has a live session is a silent idempotent no-op in
+        /// the real engine and does NOT move its binding, so the spy must refuse to
+        /// move it too. Only `rebindOutput` (stop + re-add) actually moves a live
+        /// session. Written only on op SUCCESS.
+        private var liveStreams: [UInt64: UInt32] = [:]
+        /// The stream `id`'s live session is on, or `nil` if it has none.
+        func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+        /// Every `rebindOutput` the backend issued, in order (T7).
+        private(set) var rebinds: [(OutputID, UInt32)] = []
+        var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
+
         func addOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
                 let hook = self.lock.withLock { self.onAddOutputBody }
                 hook?(id)
                 if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                // Engine idempotency: an already-live session is NOT re-bound.
+                self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
             }
         }
         func removeOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
                 if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
+            }
+        }
+
+        func boundStreamId(for id: OutputID) async -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+
+        /// Stop + re-add as ONE op — the only way a LIVE session's stream moves.
+        /// Records BOTH halves into the same arrays/`opLog` the separate
+        /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
+        /// a rebind's observable ops keeps holding.
+        func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+            try await runOp(id) {
+                self.lock.withLock {
+                    self.rebinds.append((id, streamId))
+                    self.removed.append(id)
+                    self.opLog.append("remove:\(id.rawValue)")
+                    self.liveStreams.removeValue(forKey: id.rawValue)
+                }
+                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                self.lock.withLock {
+                    if streamId == 0 {
+                        self.added.append(id)
+                        self.opLog.append("add:\(id.rawValue)")
+                    } else {
+                        self.streamAdds.append((id, streamId))
+                        self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                    }
+                    self.liveStreams[id.rawValue] = streamId
+                }
             }
         }
 
         /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
         /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
-        private(set) var streamAdds: [(OutputID, UInt32)] = []
+        private var streamAdds: [(OutputID, UInt32)] = []
         func addOutput(_ id: OutputID, streamId: UInt32) async throws {
             try await runOp(id) {
                 self.lock.withLock {
@@ -153,6 +198,11 @@ extension SerializedSharedState {
                     self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
                 }
                 if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                // Engine idempotency: an already-live session is NOT re-bound to
+                // `streamId` — that silent no-op is exactly defect B.
+                self.lock.withLock {
+                    if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = streamId }
+                }
             }
         }
 
@@ -202,6 +252,13 @@ extension SerializedSharedState {
         }
         /// Push a synthetic out-of-band transition through the state stream.
         func pushState(_ id: OutputID, _ state: OutputState) {
+            // Mirror the real `boundStreamId`, which only reports a binding for a
+            // `.streaming`/`.connected` session: a device the engine just reported
+            // dead has no live binding to move, so a later add must bind fresh.
+            switch state {
+            case .streaming, .connected: break
+            default: lock.withLock { _ = liveStreams.removeValue(forKey: id.rawValue) }
+            }
             let c = lock.withLock { continuation }
             c?.yield((id, state))
         }
@@ -279,21 +336,29 @@ extension SerializedSharedState {
     /// exactly one Mach touch per connect attempt.
     private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked Sendable {
         let willWaitForClock: Bool
-        private let outcome: PTPHelperActivationOutcome
         private let lock = NSLock()
+        private var _outcome: PTPHelperActivationOutcome
         private var _callCount = 0
 
         init(willWaitForClock: Bool, outcome: PTPHelperActivationOutcome) {
             self.willWaitForClock = willWaitForClock
-            self.outcome = outcome
+            self._outcome = outcome
         }
 
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
-            lock.withLock { _callCount += 1 }
-            return outcome
+            lock.withLock {
+                _callCount += 1
+                return _outcome
+            }
         }
 
         var callCount: Int { lock.withLock { _callCount } }
+
+        /// Re-script the outcome mid-test — how the clock-recovery tests flip
+        /// the world from "no clock" to "ready" between two connect attempts.
+        func setOutcome(_ outcome: PTPHelperActivationOutcome) {
+            lock.withLock { _outcome = outcome }
+        }
     }
 
     /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
@@ -4001,6 +4066,192 @@ extension SerializedSharedState {
         #expect(binds.count == 1, "device should be bound exactly once")
         #expect(binds.first?.1 ?? 0 >= 1,
                                     "per-app stream id must be >= 1 (0 is the legacy whole-system path)")
+    }
+
+    // MARK: Per-app PTP takeover gate (redirect-order bug, PLAN-AIRPLAY-COEXISTENCE.md)
+    //
+    // The T5+T4 takeover gate originally ran only in `convergeDevice`, which made
+    // a redirect ORDER-DEPENDENT: redirect-first (or a redirect right after
+    // launch) bound its per-app stream to a clockless receiver — session
+    // accepted, audio silent — while select-then-redirect worked because the
+    // select had already woken the helper. These pin the fix: every per-app bind
+    // runs the same gate, a clockless bind is refused (not silently issued), and
+    // a refused redirect self-heals on the next successful takeover.
+
+    /// A per-app capture that actually reaches `.capturing` for `com.foo.player`
+    /// — these tests are about the BIND gate, and a capture left failing (the
+    /// default `NoAudioProcesses` resolver) would mark the app dead and
+    /// republish an EMPTY topology mid-test, racing every assertion about the
+    /// bind itself.
+    private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {
+        PerAppCaptureCoordinator(
+            makeTap: { FlakyThenSucceedsTap(failuresBeforeSuccess: 0) },
+            processResolver: singleProcessResolver(["com.foo.player": 4242]),
+            muteBehavior: .mutedWhenTapped)
+    }
+
+    /// Redirect-FIRST (nothing selected, the launch/path-1+3 shape): the per-app
+    /// bind itself must run the takeover gate — the helper activation must not
+    /// depend on a prior Selected-Devices connect.
+    @Test func appRouteBindRunsThePTPTakeoverGateItself() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // No setOutputSet — the redirect is the FIRST routing action.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == device.outputID && $0.1 >= 1 },
+                "the redirect must bind without any prior Selected-Devices connect")
+        #expect(activator.callCount >= 1,
+                "the per-app bind must have woken/checked the PTP helper itself")
+    }
+
+    /// A clockless verdict must REFUSE the per-app bind — a receiver accepts a
+    /// clockless session and plays silence, which is exactly the live bug — and
+    /// walk the `.routedApps` claim back so the UI never asserts a stream that
+    /// was never established.
+    @Test func appRouteBindWithoutClockIsRefusedAndClaimWalkedBack() async {
+        let activator = ScriptedPTPHelperActivator(
+            willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        }
+
+        #expect(events.contains {
+            if case .routedApps(let id, let names) = $0 { return id == device.id && names.isEmpty }
+            return false
+        }, "the refused bind must clear the .routedApps claim")
+        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
+                "no per-app stream may be established while the clock is unavailable")
+    }
+
+    /// Path 3 end-to-end (redirect, THEN select): a redirect refused clockless
+    /// must re-bind BY ITSELF the moment a later Selected-Devices connect wins
+    /// the takeover — no route re-pick, no topology change.
+    @Test func refusedAppRouteRebindsAfterClockRecovery() async {
+        let activator = ScriptedPTPHelperActivator(
+            willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, injectedPerAppCapture: succeedingPerAppCapture())
+        defer { backend.stop() }
+        let target = ap2Device()
+        await startAndDiscover(backend, engine, discovery, target)
+        let selected = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Era 100")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == selected.id } else { return false } }
+        } after: { discovery.fire(.appeared(selected)) }
+        await pollUntil { engine.fedIDs.contains(selected.outputID) }
+
+        // 1. Redirect while clockless: refused (claim walked back, binding cleared).
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .routedApps(let id, let names) = $0 { return id == target.id && names.isEmpty }
+                return false
+            }
+        } after: {
+            backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: target.id)])
+        }
+        #expect(engine.streamAddCalls.filter { $0.0 == target.outputID }.isEmpty)
+
+        // 2. The clock comes up and the user selects a DIFFERENT main-out device.
+        activator.setOutcome(.ready)
+        backend.setOutputSet([selected.id])
+
+        // 3. The refused redirect re-binds on its own — the not-ready → ready
+        //    edge replays the cached per-app topology.
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == target.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == target.outputID && $0.1 >= 1 },
+                "the redirect must re-establish itself once the takeover succeeds, with no user action")
+    }
+
+
+    // MARK: T7 — scope transitions across the converging/bindTail seam
+    //
+    // The two tests below are the whole point of T7 (architecture review defect
+    // B). `converging` serializes the whole-system path (stream 0) and `bindTail`
+    // serializes the per-app path (stream >= 1); neither knows the other exists,
+    // and the engine answers a mismatched-stream `addOutput` on an already-live
+    // session with a SILENT no-op. So a device changing SCOPE used to keep
+    // streaming its old stream while Swift bookkeeping recorded the new one —
+    // shown as routed, audibly dead. `SpyEngine.liveStream(of:)` models that
+    // no-op faithfully, so each test genuinely fails without the
+    // `boundStreamId` + `rebindOutput` arbitration.
+
+    /// WHOLE-SYSTEM -> PER-APP, same device: a Selected Device (live on stream 0)
+    /// that becomes a per-app redirect target must end up with its ENGINE session
+    /// on the per-app stream — not merely with `streamBindings` claiming so.
+    @Test func deviceMovingFromWholeSystemToPerAppRebindsTheLiveSession() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Whole-system first: the device is streaming the system mix on stream 0.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "precondition: the device must be live on the whole-system stream")
+
+        // Now redirect an app to the SAME device.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        let live = engine.liveStream(of: device.outputID)
+        #expect(live != nil && live! >= 1,
+                """
+                the engine session must actually MOVE to the per-app stream — \
+                a silent addOutput no-op leaves it on \(live.map(String.init) ?? "nil") \
+                while the app's audio is written to a stream the device never joined
+                """)
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID },
+                "the move must go through the engine's serialized rebindOutput, not a cross-FIFO remove+add pair")
+    }
+
+    /// PER-APP -> WHOLE-SYSTEM, same device: a redirect target (live on stream N)
+    /// that is then selected for the whole system must end up with its ENGINE
+    /// session on stream 0, which is where the whole-system mix is written.
+    @Test func deviceMovingFromPerAppToWholeSystemRebindsTheLiveSession() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        // Per-app first: the device carries one app's redirect on a stream >= 1.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "precondition: the device must be live on a per-app stream")
+
+        // Now select the SAME device for the whole system.
+        backend.setOutputSet([device.id])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                """
+                the engine session must actually MOVE to stream 0 — a silent \
+                addOutput no-op leaves the device on its per-app stream while the \
+                whole-system mix goes to stream 0 and is never heard
+                """)
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the move must go through the engine's serialized rebindOutput")
     }
 
     /// T4b defensive guard: a per-app route that targets an AirPlay-1-only

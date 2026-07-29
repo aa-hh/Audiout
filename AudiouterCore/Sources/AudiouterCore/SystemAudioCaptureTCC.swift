@@ -264,6 +264,52 @@ public enum SystemAudioCaptureTCC {
         latchLock.unlock()
     }
 
+    // MARK: - Proven code-identity fingerprint (T8)
+
+    /// Guards ``provenIdentity``. Reuses ``latchLock`` rather than a second
+    /// lock — both guard tiny, independent pieces of process-global grant
+    /// state read from the same multi-queue callers described on ``latchLock``,
+    /// and a second lock here would just be another primitive to keep in sync
+    /// for no real isolation benefit.
+    ///
+    /// The stored fingerprint of the binary identity that last PROVED the
+    /// audio-capture grant via ``CoreAudioTonePermissionProbe/probe()``'s
+    /// audible functional check (`kSecCodeInfoUnique`, or equivalent — see
+    /// that type). This exists because a stale, cdhash-pinned TCC grant can
+    /// read `.granted` for a rebuilt binary that macOS will actually refuse to
+    /// honor — the whole reason the functional tone probe exists. Skipping
+    /// that probe whenever a fast `.granted` read comes back defeats it in
+    /// exactly the case it was built for, so `runProbe()` only takes the fast
+    /// path when the CURRENT binary's identity matches the one that last
+    /// proved the grant out loud.
+    private static var provenIdentity: String?
+
+    /// The identity fingerprint that last proved the grant, if any.
+    public static func provenCodeIdentity() -> String? {
+        latchLock.lock()
+        defer { latchLock.unlock() }
+        return provenIdentity
+    }
+
+    /// Record that `identity` just proved the grant via the audible functional
+    /// probe. Called only after `functionalGrantProbe()` actually observed
+    /// live audio — never from a bare TCC read, which is precisely the signal
+    /// this fingerprint exists to not trust blindly.
+    public static func recordProvenCodeIdentity(_ identity: String) {
+        latchLock.lock()
+        provenIdentity = identity
+        latchLock.unlock()
+    }
+
+    /// Test-only: clear the stored fingerprint. Same rationale as
+    /// ``_resetLatchForTesting()`` — process-global state that would otherwise
+    /// leak between tests.
+    public static func _resetProvenCodeIdentityForTesting() {
+        latchLock.lock()
+        provenIdentity = nil
+        latchLock.unlock()
+    }
+
     /// The authoritative status for the rest of this process's life: the
     /// fresh latch (``recordFreshGrant(source:)``) if one has EVER been
     /// recorded, otherwise the ordinary — and, per this file's whole reason

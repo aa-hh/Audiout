@@ -520,11 +520,12 @@ extension SerializedSharedState {
     // tapped device) leaves the device's UID UNCHANGED, so the identity listener
     // (`kAudioHardwarePropertyDefaultOutputDevice`) never fires and the coordinator
     // would otherwise never recover (the tap keeps delivering buffers, but silent
-    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.installSampleRateListener`
-    // (T1) closes that gap by listening on the tapped device's own
-    // `kAudioDevicePropertyNominalSampleRate` and routing the notification onto the
-    // EXACT SAME `onDefaultDeviceChanged` closure `installDefaultDeviceListener` already
-    // uses (see NativeCaptureCoordinator.swift: the listener block calls
+    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.subscribeToDefaultOutput`
+    // (T1) closes that gap by observing the tapped device's own
+    // `kAudioDevicePropertyNominalSampleRate` through ``DefaultOutputDeviceMonitor``
+    // and routing the notification onto the EXACT SAME `onDefaultDeviceChanged`
+    // closure the device-identity change uses (see NativeCaptureCoordinator.swift:
+    // the single `onChange` closure calls
     // `self?.onDefaultDeviceChanged?()`, identical to the identity listener's callback).
     // That closure is exactly what `FakeTap.fireDeviceChange()` fires — so it is the
     // correct and only hermetically-fakeable stand-in for "the nominal-rate listener
@@ -638,6 +639,12 @@ extension SerializedSharedState {
         #expect(tap.excludedProcessObjectIDs == [], "an app back on .currentDevice must re-enter the system mix")
         coordinator.stop()
     }
+
+    // localPlaybackRenderProcessIsExcludedSoItsOutputIsNotRecapturedAndMuted
+    // (this branch's fix for the same live bug) removed on merge: main's
+    // `resolveExcludedObjectIDsLoggingAttribution` unconditional self-exclude
+    // (2749cbc, "Echo guard, generalized") supersedes it — same root cause,
+    // more general fix, with its own equivalent test coverage already on main.
 
     /// A `.device`-routed app's process object never appears in the
     /// system-mix tap's exclusion-blind spot — i.e. it IS present in the
@@ -988,6 +995,71 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// The generalized echo guard (live find, 2026-07-26): the whole-system
+    /// tap's exclusion set must ALWAYS contain THIS process's own audio
+    /// process objects — `LocalPlaybackEngine` renders `.currentDevice` apps
+    /// from this process onto the very device the tap captures, so without the
+    /// self-exclude a "play on this Mac" exception echoed into the AirPlay mix
+    /// (Spotify → Mac speakers audibly replayed on the selected Sonos). The
+    /// enumerator here lists a process at OUR pid alongside an unrelated one;
+    /// only ours must be excluded, with no excluded bundles configured at all.
+    @Test func exclusionAlwaysContainsOwnProcessObjects() {
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let otherProcess = RawAudioProcess(objectID: 901, pid: 4242, bundleID: "com.other.app")
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, otherProcess])))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        coordinator.start()
+
+        #expect(tap.excludedProcessObjectIDs.contains(900),
+                "our own process object must always be excluded from the whole-system tap (echo guard)")
+        #expect(!tap.excludedProcessObjectIDs.contains(901),
+                "an unrelated process must not be swept up by the self-exclude")
+
+        coordinator.stop()
+    }
+
+    /// T2: every exclusion resolve emits `captureWS`/`exclusion_resolved` with
+    /// each resolved bundle's pids + attribution layer, AND calls out a bundle
+    /// that resolved to ZERO processes — the diagnostic gap the 2026-07-26
+    /// catch-all-attribution live leak exposed: `exclusion_changed` alone shows
+    /// only excluded bundle-id INTENT, never which concrete processes (or none)
+    /// a bundle id actually resolved to.
+    @Test func startEmitsExclusionResolvedTelemetryWithLayerDetailAndZeroBundles() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let coordinator = makeCoordinator(
+            tap: FakeTap(), sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.app.a": 111]))
+
+        coordinator.updateRouting(
+            appRoutes: [],
+            excludedBundleIDs: ["com.app.a", "com.app.missing"])
+        coordinator.start()
+
+        Telemetry._installTestSink(nil)
+
+        let lines = capturedLines.snapshot
+        let resolved = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"exclusion_resolved\"")
+        }
+        #expect(resolved != nil, "expected a captureWS/exclusion_resolved line, got: \(lines)")
+        #expect(
+            resolved?.contains("com.app.a=[111:own]") ?? false,
+            "expected the resolved pid + attribution layer, got: \(resolved ?? "nil")")
+        #expect(
+            resolved?.contains("\"zeroBundles\":\"com.app.missing\"") ?? false,
+            "expected the zero-resolution bundle called out explicitly, got: \(resolved ?? "nil")")
+
+        coordinator.stop()
+    }
+
     // MARK: - RMS metering (pure).
 
     @Test func rmsOfS16LE() {
@@ -999,9 +1071,9 @@ extension SerializedSharedState {
     }
 
     // MARK: - Compare-before-rebuild decision (TapRebuildDecision), whole-system tap
-    // (Fix 3 / CoreAudioSystemTap.installDefaultDeviceListener). The whole-system tap
-    // rebuilds on device-IDENTITY change only (it has no sample-rate listener), so its
-    // guard is the device variant, fed by the new `tappedOutputDeviceID` property.
+    // (Fix 3). Both guards are now evaluated per subscriber inside
+    // ``DefaultOutputDeviceMonitor``, against the device/rate each tap reports for
+    // itself via `subscribeToDefaultOutput`'s `tracked` closure.
     // Testing the pure decision is what makes the storm guard meaningful without a real
     // HAL — the live `defaultOutputDeviceID()` read stays a thin wrapper around it.
 
@@ -1463,7 +1535,135 @@ extension SerializedSharedState {
         #expect(tap.excludedProcessObjectIDs == [111, 333], "the coalesced diff applies the SETTLED exclusion set")
         coordinator.stop()
     }
+
+    // MARK: - DefaultOutputDeviceMonitor subscription (T2 consolidation)
+
+    /// GUARD SEMANTICS. The whole-system tap must report its OWN live device/rate
+    /// to the monitor at every notification, never a snapshot taken once at
+    /// subscribe time. The middle expectation is the one that matters: the tap's
+    /// format drifts while the DEVICE's rate stays put, and only a fresh read of
+    /// the tap's own state can see that divergence. A captured snapshot would
+    /// silently reintroduce the per-subscriber blindness (the silent-tap dropout)
+    /// the monitor exists to prevent.
+    @available(macOS 14.2, *)
+    @Test func wholeSystemTapReportsItsOwnStateLiveToTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 42, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
+        let fires = TapMonitorFireCounter()
+        tap.onDefaultDeviceChanged = { fires.bump() }
+
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput()
+
+        // Converged: the tap is built on exactly what the HAL reports.
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        #expect(fires.count == 0, "a no-op re-announcement must not rebuild the tap — the storm loop-breaker still holds")
+
+        // The TAP drifts; the device's reported rate never moves.
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 44_100)
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        #expect(fires.count == 1,
+            "a tap whose own format drifted must still be told, even though the device's rate is unchanged — proves `tracked` is read live, not captured at subscribe time")
+
+        // A genuine default-output-device identity change fires too.
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        hal.deviceID = 43
+        hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        #expect(fires.count == 2, "a genuine default-output-device change must rebuild the tap")
+
+        tap.teardown()
     }
+
+    /// Teardown replaces the old paired listener removal: it must drop the
+    /// subscription (releasing everything its closures capture) and stay
+    /// idempotent, since `teardown()` also runs from `deinit`.
+    @available(macOS 14.2, *)
+    @Test func wholeSystemTapTeardownUnsubscribesFromTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 42, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput()
+        #expect(monitor.subscriberCount == 1)
+
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "teardown must release the tap's monitor subscription")
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "a second teardown must stay a no-op")
+    }
+    }
+}
+
+/// Shared fake ``DefaultOutputHAL`` for the two capture taps' monitor-subscription
+/// tests (this file and `PerAppCaptureCoordinatorTests`). No live Core Audio, no
+/// real device, no audio played. `fire` delivers on the very queue the monitor
+/// handed over — the real HAL's contract — so it returns only once the monitor has
+/// finished handling the notification.
+final class TapMonitorFakeHAL: DefaultOutputHAL, @unchecked Sendable {
+
+    private final class Token: DefaultOutputHALListenerToken, @unchecked Sendable {
+        let selector: AudioObjectPropertySelector
+        let queue: DispatchQueue
+        let handler: @Sendable () -> Void
+        init(selector: AudioObjectPropertySelector, queue: DispatchQueue,
+             handler: @escaping @Sendable () -> Void) {
+            self.selector = selector
+            self.queue = queue
+            self.handler = handler
+        }
+    }
+
+    private let lock = NSLock()
+    private var _deviceID: AudioObjectID?
+    private var _rate: Double?
+    private var tokens: [ObjectIdentifier: Token] = [:]
+
+    init(deviceID: AudioObjectID?, rate: Double?) {
+        _deviceID = deviceID
+        _rate = rate
+    }
+
+    var deviceID: AudioObjectID? {
+        get { lock.withLock { _deviceID } }
+        set { lock.withLock { _deviceID = newValue } }
+    }
+
+    var rate: Double? {
+        get { lock.withLock { _rate } }
+        set { lock.withLock { _rate = newValue } }
+    }
+
+    func defaultOutputDeviceID() -> AudioObjectID? { deviceID }
+    func nominalSampleRate(of deviceID: AudioObjectID) -> Double? { rate }
+
+    func addListener(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        queue: DispatchQueue,
+        handler: @escaping @Sendable () -> Void
+    ) -> DefaultOutputHALListenerToken? {
+        let token = Token(selector: selector, queue: queue, handler: handler)
+        lock.withLock { tokens[ObjectIdentifier(token)] = token }
+        return token
+    }
+
+    func removeListener(_ token: DefaultOutputHALListenerToken) {
+        lock.withLock { tokens[ObjectIdentifier(token as AnyObject)] = nil }
+    }
+
+    func fire(_ selector: AudioObjectPropertySelector) {
+        let matching = lock.withLock { tokens.values.filter { $0.selector == selector } }
+        for token in matching { token.queue.sync { token.handler() } }
+    }
+}
+
+/// Counts `onDefaultDeviceChanged` fires from the monitor's queue.
+final class TapMonitorFireCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.withLock { _count } }
+    func bump() { lock.withLock { _count += 1 } }
 }
 
 private extension NSLock {

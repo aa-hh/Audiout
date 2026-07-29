@@ -27,7 +27,20 @@ enum AudioDiag {
 
     static func log(_ message: @autoclosure () -> String) {
         guard isEnabled, let handle else { return }
-        let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - startUptimeNanos) / 1_000_000_000
+        // `start` MUST be read into a local before "now" below: `startUptimeNanos`
+        // is itself a lazily-initialized static whose initializer calls
+        // `DispatchTime.now()` — on this function's very first-ever call, Swift
+        // does not guarantee that lazy init runs before the RHS "now" read in a
+        // single subtraction expression. Inlining that subtraction directly
+        // (`DispatchTime.now().uptimeNanoseconds - startUptimeNanos`) was
+        // observed to evaluate "now" first, then force startUptimeNanos's init
+        // microseconds later — making start > now and trapping on UInt64
+        // underflow (checked `-`). Forcing the read here, then taking "now"
+        // strictly after, guarantees now >= start. `&-` is kept as a second,
+        // wrapping-not-trapping line of defense rather than relying solely on
+        // ordering.
+        let start = startUptimeNanos
+        let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000_000
         let line = String(format: "[+%8.3fs] ", elapsedSeconds) + message() + "\n"
         queue.async { handle.write(Data(line.utf8)) }
     }

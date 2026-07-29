@@ -198,26 +198,58 @@ public final class AppRoutingController {
         persist()
     }
 
-    /// Revert EVERY route currently redirecting to a specific AirPlay device
-    /// back to `.noRedirect` — called once at Audiouter's own launch, so a
-    /// `.device` route never survives a full app restart (a simplification of
-    /// the app-quit-triggered `resetDeviceRoute(bundleID:)`, scaled to "all
-    /// routes at once" instead of one app). Mirrors the discipline already
-    /// applied to the live routing set (`RoutingStore` is write-only at
-    /// launch — see `AudiouterCore/AGENTS.md`): a persisted `.device` route
-    /// surviving a restart while its target was offline the whole time is the
-    /// same stale intent, just at the per-app level.
+    /// Revert every route redirecting to a device in `deviceIDs` back to
+    /// `.noRedirect` — a speaker can carry only ONE role at a time (either the
+    /// whole-system "main output" mix OR one app's redirect, never both: the
+    /// AirPlay engine holds one session per receiver, and a second bind is a
+    /// silent no-op). Selecting a speaker into Main Out — or activating a group
+    /// that contains it — is the SENIOR action and wins the speaker, so any
+    /// per-app redirect still pointed at it yields back to "follows main output"
+    /// (where the app rejoins the mix and so still plays on that speaker, now as
+    /// part of the main output rather than a private stream). The coordinating
+    /// layer calls this whenever Main Out membership changes
+    /// (`GroupController.onMainOutMembersChanged`).
     ///
-    /// `.noRedirect` and `.currentDevice` routes are left alone (only
-    /// `.isDeviceRoute` routes are touched), and this deliberately does NOT
-    /// touch `clearedDeviceRouteMemory` — that map backs the narrower
-    /// per-app-quit "Resume → <device>" offer, a separate mechanism from this
-    /// broader launch-time clear. Batches every changed route into exactly one
-    /// `persist()` / `onRoutesDidChange` fire, not one per route.
-    public func clearAllDeviceRoutes() {
+    /// Mirrors ``handleDeviceDisappeared(id:)``'s involuntary reset (same
+    /// `.noRedirect` fallback, same batched single `persist()`), generalized to
+    /// a whole set. A no-op — no persist, no `onRoutesDidChange` — when nothing
+    /// currently targets any of `deviceIDs` (including an empty set), so the
+    /// coordinator can call it unconditionally on every selection change.
+    public func clearRoutes(toDevices deviceIDs: Set<String>) {
+        guard !deviceIDs.isEmpty else { return }
         var changed = false
         for i in appRoutes.indices {
-            if appRoutes[i].destination.isDeviceRoute {
+            if case .device(let id) = appRoutes[i].destination, deviceIDs.contains(id) {
+                appRoutes[i].destination = .noRedirect
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persist()
+    }
+
+    /// Revert EVERY route with any redirect — `.device` AND `.currentDevice`
+    /// alike — back to `.noRedirect`. Called once at Audiouter's own launch, so
+    /// NO redirect of any kind survives a full app restart: every fresh launch
+    /// starts with every application on "Follows main output" (product
+    /// decision, Alec 2026-07-26 — superseding the earlier device-routes-only
+    /// launch clear: live testing showed restored `.currentDevice` routes going
+    /// live at launch, silently pre-polluting every session with active
+    /// captures/exclusions the user never asked for that day). Mirrors the
+    /// discipline already applied to the live routing set (`RoutingStore` is
+    /// write-only at launch — see `AudiouterCore/AGENTS.md`): persisted
+    /// redirect intent from a previous run is stale intent.
+    ///
+    /// Rows and their volumes persist — only the DESTINATION resets. This
+    /// deliberately does NOT touch `clearedDeviceRouteMemory` — that map backs
+    /// the narrower per-app-quit "Resume → <device>" offer, a separate
+    /// mechanism from this broader launch-time clear. Batches every changed
+    /// route into exactly one `persist()` / `onRoutesDidChange` fire, not one
+    /// per route.
+    public func clearAllRedirectsAtLaunch() {
+        var changed = false
+        for i in appRoutes.indices {
+            if appRoutes[i].destination != .noRedirect {
                 appRoutes[i].destination = .noRedirect
                 changed = true
             }

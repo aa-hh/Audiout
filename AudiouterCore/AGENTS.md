@@ -80,7 +80,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   app, and Core Audio reports no bundle id for those children. Shortcutting to
   single-pid resolution misses the real audio source — the routed app becomes
   inaudible and its audio leaks into the system mix. Both coordinators inject
-  `AudioProcessResolver` for this reason.
+  `AudioProcessResolver` for this reason. **Its four attribution layers are an
+  ANY-of union, never first-non-nil-wins:** a helper reporting a bundle id of its
+  OWN (`com.spotify.client.helper`) and reparented to launchd (`ppid == 1`) —
+  proven live 2026-07-26 — defeats both the own-bundle and parent-walk layers, so
+  the `responsibility_get_pid_responsible_for_pid` and bundle-path layers must
+  still be consulted. Collapsing them back to a single "effective bundle id"
+  reopens the exception leak.
+- **T2: resolving a bundle ID also emits a `Telemetry` line naming which
+  attribution layer matched each resolved pid** — `AudioProcessResolver
+  .resolveWithAttribution(bundleID:)` is the diagnostic companion to `resolve
+  (bundleID:)` (same ANY-of matches, each tagged with its ``AttributionLayer``:
+  `own`/`responsible`/`bundlePath`/`parentWalk`). `NativeCaptureCoordinator`
+  logs `.captureWS`/`exclusion_resolved` (bundleID -> `[pid:layer,...]`, plus a
+  `zeroBundles` field) at both its resolve choke points
+  (`resolveExcludedProcessObjectIDs`/`rebuildIfExclusionObjectsChanged`);
+  `PerAppCaptureCoordinator` logs `.capturePA`/`process_resolved` the same way
+  in `beginStart`/`handleDeviceChange`. Exists because the 2026-07-26 catch-all
+  leak could only be diagnosed by manually correlating `ps` against telemetry
+  that showed exclusion INTENT (`exclusion_changed`'s bundle-id list) but never
+  which concrete processes a bundle id resolved to, nor how — a bundle
+  resolving to ZERO processes is exactly that leak's signature and is now
+  visible in the log alone, no repro needed.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -504,7 +525,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
-| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
@@ -517,7 +538,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
-| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) shared by `CoreAudioProcessTap`'s and `CoreAudioSystemTap`'s default-device/nominal-rate listener blocks: fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
+| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) evaluated once per subscriber inside `DefaultOutputDeviceMonitor`'s fan-out (the single process-wide default-device/nominal-rate listener pair both `CoreAudioProcessTap` and `CoreAudioSystemTap` subscribe to, replacing each tap's own raw HAL listener block): fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
 | `CompanionServer` | NWListener + WebSocket: Bonjour advertisement (`_audiouter._tcp`), per-client handshake/command dispatch, snapshot broadcasting. |
 | `CompanionSnapshotBuilder` | Pure mapper: builds full `CompanionSnapshot` from live controllers (devices, groups, app routes) + settings. |

@@ -233,9 +233,9 @@ extension SerializedEngineState {
             await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
             await engine.registerKnownOutputForTest(id)
 
-            async let op: Void = engine.addOutput(id, streamId: 42)
+            async let op: OutputBindResult = engine.addOutput(id, streamId: 42)
             try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
-            try await op
+            #expect(try await op == .bound, "a fresh device really binds — not the already-bound no-op")
 
             #expect(device.pointee.stream_id == 42,
                 "addOutput(_:streamId:) must set device->stream_id before device_start runs")
@@ -260,6 +260,184 @@ extension SerializedEngineState {
             try await op
 
             #expect(device.pointee.stream_id == 0)
+        }
+
+        // MARK: - T6 — the already-bound no-op is VISIBLE, and rebinding is possible.
+        //
+        // Architecture review 2026-07-26, defect B: `addOutput(_:streamId:)` on a
+        // device that already had a live session returned a SILENT success while
+        // the C session stayed on its old stream. The caller bookkept a bind that
+        // never happened, wrote PCM to a stream the device never joined, and the
+        // app showed "routed" while being inaudible. These tests pin the three
+        // behaviours that make that state expressible and fixable.
+
+        /// Like `fireWhenArmed`, but ALSO moves `device->state` the way a real
+        /// backend does before reporting its terminal completion — the shim's
+        /// `outputs_cb` only resolves the waiter, it never touches the device, so a
+        /// multi-op test (rebind = stop then re-add) would otherwise see a device
+        /// still reading STREAMING after its stop completed.
+        private func fireBackendTransition(
+            id: UInt64,
+            to state: output_device_state,
+            engine: AirPlayEngine
+        ) async throws {
+            for _ in 0..<400 {
+                if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                    outputs_device_get(id)?.pointee.state = state
+                    fireCompletion(id: id, cbIdSlot: 0, state: state)
+                    return
+                }
+                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            }
+            Issue.record("waiter for callbackId 0 never armed")
+        }
+
+        /// Re-adding a live device on the stream it is ALREADY on (the converge
+        /// path that re-adds an unchanged device) still succeeds and still does not
+        /// re-issue `device_start` — but now says so: `.alreadyBound(5)` for a
+        /// request of 5 is the honest idempotent case a caller can accept as-is.
+        @Test func addOutputOnLiveDeviceAtSameStreamReportsAlreadyBound() async throws {
+            let id = OutputID(rawValue: 0xC010)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+            guard let device = outputs_device_get(id.rawValue) else {
+                Issue.record("device must exist in the registry")
+                return
+            }
+            device.pointee.stream_id = 5
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            // No completion is fired anywhere in this test: if the idempotency
+            // no-op regressed into a real device_start, this call would arm a
+            // waiter and never return.
+            let result = try await engine.addOutput(id, streamId: 5)
+
+            #expect(result == .alreadyBound(streamId: 5))
+            #expect(device.pointee.stream_id == 5)
+            #expect(await engine.boundStreamId(for: id) == 5)
+        }
+
+        /// THE DEFECT-B CASE: a live device asked for a DIFFERENT stream. The
+        /// session genuinely cannot move (`session_make` read `stream_id` once, at
+        /// creation), so the engine still refuses — but it now reports the stream
+        /// the device is REALLY on, so the caller can see its assumption was wrong
+        /// instead of recording a phantom bind.
+        @Test func addOutputOnLiveDeviceAtDifferentStreamReportsTheRealBinding() async throws {
+            let id = OutputID(rawValue: 0xC011)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_CONNECTED)
+            guard let device = outputs_device_get(id.rawValue) else {
+                Issue.record("device must exist in the registry")
+                return
+            }
+            device.pointee.stream_id = 0 // whole-system stream
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            let result = try await engine.addOutput(id, streamId: 7) // per-app stream
+
+            #expect(result == .alreadyBound(streamId: 0),
+                "the caller asked for stream 7 and must be told the session is still on 0 — a bare success here is the silent no-op that makes an app show as routed while inaudible")
+            #expect(result != .bound)
+            #expect(device.pointee.stream_id == 0,
+                "the live session's binding must not be perturbed by a refused add")
+            #expect(await engine.boundStreamId(for: id) == 0)
+        }
+
+        /// The query half: no live session means nothing is bound, so a caller
+        /// knows a plain `addOutput` will bind fresh.
+        @Test func boundStreamIdIsNilWhenNoLiveSession() async {
+            let id = OutputID(rawValue: 0xC012)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+            outputs_device_get(id.rawValue)?.pointee.stream_id = 3 // stale field, no session
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            #expect(await engine.boundStreamId(for: id) == nil,
+                "device->stream_id is only meaningful while a session is live")
+            // An id the engine never saw is likewise unbound, not a crash.
+            #expect(await engine.boundStreamId(for: OutputID(rawValue: 0xDEAD)) == nil)
+        }
+
+        /// The write half: `rebindOutput` DOES move a live device — stop, then
+        /// re-add bound to the new stream — which is the operation `addOutput`
+        /// alone can never perform.
+        @Test func rebindOutputMovesALiveSessionToTheNewStream() async throws {
+            let id = OutputID(rawValue: 0xC013)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+            guard let device = outputs_device_get(id.rawValue) else {
+                Issue.record("device must exist in the registry")
+                return
+            }
+            device.pointee.stream_id = 0
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id, state: .streaming)
+
+            async let op: Void = engine.rebindOutput(id, toStreamId: 7)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STOPPED, engine: engine)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STREAMING, engine: engine)
+            try await op
+
+            #expect(device.pointee.stream_id == 7,
+                "rebind must land the new stream_id on the device before the re-add's device_start, or session_make binds the old one again")
+            #expect(await engine.boundStreamId(for: id) == 7)
+        }
+
+        /// Rebinding a device with NO live session is not an error — the stop half
+        /// takes the existing idempotent no-op and the add half binds fresh. This
+        /// lets a caller use `rebindOutput` unconditionally.
+        @Test func rebindOutputOnIdleDeviceBindsFresh() async throws {
+            let id = OutputID(rawValue: 0xC014)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+            guard let device = outputs_device_get(id.rawValue) else {
+                Issue.record("device must exist in the registry")
+                return
+            }
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            // Only ONE completion: the stop half no-ops on an already-stopped
+            // device (it arms nothing), so the add half is the only armed op.
+            async let op: Void = engine.rebindOutput(id, toStreamId: 4)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STREAMING, engine: engine)
+            try await op
+
+            #expect(device.pointee.stream_id == 4)
+        }
+
+        /// `rebindOutput` holds the SAME per-`OutputID` `opsInFlight` slot across
+        /// both halves (it does not introduce a second serialization mechanism), so
+        /// a concurrent `removeOutput` on the same device cannot interleave between
+        /// the stop and the re-add. The load-bearing assertion is simply that this
+        /// terminates: if `rebindOutput` re-entered `acquireOp` for its inner ops it
+        /// would deadlock against its own slot and this test would hang.
+        @Test func rebindOutputHoldsOneOpSlotAcrossBothHalves() async throws {
+            let id = OutputID(rawValue: 0xC015)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id, state: .streaming)
+
+            async let rebind: Void = engine.rebindOutput(id, toStreamId: 2)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STOPPED, engine: engine)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STREAMING, engine: engine)
+            try await rebind
+
+            // The slot is released again afterwards — a follow-up op still runs.
+            async let stop: Void = engine.removeOutput(id)
+            try await fireBackendTransition(id: id.rawValue, to: OUTPUT_STATE_STOPPED, engine: engine)
+            try await stop
+
+            #expect(await engine.boundStreamId(for: id) == nil)
         }
     }
 }

@@ -1927,6 +1927,10 @@ final class EngineSink: PCMSink, @unchecked Sendable {
             "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
             "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
             "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+            // How much of the deficit is the ENGINE's own drop site (writes the
+            // backpressure guard refused) rather than a slow producer.
+            "refusedWrites": String(snap.refusedWrites),
+            "refusedTotalSeconds": String(format: "%.3f", snap.refusedSeconds),
         ])
     }
 }

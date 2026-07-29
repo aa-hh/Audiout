@@ -979,8 +979,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let baseResampler = snapshot.syncedLocalBaseResampler
         guard let converter = snapshot.converter else { return }
 
-        guard let pcm = converter.convertToAirPlayPCM(buffer) else { return }
-        guard !pcm.isEmpty else { return }
+        let pcm = converter.convertToAirPlayPCM(buffer)
+        // Sampled AFTER the convert attempt and BEFORE the failure early-out,
+        // so a converter dropping every buffer still surfaces its counters
+        // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
+        converter.sampleConversionFailuresIfDue()
+        guard let pcm, !pcm.isEmpty else { return }
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)
@@ -1617,6 +1621,55 @@ public protocol PCMSink: Sendable {
 /// AVFoundation. Returns nil if this buffer can't be converted (it is dropped).
 public protocol PCMConverting: Sendable {
     func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data?
+
+    /// Throttled, delta-gated telemetry flush of this converter's conversion-
+    /// failure counters (see `AVFormatConverter`'s implementation). Called by
+    /// the whole-system delivery path once per captured buffer — including
+    /// buffers whose conversion just FAILED, so a 100%-failing converter still
+    /// surfaces its failures. Default: no-op (fakes count nothing).
+    func sampleConversionFailuresIfDue()
+}
+
+extension PCMConverting {
+    public func sampleConversionFailuresIfDue() {}
+}
+
+/// Why `AVFormatConverter.convertToAirPlayPCM` dropped a buffer — one case per
+/// silent nil-return site, so the previously-invisible failure modes are
+/// individually countable (whole-system dropout investigation: a converter
+/// failing every buffer was indistinguishable from silence with no cause).
+enum ConversionFailureReason: Int, CaseIterable {
+    /// `AVAudioConverter`/`AVAudioFormat` construction failed at init (bad tap
+    /// format) — every subsequent convert fails here.
+    case converterAbsent
+    /// The captured buffer carried no frames (`frameCount <= 0`).
+    case emptyInput
+    /// `AVAudioPCMBuffer` allocation for the input side failed.
+    case inputAllocFailed
+    /// Interleaved source with no channel-0 data to copy.
+    case missingChannelData
+    /// Zero/non-finite sample rate — the fail-soft guard against a ratio trap.
+    case badSampleRate
+    /// `AVAudioPCMBuffer` allocation for the output side failed.
+    case outputAllocFailed
+    /// `AVAudioConverter.convert` errored or produced zero frames.
+    case convertFailed
+    /// Converted buffer had no extractable bytes.
+    case extractionEmpty
+
+    /// Static literal per case: telemetry field names allocate nothing.
+    var telemetryKey: String {
+        switch self {
+        case .converterAbsent: return "converterAbsent"
+        case .emptyInput: return "emptyInput"
+        case .inputAllocFailed: return "inputAllocFailed"
+        case .missingChannelData: return "missingChannelData"
+        case .badSampleRate: return "badSampleRate"
+        case .outputAllocFailed: return "outputAllocFailed"
+        case .convertFailed: return "convertFailed"
+        case .extractionEmpty: return "extractionEmpty"
+        }
+    }
 }
 
 /// The delayed-local-sink fan-out target (T-FANOUT). The whole-system tap feeds
@@ -2845,6 +2898,24 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
     private let converter: AVAudioConverter?
     private let lock = NSLock()
 
+    // Conversion-failure counters, one slot per ``ConversionFailureReason``
+    // (whole-system dropout investigation): every `return nil` below was a
+    // silently dropped buffer with zero visibility — a converter failing 100%
+    // of buffers looked identical to healthy silence. Increment-only, fixed
+    // storage, in-place mutation (no allocation); written inside the existing
+    // locked convert body and read by `sampleConversionFailuresIfDue()` on the
+    // SAME tap delivery thread — the single-caller discipline `EngineSink`'s
+    // samplers (above) already rely on, so no extra lock is taken to read.
+    private var failureCounts = [UInt64](repeating: 0, count: ConversionFailureReason.allCases.count)
+
+    /// Sampler state for ``sampleConversionFailuresIfDue()`` — same throttle
+    /// interval and delta-gate shape as `EngineSink.sampleWriteBacklogIfDue()`
+    /// / `sampleWriteCadenceIfDue()` (this event joins that family; see those
+    /// docs for why 500 and why only on a genuine change).
+    private static let failureSampleInterval = 500
+    private var failureSampleCounter = 0
+    private var lastReportedFailureTotal: UInt64 = 0
+
     init(from format: TapFormat) {
         self.sourceFormat = format
 
@@ -2884,20 +2955,64 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
         }
     }
 
+    /// Count one dropped buffer against its reason and return nil — every
+    /// failure path below funnels through here so no `return nil` can silently
+    /// escape counting again. In-place scalar bump, no allocation; called with
+    /// `lock` held (inside the convert body).
+    private func failed(_ reason: ConversionFailureReason) -> Data? {
+        failureCounts[reason.rawValue] &+= 1
+        return nil
+    }
+
+    /// Read one reason's cumulative dropped-buffer count (test seam).
+    func conversionFailureCount(_ reason: ConversionFailureReason) -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return failureCounts[reason.rawValue]
+    }
+
+    /// Throttled (1-in-`failureSampleInterval`), delta-gated flush of the
+    /// failure counters as ONE `convert_failure` telemetry event — emitted only
+    /// when failures actually accrued since the last sample, so a healthy
+    /// converter logs nothing, ever. Runs on the tap delivery thread by design,
+    /// exactly like `EngineSink`'s samplers above: the per-buffer cost is one
+    /// increment + one compare; the (allocating) field formatting happens only
+    /// on the rare nonzero-delta emission. Driven from `handleBuffer` AFTER the
+    /// convert attempt — including failed attempts — so a converter dropping
+    /// EVERY buffer (e.g. `converterAbsent`) still gets surfaced.
+    func sampleConversionFailuresIfDue() {
+        failureSampleCounter &+= 1
+        guard failureSampleCounter % Self.failureSampleInterval == 0 else { return }
+        var total: UInt64 = 0
+        for count in failureCounts { total &+= count }
+        guard total != lastReportedFailureTotal else { return }
+        let delta = total &- lastReportedFailureTotal
+        lastReportedFailureTotal = total
+        var fields: [String: String] = [
+            "failedTotal": String(total),
+            "failedDelta": String(delta),
+        ]
+        for reason in ConversionFailureReason.allCases where failureCounts[reason.rawValue] > 0 {
+            fields[reason.telemetryKey] = String(failureCounts[reason.rawValue])
+        }
+        Telemetry.log(.captureWS, "convert_failure", fields)
+    }
+
     func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
         lock.lock(); defer { lock.unlock() }
-        guard let converter, let inFmt = inputAVFormat, let outFmt = outputAVFormat,
-              buffer.frameCount > 0 else { return nil }
+        guard let converter, let inFmt = inputAVFormat, let outFmt = outputAVFormat else {
+            return failed(.converterAbsent)
+        }
+        guard buffer.frameCount > 0 else { return failed(.emptyInput) }
 
         guard let inBuf = AVAudioPCMBuffer(pcmFormat: inFmt,
                                            frameCapacity: AVAudioFrameCount(buffer.frameCount)) else {
-            return nil
+            return failed(.inputAllocFailed)
         }
         inBuf.frameLength = AVAudioFrameCount(buffer.frameCount)
 
         // Copy captured bytes into the input buffer (planar → per-channel, interleaved → single).
         if sourceFormat.isInterleaved {
-            guard let src = buffer.channelData.first else { return nil }
+            guard let src = buffer.channelData.first else { return failed(.missingChannelData) }
             let dst = inBuf.audioBufferList.pointee.mBuffers
             copy(src, into: dst.mData, cap: Int(dst.mDataByteSize))
         } else {
@@ -2915,11 +3030,11 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
         // but a converter built from a bad format must fail soft (drop the buffer),
         // never crash the capture thread.
         guard inFmt.sampleRate.isFinite, inFmt.sampleRate > 0,
-              outFmt.sampleRate.isFinite else { return nil }
+              outFmt.sampleRate.isFinite else { return failed(.badSampleRate) }
         let ratio = Double(outFmt.sampleRate) / Double(inFmt.sampleRate)
         let outCapacity = AVAudioFrameCount(Double(buffer.frameCount) * ratio) + 1
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: outCapacity) else {
-            return nil
+            return failed(.outputAllocFailed)
         }
 
         var supplied = false
@@ -2933,11 +3048,15 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
             outStatus.pointee = .haveData
             return inBuf
         }
-        guard status != .error, conversionError == nil, outBuf.frameLength > 0 else { return nil }
+        guard status != .error, conversionError == nil, outBuf.frameLength > 0 else {
+            return failed(.convertFailed)
+        }
 
         // Extract interleaved S16LE bytes.
         let outABL = outBuf.audioBufferList.pointee.mBuffers
-        guard let outData = outABL.mData, outABL.mDataByteSize > 0 else { return nil }
+        guard let outData = outABL.mData, outABL.mDataByteSize > 0 else {
+            return failed(.extractionEmpty)
+        }
         return Data(bytes: outData, count: Int(outABL.mDataByteSize))
     }
 

@@ -66,7 +66,6 @@ import CoreAudio
     private final class FakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        var onCallActiveChanged: (@Sendable (Bool) -> Void)?
 
         private let lock = NSLock()
         var format = TapFormat(

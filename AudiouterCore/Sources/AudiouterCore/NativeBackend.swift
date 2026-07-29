@@ -2290,12 +2290,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //
             // OUR OWN render process needs no staging here: the coordinator's
             // exclusion resolve unconditionally self-excludes `getpid()` (the
-            // generalized echo guard), which covers `localPlaybackEngine`'s
-            // `.currentDevice` render and the synced-local sink alike. An earlier
-            // version of this call also handed the coordinator a
-            // `.currentDevice`-conditional render pid; with the unconditional guard
-            // in place that only bought an extra tap rebuild whose exclusion set was
-            // byte-identical to the one already in force.
+            // generalized echo guard in `resolveExcludedObjectIDsLoggingAttribution`),
+            // which covers `localPlaybackEngine`'s `.currentDevice` render and the
+            // synced-local sink alike. An earlier version of this call also handed the
+            // coordinator a `.currentDevice`-conditional render pid; with the
+            // unconditional guard in place that only bought an extra tap rebuild whose
+            // exclusion set was byte-identical to the one already in force.
             self.captureCoordinator?.updateRouting(
                 appRoutes: plan.effectiveRoutes,
                 excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))

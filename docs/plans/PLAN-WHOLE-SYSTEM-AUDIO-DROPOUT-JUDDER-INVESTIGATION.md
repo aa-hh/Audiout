@@ -96,9 +96,9 @@ Consequences (verified arithmetic, R2a):
   - `snapshotLock.try()` miss drops the buffer — `NativeCaptureCoordinator.swift:971`
     (correct try-discipline; a miss is a drop by design).
   - **7 uninstrumented nil-return drop sites in `AVFormatConverter.convertToAirPlayPCM`**
-    — `NativeCaptureCoordinator.swift:2883-2940` (`:2886` format/frame guard, `:2890`
-    inBuf alloc, `:2897` interleaved src nil, `:2914` rate guard, `:2918` outBuf alloc,
-    `:2933` convert status, `:2938` outData guard). **Counters are IN FLIGHT (I1 —
+    — `NativeCaptureCoordinator.swift:2883-2938` (`:2886` format/frame guard, `:2890`
+    inBuf alloc, `:2896` interleaved src nil, `:2914` rate guard, `:2918` outBuf alloc,
+    `:2932` convert status, `:2936` outData guard). **Counters are IN FLIGHT (I1 —
     §F).**
   - Engine backpressure refusal — `AirPlayEngine.swift:1218` (`writeBacklog.admit`),
     cap 2.0 s (`:1362`). The cadence tracker records at `:1194`, BEFORE the admission
@@ -284,7 +284,7 @@ Candidate mechanisms, in the order the measurement should discriminate:
 
 1. **Converter under-emission** — `AVAudioConverter` systematically emitting fewer
    output frames than `ratio × input` (`convertToAirPlayPCM`,
-   `NativeCaptureCoordinator.swift:2883-2940`; output capacity capped at
+   `NativeCaptureCoordinator.swift:2883-2938`; output capacity capped at
    `frameCount*ratio + 1`, single-input `.noDataNow` drain contract). R2a flagged
    exactly this as S3.
 2. **Accounting rate mismatch** — `WriteCadenceTracker.record(samples:sampleRate:)`
@@ -464,7 +464,7 @@ every task in §H stays off these surfaces until I1 merges:
    subtraction). Removes J-1's confounder #4.
 2. **Converter drop-site counters**: grouped-by-reason atomic counters on the ~7
    nil-return paths in `convertToAirPlayPCM` (`NativeCaptureCoordinator.swift:
-   2883-2940`), surfaced through the existing whole-system sampler, emitted
+   2883-2938`), surfaced through the existing whole-system sampler, emitted
    only-when-nonzero.
 3. **`scripts/make-app.sh` LSEnvironment passthrough (~:542)**: add
    `AIRPLAY_AUDIO_DIAG` and `AIRPLAY_DEBUG_LATENCY` so the debug gates are reachable

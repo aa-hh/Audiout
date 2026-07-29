@@ -33,9 +33,44 @@ extension SerializedSharedState {
     /// A tap the test drives directly: `createAndStart` returns a scripted format
     /// (or throws a scripted error), and `pushBuffer`/`fireDeviceChange` inject the
     /// IOProc-thread callbacks. Records teardown so the leak fix is observable.
+    /// A process-wide ordered log of tap create/teardown/onBuffer-wire events across
+    /// MULTIPLE ``FakeTap`` instances — the only way to observe make-before-break
+    /// ordering (new tap created BEFORE old torn down; delivery wired only AFTER old
+    /// gone), since a single reused tap can't distinguish "the old" from "the new".
+    private final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var events: [String] = []
+        func record(_ e: String) { lock.withLock { events.append(e) } }
+        var all: [String] { lock.withLock { events } }
+        /// First index of an event, or nil. Used to assert relative ordering.
+        func index(of e: String) -> Int? { lock.withLock { events.firstIndex(of: e) } }
+    }
+
+    /// Hands out a fixed sequence of distinct ``FakeTap`` instances (old, then new,
+    /// …), so a make-before-break test can tell the two taps apart. Extra calls
+    /// (e.g. a coalesced replay) reuse the last tap.
+    private final class SequencedTaps: @unchecked Sendable {
+        private let lock = NSLock()
+        private let taps: [FakeTap]
+        private var i = 0
+        init(_ taps: [FakeTap]) { self.taps = taps }
+        func next() -> FakeTap { lock.withLock { let t = taps[min(i, taps.count - 1)]; i += 1; return t } }
+    }
+
     private final class FakeTap: SystemAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        /// Records `onBuffer#<id>=<wired?>` to the shared ``EventLog`` on every
+        /// assignment, so a test can prove delivery is wired only AFTER the old tap
+        /// is torn down (the no-double-capture guardrail).
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)? {
+            didSet { eventLog?.record("onBuffer#\(id)=\(onBuffer != nil)") }
+        }
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onCallActiveChanged: (@Sendable (Bool) -> Void)?
+
+        /// Optional shared ordering log + per-instance id (default 0 / nil → the
+        /// single-reused-tap tests below are unaffected).
+        var id = 0
+        var eventLog: EventLog?
 
         let lock = NSLock()
         var format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
@@ -59,14 +94,24 @@ extension SerializedSharedState {
 
         func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
             lock.lock(); createCount += 1; lastExcludedProcessObjectIDs = excludedProcessObjectIDs; lock.unlock()
+            eventLog?.record("create#\(id)")
             onCreateAndStart?()
             if let startError { throw startError }
-            lock.lock(); started = true; lock.unlock()
+            // Faithful to the real IOProc: it snapshots `onBuffer` BY VALUE at start
+            // (`let onBuffer = self.onBuffer`) and delivers through that snapshot, so a
+            // handler assigned AFTER createAndStart is NEVER seen. Capturing it here
+            // (not reading the live property in `pushBuffer`) is what lets a test catch
+            // the "onBuffer wired too late → permanent silence" class of bug.
+            lock.lock(); started = true; capturedOnBuffer = onBuffer; lock.unlock()
             return format
         }
 
+        /// The IOProc's start-time snapshot of `onBuffer` — see `createAndStart`.
+        private var capturedOnBuffer: (@Sendable (CapturedBuffer) -> Void)?
+
         func teardown() {
             lock.lock(); teardownCount += 1; started = false; lock.unlock()
+            eventLog?.record("teardown#\(id)")
         }
 
         /// What this fake reports as the device it's anchored to
@@ -79,8 +124,25 @@ extension SerializedSharedState {
         func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
         func setFormat(_ f: TapFormat) { lock.withLock { format = f } }
 
-        func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
+        /// PAUSE-ON-CALL re-drive (``SystemAudioTap/isCallProfile``): what this fake
+        /// reports as its current call profile when the coordinator reconciles the gate
+        /// after a build commit. Defaults to `.notCall` (A2DP), so every non-pause
+        /// test's rebuild re-drives a benign `applyCallActiveLocked(false)`. A
+        /// pause-on-call test sets it `.call` to model a tap that came up on the 16 kHz
+        /// HFP clock (a mid-call rebuild), `.notCall` for the return to A2DP, and
+        /// `.inconclusive` to model a transport-read failure at a low rate (the L1
+        /// fail-safe: keep a latched pause, don't un-gate).
+        private var _callProfileReading: CallProfileReading = .notCall
+        var callProfileReading: CallProfileReading { lock.withLock { _callProfileReading } }
+        func setCallProfile(_ v: CallProfileReading) { lock.withLock { _callProfileReading = v } }
+
+        /// Deliver through the START-TIME snapshot, not the live property — the real
+        /// IOProc only ever calls the handler it captured at createAndStart.
+        func pushBuffer(_ b: CapturedBuffer) { lock.withLock { capturedOnBuffer }?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
+        /// Fire the PAUSE-ON-CALL edge the production `CoreAudioSystemTap.onChange`
+        /// drives on an HFP enter/exit transition.
+        func fireCallActiveChanged(_ active: Bool) { onCallActiveChanged?(active) }
 
         var teardowns: Int { lock.withLock { teardownCount } }
         var creates: Int { lock.withLock { createCount } }
@@ -472,6 +534,131 @@ extension SerializedSharedState {
         tap.fireDeviceChange()
         waitFor { if case .failed = coordinator.state { return true } else { return false } }
         #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
+    }
+
+    // MARK: - Make-before-break tap rebuild for device-IDENTITY changes
+    //         (audio-leak-on-device-switch fix).
+
+    /// Builds a coordinator over a SEQUENCE of distinct fake taps (old, then new)
+    /// sharing one ``EventLog``, with an injected default-output-device resolver —
+    /// the seams a make-before-break ordering test needs.
+    private func makeSequencedCoordinator(
+        _ taps: SequencedTaps,
+        sink: PCMSink = SpySink(),
+        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID?
+    ) -> NativeCaptureCoordinator {
+        NativeCaptureCoordinator(
+            makeTap: { taps.next() },
+            sink: sink,
+            makeConverter: { _ in FakeConverter() },
+            resolveDefaultOutputDeviceID: resolveDefaultOutputDeviceID,
+            muteBehavior: .mutedWhenTapped,
+            installsProcessListListener: false
+        )
+    }
+
+    /// A device-IDENTITY change (new default output device != the one the old tap was
+    /// anchored to) rebuilds MAKE-BEFORE-BREAK: the new tap/aggregate is created and
+    /// started — muting the NEW device — BEFORE the old tap is torn down, so the new
+    /// default device is never left untapped/unmuted for the whole old-teardown gap
+    /// (the `.mutedWhenTapped` leak). Delivery (`onBuffer`) is wired BEFORE
+    /// `createAndStart`, because the real IOProc snapshots the handler at start — a
+    /// handler wired later is never seen and the tap goes permanently silent (the
+    /// bug an adversarial review caught). Double-capture during the overlap is
+    /// prevented not by deferring `onBuffer` but by `handleBuffer`'s empty-converter
+    /// gate, so the new tap must ACTUALLY DELIVER once the rebuild commits.
+    @Test func identityChangeRebuildsMakeBeforeBreak() {
+        let log = EventLog()
+        let sink = SpySink()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink,
+            // The new default output device (72) differs from the old tap's (71).
+            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        #expect(old.creates == 1)
+
+        old.fireDeviceChange()   // identity change -> recreateTap(.deviceOrRateChange)
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: new.format.sampleRate) && new.creates == 1 }
+
+        guard let createNew = log.index(of: "create#2"),
+              let teardownOld = log.index(of: "teardown#1"),
+              let wireNew = log.index(of: "onBuffer#2=true") else {
+            Issue.record("expected new-tap create, old-tap teardown, and new-tap onBuffer wiring; log = \(log.all)")
+            return
+        }
+        #expect(createNew < teardownOld,
+                "MAKE-BEFORE-BREAK: the new tap must be created+started BEFORE the old is torn down (log = \(log.all))")
+        #expect(wireNew < createNew,
+                "SNAPSHOT SAFETY: onBuffer must be wired BEFORE createAndStart — the real IOProc snapshots it at start (log = \(log.all))")
+
+        // The regression guard for the permanent-silence bug: a buffer captured AFTER
+        // the make-before-break rebuild must actually reach the sink. Against the
+        // buggy (deferred-onBuffer) ordering the fake's start-time snapshot is nil, so
+        // this delivers nothing and the assertion fails.
+        let before = sink.writes.count
+        new.pushBuffer(buffer(hostTime: 1_000_000))
+        #expect(sink.writes.count > before,
+                "the rebuilt tap must DELIVER buffers to the sink, not go silent")
+
+        coordinator.stop()
+    }
+
+    /// The deliberate scope limit: a SAME-device rebuild (rate-only renegotiation —
+    /// the default output device id is unchanged) must KEEP break-before-make, so two
+    /// aggregates never sit on ONE physical device mid-rate-renegotiation. Old tap
+    /// torn down BEFORE the new one is created.
+    @Test func sameDeviceRateRebuildStaysBreakBeforeMake() {
+        let log = EventLog()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(71))
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]),
+            // Same default output device (71) as the old tap: a rate-only rebuild.
+            resolveDefaultOutputDeviceID: { AudioObjectID(71) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireDeviceChange()   // same-device rebuild
+        waitFor { new.creates == 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        guard let teardownOld = log.index(of: "teardown#1"),
+              let createNew = log.index(of: "create#2") else {
+            Issue.record("expected an old-tap teardown and a new-tap create; log = \(log.all)")
+            return
+        }
+        #expect(teardownOld < createNew,
+                "BREAK-BEFORE-MAKE (unchanged): a same-device rate rebuild must tear the old tap down BEFORE creating the new one (log = \(log.all))")
+
+        coordinator.stop()
+    }
+
+    /// Failure unwind on the make-before-break path: if the new tap's `createAndStart`
+    /// throws, the old tap is still alive — BOTH must be torn down (never two taps,
+    /// never a dangling one) and the coordinator lands in `.failed`.
+    @Test func identityChangeCreateFailureTearsDownBothTaps() {
+        let log = EventLog()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
+        new.startError = .deviceLost(reason: "gone")
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]),
+            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireDeviceChange()   // identity change; the new createAndStart throws
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+        #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
+        // No tap left dangling: the failed new tap AND the still-alive old tap are both torn down.
+        #expect(new.teardowns >= 1, "the failed new tap must be torn down")
+        #expect(old.teardowns >= 1, "the old tap (still alive on the make-before-break path) must be torn down too")
     }
 
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
@@ -1234,7 +1421,338 @@ extension SerializedSharedState {
     }
     #endif
 
+    // MARK: - PAUSE-ON-CALL (HFP): silence feeder + capture gate + resume
+
+    /// (T5-1) While a call (HFP) is active the feeder is the SOLE stream-0 writer:
+    /// captured buffers are dropped BEFORE conversion, and only clean silence — at
+    /// a monotonically non-decreasing pts — reaches the sink.
+    @Test func callActiveFeedsSilenceAndDropsCapturedAudio() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call profile (production: CoreAudioSystemTap.onChange fires this
+        // on the HFP edge). The gate is published synchronously before the feeder
+        // starts, so no captured buffer can race in.
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }   // silence starts flowing at cadence
+
+        // Captured audio pushed while the call is active must NOT reach the sink.
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        tap.pushBuffer(buffer(hostTime: 2_000_000_000))
+        waitFor { sink.forwarded.count >= 3 }   // a few more feeder ticks land
+
+        #expect(converter.converts == 0,
+                "captured buffers are dropped before conversion while call-active")
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "every stream-0 write while call-active is clean silence — no captured payload")
+        // pts strictly non-decreasing across the fed silence.
+        let ptsNanos = sink.forwarded.map { timespecToNanos($0.pts) }
+        #expect(zip(ptsNanos, ptsNanos.dropFirst()).allSatisfy { $0 <= $1 },
+                "silence pts must be monotonic non-decreasing")
+
+        coordinator.stop()
+    }
+
+    /// (T5-2) On the exit edge, captured audio resumes AND the existing rebuild path
+    /// re-anchors exactly once. Production's `onChange` fires `onCallActiveChanged(false)`
+    /// then falls through to `onDefaultDeviceChanged` on the same edge; the FakeTap
+    /// exposes those as separate hooks, so the test drives both.
+    @Test func callInactiveResumesCaptureAndReAnchorsOnce() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+        let lock = NSLock()
+        var rebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { rebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Exit: un-gate + stop feeder, then the fall-through rebuild re-anchors.
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 1 }
+        #expect(lock.withLock { rebuilds } == 1,
+                "the exit re-anchors via the EXISTING rebuild exactly once")
+
+        // Captured audio now reaches the sink again — real payload, not silence.
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 3_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "captured payload resumes after the call ends")
+        #expect(converter.converts >= 1, "the resumed buffer went through the converter")
+
+        coordinator.stop()
+    }
+
+    /// (T5-3) Flap enter→exit→enter→exit: no permanent silence (the gate never
+    /// latches), and exactly one re-anchor per SETTLED exit.
+    @Test func callFlapNeverLatchesAndReAnchorsPerExit() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+        let lock = NSLock()
+        var rebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { rebuilds += 1 } }
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // enter → exit (rebuild #1)
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 1 }
+
+        // enter again → the feeder MUST feed silence again (not stuck off).
+        let beforeReenter = sink.forwarded.count
+        tap.fireCallActiveChanged(true)
+        waitFor { sink.forwarded.count > beforeReenter }
+        #expect(isAllZero(sink.forwarded.last!.pcm), "silence flows again on the second enter — no permanent silence")
+        // captured audio still gated on the second call.
+        let convertsBefore = converter.converts
+        tap.pushBuffer(buffer(hostTime: 4_000_000_000))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        #expect(converter.converts == convertsBefore, "captured audio stays gated during the second call")
+
+        // exit again (rebuild #2) → capture resumes: the gate never latched.
+        tap.fireCallActiveChanged(false)
+        tap.fireDeviceChange()
+        waitFor { lock.withLock { rebuilds } == 2 }
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 5_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm), "capture resumes after the second exit")
+        #expect(lock.withLock { rebuilds } == 2, "exactly one re-anchor per settled exit")
+
+        coordinator.stop()
+    }
+
+    /// (T5-5) Tearing down (stop) while a call is active stops the feeder and leaves
+    /// NO writer — the gate is never left latched into permanent silence.
+    @Test func teardownWhileCallActiveStopsFeederAndLeavesNoWriter() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+
+        coordinator.stop()
+        // After stop, the feeder must be silent: no further writes over a window
+        // several feeder intervals wide.
+        let after = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > after }   // returns early only if it (wrongly) grows
+        #expect(sink.forwarded.count == after, "no writer after teardown while call-active")
+
+        // And the gate is cleared, so a fresh start captures normally (not stuck silent).
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 9_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture works after restart — the gate did not latch through teardown")
+        coordinator.stop()
+    }
+
+    /// (T5-6) THE mid-call-rebuild fix (the CONFIRMED silent-forever critical). A
+    /// mid-call `.exclusionChange` rebuild swaps in a fresh tap that came up on the
+    /// 16 kHz HFP clock; the coordinator's re-drive KEEPS the pause. Crucially, when the
+    /// call ends the fresh tap fires ONLY its device-change re-anchor — never an exit
+    /// `onCallActiveChanged(false)`, because a tap that never "saw" the enter can't
+    /// report the exit — and the re-anchor's commit re-drives `applyCallActive(false)`
+    /// to un-latch the gate. Pre-fix (tap owned the enter/exit edge, no re-drive) this
+    /// latched into PERMANENT SILENCE: the swapped-in tap's edge read "not in a call",
+    /// the coordinator's gate stayed true, and the exit never fired.
+    @Test func midCallRebuildKeepsPauseAndExitStillClearsTheGate() {
+        let old = FakeTap(); old.id = 1; old.setCallProfile(.notCall)
+        let new = FakeTap(); new.id = 2; new.setCallProfile(.call)   // came up on the 16 kHz HFP clock
+        let sink = SpySink()
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink, resolveDefaultOutputDeviceID: { nil })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call on the OLD tap → gate + feeder; silence flows.
+        old.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Mid-call `.exclusionChange` rebuild → the fresh 16 kHz tap commits. The
+        // re-drive reads its `isCallProfile == true` and KEEPS the pause (idempotent).
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { new.creates >= 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Silence continues, and a buffer captured through the NEW tap while still
+        // call-active is dropped before conversion (no non-zero payload ever appears).
+        let afterRebuild = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count > afterRebuild }   // more feeder ticks land
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "the mid-call rebuild keeps the pause — no captured payload leaks")
+
+        // Call ENDS: the fresh tap now reports A2DP and fires ONLY its device-change
+        // re-anchor. Deliberately NO `fireCallActiveChanged(false)` — modelling the real
+        // bug, where a swapped-in tap never fires the exit edge. Post-fix the re-anchor's
+        // commit re-drives `applyCallActive(false)` and self-heals the gate; pre-fix
+        // nothing clears it and this is permanent silence.
+        new.setCallProfile(.notCall)
+        new.fireDeviceChange()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Gate cleared: captured audio resumes as REAL payload, not silence.
+        let base = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 2_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture resumes after the call ends — the gate did NOT latch (pre-fix: permanent silence)")
+
+        // Feeder stopped: no further silence writes appear on their own.
+        let quiescent = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > quiescent }
+        #expect(sink.forwarded.count == quiescent, "the feeder is stopped once the call ends — no writer left running")
+
+        coordinator.stop()
+    }
+
+    /// (L1 FAIL-SAFE) A mid-call rebuild whose transport read fails lands as
+    /// `.inconclusive`. While the gate is already latched (paused), the re-drive must
+    /// KEEP the pause — never un-gate into a call-audio leak on a transient HAL glitch.
+    /// Pre-fix (`isCallProfile: Bool`, transport-nil ⇒ false) this un-gated and leaked.
+    @Test func inconclusiveRedriveKeepsALatchedPause() {
+        let old = FakeTap(); old.id = 1; old.setCallProfile(.notCall)
+        let new = FakeTap(); new.id = 2; new.setCallProfile(.inconclusive)  // transport read failed
+        let sink = SpySink()
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink, resolveDefaultOutputDeviceID: { nil })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireCallActiveChanged(true)   // paused
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // Mid-call rebuild; the fresh tap can't read transport → `.inconclusive`.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { new.creates >= 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // The pause is KEPT: captured audio through the new tap is still dropped.
+        let afterRebuild = sink.forwarded.count
+        new.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count > afterRebuild }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) },
+                "an inconclusive re-drive must KEEP the latched pause — no captured payload leaks")
+
+        coordinator.stop()
+    }
+
+    /// (T5-7) The related HIGH: a tap-build failure DURING a call must not strand the
+    /// feeder running with no tap to own it, and recovering after the call ended must
+    /// self-heal the gate. Pre-fix the feeder ran forever in `.failed` and the gate
+    /// stayed latched; post-fix `.failed` stops the feeder and the recovery `start()`'s
+    /// re-drive reconciles the gate to the recovered A2DP tap.
+    @Test func failedRebuildDuringCallStopsFeederAndRecoverySelfHeals() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        // Enter the call → gate + feeder; silence flows.
+        tap.fireCallActiveChanged(true)
+        waitFor { !sink.forwarded.isEmpty }
+        #expect(sink.forwarded.allSatisfy { isAllZero($0.pcm) }, "silence while call-active")
+
+        // A mid-call `.exclusionChange` rebuild FAILS (createAndStart throws) → `.failed`.
+        tap.startError = .deviceLost(reason: "gone")
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.app.x"])
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+
+        // The feeder is stopped on entering `.failed` — no writer stranded.
+        let afterFail = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > afterFail }   // returns early only if it (wrongly) grows
+        #expect(sink.forwarded.count == afterFail,
+                "the feeder is stopped on `.failed` — pre-fix it ran forever with no owner")
+
+        // Recover AFTER the call ended: the recovered tap is A2DP, so the re-drive clears
+        // the gate and capture resumes (not stuck silent).
+        tap.startError = nil
+        tap.setCallProfile(.notCall)
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        let base = sink.forwarded.count
+        tap.pushBuffer(buffer(hostTime: 3_000_000_000))
+        waitFor { sink.forwarded.count > base }
+        #expect(!isAllZero(sink.forwarded[base].pcm),
+                "capture resumes after recovery — the gate self-healed, no permanent silence")
+
+        // And no feeder is left running after recovery.
+        let quiescent = sink.forwarded.count
+        waitFor(timeout: 0.3) { sink.forwarded.count > quiescent }
+        #expect(sink.forwarded.count == quiescent, "no feeder left running after recovery")
+
+        coordinator.stop()
+    }
+
+    /// (T5-4) The pure ``CallProfileDecision`` truth table: HFP only when the rate
+    /// rounds to `<= 16000` AND the transport is Bluetooth (classic or LE); nils and
+    /// the rate boundary are covered explicitly.
+    @Test func callProfileDecisionTruthTable() {
+        #if canImport(CoreAudio)
+        let bt = kAudioDeviceTransportTypeBluetooth
+        let btle = kAudioDeviceTransportTypeBluetoothLE
+        let builtIn = kAudioDeviceTransportTypeBuiltIn
+
+        // Positive: HFP rate on a Bluetooth transport (classic + LE).
+        #expect(CallProfileDecision.isCallActive(rate: 16000, transport: bt))
+        #expect(CallProfileDecision.isCallActive(rate: 16000, transport: btle))
+        #expect(CallProfileDecision.isCallActive(rate: 8000, transport: bt), "below-threshold HFP still counts")
+        #expect(CallProfileDecision.isCallActive(rate: 15999.6, transport: bt), "rounds to 16000")
+
+        // Rate boundary: A2DP rates are never a call.
+        #expect(!CallProfileDecision.isCallActive(rate: 16001, transport: bt), "just over the threshold")
+        #expect(!CallProfileDecision.isCallActive(rate: 44100, transport: bt))
+        #expect(!CallProfileDecision.isCallActive(rate: 48000, transport: bt))
+
+        // Transport: a 16 kHz non-Bluetooth device is NOT a call.
+        #expect(!CallProfileDecision.isCallActive(rate: 16000, transport: builtIn))
+
+        // Nils (unreadable device) are never a call — pause only on positive evidence.
+        #expect(!CallProfileDecision.isCallActive(rate: nil, transport: bt))
+        #expect(!CallProfileDecision.isCallActive(rate: 16000, transport: nil))
+        #expect(!CallProfileDecision.isCallActive(rate: nil, transport: nil))
+        #endif
+    }
+
     // MARK: - utils
+
+    /// True when every byte of `pcm` is zero — used to tell fed SILENCE (all zero
+    /// S16LE) apart from the ``FakeConverter``'s non-zero captured payload.
+    private func isAllZero(_ pcm: Data) -> Bool {
+        !pcm.isEmpty && pcm.allSatisfy { $0 == 0 }
+    }
 
     private func timespecToNanos(_ ts: timespec) -> UInt64 {
         UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
@@ -1548,7 +2066,9 @@ extension SerializedSharedState {
     @available(macOS 14.2, *)
     @Test func wholeSystemTapReportsItsOwnStateLiveToTheMonitor() {
         let hal = TapMonitorFakeHAL(deviceID: 42, rate: 48_000)
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        // Long settle window + explicit flush: fan-out happens only where this
+        // test asks for it, never on the monitor's real trailing-edge timer.
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: 60)
         let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
         let fires = TapMonitorFireCounter()
         tap.onDefaultDeviceChanged = { fires.bump() }
@@ -1558,11 +2078,13 @@ extension SerializedSharedState {
 
         // Converged: the tap is built on exactly what the HAL reports.
         hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
         #expect(fires.count == 0, "a no-op re-announcement must not rebuild the tap — the storm loop-breaker still holds")
 
         // The TAP drifts; the device's reported rate never moves.
         tap.test_seedTrackedState(deviceID: 42, sampleRate: 44_100)
         hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
         #expect(fires.count == 1,
             "a tap whose own format drifted must still be told, even though the device's rate is unchanged — proves `tracked` is read live, not captured at subscribe time")
 
@@ -1570,6 +2092,7 @@ extension SerializedSharedState {
         tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
         hal.deviceID = 43
         hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        monitor._drainForTesting()
         #expect(fires.count == 2, "a genuine default-output-device change must rebuild the tap")
 
         tap.teardown()

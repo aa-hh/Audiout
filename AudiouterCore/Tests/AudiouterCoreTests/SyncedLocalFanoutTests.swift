@@ -43,6 +43,7 @@ import AVFoundation
     private final class FeedbackFakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onCallActiveChanged: (@Sendable (Bool) -> Void)?
 
         static let sampleRate = 44_100.0
         static let channels = 2

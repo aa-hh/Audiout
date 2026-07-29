@@ -73,6 +73,73 @@ implementation and is the only one that wires up real Core Audio capture
 (`NativeCaptureCoordinator`, `PerAppCaptureCoordinator`) and local playback
 (`LocalPlaybackEngine`).
 
+### Pause-on-call (whole-system HFP handling)
+
+When the tapped output device enters a Bluetooth headset's CALL (HFP) profile —
+`DefaultOutputDeviceMonitor` delivers a settled nominal rate that rounds to
+`<= 16000` on a Bluetooth transport, classified by the pure `CallProfileDecision`
+— `CoreAudioSystemTap`'s monitor `onChange` reports the CURRENT profile via
+`onCallActiveChanged(true)` and RETURNS EARLY, deliberately SUPPRESSING the usual
+rebuild (rebuilding would re-anchor the whole pipeline onto the 16 kHz HFP clock
+and capture the call). `NativeCaptureCoordinator` then gates captured audio off
+stream 0 (the `callActive` flag, mirrored into the RT `BufferSnapshot`) and starts
+a `SilenceFeeder`: a `DispatchSourceTimer` writing zero S16LE/44100/2ch buffers to
+the same `sink` at the capture cadence, with pts stamped off the shared
+`monotonicNowNanos()` (the SAME `CLOCK_MONOTONIC` timeline the captured pts are
+rebased onto). This keeps the RTP session fed — the engine's ~2 s buffer would
+otherwise underrun across the ~2 s HFP-switch capture starvation and clip the
+receiver — while never forwarding the call audio. The feeder is the SOLE stream-0
+writer while active (capture drops, feeder writes — never both).
+
+**The COORDINATOR is the single owner of the call-active decision.** The gate +
+feeder are reconciled to `active` by one idempotent apply,
+`NativeCaptureCoordinator.applyCallActive(_:)`/`applyCallActiveLocked(_:)` (enter:
+gate before feeder; exit: feeder-stop before un-gate). The WHOLE flag+feeder
+transition runs under ONE `queue.sync` on the coordinator's serial queue, so its two
+callers can never interleave into a flag/feeder MISMATCH (`callActive == false` with
+the feeder still running = silent-forever) — the RT `handleBuffer` reads the gate
+lock-free via `snapshotLock.try()` and never takes `queue`, so holding `queue` across
+`feeder.stop()` never blocks audio. Two callers drive it: (1) the tap's
+`onCallActiveChanged`, which reports its CURRENT profile on every delivery — NOT an
+enter/exit edge; and (2) a RE-DRIVE after EVERY freshly-built tap commits (both
+`start()`'s and `recreateTap`'s commit), via `redriveCallGate(newTap.callProfileReading)`
+(committed `format.sampleRate` + a live transport read, as the FAIL-SAFE 3-state
+`CallProfileReading`). An `.inconclusive` reading (a low rate whose transport read
+failed) while the gate is already latched KEEPS the pause rather than un-gating into a
+call-audio leak on a transient HAL glitch; it only releases on a positive `.notCall`.
+The re-drive is
+load-bearing, not defensive: the enter/exit edge and HFP-rate tracking live on the
+`CoreAudioSystemTap` INSTANCE, which is destroyed/recreated on every rebuild, while
+the gate + feeder live on the coordinator (survives rebuilds). A mid-call
+`.exclusionChange`/membership rebuild (NOT suppressed during a call) used to mint a
+fresh tap whose edge state read "not in a call" while `callActive` stayed latched
+true; the new tap then never fired the exit edge and the gate stuck into permanent
+silence. `callActive` is deliberately NOT cleared inside `recreateTap` — it
+persists across the swap so a mid-call rebuild's new 16 kHz capture is gated from
+its first buffer (no leak window) — and is reconciled only by the commit re-drive:
+a 16 kHz HFP tap → `apply(true)` keeps the pause; an A2DP tap → `apply(false)`
+self-heals a latched gate. A tap-build failure during a call stops the feeder on
+entering `.failed` (no stranded writer); the recovery `start()`'s re-drive restarts
+it iff the recovered tap is still a call profile. On the return to A2DP the monitor
+re-fires (`CoreAudioSystemTap` tracks the live HFP rate while paused precisely so
+this divergence is seen), the coordinator un-gates + stops the feeder, and the
+tap's existing `onDefaultDeviceChanged` rebuild re-anchors — no new recovery path.
+`callActive` is also cleared on `start()`/`stop()`/`deinit`, so it can never latch
+into permanent silence. WHOLE-SYSTEM (stream 0) ONLY; per-app is untouched.
+
+**KNOWN LIMITATIONS** (documented from adversarial review; NOT fixed here):
+- (C) A call start that rides in behind an unrelated `F-SETTLE` settle burst can
+  delay the pause by up to ~1.2 s, briefly leaking call audio to the receiver
+  before the gate engages. Same family: the ENTER classification in the tap's
+  `onChange` is still fail-CLOSED (a transport read failing exactly at call start →
+  no pause until the next notification). The RE-DRIVE is fail-SAFE (keeps a latched
+  pause on an inconclusive read); only the enter edge retains this delay-not-leak-
+  free window.
+- (D) LE-Audio media playing at `<= 16 kHz` on a Bluetooth-LE transport can be
+  misclassified as a call by `CallProfileDecision` (rate+transport only).
+- (E) A speakerphone call routed through the Mac's OWN speakers is NOT paused —
+  the scope is HFP (Bluetooth headset) profiles only.
+
 ## Feature Flow
 
 Selecting a device as a Main Out / Selected Device target:
@@ -101,7 +168,7 @@ Redirecting one app to a specific device:
 |---|---|
 | Domain models | `Device`, `ConnectionState`, `ConnectionFailure`, `BackendEvent` |
 | Backend seam | `OutputBackend`, `NativeBackend`, `MockBackend`, `OwnToneBackend`, `makeBackend(_:)` |
-| Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver` |
+| Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver`, `SilenceFeeder`, `CallProfileDecision` |
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |

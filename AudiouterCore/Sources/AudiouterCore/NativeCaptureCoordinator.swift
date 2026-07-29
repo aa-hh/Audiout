@@ -80,9 +80,26 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     // MARK: Injected dependencies
 
     private let makeTap: @Sendable () -> SystemAudioTap
+
+    /// Resolves the CURRENT default output device id (a cheap
+    /// `kAudioHardwarePropertyDefaultOutputDevice` read), or `nil` when it can't
+    /// be read. Used by ``recreateTap(cause:)`` to tell a device-IDENTITY change
+    /// (new default != the device the old tap was anchored to) from a same-device
+    /// rate rebuild, which is the gate for make-before-break (audio-leak-on-device-
+    /// switch fix). Injected so the decision is hermetically testable; defaults to
+    /// `{ nil }` (always break-before-make — today's behavior) for tests that don't
+    /// exercise it, and is wired to `CoreAudioSystemTap.defaultOutputDeviceID()` at
+    /// the one production construction site.
+    private let resolveDefaultOutputDeviceID: @Sendable () -> AudioObjectID?
+
     private let sink: PCMSink
     private let makeConverter: @Sendable (TapFormat) -> PCMConverting
     private let muteBehavior: TapMuteBehavior
+
+    /// PAUSE-ON-CALL: feeds clean silence to `sink` at the capture cadence while a
+    /// call (HFP) is active, so the RTP session stays fed while captured audio is
+    /// gated off. Owns its own timer/queue; the coordinator only start/stops it.
+    private let feeder: SilenceFeeder
 
     /// Bundle ID -> the FULL set of live Core Audio process objects (main +
     /// every child/helper) for the exclusion list (T4/T-LEAK-FIX). A
@@ -142,24 +159,32 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let meteringActive: Bool
         let syncedLocalSink: SyncedLocalPCMSink?
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
+        /// PAUSE-ON-CALL: when true, ``handleBuffer(_:)`` drops the captured buffer
+        /// so the ``SilenceFeeder`` is the SOLE stream-0 writer (never both). Folded
+        /// into the snapshot — rather than read as a separate field — so the RT path
+        /// picks it up with the SAME lock-free `try()` read it already does, adding
+        /// no new synchronization on the audio thread.
+        let callActive: Bool
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
         /// drops the buffer at its first guard.
         static let empty = BufferSnapshot(
             converter: nil, meteringActive: false,
-            syncedLocalSink: nil, syncedLocalBaseResampler: nil)
+            syncedLocalSink: nil, syncedLocalBaseResampler: nil, callActive: false)
 
         init(
             converter: PCMConverting?,
             meteringActive: Bool,
             syncedLocalSink: SyncedLocalPCMSink?,
-            syncedLocalBaseResampler: SyncedLocalBaseResampler?
+            syncedLocalBaseResampler: SyncedLocalBaseResampler?,
+            callActive: Bool
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
             self.syncedLocalSink = syncedLocalSink
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
+            self.callActive = callActive
         }
     }
 
@@ -204,6 +229,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// yet at coordinator construction, so there's nobody to render a meter for.
     /// Confined to `queue`, same as every other piece of state here.
     private var meteringActive = false
+
+    /// PAUSE-ON-CALL single-writer gate. Set true ONLY on a real HFP-enter edge
+    /// and cleared on the exit edge AND on `start()`/`stop()`/`deinit` — never
+    /// latched (the stuck-silence class of bug). Confined to `queue`, mirrored into
+    /// every published ``BufferSnapshot`` so the RT path reads it lock-free. While
+    /// true the ``SilenceFeeder`` is the only thing writing stream 0.
+    private var callActive = false
+
+    /// The frame count of the LAST captured buffer ``handleBuffer(_:)`` forwarded —
+    /// the ``SilenceFeeder``'s cadence hint (buffer size + timer interval) so fed
+    /// silence matches the real capture cadence. A benign, word-sized hint: written
+    /// only by the single IOProc delivery thread (same unsynchronized-single-writer
+    /// discipline as `machToMonotonicOffsetNanos`), read once on the enter edge; a
+    /// torn/stale read at worst falls back to ~10 ms, never to silence.
+    private var lastObservedFrameCount: Int = 0
 
     /// The live union of routed-away (`.device` destination) and
     /// user-excluded bundle IDs, as last computed by
@@ -379,6 +419,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             },
             sink: EngineSink(engine: engine),
             makeConverter: { format in AVFormatConverter(from: format) },
+            // Make-before-break identity gate (audio-leak-on-device-switch fix): a
+            // single default-output-device read. Pre-14.2 has no live capture, so
+            // nil (-> break-before-make) is correct there.
+            resolveDefaultOutputDeviceID: {
+                if #available(macOS 14.2, *) { return try? CoreAudioSystemTap.defaultOutputDeviceID() }
+                return nil
+            },
             processResolver: processResolver,
             muteBehavior: muteBehavior,
             // T7: the same engine, as the workgroup target. Wired here (the one
@@ -402,6 +449,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> SystemAudioTap,
         sink: PCMSink,
         makeConverter: @escaping @Sendable (TapFormat) -> PCMConverting,
+        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID? = { nil },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
         workgroup: AudioIOWorkgroupJoining? = nil,
@@ -409,7 +457,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         installsProcessListListener: Bool = true
     ) {
         self.makeTap = makeTap
+        self.resolveDefaultOutputDeviceID = resolveDefaultOutputDeviceID
         self.sink = sink
+        self.feeder = SilenceFeeder(sink: sink)
         self.makeConverter = makeConverter
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
@@ -428,6 +478,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// running ahead of a `stop()` call is a pre-existing gap in the T7 workgroup
     /// feature, not something this merge should silently paper over.
     deinit {
+        feeder.stop()   // PAUSE-ON-CALL: never leave the silence timer running
         #if canImport(AudioToolbox)
         removeProcessListListenerLocked()
         membershipQueue.sync { membershipDiffWork?.cancel(); membershipDiffWork = nil }
@@ -463,6 +514,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             #endif
             switch _state {
             case .idle, .failed:
+                // PAUSE-ON-CALL: a genuine (re)start must never inherit a stale
+                // call gate — clear it here (a `.failed` path may not have run the
+                // exit edge). Only on the proceed path, so an idempotent `start()`
+                // while capturing+call-active can't clobber a live pause.
+                self.callActive = false
                 self.transition(to: .creatingTap)
                 return (true, resolveExcludedProcessObjectIDs())
             default:
@@ -470,11 +526,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
         }
         guard claim.proceed else { return }
+        feeder.stop()   // idempotent — no feeder should be running across a fresh start
 
         // Wire callbacks BEFORE creating the tap so no early buffer is dropped.
         let newTap = makeTap()
         newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+        newTap.onCallActiveChanged = { [weak self] active in self?.applyCallActive(active) }
 
         do {
             // Blocking HAL work OUTSIDE the lock.
@@ -504,6 +562,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             if orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
             }
+            // PAUSE-ON-CALL RE-DRIVE: reconcile the gate to the freshly-built tap's
+            // ACTUAL profile. A `start()` that lands while the device is already in a
+            // call (e.g. recovering from `.failed` mid-call) comes up on the 16 kHz HFP
+            // clock → `.call` → gates it from the first buffer; the normal A2DP case is
+            // `.notCall`, an idempotent no-op over the gate `start()` already cleared at
+            // claim; an `.inconclusive` read keeps whatever the gate already is. The
+            // coordinator, not any tap edge, owns this. Off the lock, orphan == nil (a
+            // racing stop() left nothing live).
+            if orphan == nil {
+                redriveCallGate(newTap.callProfileReading)
+            }
         } catch {
             // createAndStart may have created the tap/aggregate before failing on a
             // later step; tear it down so we don't leak a system-wide process tap.
@@ -525,6 +594,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Stop capture: tear the tap + aggregate device down. Idempotent: `stop()`
     /// from `.idle` is a no-op.
     public func stop() {
+        // PAUSE-ON-CALL: stop the feeder unconditionally FIRST (idempotent) so no
+        // silence buffer outlives the session, then clear the gate in the final
+        // block below — the flag is never left latched across a stop() (the
+        // stuck-silence invariant).
+        feeder.stop()
         let toTearDown: SystemAudioTap? = queue.sync {
             switch _state {
             case .idle:
@@ -548,6 +622,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         queue.sync {
             self.tap = nil
             self.converter = nil
+            self.callActive = false   // PAUSE-ON-CALL: never leave the gate latched
             self.publishBufferSnapshot()
             self.transition(to: .idle)
         }
@@ -913,7 +988,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: converter,
             meteringActive: meteringActive,
             syncedLocalSink: syncedLocalSink,
-            syncedLocalBaseResampler: syncedLocalBaseResampler)
+            syncedLocalBaseResampler: syncedLocalBaseResampler,
+            callActive: callActive)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
@@ -953,6 +1029,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         } else {
             return
         }
+        // PAUSE-ON-CALL sole-writer gate: while a call (HFP) is active the
+        // ``SilenceFeeder`` owns stream 0, so drop the captured buffer here — before
+        // conversion, fan-out, or metering — so the call audio never reaches the
+        // receivers and the two writers never race. Placed immediately after the
+        // snapshot read so it reflects the same lock-free published state.
+        if snapshot.callActive { return }
+        // Cache the real capture cadence for the feeder (only from genuinely
+        // forwarded buffers, i.e. not while gated above).
+        lastObservedFrameCount = buffer.frameCount
         let metering = snapshot.meteringActive
         let syncedSink = snapshot.syncedLocalSink
         let baseResampler = snapshot.syncedLocalBaseResampler
@@ -999,6 +1084,86 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // whole-system AirPlay session (see `onDeviceRateRebuild`). This is the one
         // rebuild path that carries `.deviceOrRateChange`.
         recreateTap(cause: .deviceOrRateChange)
+    }
+
+    /// PAUSE-ON-CALL: the coordinator's SINGLE, idempotent owner of the call-active
+    /// decision (T4). Makes the gate (`callActive`) + the ``SilenceFeeder`` MATCH
+    /// `active`, and is safe to call repeatedly with the same value — a duplicate
+    /// `true` keeps the running feeder, a duplicate `false` is a no-op. The
+    /// COORDINATOR, not the tap, owns the transition; two callers drive it:
+    ///  1. the tap's `onCallActiveChanged`, which now reports the CURRENT profile on
+    ///     every delivery (not an enter/exit edge); and
+    ///  2. the RE-DRIVE after every freshly-built tap commits (`start()` /
+    ///     ``recreateTap(cause:)``), passing `newTap.callProfileReading`.
+    ///
+    /// (2) is the crux: the enter/exit edge and the HFP-tracking state used to live on
+    /// the `CoreAudioSystemTap` INSTANCE, which is destroyed and recreated on every
+    /// rebuild. A mid-call `.exclusionChange` rebuild minted a fresh tap whose edge
+    /// state read "not in a call" while the coordinator's gate stayed latched true; the
+    /// new tap then never fired the exit edge and the gate stuck into permanent silence.
+    /// Reconciling the gate to the committed tap's ACTUAL profile after every build
+    /// closes that hole without relying on any edge firing.
+    ///
+    /// ENTER (`true`): gate captured audio off stream 0 FIRST — publish `callActive`
+    /// synchronously so every subsequent `handleBuffer` drops its buffer — THEN
+    /// start the feeder. Ordering matters: with the gate live before the feeder
+    /// writes, capture and silence can never both be writing stream 0 (the
+    /// sole-writer invariant). The feeder's cadence comes from the last observed
+    /// captured frame count.
+    ///
+    /// EXIT (`false`): stop the feeder FIRST (synchronously — no silence buffer can
+    /// still be in flight once `stop()` returns), THEN un-gate. On the exit edge the
+    /// tap's own `onDefaultDeviceChanged` fires right after this and drives the
+    /// EXISTING rebuild → re-anchor; stopping the feeder before un-gating lets that
+    /// re-anchor own the resumed timeline alone (no new recovery path here).
+    ///
+    /// Runs OFF `queue` (it takes `queue` itself) — never call it while holding `queue`.
+    ///
+    /// L2: the WHOLE flag+feeder transition runs under ONE `queue.sync`, so the two
+    /// callers — the tap's `onChange` (monitor queue) and the post-build re-drive
+    /// (rebuild thread) — serialize on this one serial queue and can never interleave
+    /// into a flag/feeder MISMATCH (e.g. `callActive == false` with the feeder still
+    /// running = silent-forever). The RT `handleBuffer` reads the gate lock-free via
+    /// `snapshotLock.try()` and never touches `queue`, so holding `queue` across
+    /// `feeder.stop()` (which briefly drains the feeder's own queue) never blocks the
+    /// audio path. `feeder.start`/`stop` never re-enter `queue`, so no cycle.
+    private func applyCallActive(_ active: Bool) {
+        queue.sync { applyCallActiveLocked(active) }
+    }
+
+    /// Body of ``applyCallActive(_:)`` / ``redriveCallGate(_:)``; MUST run on `queue`.
+    /// Idempotent. ENTER: publish the gate BEFORE starting the feeder (so a captured
+    /// buffer can never race in ungated). EXIT: stop the feeder BEFORE un-gating (so
+    /// no in-flight silence buffer outlives the pause, and the exit rebuild's
+    /// re-anchor owns the resumed timeline alone).
+    private func applyCallActiveLocked(_ active: Bool) {
+        if active {
+            callActive = true
+            publishBufferSnapshot()
+            feeder.start(frameCount: lastObservedFrameCount)
+        } else {
+            feeder.stop()
+            callActive = false
+            publishBufferSnapshot()
+        }
+    }
+
+    /// Post-build re-drive of the call gate (L1 FAIL-SAFE + L2 atomicity). Reconciles
+    /// the gate to a freshly-built tap's ``CallProfileReading``, atomically with every
+    /// other gate mutation (same `queue`). RELEASES the pause only on positive
+    /// evidence (`.notCall`); an `.inconclusive` reading (low rate, transport
+    /// unreadable) while already paused KEEPS the pause rather than leaking call audio
+    /// on a transient HAL read failure — and, when NOT paused, does not spuriously
+    /// start pausing on it. Call OFF `queue`.
+    private func redriveCallGate(_ reading: CallProfileReading) {
+        queue.sync {
+            switch reading {
+            case .call:    applyCallActiveLocked(true)
+            case .notCall: applyCallActiveLocked(false)
+            case .inconclusive:
+                if !callActive { applyCallActiveLocked(false) }  // latched → keep the pause
+            }
+        }
     }
 
     /// Why ``recreateTap(cause:)`` is rebuilding — decides whether the rebuild
@@ -1104,16 +1269,63 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the ordering survives the hop off this queue.
         if old != nil { workgroup?.leave() }
 
-        // Blocking HAL work OUTSIDE the lock.
-        old?.teardown()
+        // MAKE-BEFORE-BREAK, gated to device-IDENTITY changes (audio-leak-on-device-
+        // switch fix). The whole-system tap is `.mutedWhenTapped`: the mute that
+        // keeps system audio OFF the local speakers is a property of the LIVE tap's
+        // aggregate and engages only once the NEW tap's aggregate auto-starts. Break-
+        // before-make tears the old tap down FIRST, so during the new aggregate's
+        // create the NEW default device is tapped by nobody — unmuted — and system
+        // audio audibly leaks out of it (AirPods drop -> built-in speakers blast).
+        //
+        // Fix: when the default device IDENTITY changed (new default != the device
+        // the old tap was anchored to), build+start the new tap/aggregate — which
+        // mutes the NEW device — BEFORE tearing the old one down. The two aggregates
+        // then only ever sit on two DIFFERENT devices, which the HAL already runs
+        // (4+ concurrent taps normally). This does NOT zero the leak: it removes the
+        // old-tap teardown from the window, shrinking it to just the new aggregate's
+        // `createAndStart` (during which the new device is briefly untapped/unmuted).
+        //
+        // A SAME-device rate-only rebuild KEEPS break-before-make: make-before-break
+        // there would put two aggregates on ONE physical device mid-rate-
+        // renegotiation — a novel/risky HAL config we deliberately avoid (the same-
+        // device-rate leak is a documented lower-priority follow-up). Identity comes
+        // off a fresh default-output-device read; a nil on either side (old tap had
+        // no device, or the read failed) falls back to break-before-make.
+        let newDefaultDeviceID = resolveDefaultOutputDeviceID()
+        let makeBeforeBreak: Bool = {
+            guard let previous = claim.previousDeviceID, let current = newDefaultDeviceID
+            else { return false }
+            return previous != current
+        }()
+
+        // Blocking HAL work OUTSIDE the lock. Break-before-make (same device, or an
+        // unknown identity): tear the old tap down first, exactly as before.
+        if !makeBeforeBreak { old?.teardown() }
         let newTap = makeTap()
-        newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
         newTap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange() }
+        newTap.onCallActiveChanged = { [weak self] active in self?.applyCallActive(active) }
+        // Wire delivery BEFORE createAndStart — the real IOProc snapshots `onBuffer`
+        // by value at start (`let onBuffer = self.onBuffer`), so a handler assigned
+        // AFTER createAndStart is never seen by the running IOProc and the tap
+        // delivers nothing forever. An earlier make-before-break "guardrail" deferred
+        // this to avoid double-capture during the old/new overlap, but that was both
+        // unnecessary and a permanent-silence bug: `handleBuffer` already drops every
+        // buffer while `snapshot.converter == nil` (nulled at claim, republished only
+        // at commit), so neither tap's delivery reaches the sink until commit — the
+        // empty-snapshot gate is the real single-delivery guarantee, on both paths.
+        newTap.onBuffer = { [weak self] buffer in self?.handleBuffer(buffer) }
 
         do {
             let format = try newTap.createAndStart(
                 muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
+            // MAKE-BEFORE-BREAK second half: the new aggregate is up and already mutes
+            // the NEW device, so tear the OLD device's tap down only now (leak window
+            // = just the createAndStart above). Delivery was already wired before the
+            // create; the converter gate (above) kept the overlap single-delivery.
+            if makeBeforeBreak {
+                old?.teardown()
+            }
             let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
@@ -1146,6 +1358,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // from no membership and cannot return `EALREADY`.
             if commit.orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
+            }
+            // PAUSE-ON-CALL RE-DRIVE — the crux of the mid-call-rebuild fix. Reconcile
+            // the gate to what the freshly-built tap ACTUALLY is. `callActive` is
+            // deliberately NOT cleared anywhere in this method (it persists across the
+            // swap so a mid-call rebuild's new 16 kHz capture is gated from its first
+            // buffer — no call-audio leak window), and reconciled here at commit:
+            //  * a mid-call `.exclusionChange` rebuild comes up on the 16 kHz HFP clock
+            //    → isCallProfile true → apply(true), an idempotent no-op that keeps the
+            //    pause;
+            //  * a rebuild that commits after the call already ended (or a `.failed`
+            //    recovery) comes up on A2DP → isCallProfile false → apply(false), which
+            //    self-heals a latched gate.
+            // This does NOT depend on the swapped-in tap's exit edge firing — that edge
+            // NOT firing on a fresh tap was the stuck-silence bug. Off the lock,
+            // orphan == nil (a racing stop() that won leaves nothing to reconcile).
+            if commit.orphan == nil {
+                redriveCallGate(newTap.callProfileReading)
             }
             // Fire the whole-system session-reset signal ONLY when this rebuild was
             // caused by a device/nominal-rate change AND actually committed a fresh
@@ -1204,6 +1433,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // is no join to match. The engine thread simply runs without workgroup
             // membership until the next successful tap creation.
             newTap.teardown()   // createAndStart already tears down internally; idempotent.
+            // MAKE-BEFORE-BREAK failure unwind: on this path the old tap is STILL
+            // ALIVE (its teardown was deferred until after a successful create), so
+            // tear it down too — never leave two taps or a dangling one. On the
+            // break-before-make path the old tap was already torn down above; teardown
+            // is idempotent, but this stays guarded to keep that path byte-identical.
+            if makeBeforeBreak { old?.teardown() }
+            // PAUSE-ON-CALL: a tap-build failure DURING a call must not leave the feeder
+            // running forever with no tap to own it (the related HIGH). Stop it here;
+            // the recovery `start()` from `.failed` re-drives `applyCallActive` at its
+            // commit and restarts the feeder if the device is still in a call. No leak
+            // window opens: there is no live tap capturing in `.failed` (converter nil),
+            // so nothing is gated off. Idempotent — a racing stop() already stopped it.
+            feeder.stop()
             let mapped: NativeCaptureError = (error as? NativeCaptureError)
                 ?? .tapCreationFailed(reason: String(describing: error))
             queue.sync {
@@ -1472,6 +1714,33 @@ public protocol SystemAudioTap: AnyObject {
     /// format may change and it must be recreated).
     var onDefaultDeviceChanged: (@Sendable () -> Void)? { get set }
 
+    /// Reports the tapped device's CURRENT Bluetooth CALL (HFP) profile
+    /// (PAUSE-ON-CALL) — `true` = in HFP (~16 kHz mic/call mode), `false` = A2DP /
+    /// not a call. The coordinator (``NativeCaptureCoordinator/applyCallActive(_:)``)
+    /// owns the gate decision and dedupes idempotently, so this reports the CURRENT
+    /// value on EVERY delivery rather than only on an enter/exit EDGE. Reporting the
+    /// current value (not an edge) is half the mid-call-rebuild fix: a tap swapped in
+    /// mid-call no longer needs to have "seen" the enter to correctly report the exit.
+    /// When `true` the coordinator gates captured audio OFF stream 0 and feeds clean
+    /// silence (so the call never reaches the receivers and the ~2 s HFP-switch capture
+    /// starvation never underruns the RTP session); when `false` it un-gates and the
+    /// tap's own ``onDefaultDeviceChanged`` re-anchors via the existing rebuild. A fake
+    /// that does not model call profiles simply never invokes it.
+    var onCallActiveChanged: (@Sendable (Bool) -> Void)? { get set }
+
+    /// PAUSE-ON-CALL re-drive seam: this tap's CURRENT call-profile classification
+    /// (rate + transport), read live from the committed format, as a FAIL-SAFE
+    /// 3-state (``CallProfileReading``). The coordinator reads it right after
+    /// committing a freshly built tap (``NativeCaptureCoordinator`` `start()` /
+    /// `recreateTap`) and calls ``NativeCaptureCoordinator/redriveCallGate(_:)`` with
+    /// it, so the pause gate is reconciled to reality after ANY rebuild — closing the
+    /// mid-call-rebuild stuck-silence hole where the tap's own enter/exit edge state
+    /// was lost across the tap swap. `.inconclusive` (a low rate whose transport read
+    /// failed) keeps a latched pause rather than un-gating into a call-audio leak.
+    /// Defaulted to `.notCall` so a fake that doesn't model call profiles keeps
+    /// working (the re-drive is then always a benign apply(false)).
+    var callProfileReading: CallProfileReading { get }
+
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
     /// ``NativeCaptureError`` on failure (most commonly TCC not granted).
@@ -1515,6 +1784,7 @@ public protocol SystemAudioTap: AnyObject {
 public extension SystemAudioTap {
     var workgroupDeviceID: AudioObjectID? { nil }
     var tappedDeviceID: AudioObjectID? { nil }
+    var callProfileReading: CallProfileReading { .notCall }
 }
 
 /// The audio I/O workgroup seam (T7). Implemented in production by
@@ -1794,9 +2064,21 @@ final class EngineSink: PCMSink, @unchecked Sendable {
     private var backlogSampleCounter = 0
     private var lastReportedDroppedWrites: UInt64 = 0
 
+    /// Write-CADENCE sampling (T-ENG-CADENCE-1, whole-system-dropout
+    /// investigation): the mirror image of the backlog counters above, for
+    /// `writeCadenceSnapshot()` instead of `writeBacklogSnapshot()`. Its own
+    /// independent counter/baseline, same `backlogSampleInterval` — see
+    /// `NativeBackend.sampleWriteCadenceIfDue()`'s doc for the shape this
+    /// copies and why the per-app mixer's sampler alone couldn't cover this
+    /// (stream 0) path.
+    private var cadenceSampleCounter = 0
+    private var lastReportedCadenceDeficitSeconds: Double = 0
+    private var lastReportedCadenceOverrunSeconds: Double = 0
+
     func write(pcm: Data, pts: timespec) {
         engine.write(pcm: pcm, pts: pts)
         sampleWriteBacklogIfDue()
+        sampleWriteCadenceIfDue()
     }
 
     private func sampleWriteBacklogIfDue() {
@@ -1814,6 +2096,36 @@ final class EngineSink: PCMSink, @unchecked Sendable {
             "streamsTracked": String(snap.streamsTracked),
         ])
     }
+
+    /// Mirrors `NativeBackend.sampleWriteCadenceIfDue()` exactly (own counter,
+    /// own last-reported baseline, same `backlogSampleInterval`, same
+    /// deficit-OR-overrun delta-gate) so the whole-system (stream 0) write
+    /// path gets the identical `write_cadence_drift` visibility the per-app
+    /// mixer path already has — closing the gap D3 flagged: a whole-system-
+    /// only session (no active `.device` route) never drove the per-app
+    /// sampler's trigger (`onMixedBuffer`) at all. `path: "wholeSystem"`
+    /// distinguishes this call site from the per-app one's `path: "perApp"`
+    /// in the same event.
+    private func sampleWriteCadenceIfDue() {
+        cadenceSampleCounter &+= 1
+        guard cadenceSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeCadenceSnapshot()
+        guard snap.deficitSeconds != lastReportedCadenceDeficitSeconds
+            || snap.overrunSeconds != lastReportedCadenceOverrunSeconds else { return }
+        let deficitDelta = snap.deficitSeconds - lastReportedCadenceDeficitSeconds
+        let overrunDelta = snap.overrunSeconds - lastReportedCadenceOverrunSeconds
+        lastReportedCadenceDeficitSeconds = snap.deficitSeconds
+        lastReportedCadenceOverrunSeconds = snap.overrunSeconds
+        Telemetry.log(.captureWS, "write_cadence_drift", [
+            "path": "wholeSystem",
+            "writeCount": String(snap.writeCount),
+            "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
+            "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
+            "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
+            "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
+            "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+        ])
+    }
 }
 
 /// The engine as the ``AudioIOWorkgroupJoining`` target (T7): both calls hand off
@@ -1829,12 +2141,111 @@ struct EngineIOWorkgroup: AudioIOWorkgroupJoining {
     func leave() { engine.leaveIOWorkgroup() }
 }
 
+/// Current `CLOCK_MONOTONIC` reading in nanoseconds. File-level (not confined to
+/// ``CoreAudioSystemTap``) so ``SilenceFeeder`` and the capture path share ONE
+/// clock read: PAUSE-ON-CALL's silence pts must sit on the same `CLOCK_MONOTONIC`
+/// timeline the captured-buffer pts are rebased onto (see
+/// ``CoreAudioSystemTap/timespec(machNanos:offset:)``), or the handoff between
+/// captured audio and fed silence would step the receiver's timeline.
+func monotonicNowNanos() -> UInt64 {
+    var ts = Darwin.timespec()
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+}
+
+/// Feeds CLEAN SILENCE into the whole-system (stream 0) sink at the capture
+/// cadence while the tapped output device is in a Bluetooth headset's CALL (HFP)
+/// profile (PAUSE-ON-CALL). Its whole job is to keep the RTP session ALIVE and
+/// fed during the pause: the engine's ~2 s buffer (`startBufferMs`/
+/// `presentationDelay`) would otherwise underrun across the ~2 s HFP-switch
+/// capture starvation and clip the receiver. It never forwards the captured call
+/// audio — the coordinator gates that off (``NativeCaptureCoordinator`` `callActive`)
+/// so the feeder is the SOLE stream-0 writer while active.
+///
+/// NOT a real-time thread: ``PCMSink/write(pcm:pts:)`` is fire-and-forget behind
+/// the engine's buffer, so a plain ``DispatchSourceTimer`` on a `userInitiated`
+/// queue is the correct tool (a bespoke RT thread would be over-engineering for a
+/// buffered, non-RT sink). `start(frameCount:)`/`stop()` are idempotent and
+/// serialize on the feeder's own queue.
+final class SilenceFeeder: @unchecked Sendable {
+    private let sink: PCMSink
+    /// Owns the timer and all mutable state below; also the thread the silence is
+    /// written from. Distinct from the coordinator's state queue and the tap's
+    /// IOProc — the feeder is self-contained.
+    private let queue = DispatchQueue(
+        label: "com.audiouter.native.capture.silence", qos: .userInitiated)
+    private var timer: DispatchSourceTimer?
+    /// `CLOCK_MONOTONIC` nanos of the last emitted pts — the assert baseline that
+    /// makes the strictly-non-decreasing-pts invariant explicit across every
+    /// silence buffer AND across the capture→silence→capture handoff (both sides
+    /// stamp pts off ``monotonicNowNanos()``). Touched only on `queue`.
+    private var lastPtsNanos: UInt64 = 0
+
+    /// The engine's fixed sink format is S16LE / 44100 / 2ch.
+    private static let sinkSampleRate = 44100
+    /// 2 channels × 2 bytes per S16LE sample.
+    private static let bytesPerFrame = 4
+    /// Fallback cadence when no captured buffer has been observed yet: ~10 ms.
+    private static let fallbackFrameCount = 441
+
+    init(sink: PCMSink) { self.sink = sink }
+
+    /// Begin feeding silence. Idempotent — a second `start` while already running
+    /// keeps the existing timer/cadence. `frameCount` is the last captured
+    /// buffer's frame count (or the ~10 ms fallback when none was seen): it sets
+    /// BOTH the silence buffer size and the timer interval, so the emitted rate is
+    /// exactly ``sinkSampleRate`` frames/sec whatever its value — the two derive
+    /// from the same number, so they can't drift apart.
+    func start(frameCount: Int) {
+        queue.async {
+            guard self.timer == nil else { return }
+            let frames = frameCount > 0 ? frameCount : Self.fallbackFrameCount
+            let silence = Data(count: frames * Self.bytesPerFrame)   // zero-filled S16LE
+            let intervalNanos = Int(UInt64(frames) &* 1_000_000_000 / UInt64(Self.sinkSampleRate))
+            let t = DispatchSource.makeTimerSource(queue: self.queue)
+            t.schedule(
+                deadline: .now(),
+                repeating: .nanoseconds(intervalNanos),
+                leeway: .nanoseconds(max(1, intervalNanos / 10)))
+            t.setEventHandler { [weak self] in self?.emit(silence) }
+            self.timer = t
+            t.resume()
+        }
+    }
+
+    /// One silence buffer, stamped with a fresh pts on the SAME `CLOCK_MONOTONIC`
+    /// timeline the captured-buffer pts use — so the receiver's timeline is
+    /// continuous across the handoff — and guaranteed non-decreasing.
+    private func emit(_ silence: Data) {   // on `queue`
+        // CLOCK_MONOTONIC only advances, so `now` is already >= the last pts; the
+        // clamp is belt-and-braces (and documents the invariant) for the
+        // otherwise-impossible equal-or-regressing tick.
+        let now = max(monotonicNowNanos(), lastPtsNanos)
+        assert(now >= lastPtsNanos, "SilenceFeeder pts must be monotonic non-decreasing")
+        lastPtsNanos = now
+        let pts = timespec(tv_sec: Int(now / 1_000_000_000), tv_nsec: Int(now % 1_000_000_000))
+        sink.write(pcm: silence, pts: pts)
+    }
+
+    /// Stop feeding. Idempotent. SYNCHRONOUS on `queue`: after it returns, the
+    /// timer is cancelled AND any in-flight ``emit(_:)`` has completed, so the
+    /// caller can safely un-gate capture knowing no silence buffer will race the
+    /// resumed stream (the sole-writer invariant across the exit edge).
+    func stop() {
+        queue.sync {
+            self.timer?.cancel()
+            self.timer = nil
+        }
+    }
+}
+
 /// Stand-in tap for macOS 14.0–14.1, where the process-tap API doesn't exist.
 /// `createAndStart` throws immediately, so the coordinator lands in `.failed`
 /// with a user-visible message instead of crashing.
 final class UnavailableSystemTap: SystemAudioTap, @unchecked Sendable {
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    var onCallActiveChanged: (@Sendable (Bool) -> Void)?
 
     func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
         throw NativeCaptureError.osUnsupported(minimum: "14.2")
@@ -1892,6 +2303,52 @@ enum TapRebuildDecision {
     }
 }
 
+/// Pure classifier (PAUSE-ON-CALL): is the tapped output device currently in a
+/// Bluetooth headset's CALL (HFP) profile — the ~16 kHz mic/call mode we must NOT
+/// forward to the whole-system AirPlay stream? True only when BOTH the device's
+/// nominal rate rounds to `<= 16000` AND its transport is Bluetooth (classic or
+/// LE). Split out from the live HAL reads so the DECISION — the part that decides
+/// whether we pause capture and feed silence — is unit-testable without Core
+/// Audio, the same pure/live split ``TapRebuildDecision`` uses. `nil` rate or `nil`
+/// transport (an unreadable device) is NOT a call: we only ever pause on positive
+/// evidence of HFP, never on a failed read.
+/// Three-state result of the re-drive classification (L1 FAIL-SAFE). `.inconclusive`
+/// is a LOW rate whose transport could not be read — we can neither confirm nor
+/// deny a call. The re-drive treats it as "keep whatever the gate already is" so a
+/// transient HAL read failure during a real call can never un-gate and leak call
+/// audio (the un-gate direction was fail-open before). A rate above the HFP ceiling
+/// is conclusively `.notCall` regardless of transport, because the committed format
+/// rate is always readable — so a real call end (→ A2DP) always releases the pause.
+public enum CallProfileReading: Sendable, Equatable { case call, notCall, inconclusive }
+
+enum CallProfileDecision {
+    static func isCallActive(rate: Double?, transport: UInt32?) -> Bool {
+        guard let rate, let transport, Int(rate.rounded()) <= 16000 else { return false }
+        #if canImport(CoreAudio)
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+        #else
+        return false
+        #endif
+    }
+
+    /// The fail-safe 3-state used by the post-build re-drive. A rate above the HFP
+    /// ceiling (or missing) is `.notCall`; a low rate with an UNREADABLE transport is
+    /// `.inconclusive` (never un-gate a latched pause on it); a low rate with a
+    /// readable transport is `.call`/`.notCall` by whether it is Bluetooth.
+    static func reading(rate: Double?, transport: UInt32?) -> CallProfileReading {
+        guard let rate, Int(rate.rounded()) <= 16000 else { return .notCall }
+        guard let transport else { return .inconclusive }
+        #if canImport(CoreAudio)
+        let bluetooth = transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+        return bluetooth ? .call : .notCall
+        #else
+        return .notCall
+        #endif
+    }
+}
+
 /// The one process-wide ``DefaultOutputDeviceMonitor`` both capture taps
 /// subscribe to (architecture review 2026-07-26, defect D: one owning component
 /// per shared resource, instead of every tap installing its own pair of HAL
@@ -1937,6 +2394,28 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
     var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    var onCallActiveChanged: (@Sendable (Bool) -> Void)?
+
+    /// PAUSE-ON-CALL edge state, touched ONLY on the monitor's serial queue (the
+    /// queue `subscribeToDefaultOutput`'s `onChange`/`tracked` closures run on),
+    /// so no lock is needed — same queue-confinement discipline this file keeps
+    /// elsewhere.
+    ///
+    /// `lastCallActive` is the previous HFP classification, kept ONLY to log the
+    /// `call_active_changed` telemetry once per transition — the coordinator
+    /// (``NativeCaptureCoordinator/applyCallActive(_:)``) now owns the gate decision,
+    /// and this tap reports its CURRENT profile on every delivery, not an edge.
+    /// `hfpTrackedRate` is load-bearing, NOT cosmetic: while a call is active we
+    /// deliberately suppress the tap rebuild (we do not want the pipeline rebuilt
+    /// onto the 16 kHz HFP clock), so `format.sampleRate` stays frozen at the
+    /// pre-call A2DP rate. If `tracked` reported that frozen rate, the monitor's
+    /// divergence guard would see it EQUAL the restored A2DP rate when the call
+    /// ends and would never fire `onChange` again — a permanent-silence trap. So
+    /// while call-active `tracked` reports the live HFP rate instead, making the
+    /// return to A2DP a genuine divergence that re-fires `onChange` (the exit
+    /// edge). `nil` = not call-active; `tracked` falls back to `format.sampleRate`.
+    private var lastCallActive = false
+    private var hfpTrackedRate: Int?
 
     private let name: String
     private var tapID: AudioObjectID = kAudioObjectUnknown
@@ -1954,11 +2433,56 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return id == kAudioObjectUnknown ? nil : id
     }
 
+    /// PAUSE-ON-CALL master switch — OFF by default (`AUDIOUTER_PAUSE_ON_CALL=1` to
+    /// enable). Rate+transport ("16 kHz + Bluetooth") classifies HFP, but HFP is NOT
+    /// the same as an active CALL: a BT headset sits in HFP with no call right after
+    /// connecting (live-confirmed 2026-07-27: connect → 16 kHz for ~36 s → all audio
+    /// silenced by the pause). Until call-detection keys on the MIC actually being in
+    /// use (not the HFP rate alone), the feature stays disabled so a plain BT connect
+    /// plays (degraded during HFP) instead of going silent.
+    static let pauseOnCallEnabled =
+        ProcessInfo.processInfo.environment["AUDIOUTER_PAUSE_ON_CALL"] == "1"
+
+    /// PAUSE-ON-CALL re-drive (``SystemAudioTap/callProfileReading``): classify the
+    /// tapped device's CURRENT profile from this tap's COMMITTED `format.sampleRate`
+    /// (the rate the aggregate came up on) plus a live transport read, through the
+    /// pure ``CallProfileDecision``. Read by ``NativeCaptureCoordinator`` right after
+    /// a build commit. Always `.notCall` while the feature is disabled.
+    var callProfileReading: CallProfileReading {
+        guard Self.pauseOnCallEnabled else { return .notCall }
+        return CallProfileDecision.reading(
+            rate: Double(format.sampleRate),
+            transport: Self.readTransportType(tappedOutputDeviceID))
+    }
+
     /// The process-wide default-output watcher this tap observes through, and the
     /// handle for its one subscription (nil until `createAndStart`, and again
     /// after `teardown()`).
     private let monitor: DefaultOutputDeviceMonitor
     private var monitorToken: DefaultOutputDeviceMonitor.SubscriptionToken?
+
+    /// D2 telemetry ONLY (whole-system-dropout investigation, see
+    /// `aggregate_create`/`aggregate_destroy`): the correlation id for the
+    /// CURRENT aggregate, so `teardown()`'s `aggregate_destroy` line can be
+    /// matched back to the `aggregate_create` line that made it. Set in
+    /// `createAggregate()`, cleared in `teardown()` — mirrors
+    /// `tappedOutputDeviceID`'s own set/clear discipline.
+    private var lastAggregateUID: String?
+
+    /// D2 telemetry ONLY: the pending ~250ms delayed nominal-rate read for
+    /// the CURRENT aggregate, if any (`scheduleDelayedRateTelemetry`).
+    /// Cancelled and cleared in `teardown()`, mirroring
+    /// `PerAppCaptureCoordinator.membershipDiffWork`'s cancellable-
+    /// `DispatchWorkItem` pattern, so a stale read can never fire once this
+    /// tap's aggregate is gone and never leaks a work item.
+    private var delayedRateTelemetryWork: DispatchWorkItem?
+
+    /// D2 telemetry ONLY: a dedicated queue for the delayed read above —
+    /// never the RT IOProc thread, never `NativeCaptureCoordinator`'s own
+    /// state queue (which is what calls `createAggregate()`/`teardown()`),
+    /// so this diagnostic read can neither block nor be blocked by either.
+    private static let telemetryQueue = DispatchQueue(
+        label: "com.audiouter.native.capture.telemetry", qos: .utility)
 
     /// Per-instance mach→CLOCK_MONOTONIC rebase offset (see `timespec(machNanos:offset:)`
     /// below). Resampled once at `startIOProc()` (i.e. every tap create/recreate,
@@ -2113,6 +2637,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         }
         self.tappedOutputDeviceID = outputID
         let aggregateUID = UUID().uuidString
+        lastAggregateUID = aggregateUID
 
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey as String:          "Tap-\(name)",
@@ -2132,12 +2657,63 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             ]
         ]
 
+        // D2 telemetry ONLY (whole-system-dropout investigation): read the
+        // sub-device's rate immediately BEFORE the create call below — the
+        // other half of the "did our own create flip the rate" comparison
+        // `aggregate_create` reports. A read, never a write — cannot itself
+        // perturb anything, and cannot slow the create down (no I/O, no wait).
+        let rateBeforeCreate = Self.readNominalSampleRate(outputID)
+
         var newAggregateID: AudioObjectID = kAudioObjectUnknown
         let err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
         guard err == noErr else {
             throw NativeCaptureError.aggregateDeviceFailed(reason: "AudioHardwareCreateAggregateDevice \(err)")
         }
         self.aggregateID = newAggregateID
+
+        // D2 telemetry ONLY: answers "which of the four live aggregates
+        // (whole-system + one per routed app) is this, does its sub-device
+        // look like Bluetooth, and does it hand our aggregate an INPUT (mic)
+        // stream alongside its output" — the datum that would explain a BT
+        // HFP/A2DP profile flap as self-inflicted rather than the headset
+        // flapping on its own. Logged once, synchronously, right here —
+        // never on the RT IOProc path, which does not exist yet at this
+        // point (`startIOProc()` runs after this function returns).
+        Telemetry.log(.captureWS, "aggregate_create", [
+            "coordinator": name,
+            "aggregateUID": aggregateUID,
+            "transport": Self.describeTransportType(outputID),
+            "inputStreams": Self.describeStreamCount(Self.streamCount(outputID, scope: kAudioObjectPropertyScopeInput)),
+            "outputStreams": Self.describeStreamCount(Self.streamCount(outputID, scope: kAudioObjectPropertyScopeOutput)),
+            "rateBeforeCreate": Self.describeRate(rateBeforeCreate),
+            "rateAfterCreate": Self.describeRate(Self.readNominalSampleRate(outputID)),
+        ])
+        scheduleDelayedRateTelemetry(deviceID: outputID, aggregateUID: aggregateUID)
+    }
+
+    /// D2 telemetry ONLY: the ~250ms-delayed half of `aggregate_create`'s
+    /// nominal-rate comparison — the read that would reveal "our own create
+    /// call flipped the rate" (a renegotiation that settles shortly AFTER
+    /// creation, not synchronously during the API call itself). Deliberately
+    /// off `createAggregate()`'s own call stack: this function schedules and
+    /// returns immediately, so the 250ms wait can never slow down the create
+    /// it's measuring. Runs on `telemetryQueue` — never the RT IOProc thread,
+    /// never the coordinator's own state queue. `[weak self]` + the stored,
+    /// cancellable `delayedRateTelemetryWork` mirror
+    /// `PerAppCaptureCoordinator.membershipDiffWork`'s exact pattern:
+    /// `teardown()` cancels it so a stale read can never fire once this tap
+    /// is gone, and it can never leak a work item.
+    private func scheduleDelayedRateTelemetry(deviceID: AudioObjectID, aggregateUID: String) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Telemetry.log(.captureWS, "aggregate_create_rate_delayed", [
+                "coordinator": self.name,
+                "aggregateUID": aggregateUID,
+                "rateDelayed": Self.describeRate(Self.readNominalSampleRate(deviceID)),
+            ])
+        }
+        delayedRateTelemetryWork = work
+        Self.telemetryQueue.asyncAfter(deadline: .now() + .milliseconds(250), execute: work)
     }
 
     private func startIOProc() throws {
@@ -2303,6 +2879,77 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return rate
     }
 
+    // MARK: D2 telemetry helpers (whole-system-dropout investigation)
+    //
+    // Read-only HAL property probes + string formatters feeding
+    // `aggregate_create`/`aggregate_create_rate_delayed`/`aggregate_destroy`
+    // above and their `PerAppCaptureCoordinator.CoreAudioProcessTap`
+    // counterparts (which call these directly, cross-file, the same way they
+    // already call `readNominalSampleRate`/`readDeviceUID`). Every helper
+    // degrades to nil/"unreadable" on failure rather than throwing — this is
+    // diagnostics-only and must never affect tap creation/teardown.
+
+    /// A device's current transport type (`kAudioDevicePropertyTransportType`)
+    /// — e.g. `kAudioDeviceTransportTypeBluetooth`/`.bluetoothLE` vs.
+    /// everything else — or nil if unreadable.
+    static func readTransportType(_ deviceID: AudioObjectID) -> UInt32? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport)
+        guard err == noErr else { return nil }
+        return transport
+    }
+
+    /// How many streams `deviceID` exposes in `scope`
+    /// (`kAudioObjectPropertyScopeInput`/`.Output`), or nil if unreadable.
+    /// This is the key datum the whole-system-dropout investigation needs: a
+    /// nonzero INPUT count on the device our aggregate wraps means it is
+    /// handing us a MIC stream alongside its speaker — a live candidate for
+    /// forcing a Bluetooth headset's HFP/A2DP profile switch.
+    static func streamCount(_ deviceID: AudioObjectID, scope: AudioObjectPropertyScope) -> Int? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let err = AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size)
+        guard err == noErr else { return nil }
+        return Int(size) / MemoryLayout<AudioObjectID>.size
+    }
+
+    /// `readTransportType(_:)` rendered as its 4-character code (e.g.
+    /// `"blue"`, `"airp"`, `"bltn"`) — the human/greppable form Core Audio's
+    /// own `AudioDeviceTransportType` constants are defined in — or
+    /// `"unreadable"` on any read failure.
+    static func describeTransportType(_ deviceID: AudioObjectID) -> String {
+        guard let raw = readTransportType(deviceID) else { return "unreadable" }
+        let bytes: [UInt8] = [
+            UInt8((raw >> 24) & 0xff), UInt8((raw >> 16) & 0xff),
+            UInt8((raw >> 8) & 0xff), UInt8(raw & 0xff),
+        ]
+        return String(bytes: bytes, encoding: .ascii) ?? String(raw)
+    }
+
+    /// `streamCount(_:scope:)`'s result as a log-ready string, or
+    /// `"unreadable"` for `nil`.
+    static func describeStreamCount(_ count: Int?) -> String {
+        guard let count else { return "unreadable" }
+        return String(count)
+    }
+
+    /// A `readNominalSampleRate(_:)` result as a whole-Hz log-ready string,
+    /// or `"unreadable"` for `nil`.
+    static func describeRate(_ rate: Double?) -> String {
+        guard let rate else { return "unreadable" }
+        return String(Int(rate.rounded()))
+    }
+
     // MARK: Default-output subscription (device identity + nominal sample rate)
     //
     // Both changes this tap must react to used to be two private HAL property
@@ -2349,10 +2996,53 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                         deviceID: kAudioObjectUnknown, rate: 0)
                 }
                 return DefaultOutputDeviceMonitor.Tracked(
-                    deviceID: self.tappedOutputDeviceID, rate: self.format.sampleRate)
+                    deviceID: self.tappedOutputDeviceID,
+                    // PAUSE-ON-CALL: while a call is active, track the HFP rate (not
+                    // the frozen pre-call `format.sampleRate`) so the return to A2DP
+                    // is seen as a divergence and re-fires `onChange` (the exit edge).
+                    // See `hfpTrackedRate`'s doc.
+                    rate: self.hfpTrackedRate ?? self.format.sampleRate)
             },
             onChange: { [weak self] snapshot in
                 guard let self else { return }
+                // PAUSE-ON-CALL (T2): classify the tapped device's current profile
+                // from the SETTLED rate the monitor just delivered plus a live
+                // transport read, and drive the call-active edge BEFORE any rebuild
+                // decision.
+                let transport = Self.readTransportType(self.tappedOutputDeviceID)
+                // Feature-gated OFF by default (see `pauseOnCallEnabled`): HFP rate is
+                // not proof of a call, so a plain BT connect must not pause.
+                let nowCallActive = Self.pauseOnCallEnabled && CallProfileDecision.isCallActive(
+                    rate: snapshot.nominalRate, transport: transport)
+                // Telemetry keyed on the tap's OWN last-reported value, logged only on a
+                // genuine transition (the live-diagnosis workflow greps this line). This
+                // is now the ONLY thing `lastCallActive` drives — the GATE decision moved
+                // to the coordinator (`applyCallActive`), which owns the edge.
+                if nowCallActive != self.lastCallActive {
+                    Telemetry.log(.captureWS, "call_active_changed", [
+                        "active": nowCallActive ? "true" : "false",
+                        "rate": snapshot.nominalRate.map { String(Int($0.rounded())) } ?? "unreadable",
+                        "transport": Self.describeTransportType(self.tappedOutputDeviceID),
+                    ])
+                }
+                self.lastCallActive = nowCallActive
+                // Report the CURRENT profile on EVERY delivery — the coordinator dedupes
+                // via its idempotent `applyCallActive`. Reporting current (not an edge)
+                // is what lets a tap swapped in mid-call correctly report the exit even
+                // though it never "saw" the enter (the mid-call-rebuild stuck-silence bug).
+                self.onCallActiveChanged?(nowCallActive)
+                if nowCallActive {
+                    // SUPPRESS the rebuild: rebuilding here would re-anchor the whole
+                    // pipeline onto the 16 kHz HFP clock and capture the call. The
+                    // coordinator's feeder keeps stream 0 fed with silence instead.
+                    // Track the live HFP rate so the return to A2DP diverges (the
+                    // exit edge above); without this the frozen `format.sampleRate`
+                    // would equal the restored rate and the exit `onChange` would
+                    // never fire — a stuck-silence trap.
+                    self.hfpTrackedRate = snapshot.nominalRate.map { Int($0.rounded()) }
+                    return
+                }
+                self.hfpTrackedRate = nil
                 // The rebuild below is unconditional: the monitor only delivers
                 // here when a guard already said this tap diverged. The two
                 // Telemetry events are preserved verbatim from the rate listener
@@ -2392,6 +3082,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     // MARK: Teardown (order matters: stop → destroy IOProc → destroy aggregate → destroy tap)
 
     func teardown() {
+        // D2 telemetry ONLY: cancel any pending ~250ms delayed-rate read
+        // before anything else, so it can never fire after teardown starts,
+        // and snapshot what `aggregate_destroy` below needs to report before
+        // the fields it reads from are cleared by this same function.
+        delayedRateTelemetryWork?.cancel()
+        delayedRateTelemetryWork = nil
+        let telemetryDeviceID = tappedOutputDeviceID
+        let telemetryAggregateUID = lastAggregateUID
+
         unsubscribeFromDefaultOutput()
         tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
@@ -2404,12 +3103,26 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
+            // D2 telemetry ONLY: same shape as `aggregate_create`, read
+            // BEFORE the destroy call below so a reader can compare "at
+            // create" vs. "at destroy" for the SAME `aggregateUID`. We never
+            // destroy the physical sub-device itself (only our own private
+            // aggregate wrapper), so it is still live and readable here.
+            Telemetry.log(.captureWS, "aggregate_destroy", [
+                "coordinator": name,
+                "aggregateUID": telemetryAggregateUID ?? "unreadable",
+                "transport": Self.describeTransportType(telemetryDeviceID),
+                "inputStreams": Self.describeStreamCount(Self.streamCount(telemetryDeviceID, scope: kAudioObjectPropertyScopeInput)),
+                "outputStreams": Self.describeStreamCount(Self.streamCount(telemetryDeviceID, scope: kAudioObjectPropertyScopeOutput)),
+                "rate": Self.describeRate(Self.readNominalSampleRate(telemetryDeviceID)),
+            ])
             let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
             if destroyAggErr != noErr {
                 AudioDiag.log("CoreAudioSystemTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)")
             }
             aggregateID = kAudioObjectUnknown
         }
+        lastAggregateUID = nil
         if tapID != kAudioObjectUnknown {
             let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
             if destroyTapErr != noErr {
@@ -2475,12 +3188,13 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return tb
     }()
 
-    /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
-    private static func currentMonotonicNanos() -> UInt64 {
-        var ts = Darwin.timespec()
-        clock_gettime(CLOCK_MONOTONIC, &ts)
-        return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
-    }
+    /// Current `CLOCK_MONOTONIC` reading in nanoseconds. Delegates to the
+    /// file-level ``monotonicNowNanos()`` so ``SilenceFeeder`` (PAUSE-ON-CALL)
+    /// derives its silence pts off the EXACT clock the captured-buffer pts are
+    /// rebased onto — the handoff between captured audio and fed silence must stay
+    /// continuous on one timeline, and there must be only ONE implementation of
+    /// that clock read.
+    private static func currentMonotonicNanos() -> UInt64 { monotonicNowNanos() }
 
     /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled fresh on each call
     /// by reading both clocks back-to-back. Adding the result to a mach-time

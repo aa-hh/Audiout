@@ -945,7 +945,9 @@ extension SerializedSharedState {
     @available(macOS 14.2, *)
     @Test func perAppTapReportsItsOwnStateLiveToTheMonitor() {
         let hal = TapMonitorFakeHAL(deviceID: 7, rate: 48_000)
-        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        // Long settle window + explicit flush: fan-out happens only where this
+        // test asks for it, never on the monitor's real trailing-edge timer.
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: 60)
         let tap = CoreAudioProcessTap(name: "test", monitor: monitor)
         let fires = TapMonitorFireCounter()
         tap.onDefaultDeviceChanged = { fires.bump() }
@@ -954,16 +956,19 @@ extension SerializedSharedState {
         tap.subscribeToDefaultOutput(bundleID: "com.example.app")
 
         hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
         #expect(fires.count == 0, "a no-op re-announcement must not rebuild this per-app tap")
 
         tap.test_seedTrackedState(deviceID: 7, sampleRate: 44_100)
         hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
         #expect(fires.count == 1,
             "a per-app tap whose own format drifted must still be told — proves `tracked` is read live, not captured at subscribe time")
 
         tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
         hal.deviceID = 8
         hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        monitor._drainForTesting()
         #expect(fires.count == 2, "a genuine default-output-device change must rebuild the per-app tap")
 
         tap.teardown()

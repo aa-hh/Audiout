@@ -969,25 +969,57 @@ public actor AirPlayEngine {
         device.pointee.session != nil
     }
 
-    /// Flush any buffered/in-flight audio for `id` — the primitive a future
-    /// pause/seek feature builds on (AirPlay FLUSH: RTSP FLUSH re-anchors the
-    /// receiver's RTP position so playback can resume from a new point).
+    /// Flush any buffered/in-flight audio for `id` and re-anchor the receiver's
+    /// RTP position WITHOUT tearing down the RTSP session (AirPlay FLUSH). The
+    /// vendored `airplay_device_flush` (airplay.c:4294) sends an RTSP FLUSH via
+    /// `sequence_start(AIRPLAY_SEQ_FLUSH…)` and — unlike `device_stop` —
+    /// deliberately does NOT `session_cleanup`: the session stays STREAMING and
+    /// the connection lives, only the playback timeline re-anchors.
     ///
-    /// NO-OP SEAM (first-light hardening #5): pause/seek is explicitly OUT OF
-    /// SCOPE for this phase, so this deliberately does NOT call the vendored
-    /// `output_airplay.device_flush` yet — it only validates the engine/output
-    /// state and returns, giving `NativeBackend` and a later pause/seek task a
-    /// stable API surface to target without a redesign. When pause/seek lands,
-    /// the body becomes a `startOp` over `output_airplay.device_flush` (which
-    /// already exists in the vendored sender, `airplay_device_flush`), mirroring
-    /// `removeOutput` — including its `stopSessionIsLive` guard, since
-    /// `airplay_device_flush` also dereferences device->session unconditionally
-    /// (airplay.c:4187). Throws `unknownOutput` if `id` isn't registered so a
-    /// caller can't silently flush a device the engine never saw.
-    public func flushOutput(_ id: OutputID) async throws {
+    /// F-REANCHOR (2026-07-26): this is the lightweight recovery a whole-system
+    /// tap rebuild wants. A rate-change tap rebuild leaves the process tap
+    /// delivering again but the receiver pinned to a now-stale RTP timeline
+    /// (silent forever — Apple Dev Forums 825780); today `NativeBackend` recovers
+    /// with a full `removeOutput`→`addOutput` (a fresh RTSP/RTP session — audible
+    /// drop). A FLUSH re-anchors in place, so the connection never drops — observed
+    /// to cure the stall on the tested Sonos after a *capture* rebuild (not just the
+    /// deliberate pause/seek FLUSH was designed for); whether it re-anchors on every
+    /// receiver model is not yet proven, so `NativeBackend` uses it as the default
+    /// whole-system rebuild recovery WITH `removeOutput`→`addOutput` as an automatic
+    /// fallback (and the silence watchdog as a further backstop).
+    ///
+    /// ## Returns `true` only if a flush was actually ISSUED
+    /// The vendored `airplay_device_flush` is a silent NO-OP (returns 0, arms no
+    /// completion) unless `device->session->state == STREAMING` (airplay.c:4298) —
+    /// and that inner session state is a DIFFERENT field from `device->state`
+    /// (`liveDeviceState`), which only updates at sequence completion, so the two
+    /// diverge during normal streaming and across a just-completed flush. Guarding
+    /// on `device->state` here would therefore let a no-op masquerade as success.
+    /// So this makes NO device-state pre-guard: it lets the vendored call decide,
+    /// and returns whether it actually issued a flush (`n > 0`). A caller MUST treat
+    /// `false` as "did not re-anchor" and fall back to a real teardown+re-add —
+    /// otherwise a swept-in non-streaming device is left silent with no recovery
+    /// (the exact regression an adversarial review caught). Throws `unknownOutput`
+    /// if `id` isn't registered.
+    @discardableResult
+    public func flushOutput(_ id: OutputID) async throws -> Bool {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
-        // Intentionally no device_flush issue: seam only (pause/seek deferred).
+        // No device->state pre-guard (see doc): it reads a field that diverges from
+        // the session->state the vendored flush acts on. Let the engine-thread
+        // closure decide and report back whether a flush was truly issued.
+        final class IssuedBox: @unchecked Sendable { var value = false }
+        let issued = IssuedBox()
+        _ = try await startOp(id: id, serialize: true, onIssue: { issued.value = $0 > 0 }) { device, cbId in
+            // Same TOCTOU/NULL-session guard removeOutput uses: a receiver-side
+            // RTSP drop can NULL device->session before this closure runs on the
+            // engine thread. airplay_device_flush derefs session unconditionally, so
+            // short-circuit to a clean no-op (0). A non-STREAMING session also makes
+            // the vendored call return 0. `onIssue` records whether n > 0.
+            guard device.pointee.session != nil else { return 0 }
+            return output_airplay.device_flush?(device, cbId) ?? 0
+        }
+        return issued.value
     }
 
     /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
@@ -1423,6 +1455,7 @@ public actor AirPlayEngine {
     private func startOp(
         id: OutputID,
         serialize: Bool = true,
+        onIssue: (@Sendable (Int32) -> Void)? = nil,
         issue: @escaping (UnsafeMutablePointer<output_device>, Int32) -> Int32
     ) async throws -> OutputState {
         // B5.1: serialize ops per OutputID — a second op on the same id awaits the
@@ -1494,6 +1527,11 @@ public actor AirPlayEngine {
                     return
                 }
                 let n = effectiveIssue(device, cbId)
+                // Report the raw issue count to the caller (used by flushOutput to
+                // tell a real flush, n>0, from a silent no-op, n==0). Fires in both
+                // production and headless (issueOverride) paths since it reads
+                // `effectiveIssue`'s return.
+                onIssue?(n)
                 if n <= 0 {
                     // No callback promised -> no completion will arrive. Disarm
                     // and resolve immediately so we never hang (contract N<=0).

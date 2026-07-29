@@ -204,6 +204,25 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   therefore also compares the outgoing tap's `SystemAudioTap.tappedDeviceID` and rate
   against the incoming one's and resets on a real move. A tap that reports `nil`
   (the protocol default) abstains from the identity half rather than forcing a reset.
+- **While a Bluetooth CALL (HFP) profile is active on the tapped output device,
+  the `SilenceFeeder` is the SOLE whole-system (stream-0) writer, and the
+  `callActive` gate must never latch.** `CoreAudioSystemTap`'s monitor `onChange`
+  classifies the settled rate+transport via the pure `CallProfileDecision`
+  (`<= 16000` Hz AND Bluetooth); on the enter edge it fires `onCallActiveChanged(true)`
+  and SUPPRESSES the rebuild (rebuilding would re-anchor onto the 16 kHz HFP clock
+  and forward the call). `NativeCaptureCoordinator` then drops captured buffers
+  (`callActive`, mirrored into the RT `BufferSnapshot`) and runs the `SilenceFeeder`,
+  which writes zero S16LE/44100/2ch buffers to the same sink at the capture cadence
+  with pts on the shared `monotonicNowNanos()` `CLOCK_MONOTONIC` timeline — keeping
+  the RTP session fed (the ~2 s buffer would otherwise underrun the ~2 s HFP-switch
+  starvation). Capture and feeder never write at once. **TRAP: while paused the tap
+  must track the LIVE HFP rate (`hfpTrackedRate`), not the frozen pre-call rate** —
+  the monitor only re-fires `onChange` on a divergence from what the subscriber
+  tracks, so a frozen rate would equal the restored A2DP rate and the exit edge would
+  never fire (permanent silence). On exit the coordinator un-gates and the existing
+  `onDefaultDeviceChanged` rebuild re-anchors — no new recovery path. The gate is set
+  only on a real enter edge and cleared on exit AND on `start()`/`stop()`/`deinit`.
+  WHOLE-SYSTEM ONLY; per-app capture is untouched.
 - **The silence fallback (R11) has its OWN always-on delay, decoupled from the
   wake-restore preference.** `armSilenceWatchdog` uses the always-on
   `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be

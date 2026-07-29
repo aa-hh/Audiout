@@ -196,12 +196,22 @@ Flagged, not silently fixed:
    lifecycle telemetry gap that claim papered over is now closed differently:
    `aggregate_create`/`aggregate_create_rate_delayed`/`aggregate_destroy` Telemetry
    at `NativeCaptureCoordinator.swift:2296/:2323/:2682` and the per-app mirror.
+   **The stale sentence itself SURVIVES at e960a7b** (`AudiouterCore/AGENTS.md` Map
+   entry for `AudioDiag`; `handleCreated`/`handleDestroyed`/`dumpLiveHandles` still
+   have zero production callers — definition + tests only). F-7 owns the doc fix;
+   per "docs orient, code decides", believe the source until then.
 6. All R1/R2a/R4 line anchors into `NativeCaptureCoordinator.swift` (grew 2564→2949),
    `NativeBackend.swift` (5713→6161), `AirPlayEngine.swift` (→2466) shifted; the
    re-resolved values are the ones used throughout this document. Notables:
    `handleBuffer` 871→**947**, converter 2498→**2883**, `write(streams:pts:)`
    1040→**1174**, `WriteBacklogGuard` 1884→**2029**, `recreateTap` 973→**1062**.
-7. **Vendored C anchors hold byte-identically** (airplay.c, rtp_common.c, misc.c,
+7. **Roadmap 009's premise no longer holds** ("per-app tap lacks a
+   deviceMoved-equivalent guard; could silently miss the RTP-session-reset window"):
+   the per-app coordinator now runs the shared `TapReanchor` device/rate compare on
+   its rebuild path (`PerAppCaptureCoordinator.swift:569-579`). Close 009 out when
+   the roadmap next lands on `main`; 012 and 015 are likewise satisfied by the
+   merge (items 3–4 above) and need only their close-out notes.
+8. **Vendored C anchors hold byte-identically** (airplay.c, rtp_common.c, misc.c,
    ptp sources) — verified spot-for-spot.
 
 ---

@@ -138,6 +138,49 @@ import CAirPlayEngine
         tracker.record(samples: 352, sampleRate: 0)
         #expect(tracker.snapshot().writeCount == 0)
     }
+
+    /// A backpressure-refused write (recorded first as every producer write is,
+    /// then charged back via `recordRefused`) must ADD its audio time to the
+    /// cumulative deficit — refused audio was never delivered, so counting it
+    /// as delivered under-reports the receiver-visible shortfall — while
+    /// leaving the producer-cadence fields (`writeCount`, `lastGapSeconds`,
+    /// `overrunSeconds`) untouched, and must stay separately visible via the
+    /// refused counters.
+    @Test func refusedWriteChargesDeficitAndStaysSeparatelyVisible() {
+        let tracker = WriteCadenceTracker()
+        let sampleRate = 44100
+        let samples = 4410 // 0.1s of audio per write
+        let audioSeconds = Double(samples) / Double(sampleRate)
+
+        tracker.record(samples: samples, sampleRate: sampleRate) // seed baseline
+        tracker.record(samples: samples, sampleRate: sampleRate) // the write that gets refused
+        let before = tracker.snapshot()
+
+        tracker.recordRefused(samples: samples, sampleRate: sampleRate)
+        let after = tracker.snapshot()
+
+        #expect(after.refusedWrites == 1)
+        #expect(abs(after.refusedSeconds - audioSeconds) <= 1e-9)
+        #expect(abs((after.deficitSeconds - before.deficitSeconds) - audioSeconds) <= 1e-9,
+                "the refused write's audio time must be charged back into the deficit")
+        // The paired `record` already measured this write's producer gap —
+        // a refusal must not double-touch the producer-cadence fields.
+        #expect(after.writeCount == before.writeCount)
+        #expect(after.lastGapSeconds == before.lastGapSeconds)
+        #expect(after.overrunSeconds == before.overrunSeconds)
+
+        // Degenerate refusals are ignored, like degenerate records.
+        tracker.recordRefused(samples: 0, sampleRate: sampleRate)
+        tracker.recordRefused(samples: samples, sampleRate: 0)
+        #expect(tracker.snapshot().refusedWrites == 1)
+
+        // And `reset()` clears the refused counters with everything else.
+        tracker.reset()
+        let cleared = tracker.snapshot()
+        #expect(cleared.refusedWrites == 0)
+        #expect(cleared.refusedSeconds == 0)
+        #expect(cleared.deficitSeconds == 0)
+    }
 }
 
 // MARK: - AirPlayEngine.write(pcm:pts:) end-to-end
@@ -214,6 +257,41 @@ extension SerializedEngineState {
         #expect(snapshot.writeCount == 11)
         #expect(snapshot.deficitSeconds < 0.15)
         #expect(snapshot.overrunSeconds < 0.15)
+    }
+
+    /// Wiring proof for the refusal accounting through the REAL public write
+    /// path: a write the backpressure guard refuses (stream preloaded to the
+    /// cap, same idiom as `WriteBacklogTests.engineDropsSaturatedStreamThenSelfHeals`)
+    /// must surface in `writeCadenceSnapshot()` as a refused write whose audio
+    /// time is folded into the deficit — the engine's own drop site no longer
+    /// counts as delivered audio.
+    @Test func engineRefusedWriteIsChargedToCadenceDeficit() async {
+        let engine = AirPlayEngine()
+        await engine.enterHeadlessTestMode()
+
+        let samplesPerWrite = 352
+        let audioSeconds = Double(samplesPerWrite) / 44100.0
+        let pcm = Data(repeating: 0xAB, count: samplesPerWrite * 4) // S16LE stereo
+        let pts = timespec(tv_sec: 0, tv_nsec: 0)
+
+        // Saturate stream 9's backlog WITHOUT draining it — models
+        // enqueued-but-not-yet-run write bodies during an engine-thread stall.
+        let reservation: [(streamId: UInt32, audioSeconds: Double)] =
+            [(streamId: 9, audioSeconds: engine.writeBacklog.capSeconds)]
+        #expect(engine.writeBacklog.admit(reservation))
+
+        engine.write(pcm: pcm, streamId: 9, pts: pts) // refused by backpressure
+
+        let snap = engine.writeCadenceSnapshot()
+        #expect(engine.writeBacklogSnapshot().droppedWrites == 1)
+        #expect(snap.refusedWrites == 1, "the refused write must be counted")
+        #expect(abs(snap.refusedSeconds - audioSeconds) <= 1e-9)
+        // The first record only seeds the baseline (zero gap contribution), so
+        // the whole deficit here is exactly the refused audio time.
+        #expect(abs(snap.deficitSeconds - audioSeconds) <= 1e-9,
+                "refused audio must be charged into the cumulative deficit")
+
+        engine.writeBacklog.release(reservation)
     }
 }
 

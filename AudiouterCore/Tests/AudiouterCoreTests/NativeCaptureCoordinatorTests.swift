@@ -1446,6 +1446,87 @@ extension SerializedSharedState {
         #expect(abs(ratio - 44100.0 / 48000.0) <= 0.01,
             "total output length must scale by the declared-rate ratio (44100/48000), confirming rate == pitch")
     }
+
+    /// The converter's silent nil-return sites are counted, grouped by reason
+    /// (whole-system dropout investigation): before this, a converter dropping
+    /// every buffer was indistinguishable from healthy silence. A converter
+    /// built from a degenerate tap format fails every buffer as
+    /// `.converterAbsent`; a frameless buffer counts `.emptyInput`; an
+    /// interleaved buffer with no channel data counts `.missingChannelData`;
+    /// and a healthy conversion counts nothing.
+    @available(macOS 14.2, *)
+    @Test func converterFailureCountersGroupByReason() {
+        let planar = Self.planarFloat32Stereo(frameCount: 64)
+        let buffer = CapturedBuffer(channelData: planar, frameCount: 64, pts: timespec())
+
+        // Degenerate format -> AVAudioFormat/AVAudioConverter never construct,
+        // so EVERY convert fails as converterAbsent.
+        let broken = AVFormatConverter(from: TapFormat(
+            sampleRate: 0, channels: 2, bitsPerSample: 0, isFloat: true, isInterleaved: true))
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        #expect(broken.conversionFailureCount(.converterAbsent) == 2)
+
+        // A frameless buffer through a HEALTHY converter counts emptyInput.
+        let healthy = AVFormatConverter(from: TapFormat(
+            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+        #expect(healthy.convertToAirPlayPCM(
+            CapturedBuffer(channelData: planar, frameCount: 0, pts: timespec())) == nil)
+        #expect(healthy.conversionFailureCount(.emptyInput) == 1)
+
+        // An interleaved source with no channel data counts missingChannelData.
+        let interleaved = AVFormatConverter(from: TapFormat(
+            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: true))
+        #expect(interleaved.convertToAirPlayPCM(
+            CapturedBuffer(channelData: [], frameCount: 64, pts: timespec())) == nil)
+        #expect(interleaved.conversionFailureCount(.missingChannelData) == 1)
+
+        // A successful conversion moves NO counter.
+        #expect(healthy.convertToAirPlayPCM(buffer) != nil)
+        for reason in ConversionFailureReason.allCases where reason != .emptyInput {
+            #expect(healthy.conversionFailureCount(reason) == 0,
+                "a healthy conversion must not count \(reason)")
+        }
+        #expect(healthy.conversionFailureCount(.emptyInput) == 1)
+    }
+
+    /// `sampleConversionFailuresIfDue()` (the whole-system sampler family):
+    /// throttled to its interval, delta-gated to genuinely NEW failures — a
+    /// failing converter emits ONE `convert_failure` event per accrual, a
+    /// converter with no new failures emits nothing, ever. Test-sink idiom and
+    /// serialization rationale identical to
+    /// `startEmitsCaptureWSTransitionTelemetry` above.
+    @available(macOS 14.2, *)
+    @Test func converterFailureSamplerEmitsOnlyOnNewFailures() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let broken = AVFormatConverter(from: TapFormat(
+            sampleRate: 0, channels: 2, bitsPerSample: 0, isFloat: true, isInterleaved: true))
+        let buffer = CapturedBuffer(
+            channelData: Self.planarFloat32Stereo(frameCount: 64), frameCount: 64, pts: timespec())
+
+        func failureLines() -> [String] {
+            capturedLines.snapshot.filter { $0.contains("\"evt\":\"convert_failure\"") }
+        }
+
+        // One failing convert + a full sampler interval -> exactly one event
+        // (the delta-gate blocks every later tick with no NEW failures).
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        for _ in 0..<1000 { broken.sampleConversionFailuresIfDue() }
+        Telemetry._installTestSink { capturedLines.append($0) } // flush barrier
+        #expect(failureLines().count == 1,
+            "one accrual across many sampler ticks must emit exactly one event, got: \(failureLines())")
+        #expect(failureLines().first?.contains("\"converterAbsent\":\"1\"") == true)
+
+        // A NEW failure re-arms the delta gate: next interval emits again.
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        for _ in 0..<500 { broken.sampleConversionFailuresIfDue() }
+        Telemetry._installTestSink(nil) // synchronous flush barrier
+        #expect(failureLines().count == 2)
+        #expect(failureLines().last?.contains("\"failedTotal\":\"2\"") == true)
+    }
     #endif
 
     // MARK: - utils

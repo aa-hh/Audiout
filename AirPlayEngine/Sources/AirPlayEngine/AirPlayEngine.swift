@@ -1187,10 +1187,15 @@ public actor AirPlayEngine {
         // the wall clock. Keyed off the FIRST entry — the cadence tracker models
         // one write-rate stream; a future task can split per-stream cadence if
         // simultaneous streams stop sharing a nominal rate. Recorded for EVERY
-        // producer write, including one we go on to drop below: cadence measures
-        // the producer's real feed rate, which our backpressure decision must not
-        // distort. Allocation-free, never gates the write.
-        if let firstSamples = entries.first.map({ $0.pcm.count / bytesPerSample }) {
+        // producer write, including one we go on to drop below: the per-write
+        // gap measures the producer's real feed rate, which our backpressure
+        // decision must not distort. A write the backpressure guard then REFUSES
+        // is charged back via `recordRefused` (below), so the cumulative deficit
+        // still equals wall time minus audio actually DELIVERED — the receiver
+        // anchor slide — instead of crediting refused audio as delivered.
+        // Allocation-free, never gates the write.
+        let firstSamples = entries.first.map { $0.pcm.count / bytesPerSample }
+        if let firstSamples {
             cadence.record(samples: firstSamples, sampleRate: sampleRate)
         }
         // Latency budget probe (env-gated, diagnostic only): how stale is the
@@ -1215,7 +1220,17 @@ public actor AirPlayEngine {
             (streamId: entry.streamId,
              audioSeconds: Double(entry.pcm.count / bytesPerSample) / Double(sampleRate))
         }
-        guard writeBacklog.admit(additions) else { return }
+        guard writeBacklog.admit(additions) else {
+            // Backpressure refused this write: the audio recorded above was NOT
+            // delivered. Charge it back into the cadence deficit so the
+            // cumulative deficit keeps tracking the receiver-visible shortfall
+            // (see `WriteCadenceTracker.recordRefused`). Same first-entry keying
+            // as `record` above; allocation-free.
+            if let firstSamples {
+                cadence.recordRefused(samples: firstSamples, sampleRate: sampleRate)
+            }
+            return
+        }
         let backlog = writeBacklog
 
         // Copy each buffer out of its `Data` (which may be reclaimed) into a C
@@ -1894,6 +1909,8 @@ final class WriteCadenceTracker: @unchecked Sendable {
     private var overrunSeconds: Double = 0
     private var lastGapSeconds: Double = 0
     private var lastWriteMonotonic: Double?
+    private var refusedWrites: UInt64 = 0
+    private var refusedSeconds: Double = 0
 
     /// Deficit/overrun accumulated (independently) since the last threshold
     /// log, so repeated small gaps don't each re-trigger a log line.
@@ -1946,6 +1963,26 @@ final class WriteCadenceTracker: @unchecked Sendable {
         }
     }
 
+    /// Record one write the backpressure guard REFUSED after `record` had
+    /// already credited its audio time as delivered (see the call-site pairing
+    /// in `AirPlayEngine.write(streams:pts:)`). Charges the refused audio back
+    /// into the cumulative deficit so `deficitSeconds` keeps equaling wall time
+    /// minus audio actually delivered (the receiver anchor slide), and tracks
+    /// the refusals separately so the engine's own drop-site contribution stays
+    /// distinguishable from a slow producer. Deliberately does NOT touch
+    /// `deficitSinceLog` (no new os_log traffic from the hot path) nor
+    /// `lastGapSeconds`/`lastWriteMonotonic` (the paired `record` already
+    /// measured this write's producer gap). Same hot-path contract as `record`:
+    /// allocation-free scalars under the one lock.
+    func recordRefused(samples: Int, sampleRate: Int) {
+        guard samples > 0, sampleRate > 0 else { return }
+        let audioSeconds = Double(samples) / Double(sampleRate)
+        lock.lock(); defer { lock.unlock() }
+        refusedWrites &+= 1
+        refusedSeconds += audioSeconds
+        deficitSeconds += audioSeconds
+    }
+
     /// A consistent snapshot of the counters.
     func snapshot() -> WriteCadenceSnapshot {
         lock.lock(); defer { lock.unlock() }
@@ -1953,7 +1990,9 @@ final class WriteCadenceTracker: @unchecked Sendable {
             writeCount: writeCount,
             deficitSeconds: deficitSeconds,
             overrunSeconds: overrunSeconds,
-            lastGapSeconds: lastGapSeconds
+            lastGapSeconds: lastGapSeconds,
+            refusedWrites: refusedWrites,
+            refusedSeconds: refusedSeconds
         )
     }
 
@@ -1969,6 +2008,8 @@ final class WriteCadenceTracker: @unchecked Sendable {
         lastWriteMonotonic = nil
         deficitSinceLog = 0
         overrunSinceLog = 0
+        refusedWrites = 0
+        refusedSeconds = 0
     }
 
     /// `CLOCK_MONOTONIC_RAW` in seconds — immune to NTP/wall-clock slew,

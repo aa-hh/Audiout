@@ -106,9 +106,15 @@ graduates most Needs-live-confirm findings.
   GRP-10/GRP-13, POP-05 (lead with visible text).
 - **Speak the missing states:** ROW-01 (debounced "playing" on main-mix
   signal), ROW-02 ("unavailable" suffix), POP-11 ("connecting" on Main-Out
-  value), SHL-02 (status item: "Audiouter — streaming/muted/idle" composed in
-  pure `MenuBarStatus`; thread mute through to drain the arc; **wire or delete
-  `StatusRoutingIndicator`** — decide, don't leave the orphan).
+  value), SHL-02 (status item: compose "Audiouter — streaming/muted/idle" in
+  pure `MenuBarStatus`; thread mute through to drain the arc). **Delete
+  `StatusRoutingIndicator`** (decided — see Decisions): git history shows it
+  isn't merely orphaned, it was *superseded* — `MenuBarStatus.isStreaming`/T9
+  (commit `7ad75e62`) re-solved the identical "am I broadcasting" predicate as
+  the glyph's filled-vs-outline + accent-tint state, and the corner-dot wiring
+  introduced in `85c2052a` never survived that transition. Remove the type,
+  `StatusRoutingIndicatorTests`, and the stale "routing-active dot" paragraph
+  in `StatusItemController.swift`'s header comment, alongside SHL-02's fix.
 - **Truthful containers:** POP-08 (cards → labeled `.group`s), POP-09 (banners
   → group with single-spoken copy; both classes), ROW-11 (GroupRowView adopts
   the DeviceRowView contract wholesale: `.group`, value carries "muted",
@@ -142,10 +148,14 @@ for popover instruments — the stale-`panel`-reference lesson, ROW-09).
    node rim token; `faderRim` decision (fix or ledger); warm
    `textSecondary`/`textTertiary` tokens at ≥4.5:1 with IC variants,
    repointing the aliases (VIS-01 — also resolves ONB-10's surface).
-2. **State-composite honesty:** ROW-06/VIS-03 — decide disable-vs-visible
-   (see Decisions) and implement so no *enabled* control renders under 3:1;
-   ROW-10/VIS-02 — `AppTetherColor` text/chip register split (or chip-only
-   tint), test floor updated to match.
+2. **State-composite honesty (decided):** ROW-06/VIS-03 — disable the slider
+   while connecting/reconnecting/failed-but-available (owner call: honesty
+   over operability) — WCAG's disabled-component exemption then legitimately
+   applies, so this pair needs no token re-tune; `slider.isEnabled` likely
+   already gates on the same states `controlsMuted` does, so the two
+   conditions can probably collapse into one in `DeviceRowView`. ROW-10/VIS-02
+   — `AppTetherColor` text/chip register split (or chip-only tint), test
+   floor updated to match.
 3. **Follow-System accent floor:** VIS-04 — escape-valve luminance lift +
    an IC step inside `systemAccentColor(in:scale:)`.
 4. **DWC:** ROW-05/VIS-08 — read `shouldDifferentiateWithoutColor` via the
@@ -156,10 +166,17 @@ for popover instruments — the stale-`panel`-reference lesson, ROW-09).
 6. **Targets:** ROW-08 first (the one outright 2.5.8 failure — group
    activate/chevron), then the padded-hit-area constants (POP-06, ROW-13,
    SET-10, GRP-12) — glyphs unchanged, frames grown.
-7. **Typography:** VIS-09/SET-12 — raise informational 8.5/10 pt uses to
-   ≥11 pt (needs the §3.5 no-reflow renegotiation — see Decisions) and run
-   the text-style adoption spike through the one `Tokens.Font` seam; add the
-   1.3× layout test.
+7. **Typography (decided — full scope):** raise the two sub-floor rungs
+   (8.5 pt `microLabel`, 10 pt row sublabels, VIS-09/SET-12) to ≥11 pt, growing
+   affected rows by the necessary ~1–3 pt (the §3.5 no-reflow line
+   renegotiated); separately, execute the **full text-style migration** —
+   re-express `Tokens.Font` as macOS text styles
+   (`preferredFont(forTextStyle:)`) throughout every UI target, giving
+   Audiouter real system Text Size support. This is the largest single item
+   in the plan — all six UI targets, every fixed-height row/column
+   re-verified, the 1.3× layout test as the acceptance gate — budget it as
+   its own inner sub-phase of Wave 4 rather than folding it in alongside the
+   token re-tunes.
 8. **Ledger resolution:** GRP-05 (owner re-confirms or adopts the costed
    stock-semantic step-up), GRP-06's picker-ring drift (system treatment on
    the system surface), VIS-13/ROW-16 items — each **fixed or ledgered
@@ -210,36 +227,36 @@ Guard 4 green; the standard's §4 audit loop re-run "clean or ledgered".
 
 ---
 
-## Decisions needed from the owner (recommended option first)
+## Decisions (resolved 2026-08-01, by Alec)
 
-1. **Muted-unconnected fader honesty (ROW-06).** (a) **Keep it operable and
-   render ≥3:1 muted-treatment tokens** — preserves "you can pre-set volume
-   while connecting", costs a small design change; or (b) disable during
-   connecting/failed — simpler, honest, but removes a capability. Recommend (a).
-2. **8.5 pt micro-labels (VIS-09).** (a) **Raise informational uses to ≥11 pt
-   and re-negotiate the §3.5 no-reflow line** (sublabel rung grows ~2 pt) —
-   compliant, small visual shift; or (b) keep 8.5 pt and ledger it, relying on
-   AX duplication — leaves low-vision non-VoiceOver users behind. Recommend (a).
-3. **Groups stock-text ledger (GRP-05).** (a) **Adopt the costed step-up**
+All seven decided in a single pass; the plan text above already reflects each
+answer at its point of use. Recorded here as the durable reference.
+
+1. **Muted-unconnected fader honesty (ROW-06).** → **Disable** the slider
+   while connecting/reconnecting/failed-but-available. WCAG's disabled
+   exemption then legitimately applies — no token re-tune needed for this
+   pair. (This is the non-default option; the audit's "keep operable" lean was
+   not taken.)
+2. **8.5 pt micro-labels (VIS-09 floor).** → **Raise to ≥11 pt**, renegotiating
+   the §3.5 no-reflow line (rows grow ~1–3 pt as needed).
+3. **Groups stock-text ledger (GRP-05).** → **Adopt the step-up**
    (tertiary→secondary, caption-informational→label) — stays inside stock
-   semantics, closes the worst ratios; or (b) re-confirm the ledger as-is —
-   zero work, keeps 1.87:1 subtitles. Recommend (a); it was originally locked
-   against *warm-tinted text*, which (a) does not introduce.
-4. **Text-style adoption scope (VIS-09).** (a) **Full `preferredFont`
-   migration through `Tokens.Font`** — real Text-Size support, more layout
-   QA; or (b) floor-only fixes now, styles later — cheaper, defers the
-   platform mechanism. Recommend (a) at Wave-4 scope, (b) acceptable if Wave 4
-   must stay small.
-5. **Global hotkey (SHL-05).** (a) **Ship the opt-in hotkey in Wave 5** — real
-   keyboard-access win, small scope, already spec'd as Later; or (b) defer —
-   Ctrl-F8 remains the only path. Recommend (a).
-6. **`StatusRoutingIndicator` (SHL-02).** (a) **Wire it** (the documented
-   glance dot becomes real); or (b) delete it and its tests + the doc
-   paragraph. Either is honest; recommend (a) — the doc, tests, and design
-   intent all already exist.
-7. **Nutrition Labels (H3).** When distribution is on the table: declare the
-   six features only after the Wave-6 full checklist passes. No action now
-   beyond keeping the evidence sheet current.
+   semantics, no warm-tinted text introduced.
+4. **Text-style adoption scope (VIS-09, broader).** → **Full `preferredFont`
+   migration** through `Tokens.Font`, all six UI targets — real macOS Text
+   Size support, not just the floor fix. Sized as its own inner sub-phase of
+   Wave 4 (see Wave 4 item 7).
+5. **Global hotkey (SHL-05).** → **Ship the opt-in hotkey in Wave 5.**
+6. **`StatusRoutingIndicator` (SHL-02).** → **Delete it** (type + tests + the
+   stale doc paragraph). Overturned from the audit's initial "wire it" lean
+   after git archaeology (prompted by Alec's own hunch) confirmed it wasn't
+   merely orphaned — it was *superseded* by `MenuBarStatus.isStreaming`/T9
+   (commit `7ad75e62`), which re-solved the same "am I broadcasting" signal as
+   the glyph's filled-vs-outline + accent-tint state. Wiring the old dot back
+   in would duplicate information the glyph already conveys.
+7. **Nutrition Labels (H3).** → **Prep the evidence sheet now, in Wave 6** —
+   low-cost mapping of each declarable feature to its proving checklist
+   items/tests, ready whenever App Store distribution happens.
 
 ## Sizing & sequencing summary
 
@@ -249,7 +266,7 @@ Guard 4 green; the standard's §4 audit loop re-run "clean or ledgered".
 | 1 announce | M | low | 0 |
 | 2 focus | **L** | medium (interaction changes; live gate) | 0; hot-branch landings |
 | 3 names/structure | M–L | low | 0 (0.5 sweep test), ideally 1 |
-| 4 visual re-tune | M | medium (pixels; owner sign-off; snapshots) | decisions 1–4 |
+| 4 visual re-tune | **L** (decision 4 grew its scope to a full text-style migration) | medium (pixels; owner sign-off obtained; snapshots) | none — all 7 decisions resolved |
 | 5 reach/polish | S–M | low | 2 (focus kit), item-35 live result |
 | 6 process | M | none | all prior (sweeps their remainder) |
 

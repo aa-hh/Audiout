@@ -26,18 +26,11 @@ import AudiouterSharedUI
 /// (`AudiouterSharedUI.MenuBarStatus`) — this controller only turns that
 /// decision into `NSImage`/`NSColor` work.
 ///
-/// Warm Signal v3 §5.5 (decision h) adds two glance rules on top:
-/// - a small **routing-active dot** at the glyph's top-trailing corner —
-///   present = ≥1 live route (`StatusRoutingIndicator`), absent =
-///   passthrough/idle. Because the whole button image stays a TEMPLATE image
-///   (alpha-only — menu bar rules; survives Reduce Transparency and both
-///   menu-bar appearances for free), the dot is presence/absence only, never
-///   a color;
-/// - **master-mute drains the volume arc** to the empty `variableValue` state
-///   (mirrors the meter-drain rule) so the closed-popover glance never lies
-///   "80% and broadcasting" while silent.
-/// Both states are also spoken: the image's accessibility description appends
-/// "muted" / "routing" so VoiceOver reads what the glance shows.
+/// Warm Signal v3 §5.5 (decision h): **master-mute drains the volume arc**
+/// to the empty `variableValue` state (mirrors the meter-drain rule) so the
+/// closed-popover glance never lies "80% and broadcasting" while silent.
+/// This state is also spoken: the image's accessibility description appends
+/// "muted" so VoiceOver reads what the glance shows.
 ///
 /// SPEC §9 revised (NSMenu → NSPopover): the dropdown is now an `NSPopover`, so
 /// the button's *action* toggles the popover (rather than assigning `.menu`,

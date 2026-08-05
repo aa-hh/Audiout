@@ -585,6 +585,41 @@ spirit, none silent:
    treatment §5 prescribed for `deviceMovingFromWholeSystemToPerApp...`, which
    became `...AfterDeselectEndsOnThePerAppStream`).
 
+## 6b. Final adversarial review (2026-08-05, independent pass against the landed code)
+
+Verdict: design and implementation hold — every mechanism re-verified against
+the code (demote-at-decision full-table-only callers, fire-time gate placement
+after the PTP wait, four-case arm, recovery-chain preflight + `.perApp`
+WS-conjunct, release re-drives behind the `!suspended` guard, `stop()`/sleep
+clears, leaf-`stateQueue` discipline, `enqueueBindOps` append-only-under-lock).
+Single-domain op traces re-confirmed byte-identical (test 8). ONE real defect
+found, forced red, fixed, and pinned:
+
+- **Stale deferred unbind vs. a re-engaged route (fixed).** The release-side
+  settle consumption re-enqueued the deferred `.unbind` unconditionally. When
+  the user DESELECTED while the deferring converge was still in flight, the
+  restore replay re-decides a binding (`streamBindings[id]` set) and its
+  `.bind` is FIFO-AHEAD of the re-enqueued unbind; the stale unbind then fires
+  with no claim left (case 1) and removeOutput-kills the freshly re-engaged
+  session — and with `streamBindings` set, every replay guard
+  (`streamBindings == nil`) skips the device forever: silent audio loss with
+  no self-recovery. Fix: the consume drops the settle (loudly,
+  `unbind_redrive` `outcome: dropped_route_reengaged`) when
+  `streamBindings[id] != nil`; the read and the restore diff's write are both
+  under `stateQueue`, so the decision is atomic against the replay in both
+  orders. Safety of the drop: this release's own converge tore the engine
+  session down on the way to `added == false`, and a still-live astray session
+  is moved by the restored `bindOutput` itself (engine-truth read). Test 10
+  (`staleDeferredUnbindMustNotKillAReengagedRoute`) forces the interleaving
+  deterministically (held rebind → deferred unbind → deselect → restored bind
+  parked pre-gate on the armable PTP activator → release) and was confirmed
+  red pre-fix (session dead, remove after the re-engaged bind) and green
+  post-fix.
+
+Test honesty spot-check: tests 3 and 9 re-run against a locally neutered
+four-case arm (blanket `removeOutput`, the pre-008 behavior) go red as
+claimed; neuter discarded.
+
 ## 7. OUT OF SCOPE
 
 - **GroupController / AppRoutingController / popover changes.** UI-layer

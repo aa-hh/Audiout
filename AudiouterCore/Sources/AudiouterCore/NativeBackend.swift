@@ -3974,8 +3974,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if self.pendingScopeSettles.contains(id) {
             self.pendingScopeSettles.remove(id)
             if let out = self.outputIDs[id] {
-                Telemetry.log(.airplay, "unbind_redrive", ["device": id, "trigger": "ws_release"])
-                self.enqueueBindOps([.unbind(out)])
+                if self.streamBindings[id] == nil {
+                    Telemetry.log(.airplay, "unbind_redrive", ["device": id, "trigger": "ws_release"])
+                    self.enqueueBindOps([.unbind(out)])
+                } else {
+                    // Adversarial-review fix (008): the route RE-ENGAGED while the
+                    // settle was deferred (deselect → restore replay re-decided a
+                    // binding), so the deferred unbind is STALE — re-enqueued, it
+                    // would fire FIFO-behind the restored `.bind` with no claim
+                    // left (case 1) and removeOutput-kill the user's freshly
+                    // re-engaged session; with `streamBindings` set, every replay
+                    // guard (`streamBindings == nil`) then skips the device
+                    // forever — silent stranding. Any session the settle existed
+                    // to tear down is already handled: this release's own converge
+                    // tore the engine session down on the way to `added == false`,
+                    // and a still-live astray session is moved by the restored
+                    // `bindOutput` itself (it reads engine truth). Drop it loudly.
+                    // The `streamBindings` read and the restore diff's write are
+                    // both under `stateQueue`, so this decision is atomic against
+                    // the replay: diff-before-release → drop (the queued bind is
+                    // the last word); release-before-diff → the re-enqueued unbind
+                    // runs FIFO-ahead of the diff's bind, a tolerated no-op remove.
+                    Telemetry.log(.airplay, "unbind_redrive", [
+                        "device": id, "trigger": "ws_release",
+                        "outcome": "dropped_route_reengaged",
+                    ])
+                }
             }
         }
         // 2. Per-app re-drive: the per-app table still wants this device, its

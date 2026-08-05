@@ -90,3 +90,18 @@ telemetry-observed classification); deviceMovingFromWholeSystemToPerApp rewritte
 sanctioned deselect-first direction; deviceFedBySystemAndStreamReportsMax rebuilt (its fixture
 was the now-prevented double-claim state). Four deviations documented in the plan's new §6;
 AGENTS.md arbiter rule + two traps added. NativeBackendTests 192/192 green; full suite running.
+
+2026-08-05 (final adversarial reviewer): independent verification pass done — every commit's diff
+audited against the reviewed design (no undocumented deviations beyond the plan's own §6 four),
+concurrency re-attacked with the real code, losing-domain telemetry force-read, single-domain
+op traces re-confirmed pinned, tests 3+9 confirmed honest by running them red against a locally
+neutered four-case arm. ONE real defect found + fixed: the release-side settle consumption
+re-enqueued a deferred .unbind unconditionally — after a deselect-while-converging the restored
+route's .bind sits FIFO-ahead, so the stale unbind killed the freshly re-engaged per-app session
+with streamBindings still set (silent stranding, no replay guard could ever re-drive it). Fix:
+consume drops the settle loudly (unbind_redrive outcome=dropped_route_reengaged) when
+streamBindings[id] != nil; atomic vs the restore replay under stateQueue in both orders. New
+test 10 staleDeferredUnbindMustNotKillAReengagedRoute forces the interleaving (held rebind →
+deferred unbind → deselect → bind parked pre-gate on the armed PTP activator → release):
+confirmed red pre-fix (session dead, remove after the re-engaged bind), green post-fix.
+Plan §6b documents the review. Full suite 1645/1645 green via scripts/run-tests.sh.

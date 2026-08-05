@@ -5158,6 +5158,81 @@ extension SerializedSharedState {
                 "no per-app bookkeeping survives — the demotion is queryable")
     }
 
+    /// Test 10 (defect found in the final adversarial review): an `.unbind`
+    /// deferred mid-converge (case 3) is consumed at release by RE-ENQUEUING it —
+    /// but when the user DESELECTED while that converge was still in flight, the
+    /// restore replay has already re-decided a binding for the device and its
+    /// `.bind` sits AHEAD of the re-enqueued unbind in the FIFO (here: parked
+    /// inside `ensurePTPTakeover` on the armed activator, so the ordering is
+    /// forced, not hoped). The stale unbind would then fire with no claim left
+    /// (case 1) and removeOutput-kill the freshly re-engaged per-app session —
+    /// and with `streamBindings` still set, every replay guard
+    /// (`streamBindings == nil`) skips the device forever: silent stranding.
+    /// The consume must DROP the settle (loudly) when the decision layer already
+    /// wants the device bound again.
+    @Test func staleDeferredUnbindMustNotKillAReengagedRoute() async {
+        let activator = ArmableHoldingPTPActivator()
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+
+        // Hold converge's 1→0 rebind open so the demotion's unbind
+        // deterministically defers (case 3) and the deselect below lands while
+        // the converge is provably still in flight.
+        let rebindHold = HoldPoint()
+        engine.onRebindBody = { id, streamId in
+            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            !self.telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
+        }
+        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
+                "precondition: the demotion's unbind must have deferred mid-converge")
+
+        // Deselect while the converge is held. The restore replay re-decides the
+        // binding and its `.bind` parks inside `ensurePTPTakeover` (armed) —
+        // provably queued AHEAD of anything the release later enqueues.
+        activator.arm()
+        backend.setOutputSet([])
+        await pollUntil(timeout: 5) { activator.holding }
+        #expect(activator.holding,
+                "precondition: the restored route's bind must be parked pre-gate before the release runs")
+
+        // Let the converge finish: its add-half completes, the loop tears the
+        // now-undesired session down, and the release consumes the deferred
+        // settle — which must be DROPPED, not re-enqueued behind the parked bind.
+        rebindHold.open()
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                .contains { $0["outcome"] as? String == "dropped_route_reengaged" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                    .contains { $0["outcome"] as? String == "dropped_route_reengaged" },
+                "the release must drop (loudly) a settle whose device the route table re-claimed")
+
+        activator.release()
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
+        let ops = engine.ops
+        let lastBind = ops.lastIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
+        let lastRemove = ops.lastIndex(of: "remove:\(device.outputID.rawValue)")
+        #expect(lastBind != nil && (lastRemove == nil || lastRemove! < lastBind!),
+                "no remove may follow the re-engaged bind — the stale unbind must never fire")
+    }
+
     // MARK: Per-app PTP takeover gate (redirect-order bug, PLAN-AIRPLAY-COEXISTENCE.md)
     //
     // The T5+T4 takeover gate originally ran only in `convergeDevice`, which made

@@ -63,3 +63,15 @@ lock/map): R5 effective-route demotion extended to Selected Devices, stillOwnsRe
 fire-time checks on every bindTail op, per-app replay re-driven at WS slot release. Rejected:
 merged serialization domain (PTP head-of-line blocking + 013-shape reentrancy) and blocking
 converging-slot claims (provable FIFO deadlock). T1-T8 tasks + 8 deterministic race tests specced.
+
+2026-08-05 (design reviewer): Adversarial review done — verdict REPAIRED, plan edited in place.
+Found the draft's I1/I2 closure argument false (converge starting after a bind op does not order
+its boundStreamId read after that op's addOutput — a written-out interleaving left the engine
+stuck on stream 1 with the blanket unbind-downgrade freezing it forever), the recovery chains
+ungated (performRebindRecovery never passes performBindOp's gate), a zombie-session regression
+in the blanket downgrade (desiredOn-only park), a missing !suspended guard on re-drive, one
+unforceable test (onAddOutputBody never fires in the per-app addOutput), one flaky-by-race test,
+and a self-contradictory "both T7 tests keep passing" claim. Repairs: four-case unbind arm with
+a verify-first settle reusing enqueueRebindRecovery's slot/gen discipline, pendingScopeSettles
+consumed at release, stillOwnsRebind .perApp WS-claim conjunct + pre-op re-check, gate placed
+after the PTP wait, test plan fixed + new test 9 forcing the surviving interleaving.

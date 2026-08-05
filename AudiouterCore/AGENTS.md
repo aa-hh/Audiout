@@ -64,6 +64,35 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **Scope arbiter (roadmap 008): whole-system routing ALWAYS wins a contested
+  device inside `NativeBackend` — the per-app domain yields loudly, and is
+  RE-DRIVEN ONLY when the losing bow-out's own in-flight release resolves
+  (`releaseConvergingAndRequeueIfNeeded`'s `redrivePerApp`), never the
+  reverse.** A `.device` route whose target is in `expectedSelected` is
+  demoted to effective-`.noRedirect` (same R5 semantics as an unreachable
+  target, `isRouteTargetEligibleLocked`); every `bindTail` op re-checks the
+  operational whole-system claim (`desiredOn`/`converging`/`added`) under
+  `stateQueue` immediately before its engine call — AFTER `ensurePTPTakeover`,
+  because a gate before that seconds-wide wait re-opens the window it closes
+  — and bows out. **Live-verified gap (2026-08-05, see roadmap 008 notes):**
+  re-drive fires for the settle immediately following the CLAIM that caused
+  the demotion, but a LATER, separate whole-system deselect of the same
+  device (`setOutputSet` dropping it from `desiredOn` well after the contest
+  settled) does not re-drive the demoted per-app route — confirmed via
+  telemetry, no `scope_conflict`/`unbind_redrive`/re-capture fired at that
+  deselect. Read this as accepted current behavior (Alec: turning a speaker
+  off shouldn't necessarily hand it back to a stale per-app assignment), not
+  as "the reverse never happens" — it currently does, on this path. TWO
+  TRAPS: (1) a
+  `bindTail` op must NEVER WAIT on the `converging` slot — a bind queued ahead
+  of a recovery that holds the slot would deadlock the FIFO (bow-out +
+  re-drive is the only safe shape); (2) an `.unbind` under a whole-system
+  claim is neither executed nor blanket-skipped — executing it kills the
+  user's fresh stream-0 session, skipping it strands an astray engine session
+  (the engine's `addOutput` is a silent no-op on a live session) or leaks a
+  zombie per-app session when the converge parked. `performBindOp`'s
+  four-case arm + the verify-first settle exist precisely for this; don't
+  "simplify" them back to either extreme.
 - **The whole-system tap's `.failed` now self-heals via a bounded retry (T16,
   E10).** `CaptureControlling` gained `onStateChange`; `NativeBackend` wires it in
   `start()` and drives a capped-exponential backoff retry

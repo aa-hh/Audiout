@@ -59,6 +59,15 @@ extension SerializedSharedState {
             lock.lock(); teardownCount += 1; lock.unlock()
         }
 
+        /// What this fake reports as the device it's anchored to
+        /// (``ProcessAudioTap/tappedDeviceID``). Left nil by default, modelling a tap
+        /// that can't say — the protocol's own default. A test that cares about clock
+        /// re-anchoring sets it, and may change it from inside `onCreateAndStart` to
+        /// model the default output device moving mid-rebuild.
+        private var _deviceID: AudioObjectID?
+        var tappedDeviceID: AudioObjectID? { lock.withLock { _deviceID } }
+        func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
+
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
@@ -516,6 +525,89 @@ extension SerializedSharedState {
         #expect(obj["bundleID"] as? String == "com.example.music")
         #expect(obj["oldRate"] as? String == "48000")
         #expect(obj["newRate"] as? String == "44100")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (roadmap 009): a DEVICE-only rebuild (no rate change)
+    // now emits the same reanchor telemetry, with `deviceMoved` true. Before
+    // this coordinator tracked `ProcessAudioTap/tappedDeviceID`, a pure device
+    // move was invisible even as a log line — `TapReanchor.deviceMoved`
+    // hardcoded `false` here, so `reanchor.rateMoved` alone gated the emission
+    // and a same-rate/different-device rebuild dropped it silently. This is
+    // the regression guard for that gap: the real-world case is the default
+    // output device moving in the window between the old tap's `teardown()`
+    // (which takes its listener with it) and the new tap arming its own.
+
+    @Test func deviceOnlyMoveEmitsCapturePARateRebuildTelemetryWithDeviceMovedTrue() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        tap.setTappedDeviceID(1)
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Same rate throughout — only the device identity moves, simulated via
+        // `onCreateAndStart` so the flip lands between the claim (which snapshots
+        // the OLD device) and the post-createAndStart compare (which reads the
+        // NEW one), exactly like the real teardown/create gap.
+        tap.onCreateAndStart = { tap.setTappedDeviceID(2) }
+        tap.fireDeviceChange()
+        waitFor { tap.creates >= 2 }
+
+        Telemetry._installTestSink(nil)
+
+        let rebuildLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") },
+            "expected a capturePA/rate_rebuild line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(rebuildLine.utf8)) as? [String: Any],
+            "not a JSON object: \(rebuildLine)")
+        #expect(obj["cat"] as? String == "capturePA")
+        #expect(obj["bundleID"] as? String == "com.example.music")
+        #expect(obj["oldRate"] as? String == "48000")
+        #expect(obj["newRate"] as? String == "48000")
+        #expect(obj["deviceMoved"] as? String == "true")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (roadmap 009): neither axis moving must NOT emit —
+    // guards against the fix over-firing on every ordinary rebuild.
+
+    @Test func neitherAxisMovingDoesNotEmitCapturePARateRebuildTelemetry() {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        tap.setTappedDeviceID(1)
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Neither rate nor device identity changes — same format, same device id.
+        tap.fireDeviceChange()
+        waitFor { tap.creates >= 2 }
+
+        Telemetry._installTestSink(nil)
+
+        #expect(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") } == nil,
+            "no reanchor on either axis should not emit rate_rebuild: \(spy.all)")
 
         coordinator.stop(bundleID: "com.example.music")
     }

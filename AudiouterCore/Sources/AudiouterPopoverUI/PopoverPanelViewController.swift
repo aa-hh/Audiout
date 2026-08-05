@@ -638,6 +638,15 @@ final class PopoverPanelViewController: NSViewController {
         view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
         view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
 
+        // Republish the size HERE, not at the call site (found live 2026-08-06):
+        // mounting a row changes the panel's height, and every caller that forgot
+        // this left the popover sized for the old content. Auto Layout then has to
+        // reconcile a container whose height disagrees with its content, and the
+        // slack lands wherever nothing pins it — in practice the pinned banner,
+        // which balloons into a tall empty box. Measured BEFORE the `isHidden`
+        // animation dance below so the target is the row's final, visible height.
+        panelContentDidChangeHeight(animated: animated)
+
         // Same Reduce Motion gate `setCardCollapsed` already applies (PLAN §E
         // risk 1 / house rule — "Respect system settings: Reduce Motion"):
         // re-derive `wantsAnimation` here rather than trusting the caller's
@@ -662,11 +671,19 @@ final class PopoverPanelViewController: NSViewController {
     func removeRow(_ view: NSView, animated: Bool) {
         guard let stack = view.superview as? NSStackView else {
             view.removeFromSuperview()
+            panelContentDidChangeHeight(animated: animated)
             return
         }
-        let detach = {
+        // The detach is DEFERRED into the animation's completion handler, so the
+        // row is still in the tree while the fade runs — which is exactly why the
+        // re-fit has to live in here too (found live 2026-08-06). Measuring at the
+        // call site sized the popover for a row that was about to leave, and
+        // nothing ever measured again once it did: the popover stayed permanently
+        // taller than its content, one row's worth per removal. See `insertRow`.
+        let detach = { [weak self] in
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
+            self?.panelContentDidChangeHeight(animated: false)
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -676,6 +693,11 @@ final class PopoverPanelViewController: NSViewController {
             context.allowsImplicitAnimation = true
             view.animator().isHidden = true
             self.stackView.layoutSubtreeIfNeeded()
+            // Kick the popover resize in the SAME turn as the row's fade so the two
+            // glide together rather than the panel snapping shut after it (the
+            // precedent `setCardCollapsed` sets). The `detach` above then publishes
+            // the exact end state, so a mid-flight mismeasure can't persist.
+            self.panelContentDidChangeHeight(animated: true)
         }, completionHandler: detach)
     }
 

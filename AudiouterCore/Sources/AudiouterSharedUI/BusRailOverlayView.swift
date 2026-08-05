@@ -61,7 +61,17 @@ public final class BusRailOverlayView: NSView {
         needsDisplay = true
     }
 
+    /// How many times this overlay has actually been drawn. The rail's geometry is
+    /// resolved from live frames AT DRAW TIME, so it is only ever as fresh as its
+    /// last INVALIDATION — which makes "was it asked to redraw?" the whole
+    /// correctness question, and one that `needsDisplay` can't answer for a test
+    /// (AppKit ignores the flag on a windowless view, and won't let you clear it on
+    /// a view it has already scheduled). Counting real draws is the observable that
+    /// distinguishes an invalidated overlay from a stale one.
+    public private(set) var test_drawCount = 0
+
     public override func draw(_ dirtyRect: NSRect) {
+        test_drawCount += 1
         guard let plan = resolvePlan() else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             drawPlan(plan)
@@ -74,8 +84,9 @@ public final class BusRailOverlayView: NSView {
     /// headers) ONCE, convert them into the overlay's coordinate space, then hand
     /// the plain numbers to `RailPlan.resolve` — a pure function — so the drawn
     /// geometry is a deterministic function of the CURRENT layout. The collapse
-    /// animation drives `bodyClip`'s height frame-by-frame; `RailHostView.layout`
-    /// re-invalidates this overlay on every one of those layout passes, so calling
+    /// animation drives `bodyClip`'s height frame-by-frame; the host's card stack
+    /// (`RailStackView.layout`) re-invalidates this overlay on every one of those
+    /// layout passes, so calling
     /// `resolvePlan` each frame makes the rail squeeze/extend IN SYNC with the
     /// collapse (behavior 3) using the intermediate clip frame, never a before/
     /// after snap. `nil` when the origin anchor can't be resolved (no window / not

@@ -2238,6 +2238,54 @@ import AppKit
         #expect(popover.test_deviceRowFlashing(id: "local-mac") == !reduceMotion, "the auto-unchecked local row flashes (unless Reduce Motion)")
     }
 
+    // MARK: The rail's invalidation hangs off the view that moves the rows
+
+    /// Live bug, 2026-08-06: the whole rail — origin hook, spine and both detour
+    /// arcs — rendered displaced from the rows by a rigid offset. `resolvePlan`
+    /// reads live frames at DRAW time, so the resolved geometry was never wrong;
+    /// the overlay was simply never told to redraw. The invalidation hung off the
+    /// panel's top-level CONTAINER, whose `layout()` does not run when only its
+    /// descendants re-lay out inside an unchanged container frame — exactly the
+    /// state a too-tall popover produces (constant container, swelling banner,
+    /// every card below it sliding). It now hangs off the card stack
+    /// (`RailStackView`), which re-lays out in both cases.
+    ///
+    /// SCOPE — read before trusting this: it guards the WIRING, not the redraw.
+    /// The behavioral assertion is not written here because neither shape works in
+    /// this process, both established the hard way: a snapshot can't catch it
+    /// (`cacheDisplay` forces a full repaint, so the PNG is correct by
+    /// construction however stale the invalidation is), `needsDisplay` assertions
+    /// pass vacuously (AppKit drops the flag on a windowless view and won't let
+    /// you clear one it has already scheduled), and `BusRailOverlayView`'s
+    /// `test_drawCount` never moves because a non-GUI test process runs no display
+    /// cycle at all — `display()` is a no-op even for an ordered-front window.
+    /// The mechanism was proven with standalone on-screen probes instead (four
+    /// scenarios; only a container-frame change fired the container's `layout()`,
+    /// while the stack's fired in all four). What this test does catch is the
+    /// realistic regression: the hook being deleted, or left unwired.
+    @Test func theRailOverlayIsInvalidatedByTheCardStack() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_simulateOpen()
+        let root = popover.test_panelView
+        root.layoutSubtreeIfNeeded()
+
+        func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+            if let hit = view as? T { return hit }
+            for sub in view.subviews {
+                if let hit = firstDescendant(type, in: sub) { return hit }
+            }
+            return nil
+        }
+        let overlay = try #require(firstDescendant(BusRailOverlayView.self, in: root),
+                                   "the rail overlay is mounted in the panel")
+        let stack = try #require(firstDescendant(RailStackView.self, in: root),
+                                 "the CARD STACK carries the invalidation hook — not the container, whose layout() misses descendant-only relayouts")
+        #expect(stack.railOverlay === overlay,
+                "the stack's hook points at the mounted overlay; unwired, the rail silently goes stale again")
+        #expect(stack.arrangedSubviews.contains { $0 is CardView },
+                "and it really is the stack holding the cards, i.e. the view whose layout pass moves the rows")
+    }
+
     // MARK: Deselecting a failed device retires its panel (live bug, 2026-08-06)
 
     /// Reported live: clicking a stuck-unreachable device's radio on and off left

@@ -219,7 +219,15 @@ public final class GroupEditorViewController: NSViewController {
 
         // A host that re-invalidates the rail on every layout pass, so the spine
         // always reflects the CURRENT row frames (rebuild, resize, pane swap)
-        // with no cached geometry — the popover's `RailHostView` pattern.
+        // with no cached geometry.
+        //
+        // KNOWN HOLE (not yet exercised here, 2026-08-06): hanging this off the
+        // CONTAINER means it doesn't fire when only descendants re-lay out inside
+        // an unchanged container frame — the popover hit exactly that and its rail
+        // drew displaced by the surplus (see `PopoverPanelViewController`'s
+        // `RailStackView`, which moved the hook onto the card stack). This pane
+        // hasn't been observed doing it, so the move isn't made blind; if the rail
+        // here is ever seen offset from its rows, that is this.
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
@@ -916,7 +924,7 @@ extension GroupEditorViewController: RailHookProviding {
 
 /// The editor pane's container: re-invalidates the rail overlay AND the
 /// membership well (T5) on every layout pass so both track the current row
-/// frames with no cached geometry (the popover's `RailHostView` pattern). Both
+/// frames with no cached geometry. Both
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
 private final class RailRepaintingView: NSView {
     weak var railOverlay: BusRailOverlayView?

@@ -58,8 +58,9 @@ final class PopoverPanelViewController: NSViewController {
 
     /// The vertical stack of section **cards** (and the footer card). Public to
     /// the module so the controller can animate `layoutSubtreeIfNeeded()` on it
-    /// during a group's expand/collapse.
-    let stackView = NSStackView()
+    /// during a group's expand/collapse. It is also what re-invalidates the rail
+    /// overlay — see `RailStackView`.
+    let stackView = RailStackView()
 
     /// The card currently being filled by `addRow` / `addSubsectionHeader`.
     private var currentCard: CardView?
@@ -127,12 +128,12 @@ final class PopoverPanelViewController: NSViewController {
     /// for the whole panel, ON TOP of every card + divider, so the rail is one
     /// uninterrupted line down a clear left gutter (section titles sit to its
     /// right, at the icon column). Fed the Main Audio row + device rows by the
-    /// controller each rebuild; repainted on every layout by `RailHostView`.
+    /// controller each rebuild; repainted on every layout by `RailStackView`.
     let railOverlay = BusRailOverlayView()
 
     override func loadView() {
-        let container = RailHostView()
-        container.railOverlay = railOverlay
+        let container = NSView()
+        stackView.railOverlay = railOverlay
         container.translatesAutoresizingMaskIntoConstraints = false
 
         background.translatesAutoresizingMaskIntoConstraints = false
@@ -953,12 +954,28 @@ final class PopoverPanelViewController: NSViewController {
     }
 }
 
-/// The panel's top-level container (Warm Signal v4 §Call-1): a plain view that
-/// repaints the continuous rail overlay on every layout pass, so the spine
-/// always reflects the current row frames (collapse / expand / resize) with no
-/// cached geometry. The overlay draws from settled frames, so `cacheDisplay`
-/// snapshots stay deterministic.
-private final class RailHostView: NSView {
+/// The card stack (Warm Signal v4 §Call-1), which also repaints the continuous
+/// rail overlay on every layout pass so the spine always reflects the current row
+/// frames (collapse / expand / resize) with no cached geometry. The overlay draws
+/// from settled frames, so `cacheDisplay` snapshots stay deterministic.
+///
+/// **Why the STACK and not the container** (live bug, 2026-08-06): this hook used
+/// to live on the panel's top-level container (`RailHostView`), whose `layout()`
+/// runs only when the CONTAINER's own frame changes — not when its descendants
+/// re-lay out inside a container of unchanged size. That is exactly the state a
+/// too-tall popover produces: the container's frame is constant while the banner
+/// swells and every card below it slides. Nothing re-invalidated the overlay, so
+/// it composited its last painted figure — hook, spine and arcs together — over
+/// rows that had since moved, displacing the whole rail by the surplus. The stack
+/// re-lays out in BOTH cases (its frame is pinned to the container's four edges,
+/// so a container resize moves it too), which is why the container hook is gone
+/// rather than doubled up.
+///
+/// Do NOT move this to an ancestor's `viewWillDraw()`: an ancestor is drawn on
+/// every display pass, so dirtying a subview from there schedules another pass
+/// forever. Dirtying from `layout()` cannot loop — `needsDisplay` does not
+/// invalidate layout.
+final class RailStackView: NSStackView {
     weak var railOverlay: BusRailOverlayView?
     override func layout() {
         super.layout()

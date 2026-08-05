@@ -22,6 +22,16 @@ public final class ConnectionDiagnosisView: NSView {
     /// the tinted background reads as its own inset card rather than flush with
     /// the row (matches the mockup's "inset to align with the name column").
     private static let horizontalInset: CGFloat = 10
+    /// LEADING inset, which is NOT symmetric with the trailing one (Alec, live
+    /// 2026-08-06): the panel used `horizontalInset` on both sides, so its card
+    /// began inside the rail GUTTER — the column the membership spine owns — and
+    /// read as belonging to the whole panel rather than to the row it is about.
+    /// It now starts at the icon column (`firstElementLeading`), the same edge the
+    /// device row's own leading element uses, so the card visibly hangs off the
+    /// device it refers to and leaves the spine's column clear.
+    private static var leadingInset: CGFloat {
+        PopoverColumnGrid.firstElementLeading(indented: false)
+    }
     /// Vertical inset of the tinted background from this view's top/bottom.
     private static let verticalInset: CGFloat = 4
     /// Padding between the tinted background's edge and its content.
@@ -131,7 +141,7 @@ public final class ConnectionDiagnosisView: NSView {
         NSLayoutConstraint.activate([
             background.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalInset),
             background.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalInset),
-            background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
             background.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
 
             dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
@@ -235,7 +245,10 @@ public final class ConnectionDiagnosisView: NSView {
     // intrinsic content size at all).
 
     public override func layout() {
-        let available = bounds.width - 2 * Self.horizontalInset - 2 * Self.contentPadding
+        // Leading and trailing insets are NOT symmetric (see `leadingInset`), so
+        // this sums the two rather than doubling one — getting it wrong overstates
+        // the wrap width and the suggestion text clips.
+        let available = bounds.width - Self.leadingInset - Self.horizontalInset - 2 * Self.contentPadding
         if available > 0, suggestionWidthConstraint?.constant != available {
             suggestionWidthConstraint?.constant = available
         }

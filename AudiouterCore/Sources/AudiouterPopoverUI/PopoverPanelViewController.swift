@@ -131,13 +131,22 @@ final class PopoverPanelViewController: NSViewController {
     /// controller each rebuild; repainted on every layout by `RailStackView`.
     let railOverlay = BusRailOverlayView()
 
+    /// The rigid content column — header + card stack, chained top-to-bottom by
+    /// REQUIRED constraints, so its `fittingSize` is exactly the content height.
+    /// This, not `view`, is what `fittingSizeSettled` measures: `view` is the
+    /// surplus-shield wrapper, and a wrapper's `fittingSize` was MEASURED to keep
+    /// a feasible stale frame height rather than minimize down to its `<=` floor
+    /// (returned the pre-collapse height after a card collapsed, at every pin
+    /// priority tried, and with no pin at all).
+    private let contentContainer = NSView()
+
     override func loadView() {
-        let container = NSView()
+        let container = contentContainer
         stackView.railOverlay = railOverlay
         container.translatesAutoresizingMaskIntoConstraints = false
 
         background.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(background)
+        container.addSubview(background)   // re-parented onto the wrapper below
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
@@ -176,10 +185,11 @@ final class PopoverPanelViewController: NSViewController {
             container.widthAnchor.constraint(equalToConstant: panelWidth),
 
             // The background fills the whole container, behind everything else.
+            // (Its bottom pin moves to the WRAPPER below, so a surplus-taller
+            // wrapper still reads as continuous canvas — see the surplus shield.)
             background.topAnchor.constraint(equalTo: container.topAnchor),
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            background.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             // Header bar pinned to the very top (task A), above the System card.
             header.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
@@ -191,6 +201,14 @@ final class PopoverPanelViewController: NSViewController {
             stackView.topAnchor.constraint(equalTo: header.bottomAnchor),
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
+            // single required `==`, which made a container taller than its content
+            // unsatisfiable — so Auto Layout deformed the content instead, dumping
+            // the surplus into whatever had nothing pinning its height. In practice
+            // that was the pinned banner, which ballooned into a tall empty box and
+            // pushed every card below it down (the live report). The re-fit in
+            // `insertRow`/`removeRow` stops the mismatch arising, but this makes the
+            // failure mode boring rather than broken if one ever does:
             stackView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
 
             // The rail overlay spans the whole panel (it reads row frames in its
@@ -200,8 +218,33 @@ final class PopoverPanelViewController: NSViewController {
             railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-
-        view = container
+        // SURPLUS SHIELD (Alec's resilience call, 2026-08-06). The content keeps
+        // its original, fully-REQUIRED constraint chain — that rigidity is what
+        // makes its fitting height exact — and the popover sizes this WRAPPER
+        // instead. The container hangs from the wrapper's top; the required `<=`
+        // stops it overflowing; and there is deliberately NO constraint pulling
+        // the container's bottom down to the wrapper's. Every in-place softening
+        // was measured to fail: a `<=` bottom pin let `fittingSize` return stale
+        // frame heights; an added `==` needed priority >500 before `fittingSize`
+        // honored it, but anything ≥251 lets an over-tall wrapper stretch the
+        // banner (its label hugs at 250) — the live report's tall empty box. No
+        // such priority exists, so the wrapper carries no tail pin and the size
+        // channel reads `contentContainer.fittingSize` directly (see
+        // `fittingSizeSettled`). A wrapper taller than the content — the
+        // pathology behind the ballooned banner — now just shows inert warm
+        // canvas below the last card (the canvas backs the WRAPPER), with every
+        // row's geometry, and therefore the rail's anchoring, untouched.
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
+        NSLayoutConstraint.activate([
+            background.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+            container.bottomAnchor.constraint(lessThanOrEqualTo: wrapper.bottomAnchor),
+        ])
+        view = wrapper
     }
 
     /// Point the continuous rail overlay at the current Main Audio row + device
@@ -231,7 +274,9 @@ final class PopoverPanelViewController: NSViewController {
     func fittingSizeSettled() -> NSSize {
         _ = view   // ensure `loadView` ran
         view.layoutSubtreeIfNeeded()
-        return view.fittingSize
+        // The RIGID content column, not `view`: the wrapper's own `fittingSize`
+        // keeps stale frame heights (see the surplus-shield note in `loadView`).
+        return contentContainer.fittingSize
     }
 
     /// The single resize primitive (T-3 → consumed by the collapsible-sections task

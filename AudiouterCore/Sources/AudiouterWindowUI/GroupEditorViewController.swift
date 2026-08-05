@@ -77,7 +77,7 @@ public final class GroupEditorViewController: NSViewController {
 
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
-    private let membershipStack = NSStackView()
+    private let membershipStack = RailRepaintingStackView()
     /// The checklist's recessed background + inter-row hairlines (T5) — see
     /// ``GroupedSectionView``. Sits BEHIND `membershipStack` in z-order.
     /// NAME IS LOAD-BEARING: `GroupsWindowTextColorLockTests` reaches this
@@ -221,16 +221,21 @@ public final class GroupEditorViewController: NSViewController {
         // always reflects the CURRENT row frames (rebuild, resize, pane swap)
         // with no cached geometry.
         //
-        // KNOWN HOLE (not yet exercised here, 2026-08-06): hanging this off the
-        // CONTAINER means it doesn't fire when only descendants re-lay out inside
-        // an unchanged container frame — the popover hit exactly that and its rail
-        // drew displaced by the surplus (see `PopoverPanelViewController`'s
-        // `RailStackView`, which moved the hook onto the card stack). This pane
-        // hasn't been observed doing it, so the move isn't made blind; if the rail
-        // here is ever seen offset from its rows, that is this.
+        // TWO hooks, deliberately, and neither replaces the other (2026-08-06 —
+        // the popover's rail drew displaced by exactly the gap between them):
+        // the CONTAINER's `layout()` fires on window resize / pane swap but NOT
+        // when only descendants re-lay out inside an unchanged container frame
+        // (a checklist row growing or a mid-animation reflow); the membership
+        // STACK's fires for its own relayouts but — unlike the popover's card
+        // stack, which is pinned to its container's four edges and so covers
+        // both cases alone — this stack floats inside the elastic form column,
+        // so its `layout()` is not guaranteed to run on every container
+        // resize. The popover could DELETE its container hook; here both stay.
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
+        membershipStack.railOverlay = railOverlay
+        membershipStack.membershipWell = membershipWell
         // The form column: symmetric margins off the pane, ELASTIC up to
         // `GroupsPaneLayout.contentMaxWidth`. Everything hangs off this
         // column's edges rather than the container's, so both sections and the
@@ -927,6 +932,21 @@ extension GroupEditorViewController: RailHookProviding {
 /// frames with no cached geometry. Both
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
 private final class RailRepaintingView: NSView {
+    weak var railOverlay: BusRailOverlayView?
+    weak var membershipWell: GroupedSectionView?
+    override func layout() {
+        super.layout()
+        railOverlay?.needsDisplay = true
+        membershipWell?.needsDisplay = true
+    }
+}
+
+/// The checklist stack, carrying the SAME re-invalidation for relayouts that
+/// never reach the container's `layout()` — a row growing inside an unchanged
+/// container frame (see the two-hooks note in `loadView`; the popover's
+/// `RailStackView` is the precedent). Dirtying from `layout()` cannot loop:
+/// `needsDisplay` does not invalidate layout.
+final class RailRepaintingStackView: NSStackView {
     weak var railOverlay: BusRailOverlayView?
     weak var membershipWell: GroupedSectionView?
     override func layout() {

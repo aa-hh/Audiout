@@ -2238,6 +2238,57 @@ import AppKit
         #expect(popover.test_deviceRowFlashing(id: "local-mac") == !reduceMotion, "the auto-unchecked local row flashes (unless Reduce Motion)")
     }
 
+    // MARK: Surplus container height must not deform the content
+
+    /// Alec's call, 2026-08-06 — resilience, not a root fix. The live report's
+    /// banner ballooned into a tall empty box because the card stack's bottom pin
+    /// was a single REQUIRED `==`: a container taller than its content was
+    /// unsatisfiable, so Auto Layout deformed the content instead and the surplus
+    /// landed in the one view with nothing pinning its height. The pin is now
+    /// `<=` required (anti-collapse) plus `==` at 999 (hug), so surplus falls to
+    /// blank space at the bottom and every row keeps its geometry — which is also
+    /// what keeps the rail anchored to its rows through such a mismatch.
+    @Test func aContainerTallerThanItsContentLeavesRowGeometryUntouched() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_simulateOpen()
+        popover.setLocalFallbackActive(true)   // mount the banner from the report
+        let root = popover.test_panelView
+        root.layoutSubtreeIfNeeded()
+
+        func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+            if let hit = view as? T { return hit }
+            for sub in view.subviews {
+                if let hit = firstDescendant(type, in: sub) { return hit }
+            }
+            return nil
+        }
+        let banner = try #require(firstDescendant(SilenceFallbackBannerView.self, in: root),
+                                  "the fallback banner is mounted")
+        let anyRow = try #require(popover.test_deviceRow(for: "office"))
+
+        let naturalFit = popover.test_panelFittingSize.height
+        let bannerHeight = banner.frame.height
+        // Content is TOP-anchored (header → container top, stack → header bottom),
+        // so the invariant is the row's distance from the TOP. Surplus appearing as
+        // blank space at the bottom is the intended outcome, not a regression.
+        func rowInsetFromTop() -> CGFloat {
+            root.frame.height - root.convert(anyRow.bounds, from: anyRow).maxY
+        }
+        let rowFromTop = rowInsetFromTop()
+
+        // Impose a container 200pt taller than its content — the exact pathology.
+        let stretch = root.heightAnchor.constraint(equalToConstant: naturalFit + 200)
+        stretch.isActive = true
+        root.layoutSubtreeIfNeeded()
+        defer { stretch.isActive = false }
+
+        #expect(root.frame.height == naturalFit + 200, "the container really is over-tall")
+        #expect(banner.frame.height == bannerHeight,
+                "the banner kept its natural height instead of absorbing the surplus")
+        #expect(rowInsetFromTop() == rowFromTop,
+                "the device rows held their position under the header, so the surplus became blank space at the bottom rather than displacing content")
+    }
+
     // MARK: The rail's invalidation hangs off the view that moves the rows
 
     /// Live bug, 2026-08-06: the whole rail — origin hook, spine and both detour

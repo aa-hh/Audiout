@@ -136,6 +136,44 @@ import Testing
         #expect(AppSettings.wakeRestoreMinuteOptions.first == 0)
     }
 
+    // MARK: Main-out volume
+
+    @Test func mainOutVolumeDefaultsToOneHundredWhenUnset() {
+        #expect(AppSettings(defaults: defaults).mainOutVolume == AppSettings.defaultMainOutVolume)
+        #expect(AppSettings.defaultMainOutVolume == 100)
+    }
+
+    @Test func mainOutVolumeRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.mainOutVolume = 75
+        #expect(AppSettings(defaults: defaults).mainOutVolume == 75)
+
+        settings.mainOutVolume = 0
+        #expect(AppSettings(defaults: defaults).mainOutVolume == 0)
+
+        settings.mainOutVolume = 100
+        #expect(AppSettings(defaults: defaults).mainOutVolume == 100)
+    }
+
+    @Test func mainOutVolumeClampsToBounds() {
+        let settings = AppSettings(defaults: defaults)
+        settings.mainOutVolume = 150
+        #expect(AppSettings(defaults: defaults).mainOutVolume == AppSettings.maxMainOutVolume)
+
+        settings.mainOutVolume = -50
+        #expect(AppSettings(defaults: defaults).mainOutVolume == AppSettings.minMainOutVolume)
+    }
+
+    @Test func mainOutVolumeOutOfRangeStoredValueClamps() {
+        // A value outside the valid range (a newer/older build, or hand-edited
+        // defaults) resolves to the clamped bound rather than leaking through.
+        defaults.set(200, forKey: "audio.mainOutVolume")
+        #expect(AppSettings(defaults: defaults).mainOutVolume == AppSettings.maxMainOutVolume)
+
+        defaults.set(-100, forKey: "audio.mainOutVolume")
+        #expect(AppSettings(defaults: defaults).mainOutVolume == AppSettings.minMainOutVolume)
+    }
+
     // MARK: Sync offset (T-OFFSET-UI)
 
     @Test func syncOffsetDefaultsToZeroWhenUnset() {

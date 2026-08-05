@@ -286,6 +286,94 @@ import Foundation
         #expect(abs(sink.latestPhaseErrorNanos) <= Int64(nsPerFrame.rounded()))
     }
 
+    /// The `group × device` gain actually scales the samples it produces. The unity
+    /// path is already pinned by `rampReleasesAtComputedHostTime_withinOneFrame`
+    /// above — it never calls `setGain` and asserts the raw ramp value — so this
+    /// covers the attenuating path, which no other render test exercises.
+    ///
+    /// Gains are powers of two so the expected products are exact in binary
+    /// floating point and the assertion needs no epsilon.
+    @Test(arguments: [Float(0.5), Float(0.25)])
+    func gainScalesProducedSamples(gain: Float) throws {
+        let sink = Self.rampSink()
+        sink.setGain(gain)
+        let ramp = Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var firstRealSample: Float?
+        var out = [Float](repeating: .nan, count: 512)
+
+        for cycle in 0..<40 where firstRealSample == nil {
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            _ = out.withUnsafeMutableBufferPointer { ob -> Bool in
+                sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            if let localIdx = out.firstIndex(where: { $0 != 0 }) { firstRealSample = out[localIdx] }
+        }
+
+        let sample = try #require(firstRealSample, "audio was never released")
+        #expect(sample == ramp[0] * gain)
+    }
+
+    /// Gain 0 is silence, not "quiet". Asserted separately from
+    /// ``gainScalesProducedSamples(gain:)`` because at zero there is no non-zero
+    /// sample to locate the release point by — the drain having run (`produced`)
+    /// is the only signal that the gate opened at all.
+    @Test func gainOfZeroProducesSilenceEvenAfterRelease() throws {
+        let sink = Self.rampSink()
+        sink.setGain(0)
+        _ = Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var everDrained = false
+        var out = [Float](repeating: .nan, count: 512)
+
+        for cycle in 0..<40 {
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            let produced = out.withUnsafeMutableBufferPointer { ob -> Bool in
+                sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            everDrained = everDrained || produced
+            // Silent whether the gate was open or not — that is the whole assertion.
+            #expect(out.allSatisfy { $0 == 0 })
+        }
+
+        #expect(everDrained, "the gate never opened, so silence proves nothing")
+    }
+
+    // MARK: Shared ramp fixture (mirrors `rampReleasesAtComputedHostTime_withinOneFrame`)
+
+    static let rampAnchorPtsSec = 1_000
+    static let rampAnchorNanos = Int64(rampAnchorPtsSec) * 1_000_000_000
+
+    /// A sink with the same 87 ms effective delay as the ramp-release test above
+    /// (100 ms presentation − 10 ms measured latency − 3 ms safety), mono at 48 kHz.
+    static func rampSink() -> SyncedLocalSink {
+        let latency = LocalOutputLatencyMeasurement(
+            safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+            bufferFrameSizeFrames: 0, nominalSampleRate: 48_000.0)
+        return SyncedLocalSink(
+            renderSampleRate: 48_000.0,
+            channelCount: 1,
+            safetyMarginMs: 3,
+            presentationDelayMs: { 100 },
+            localOutputLatency: { latency })
+    }
+
+    /// Enqueue a strictly-increasing ramp starting at 1.0, so every real sample is
+    /// non-zero and "first non-silence" is unambiguous. Returns the ramp.
+    @discardableResult
+    static func enqueueRamp(into sink: SyncedLocalSink) -> [Float] {
+        var ramp = [Float](repeating: 0, count: 20_000)
+        for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+        ramp.withUnsafeBufferPointer { buf in
+            sink.enqueue(
+                interleavedFrames: buf.baseAddress!, frameCount: ramp.count,
+                pts: timespec(tv_sec: rampAnchorPtsSec, tv_nsec: 0))
+        }
+        return ramp
+    }
+
     @Test func noAudioBeforeEnqueue_isSilent() {
         let sink = SyncedLocalSink(
             renderSampleRate: 48_000, channelCount: 1,
@@ -547,4 +635,91 @@ import Foundation
         #expect(out2.allSatisfy { $0 == 0 })
     }
     #endif
+
+    // MARK: Ring-overflow drop counting
+
+    /// A ring-full drop is COUNTED, no longer just silently discarded
+    /// (whole-system dropout investigation): flooding a tiny ring past
+    /// capacity moves the producer-side drop counters; an enqueue that fits
+    /// counts nothing.
+    @Test func enqueue_ringOverflow_countsDroppedWrites() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            presentationDelayMs: { 5 }, localOutputLatency: { nil })
+
+        // A small chunk that fits counts nothing.
+        var small = [Float](repeating: 0.5, count: 8)
+        small.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                         pts: timespec(tv_sec: 10, tv_nsec: 0))
+        }
+        #expect(sink.ringOverflowDropsForTesting.writes == 0,
+                "an admitted chunk must not count as a drop")
+
+        // A chunk far larger than the ring is dropped wholesale — and counted.
+        var huge = [Float](repeating: 0.5, count: 50_000)
+        huge.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                         pts: timespec(tv_sec: 10, tv_nsec: 0))
+        }
+        let drops = sink.ringOverflowDropsForTesting
+        #expect(drops.writes == 1, "the ring-full drop must be counted")
+        #expect(drops.samples == 50_000)
+    }
+}
+
+/// `sync_ring_overflow` emission: session boundaries (`stop()` / lifecycle
+/// rebuild, via `clearSessionState()`) flush the ring's drop counters
+/// only-when-nonzero. Nested inside `SerializedSharedState` because it
+/// installs the process-global `Telemetry` test sink — same idiom and
+/// rationale as `NativeCaptureCoordinatorTests`'
+/// `startEmitsCaptureWSTransitionTelemetry`.
+extension SerializedSharedState {
+    @Suite struct SyncedLocalSinkRingOverflowTelemetryTests {
+
+        /// Thread-safe capture box (Telemetry's sink runs on its own writer
+        /// queue) — mirrors `NativeCaptureCoordinatorTests.TelemetryLineBox`.
+        private final class LineBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+        }
+
+        @Test func stopFlushesRingOverflowOnlyWhenNonzero() {
+            let captured = LineBox()
+            Telemetry._installTestSink { captured.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let sink = SyncedLocalSink(
+                renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+                presentationDelayMs: { 5 }, localOutputLatency: { nil })
+
+            func overflowLines() -> [String] {
+                captured.snapshot.filter { $0.contains("\"evt\":\"sync_ring_overflow\"") }
+            }
+
+            // A clean session boundary flushes nothing.
+            sink.stop()
+            Telemetry._installTestSink { captured.append($0) } // flush barrier
+            #expect(overflowLines().isEmpty, "a drop-free session must not log sync_ring_overflow")
+
+            // Overflow the tiny ring, then hit the boundary: exactly one line.
+            var huge = [Float](repeating: 0.5, count: 50_000)
+            huge.withUnsafeMutableBufferPointer { buf in
+                sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                             pts: timespec(tv_sec: 10, tv_nsec: 0))
+            }
+            sink.stop()
+            Telemetry._installTestSink { captured.append($0) } // flush barrier
+            #expect(overflowLines().count == 1, "got: \(captured.snapshot)")
+            #expect(overflowLines().first?.contains("\"droppedWritesDelta\":\"1\"") == true)
+            #expect(overflowLines().first?.contains("\"droppedFramesDelta\":\"50000\"") == true)
+
+            // Already-flushed drops must not re-emit on the next boundary.
+            sink.stop()
+            Telemetry._installTestSink(nil) // synchronous flush barrier
+            #expect(overflowLines().count == 1, "an already-flushed drop must not re-emit")
+        }
+    }
 }

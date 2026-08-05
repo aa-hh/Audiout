@@ -89,6 +89,8 @@ Fresh boot →
 
 **Design rationale — why this approach avoids the false-positive trap:** the naive "on timeout, unregister→register→retry" fix fires in every failed-takeover hot path and cannot distinguish (1) the zombie case (no launchd job, ports FREE) from (2) *legitimate contention* (helper fine, macOS/another app holds the ports — the "Known asymmetry" case above, which is EXPECTED and unfixable). Firing in the hot path would tear down and re-register the ROOT daemon on every normal failed-takeover, creating churn. The built version fires only once at launch (outside the hot path), uses a precise zombie signal (XPC_ERROR_CONNECTION_INVALID) rather than a timeout, and explicitly refuses to heal `.indeterminate` cases (contention). Approval preservation is verified by testing: re-registration does NOT bounce the approval back to `.requiresApproval` in the normal case — the fallback to `.permissionLost()` screens is only for when the heal truly fails.
 
+**REAL BUG FOUND + FIXED — T-PERAPP-GATE (2026-07-26, branch `claude/audio-routing-exception-bug-1ef721`):** the T5+T4 takeover gate ran ONLY in `convergeDevice` (the Selected-Devices path), so a per-app redirect's `addOutput(_:streamId:)` never woke the helper or switched the default output away. That made a redirect ORDER-DEPENDENT: redirect-first (or a redirect right after launch) established a session with no clock — receiver accepts, plays silence, only the main-selected devices make sound — while select-then-redirect happened to work because the select had already run the gate. **Fix (committed):** the gate is extracted to `ensurePTPTakeover` and now fronts EVERY session-establishing engine op (`convergeDevice`, `performBindOp` bind/rebind, `performRebindRecovery`). A clockless per-app bind is refused (claim walked back, binding slot cleared) instead of silently issued, and the not-ready → ready edge replays the cached per-app topology so a refused redirect re-binds by itself once a later takeover succeeds. Covered by `appRouteBindRunsThePTPTakeoverGateItself` / `appRouteBindWithoutClockIsRefusedAndClaimWalkedBack` / `refusedAppRouteRebindsAfterClockRecovery`.
+
 **Also covered live, same session:**
 - **Yield-back** — stopped the stream, waited ~1 min, macOS's own AirPlay dropdown worked again. Confirmed.
 - **Takeover under real contention** — macOS playing to the Sonos via its own AirPlay, then clicked the speaker in Audiouter Coexist: takeover succeeded, audio moved over. Confirmed.
@@ -101,6 +103,7 @@ Fresh boot →
 Also note the live session repeatedly demonstrated why per-machine hygiene matters: THREE different stale always-on daemons from old dev builds blocked testing in sequence — 16 registrations were purged. The cleanup script found and clears exactly this class of issue.
 
 **VERDICT: every core mechanism (demand-start, audio, yield-back, takeover-under-contention) is LIVE-VERIFIED on real hardware against a real Sonos, 2026-07-26. Remaining items are approval-persistence (needs the original bundle id) and the regression sweep — neither blocks merge readiness in principle, both are Alec's call on timing.**
+
 
 ## Risks
 

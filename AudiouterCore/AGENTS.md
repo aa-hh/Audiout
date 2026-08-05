@@ -44,11 +44,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never `device.isSelected`. Redirect targets stay excluded from
   `selectedDeviceIDs`/`mainOutMemberIDs` so a redirect can't move the Main Out
   master or pollute group identity — group matching keys off `mainOutMemberIDs`,
-  never the live output set. The volume-key mirror (`mirrorMemberIDs`) follows
-  the same rule: it drives Main Out only, never a per-app redirect target — a
-  redirect no longer opens its session through the whole-system output set (see
-  below), so there's nothing left for the volume keys to unstick there, and each
-  redirected app already has its own independent volume control.
+  never the live output set. The volume keys drive Main Out and nothing else:
+  Main is a stored master GAIN (`Main × Group × Device`, formed once at the write
+  boundary in `NativeBackend.engineVolume(forID:uiVolume:)` and never stored), so
+  a key press moves one number and every device follows. Per-app redirect targets
+  are exempt by design — each redirected app owns its volume.
+  `applyExternalSystemVolume(_:)` is the read-back arm and writes no hardware;
+  the only hardware write is `setMasterGain`'s `mirrorToSystemVolume` on the
+  user-drag arm. One direction writes, the other never does — that, not a
+  membership guard, is what makes the loop impossible.
 - **A redirected app streams to its target device via the per-app capture path,
   NOT the whole-system output set (T7).** `GroupController.applyRouting` no
   longer unions app-route targets into `backend.setOutputSet` — that union was
@@ -76,7 +80,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   app, and Core Audio reports no bundle id for those children. Shortcutting to
   single-pid resolution misses the real audio source — the routed app becomes
   inaudible and its audio leaks into the system mix. Both coordinators inject
-  `AudioProcessResolver` for this reason.
+  `AudioProcessResolver` for this reason. **Its four attribution layers are an
+  ANY-of union, never first-non-nil-wins:** a helper reporting a bundle id of its
+  OWN (`com.spotify.client.helper`) and reparented to launchd (`ppid == 1`) —
+  proven live 2026-07-26 — defeats both the own-bundle and parent-walk layers, so
+  the `responsibility_get_pid_responsible_for_pid` and bundle-path layers must
+  still be consulted. Collapsing them back to a single "effective bundle id"
+  reopens the exception leak.
+- **T2: resolving a bundle ID also emits a `Telemetry` line naming which
+  attribution layer matched each resolved pid** — `AudioProcessResolver
+  .resolveWithAttribution(bundleID:)` is the diagnostic companion to `resolve
+  (bundleID:)` (same ANY-of matches, each tagged with its ``AttributionLayer``:
+  `own`/`responsible`/`bundlePath`/`parentWalk`). `NativeCaptureCoordinator`
+  logs `.captureWS`/`exclusion_resolved` (bundleID -> `[pid:layer,...]`, plus a
+  `zeroBundles` field) at both its resolve choke points
+  (`resolveExcludedProcessObjectIDs`/`rebuildIfExclusionObjectsChanged`);
+  `PerAppCaptureCoordinator` logs `.capturePA`/`process_resolved` the same way
+  in `beginStart`/`handleDeviceChange`. Exists because the 2026-07-26 catch-all
+  leak could only be diagnosed by manually correlating `ps` against telemetry
+  that showed exclusion INTENT (`exclusion_changed`'s bundle-id list) but never
+  which concrete processes a bundle id resolved to, nor how — a bundle
+  resolving to ZERO processes is exactly that leak's signature and is now
+  visible in the log alone, no repro needed.
 - **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
   unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
@@ -93,15 +118,18 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   into the capture. If no safe default exists, it falls back to built-in speakers.
   Don't hardcode built-in (wrong when Bluetooth is selected), but don't blindly
   follow any default (creates feedback loops).
-- **Every real (re)connect must reseed the engine volume from the Mac's current
-  system level** (0% when unreadable): the engine's volume field is
-  zero-initialized and 0 maps to ≈ −30 dB (silent), so a connect that pushes no
-  volume streams INAUDIBLY until the first slider touch — the −30 dB trap. The one
-  exception is `applyStartBuffer`'s internal teardown/re-add (a buffer-size change,
-  *not* a reconnect), which preserves the in-session level instead. That is why the
-  seed is gated on `bufferReAdding`, not fired unconditionally in the shared add
-  path — remove the gate and a plain buffer change resets the user's level to the
-  system volume. The seed (`connectVolumeSeed`) is reachable from TWO independent
+- **Every real (re)connect must reseed the engine volume** from
+  `connectVolumeProvider()` (an `AppSettings.connectVolume` read, clamped to
+  min/max — NOT the Mac's system level, which is what this said before): the
+  engine's volume field is zero-initialized and 0 maps to ≈ −30 dB (silent), so a
+  connect that pushes no volume streams INAUDIBLY until the first slider touch —
+  the −30 dB trap. The clamp keeps the seed audible on its own; note that Main is
+  a separate stage, so a seed of 35 with Main at 0 is still silent, correctly.
+  The one exception is `applyStartBuffer`'s internal teardown/re-add (a
+  buffer-size change, *not* a reconnect), which preserves the in-session level
+  instead. That is why the seed is gated on `bufferReAdding`, not fired
+  unconditionally in the shared add path — remove the gate and a plain buffer
+  change resets the user's level. The seed (`connectVolumeSeed`) is reachable from TWO independent
   add-success sites — `convergeDevice`'s post-`addOutput` write (ordinary
   user-initiated connects) and `applyEngineState`'s `.connected`/`.streaming`
   branch (out-of-band auto-recovery reconnects that never go through
@@ -190,11 +218,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   never strands ON (invariant 4).
 - The live routing set is not auto-resumed at launch (`RoutingStore` is
   write-only at launch) — a previously-selected device never auto-streams.
-  Saved groups still persist and re-apply. A per-app `.device` route follows
-  the SAME discipline at launch: `AppRoutingController.clearAllDeviceRoutes()`
-  reverts every `.device` route to `.noRedirect` once, called before the
-  initial route push, so a redirect never silently survives a full restart
-  regardless of how long its target was gone for.
+  Saved groups still persist and re-apply. A per-app redirect follows
+  the SAME discipline at launch: `AppRoutingController.clearAllRedirectsAtLaunch()`
+  reverts EVERY non-`.noRedirect` destination — `.currentDevice` picks included —
+  once, called before the initial route push, so a redirect never silently
+  survives a full restart regardless of how long its target was gone for.
 - **A per-app `.device` route survives its target going merely UNREACHABLE
   (`isAvailable == false`) — it does NOT survive the target DISAPPEARING
   entirely.** These are different signals and only the second resets the
@@ -242,8 +270,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   the route-table DIFF, so re-pushing an unchanged table starts nothing, and the
   indefinite retry is `.processNotYetAudible`-only. The auto-resume machinery
   that used to paper over both was DELETED (2026-07-25): the app never
-  auto-connects at launch and `AppRoutingController.clearAllDeviceRoutes()`
-  clears every `.device` route there, so a fresh launch after granting is the
+  auto-connects at launch and `AppRoutingController.clearAllRedirectsAtLaunch()`
+  clears every redirect there, so a fresh launch after granting is the
   supported — and only — recovery path. Do not reintroduce a mid-session
   resume without revisiting that decision.
 - `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
@@ -492,7 +520,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
-| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + nil-bundle-id children, via parent-pid walk); AppKit pid→bundle lookup is injected. |
+| `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |
 | `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
@@ -505,6 +533,6 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `RemoteControlPriming` / `RemoteControlPrimer` | Seam + impl: `AXIsProcessTrustedWithOptions` fires the Accessibility prompt. Primed AHEAD of the feature that needs it (speaker-side transport controls simulating Mac media keys — not yet merged; the branch name once cited here, `claude/speaker-input-responsiveness-b8123f`, does NOT hold this work — its tip is an old already-merged checkpoint with zero unique commits, see `docs/plans/phase-3-findings/branch-inventory.md`); same `.requested`-only honesty rule as Local Network even though `AXIsProcessTrusted()` is a real status API, because macOS doesn't reliably push a live grant back to an already-running process. |
 | `PTPHelperManaging` / `SMAppServicePTPHelper` | Seam + impl (T6) over `SMAppService.daemon(plistName:)` for the privileged PTP helper daemon (`AirPlayEngine/docs/ptp-helper-design.md`); `register()` is idempotent and prompt-free, `.status` maps to `PTPHelperStatus`. Real `.enabled` is Developer-ID-signing-gated — unit-tested only via the injected fake. |
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
-| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) shared by `CoreAudioProcessTap`'s and `CoreAudioSystemTap`'s default-device/nominal-rate listener blocks: fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
+| `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) evaluated once per subscriber inside `DefaultOutputDeviceMonitor`'s fan-out (the single process-wide default-device/nominal-rate listener pair both `CoreAudioProcessTap` and `CoreAudioSystemTap` subscribe to, replacing each tap's own raw HAL listener block): fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |

@@ -34,17 +34,23 @@ func audiouterEmergencyWriteStderr(_ message: String) {
 }
 
 /// The real per-app-capture process resolver the native backend needs: Core
-/// can't import AppKit (`NSRunningApplication`), so the AppKit layer builds it
-/// and supplies it via `makeBackend(resolver:)`. `bundleIDForPID` is the one
-/// AppKit-only step (`AudioProcessResolver`'s own doc comment) — everything
-/// else (enumerating Core Audio process objects, walking parent pids) is pure
-/// Core Audio + Darwin and lives in `AudioProcessResolver` itself. A free
-/// value (not an instance property) so it can be used in `AppDelegate`'s
-/// `backend` property initializer, which runs before `self` exists.
+/// can't import AppKit, so the AppKit layer builds it and supplies it via
+/// `makeBackend(resolver:)`. `bundleIDForPID` (`NSRunningApplication`) and
+/// `bundlePathForBundleID` (`NSWorkspace`) are the two AppKit-only steps of the
+/// resolver's four-layer catch-all attribution (`AudioProcessResolver`'s own doc
+/// comment) — everything else (enumerating Core Audio process objects, walking
+/// parent pids, reading responsible pids and executable paths) is pure Core
+/// Audio + Darwin and lives in `AudioProcessResolver` itself, already wired by
+/// its own defaults. A free value (not an instance property) so it can be used
+/// in `AppDelegate`'s `backend` property initializer, which runs before `self`
+/// exists.
 private let audioProcessResolver = AudioProcessResolver(
     enumerator: CoreAudioProcessEnumerator(),
     bundleIDForPID: { pid in
         NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    },
+    bundlePathForBundleID: { bundleID in
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)?.path
     })
 
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
@@ -74,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// persist to Application Support (T-11).
     private var popoverController: PopoverController!
 
-    /// UI-agnostic mixer model (groups, proportional master, mute) shared
+    /// UI-agnostic mixer model (groups, master gain, mute) shared
     /// by the menu and the mixer window (T-U4). Built lazily in
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
@@ -391,6 +397,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // no-op mutations never reach the backend. Fired synchronously from a UI
         // mutation (no lock held) → no deadlock with the backend's internal queues.
         appRouting.onRoutesDidChange = { [weak self] in self?.pushAppRoutesToBackend() }
+        // One role per speaker: when Main Out membership changes (a device
+        // selected, or a group activated), any per-app redirect still pointed at
+        // one of those speakers yields back to "follows main output" — selecting
+        // the speaker is the senior action (a receiver holds ONE AirPlay session;
+        // the two roles can't share it). `clearRoutes` no-ops when nothing
+        // conflicts, so this is cheap on every selection change; its change edge
+        // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing down the
+        // now-stale per-app tap. The popover's picker refuses the mirror-image
+        // conflict up front (a Main Out member is never offered as a redirect
+        // target), so the two directions can never build the overlap.
+        groupController.onMainOutMembersChanged = { [weak self] memberIDs in
+            self?.appRouting.clearRoutes(toDevices: memberIDs)
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
@@ -425,14 +444,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
-        // A persisted `.device` redirect must never survive a full Audiouter
-        // restart (simplification of the app-quit reset, scaled to every route
-        // at once) — mirrors the existing "the live routing set is not
-        // auto-resumed at launch" discipline (AudiouterCore/AGENTS.md) at the
-        // per-app level. Called BEFORE the initial `pushAppRoutesToBackend()`
-        // below so the backend never sees a stale `.device` route even
-        // transiently at launch.
-        appRouting.clearAllDeviceRoutes()
+        // NO persisted redirect of any kind survives a full Audiouter restart —
+        // every launch starts with every application on "Follows main output"
+        // (product decision, Alec 2026-07-26: live testing showed restored
+        // `.currentDevice` routes going live at launch, silently starting
+        // captures/exclusions the user never asked for that session). Mirrors
+        // the existing "the live routing set is not auto-resumed at launch"
+        // discipline (AudiouterCore/AGENTS.md) at the per-app level. Called
+        // BEFORE the initial `pushAppRoutesToBackend()` below so the backend
+        // never sees a stale redirect even transiently at launch.
+        appRouting.clearAllRedirectsAtLaunch()
         // Seed the backend with the persisted route table + excluded set (T7). A
         // prune/clear above would already have pushed via `onRoutesDidChange`, but
         // that fires only when something changed — this unconditional push syncs
@@ -600,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // invisible to it for the process's whole life (the TCC read is
         // process-lifetime cached). Nothing auto-resumes off the back of it:
         // the app deliberately starts empty, per-app `.device` routes are
-        // cleared at launch (`AppRoutingController.clearAllDeviceRoutes()`),
+        // cleared at launch (`AppRoutingController.clearAllRedirectsAtLaunch()`),
         // and the user re-picks a destination themselves. The latch is what
         // makes that re-pick actually produce audio without a relaunch.
         if SystemAudioCaptureTCC.effectiveStatus() != .granted {
@@ -1282,21 +1303,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.updateAppLevel(rms, for: bundleID)
             return
         case .systemVolumeChanged(let volume):
-            // The volume keys move the system output = the local "Current Device",
-            // which the capture tap mutes while streaming — so they were adjusting a
-            // device the user couldn't hear. Hand the fact to the routing brain, which
-            // mirrors it onto the Main Out master so the keys drive what's actually
-            // playing (and no-ops in passthrough, where the keys already did the job).
+            // The volume keys moved the system output, which IS Main Out's own value.
+            // Nothing is redistributed: Main is a stored master gain, and every device
+            // picks the change up because `Main × Group × Device` is formed at the
+            // write boundary. So the keys drive whatever is actually playing without
+            // any device's own level being touched.
+            //
+            // The system hardware is ALREADY at `volume` — this only brings Main into
+            // agreement and re-pushes the dependent gains. It deliberately writes no
+            // hardware, which is what keeps the keys from feeding back on themselves.
             //
             // This delegate is the whole reason the backend can stay below the routing
             // brain: `NativeBackend` owns the system-volume listener but must not know
             // `GroupController` exists, so it publishes the fact and this — already the
             // place backend events meet app-level controllers — does the wiring.
-            groupController.mirrorSystemVolumeToMainOut(volume)
+            groupController.applyExternalSystemVolume(volume)
             log("event: \(describe(event))")
-            // Falls through to the repaint below. The mirror's own `setVolume` calls
-            // echo back as `deviceUpdated`s and repaint again with the settled values;
-            // this pass just keeps the master readout honest in the meantime.
+            // Falls through to the repaint below, to keep the master readout honest.
         case .routedApps(let deviceID, let appNames):
             // The live "which app streams here now" map (T6). T9: store it on the
             // popover so the device row's routing sublabel can prefer this
@@ -1393,7 +1416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .appLevel(let bundleID, let rms):
             return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
-            return "systemVolumeChanged(\(volume)) — mirroring to Main Out"
+            return "systemVolumeChanged(\(volume)) — syncing Main Out"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):

@@ -26,12 +26,42 @@ public struct Group: Identifiable, Equatable, Codable, Sendable {
     /// Fallback SF Symbol used when `iconSymbolName` is `nil` or unrecognized.
     public static let defaultIconSymbolName = "rectangle.3.group"
 
-    public init(id: String = UUID().uuidString, name: String, memberIDs: [String], memberVolumes: [String: Int], iconSymbolName: String? = nil) {
+    /// Group-level master volume (0–100), applied on top of Main Out: what
+    /// reaches a device is `Main × Group × Device`. Defaults to `100` (no
+    /// attenuation) so groups saved before this field existed are unaffected.
+    public var masterVolume: Int
+
+    public init(id: String = UUID().uuidString, name: String, memberIDs: [String], memberVolumes: [String: Int], iconSymbolName: String? = nil, masterVolume: Int = 100) {
         self.id = id
         self.name = name
         self.memberIDs = memberIDs
         self.memberVolumes = memberVolumes
         self.iconSymbolName = iconSymbolName
+        self.masterVolume = masterVolume.clampedToVolume
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, memberIDs, memberVolumes, iconSymbolName, masterVolume
+    }
+
+    /// Hand-written to stay backward-compatible: a `groups.json` written
+    /// before `masterVolume` existed has no such key, and must still decode
+    /// (rather than throw) so `GroupController`'s `(try? store.load()) ?? []`
+    /// doesn't silently erase every saved group. Missing key → `100` (no
+    /// attenuation), matching the memberwise initializer's default.
+    ///
+    /// Clamped on the way in, like every other volume (`Int.clampedToVolume`):
+    /// this value multiplies into the `Main × Group × Device` gain chain, so a
+    /// hand-edited or corrupt file holding `500` would be a 5× amplification
+    /// into the user's speakers rather than a merely odd-looking slider.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        memberIDs = try container.decode([String].self, forKey: .memberIDs)
+        memberVolumes = try container.decode([String: Int].self, forKey: .memberVolumes)
+        iconSymbolName = try container.decodeIfPresent(String.self, forKey: .iconSymbolName)
+        masterVolume = (try container.decodeIfPresent(Int.self, forKey: .masterVolume) ?? 100).clampedToVolume
     }
 }
 

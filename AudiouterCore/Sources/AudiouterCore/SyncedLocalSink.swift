@@ -198,6 +198,12 @@ public final class SyncedLocalSink: @unchecked Sendable {
     private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
     #endif
     private var started = false
+    /// `stateLock`-guarded last-flushed baselines for the ring's cumulative
+    /// overflow counters (see `clearSessionState()`'s `sync_ring_overflow`
+    /// flush) — the ring's own counters are never reset, so a torn flush can
+    /// never lose a drop; anything a flush misses rides into the next delta.
+    private var lastReportedRingDroppedWrites = 0
+    private var lastReportedRingDroppedSamples = 0
     /// Set on the first enqueue of a play session; pins ring-sample 0 to a pts.
     private var anchored = false
     /// Flips true (once) inside the render block when the gate opens.
@@ -211,6 +217,20 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-CORRECTION's control loop nulls; with frame-accurate placement it is < 1
     /// frame at release, and a future correction loop keeps it there over time.
     private var lastPhaseErrorNanos: Int64 = 0
+    /// `group × device` gain applied to this sink's real-time output — deliberately
+    /// EXCLUDING Main, which the Mac's own system volume already applies to this
+    /// device; multiplying it again here would double-apply it. Set via `setGain(_:)`
+    /// (``NativeBackend`` calls it whenever the computed gain changes).
+    ///
+    /// razor: piggybacked onto the render path's existing `stateLock.try()` (see
+    /// `renderInterleaved`) rather than a dedicated atomic — the lock is already
+    /// taken every cycle for `anchored`/`released`/`lastPhaseErrorNanos`, so one more
+    /// `Float` costs nothing extra, and a missed `try()` just replays the previous
+    /// cycle's gain for one render (inaudible), the same tradeoff the phase-error
+    /// readout above already makes. If gain ever needs a harder guarantee (e.g.
+    /// sample-accurate fades), upgrade to a lock-free atomic (bit-cast the `Float`
+    /// into an `UnsafeAtomic<UInt32>`) instead of adding a second lock.
+    private var gain: Float = 1.0
 
     public init(
         renderSampleRate: Double = 48_000,
@@ -267,6 +287,20 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-SPIKE-PHASE reads and T-CORRECTION drives to zero.
     public var latestPhaseErrorNanos: Int64 {
         stateLock.withLock { lastPhaseErrorNanos }
+    }
+
+    /// Test seam: the ring's cumulative producer-overflow drop counters
+    /// (chunks, samples). Never reset — see `clearSessionState()`'s flush.
+    var ringOverflowDropsForTesting: (writes: Int, samples: Int) {
+        (ring.droppedWrites, ring.droppedSamples)
+    }
+
+    /// Sets the `group × device` gain applied to this sink's output (see `gain`
+    /// above for the synchronization contract and why Main is excluded). Callable
+    /// from any thread — `NativeBackend` calls this off the render path whenever
+    /// the computed gain changes.
+    public func setGain(_ gain: Float) {
+        stateLock.withLock { self.gain = gain }
     }
 
     // MARK: Lifecycle
@@ -337,12 +371,38 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// Just the session/anchor-state half of `stop()` — no engine teardown. Split
     /// out for the same reason as `teardownEngine()` above.
     private func clearSessionState() {
+        // Flush the ring's producer-side overflow counters as ONE
+        // `sync_ring_overflow` line, only when drops actually accrued since the
+        // last flush — a healthy session logs nothing. This is the sink's
+        // off-render-thread choke point every session end passes through
+        // (`stop()` and every T-LIFECYCLE rebuild), so the emission never runs
+        // on the tap delivery or render thread; the producer pays one plain
+        // increment per dropped chunk and nothing else.
+        // razor: per-session-boundary flush, not mid-session sampling — this
+        // sink has no periodic off-thread sampler to piggyback on; if one ever
+        // exists, drive the same delta-gate from it.
+        let droppedWrites = ring.droppedWrites
+        let droppedSamples = ring.droppedSamples
+        var writesDelta = 0
+        var samplesDelta = 0
         stateLock.withLock {
             anchored = false
             released = false
             targetReleaseNanos = 0
             cachedTotalDelayNanos = nil
             lastPhaseErrorNanos = 0
+            writesDelta = droppedWrites - lastReportedRingDroppedWrites
+            samplesDelta = droppedSamples - lastReportedRingDroppedSamples
+            lastReportedRingDroppedWrites = droppedWrites
+            lastReportedRingDroppedSamples = droppedSamples
+        }
+        if writesDelta > 0 {
+            Telemetry.log(.localPlayback, "sync_ring_overflow", [
+                "droppedWritesDelta": String(writesDelta),
+                "droppedFramesDelta": String(samplesDelta / channelCount),
+                "droppedWritesTotal": String(droppedWrites),
+                "droppedFramesTotal": String(droppedSamples / channelCount),
+            ])
         }
         ring.reset()
         // T-CORRECTION: the render thread is stopped by the time a rebuild reaches
@@ -513,6 +573,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
             stateLock.unlock()
         }
 
+        // A full ring drops the chunk (never blocks); the ring counts the drop
+        // itself and `clearSessionState()` flushes it as `sync_ring_overflow`.
         _ = ring.write(interleavedFrames, count: frameCount * channelCount)
     }
 
@@ -594,7 +656,9 @@ public final class SyncedLocalSink: @unchecked Sendable {
         var silentFrames = frameCount
         var shouldDrain = false
         var target: Int64 = 0
+        var gainSnapshot: Float = 1.0
         if stateLock.try() {
+            gainSnapshot = gain
             if anchored {
                 target = targetReleaseNanos
                 if released {
@@ -653,6 +717,15 @@ public final class SyncedLocalSink: @unchecked Sendable {
             ring.read(into: framePtr, maxCount: channelCount) == channelCount
         }
 
+        // Apply the group×device gain (never Main — see `gain`'s doc comment) to the
+        // real samples this cycle produced. Skipped entirely at unity so a gain of
+        // 1.0 is byte-identical to the ungained render, not just numerically equal.
+        if gainSnapshot != 1.0 {
+            let start = silentFrames * channelCount
+            let producedSamples = produced * channelCount
+            for i in 0..<producedSamples { base[start + i] *= gainSnapshot }
+        }
+
         // Underrun: zero-fill the shortfall so a starved ring is silence, not garbage.
         if produced < outFrames {
             let tailStart = (silentFrames + produced) * channelCount
@@ -685,6 +758,15 @@ private final class InterleavedFloatRing {
     private let mask: Int
     private let headPtr: UnsafeMutablePointer<Int>   // producer-owned: next write index
     private let tailPtr: UnsafeMutablePointer<Int>   // consumer-owned: next read index
+    // Producer-owned overflow counters (whole-system dropout investigation):
+    // the overflow branch in `write` was the sink's one silently-discarded drop
+    // site — a full ring ate whole chunks with zero visibility. Same
+    // aligned-word/heap-cell idiom as `headPtr` (single writer: the producer
+    // thread; word loads/stores are atomic on Apple silicon). Monotonic
+    // diagnostics, so the off-thread reader tolerates a slightly-stale read and
+    // no barrier is paid on this path.
+    private let droppedWritesPtr: UnsafeMutablePointer<Int>
+    private let droppedSamplesPtr: UnsafeMutablePointer<Int>
 
     init(minimumCapacitySamples: Int) {
         var cap = 1
@@ -697,16 +779,28 @@ private final class InterleavedFloatRing {
         self.tailPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         headPtr.initialize(to: 0)
         tailPtr.initialize(to: 0)
+        self.droppedWritesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.droppedSamplesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        droppedWritesPtr.initialize(to: 0)
+        droppedSamplesPtr.initialize(to: 0)
     }
 
     deinit {
         storage.deallocate()
         headPtr.deallocate()
         tailPtr.deallocate()
+        droppedWritesPtr.deallocate()
+        droppedSamplesPtr.deallocate()
     }
 
+    /// Cumulative producer chunks dropped on overflow (never reset — the
+    /// consumer keeps its own last-reported baseline).
+    var droppedWrites: Int { droppedWritesPtr.pointee }
+    /// Cumulative samples those dropped chunks carried.
+    var droppedSamples: Int { droppedSamplesPtr.pointee }
+
     /// Producer side. Real-time safe: no allocation, no locks. Returns false if the
-    /// chunk didn't fit (dropped).
+    /// chunk didn't fit (dropped — counted in `droppedWrites`/`droppedSamples`).
     @discardableResult
     func write(_ src: UnsafePointer<Float>, count: Int) -> Bool {
         let h = headPtr.pointee
@@ -714,7 +808,11 @@ private final class InterleavedFloatRing {
         OSMemoryBarrier()                 // acquire: see the consumer's tail
         let used = (h &- t) & mask
         let free = capacity - 1 - used
-        if count > free { return false }
+        if count > free {
+            droppedWritesPtr.pointee &+= 1
+            droppedSamplesPtr.pointee &+= count
+            return false
+        }
         let first = min(count, capacity - (h & mask))
         storage.advanced(by: h & mask).update(from: src, count: first)
         if count > first { storage.update(from: src.advanced(by: first), count: count - first) }
@@ -771,6 +869,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public var latestPhaseErrorNanos: Int64 { 0 }
     public func start() throws {}
     public func stop() {}
+    public func setGain(_ gain: Float) {}
     public func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
     // T-LIFECYCLE: API parity no-ops for the AVFoundation-less fallback.
     public func handleSystemWillSleep() {}

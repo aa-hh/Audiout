@@ -102,6 +102,22 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private let makeTap: @Sendable () -> ProcessAudioTap
     private let processResolver: AudioProcessResolver
     private let muteBehavior: TapMuteBehavior
+    /// This instance's short label — the SAME string that names its private
+    /// tap/aggregate devices — stamped on every `capturePA` transition as
+    /// `coordinator`.
+    ///
+    /// There is more than ONE live `PerAppCaptureCoordinator` in the app
+    /// (`NativeBackend.perAppCapture`, the routing one, and
+    /// `NativeBackend.meteringCapture`, the `.unmuted` metering-only one),
+    /// both logging `capturePA` transitions for the SAME bundle IDs into the
+    /// SAME telemetry stream. Without a discriminator the two interleave into
+    /// sequences that look impossible for one state machine — a
+    /// `from: capturing` with no preceding `to: capturing`, or a long "gap"
+    /// that is really one instance sitting healthily in `.capturing` while the
+    /// other churns. That misread cost a live-test session hours (see
+    /// `docs/plans/PLAN-LIVE-TEST-HANDOFF-2026-07-25.md`); the field is what
+    /// makes the log readable.
+    private let name: String
     /// Whether `start(bundleID:)` arms the REAL, live system-wide
     /// ``kAudioHardwarePropertyProcessObjectList`` listener
     /// (``installProcessListListenerLocked()``). Defaults to `true` in the
@@ -124,11 +140,16 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     private final class Slot {
         var state: State = .idle
         var tap: ProcessAudioTap?
-        /// STABILITY(C6) (per-app port): set when a device-change notification
-        /// arrives while this slot is mid-rebuild (`.creatingTap`), so it isn't
-        /// silently dropped — see `handleDeviceChange(bundleID:)` and
-        /// dev/notes/stability-audit-2026-07-18.md §C6.
-        var pendingDeviceChange = false
+        /// STABILITY(C6): set when a device-change notification arrives while
+        /// this slot is mid-rebuild (`.creatingTap`), so it isn't silently
+        /// dropped — see `handleDeviceChange(bundleID:)` and
+        /// dev/notes/stability-audit-2026-07-18.md §C6. Confined to `queue`,
+        /// which is also ``TapRebuildCoalescer``'s lock contract.
+        ///
+        /// Single-sourced with `NativeCaptureCoordinator.rebuildCoalescer` —
+        /// the mechanism used to be written out twice (architecture review
+        /// 2026-07-26, defect A).
+        var rebuildCoalescer = TapRebuildCoalescer()
         /// W1-T4: the process-OBJECT set this slot's LIVE tap was last built
         /// against — the per-slot compare-before-rebuild baseline for live
         /// membership diffing (``handleMembershipChange()``). Recorded on each
@@ -231,7 +252,8 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 }
             },
             processResolver: processResolver,
-            muteBehavior: muteBehavior
+            muteBehavior: muteBehavior,
+            name: name
         )
     }
     #endif
@@ -246,12 +268,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         makeTap: @escaping @Sendable () -> ProcessAudioTap,
         processResolver: AudioProcessResolver,
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+        name: String = "AirPlayController",
         installsProcessListListener: Bool = true,
         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) {
         self.makeTap = makeTap
         self.processResolver = processResolver
         self.muteBehavior = muteBehavior
+        self.name = name
         self.installsProcessListListener = installsProcessListListener
         self.membershipDebounceInterval = membershipDebounceInterval
     }
@@ -358,8 +382,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     // tearing the just-created tap back down instead of resurrecting a stopped
     // slot.
 
+    /// Reject a tap format the converter/aggregate can't safely consume before
+    /// it commits to `.capturing` — ported verbatim from
+    /// `NativeCaptureCoordinator.validate(_:)` (architecture review
+    /// 2026-07-26, defect A). A non-positive sample rate makes a downstream
+    /// resample ratio infinite and an `AVAudioFrameCount` conversion trap; the
+    /// real tap's `createTapAndReadFormat` already guards the raw ASBD, but
+    /// validating here also covers an injected/degenerate format and keeps
+    /// the failure on the `.failed` state path rather than a crash.
+    static func validate(_ format: TapFormat) throws {
+        guard format.sampleRate > 0 else {
+            throw PerAppCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(format.sampleRate)")
+        }
+    }
+
     private func beginStart(bundleID: String) {
-        let processes = processResolver.resolve(bundleID: bundleID)
+        let processes = resolveProcessesLoggingAttribution(bundleID: bundleID)
         guard !processes.isEmpty else {
             queue.sync {
                 guard let slot = slots[bundleID], case .resolvingProcess = slot.state else { return }
@@ -381,6 +420,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try tap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
+            try Self.validate(format)
             queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     tap.teardown() // a stop() (or a second start()) raced in — don't leak this tap
@@ -402,11 +442,58 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Shared core of both places this coordinator resolves a bundle id to its
+    /// tapped process set (``beginStart(bundleID:)`` and
+    /// ``handleDeviceChange(bundleID:)``): resolves via
+    /// ``processResolver/resolveWithAttribution(bundleID:)`` and emits ONE
+    /// `Telemetry(.capturePA)` line per call — the per-app analog of
+    /// `NativeCaptureCoordinator`'s `exclusion_resolved` (T2). Reports each
+    /// resolved pid + the attribution layer that matched it, and calls out a
+    /// ZERO-process resolve explicitly (`processCount: "0"`) — the routed
+    /// app's own leak signature: a redirected/excluded bundle id that still
+    /// resolves to nothing here is exactly why its audio can't be found on the
+    /// per-app path. The subsequent `.processNotYetAudible` transition already
+    /// logs separately (`transition`'s `error` field); this adds the detail
+    /// that path lacked, without changing its behavior.
+    private func resolveProcessesLoggingAttribution(bundleID: String) -> Set<AudioProcess> {
+        let attributed = processResolver.resolveWithAttribution(bundleID: bundleID)
+        if attributed.isEmpty {
+            Telemetry.log(.capturePA, "process_resolved", [
+                "bundleID": bundleID,
+                "processCount": "0",
+            ])
+        } else {
+            let byPID = attributed.map { "\($0.process.pid):\($0.layer.rawValue)" }.sorted()
+            Telemetry.log(.capturePA, "process_resolved", [
+                "bundleID": bundleID,
+                "processCount": "\(attributed.count)",
+                "processes": byPID.joined(separator: ","),
+            ])
+        }
+        return Set(attributed.map(\.process))
+    }
+
     /// The default output device changed under a capturing tap (its aggregate
     /// is pinned to it, same as the system-wide tap). Re-resolve the bundle
     /// ID's process set (it may have relaunched, or gained/lost child
     /// processes, since capture started) and recreate the tap + aggregate
     /// against the new device.
+    ///
+    /// ## Sibling implementation
+    /// `NativeCaptureCoordinator.recreateTap(cause:)` runs the SAME
+    /// claim-under-lock / teardown-off-the-lock / commit-under-lock shape, for
+    /// its one whole-system tap instead of per bundle-ID slot. The two are
+    /// deliberately kept as separate bodies rather than one parameterized
+    /// template — see [TapRebuildLifecycle.swift](TapRebuildLifecycle.swift)
+    /// for the step-by-step list of what actually differs (notably: that path
+    /// leaves/joins an audio I/O workgroup, this one has no workgroup
+    /// membership to drop; this path re-resolves the process set mid-rebuild
+    /// and can bail to `.failed`, that one has no such step). The parts that
+    /// are genuinely identical (``TapRebuildCoalescer``, ``TapReanchor``) DO
+    /// live there and are used by both. **A behavioural fix to the
+    /// choreography here almost certainly needs the same fix there** — that
+    /// "same fix, written twice" is exactly the cost the architecture review
+    /// priced (2026-07-26, defect A).
     private func handleDeviceChange(bundleID: String) {
         Telemetry.log(.capturePA, "device_change_fired", ["bundleID": bundleID])
         // STABILITY(C6) (per-app port of NativeCaptureCoordinator's fix sketch,
@@ -420,7 +507,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             guard let slot = slots[bundleID] else { return (false, nil, nil) }
             guard case .capturing(let oldFormat) = slot.state else {
                 if case .creatingTap = slot.state {
-                    slot.pendingDeviceChange = true
+                    slot.rebuildCoalescer.markPending()
                 }
                 return (false, nil, nil)
             }
@@ -437,13 +524,13 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // rebuild will replay it once it lands in `.capturing`, see the
             // "replaying coalesced pending device change" log below) or
             // simply discarded (no slot / not capturing and not rebuilding).
-            let pendingNow = queue.sync { slots[bundleID]?.pendingDeviceChange ?? false }
+            let pendingNow = queue.sync { slots[bundleID]?.rebuildCoalescer.isPending ?? false }
             Telemetry.log(.capturePA, "device_change_coalesced", ["bundleID": bundleID, "pending": String(pendingNow)])
             return
         }
         claim.old?.teardown()
 
-        let processes = processResolver.resolve(bundleID: bundleID)
+        let processes = resolveProcessesLoggingAttribution(bundleID: bundleID)
         guard !processes.isEmpty else {
             // The subsequent .failed(.processNotYetAudible) transition below
             // already carries this reason in its "transition"/"error" telemetry
@@ -461,6 +548,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
 
         do {
             let format = try newTap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
+            try Self.validate(format)
             // The subsequent .capturing(format) transition below already carries
             // the new format in its "transition"/"format" telemetry field.
             // The single highest-value event in PLAN-TELEMETRY-SYSTEM.md's T3:
@@ -477,7 +565,20 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // no live Core Audio here — so this coordinator-level emission,
             // testable via the existing FakeProcessTap/fireDeviceChange()
             // seam, is the one exercised by PerAppCaptureCoordinatorTests.)
-            if let oldFormat = claim.oldFormat, oldFormat.sampleRate != format.sampleRate {
+            //
+            // The compare itself is ``TapReanchor`` — single-sourced with
+            // `NativeCaptureCoordinator`'s identical `previousRate == nil
+            // abstains` rule (architecture review 2026-07-26, defect A). Only
+            // the RATE half applies here: this coordinator doesn't track the
+            // tapped device's identity, and `TapReanchor.deviceMoved`
+            // deliberately abstains (`false`) rather than guessing, so no
+            // behaviour changes. There is also no per-app analogue of the
+            // whole-system `onDeviceRateRebuild` session reset to fire — each
+            // per-app stream is rebound by `AppRouteMixer`, not by resetting a
+            // shared RTP session.
+            let reanchor = TapReanchor(
+                previousRate: claim.oldFormat?.sampleRate, newRate: format.sampleRate)
+            if reanchor.rateMoved, let oldFormat = claim.oldFormat {
                 Telemetry.log(.capturePA, "rate_rebuild", [
                     "bundleID": bundleID,
                     "oldRate": String(oldFormat.sampleRate),
@@ -495,9 +596,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 // STABILITY(C6): a device-change notification landed while we were
                 // rebuilding — replay it once now that we're capturing again,
                 // coalescing however many were dropped into a single retry.
-                guard slot.pendingDeviceChange else { return false }
-                slot.pendingDeviceChange = false
-                return true
+                return slot.rebuildCoalescer.takePending()
             }
             if replay {
                 Telemetry.log(.capturePA, "device_change_replay", ["bundleID": bundleID])
@@ -709,6 +808,10 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         let previous = slot.state
         slot.state = newState
         var fields = [
+            // WHICH coordinator instance — see the `name` property's doc. Two
+            // instances share this category; without this field their lines
+            // interleave into a sequence no single state machine could produce.
+            "coordinator": name,
             "bundleID": bundleID,
             "from": Self.telemetryLabel(for: previous),
             "to": Self.telemetryLabel(for: newState),
@@ -820,7 +923,7 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
     ///
     /// NOTE: nothing recovers a refused bundle automatically, by design. The app
     /// starts empty, per-app `.device` routes are cleared at launch
-    /// (`AppRoutingController.clearAllDeviceRoutes()`), and the user re-picks a
+    /// (`AppRoutingController.clearAllRedirectsAtLaunch()`), and the user re-picks a
     /// destination after granting — at which point the fresh-grant latch in
     /// ``SystemAudioCaptureTCC`` means the new tap is allowed straight away,
     /// with no relaunch.
@@ -907,13 +1010,67 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     private var format = TapFormat(
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var asbd = AudioStreamBasicDescription()
-    private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
-    /// The physical output device our aggregate is built on. Kept so we can
-    /// listen for ITS nominal-sample-rate changes (see `installSampleRateListener`).
+    /// The physical output device our aggregate is built on. Kept so the monitor
+    /// subscription can report ITS identity/rate as what this tap is built on
+    /// (see `subscribeToDefaultOutput(bundleID:)`).
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
-    private var sampleRateBlock: AudioObjectPropertyListenerBlock?
 
-    init(name: String) { self.name = name }
+    /// The process-wide default-output watcher this tap observes through, and the
+    /// handle for its one subscription (nil until `createAndStart`, and again
+    /// after `teardown()`).
+    private let monitor: DefaultOutputDeviceMonitor
+    private var monitorToken: DefaultOutputDeviceMonitor.SubscriptionToken?
+
+    /// D2 telemetry ONLY (whole-system-dropout investigation, see
+    /// `aggregate_create`/`aggregate_destroy`): the correlation id for the
+    /// CURRENT aggregate, so `teardown()`'s `aggregate_destroy` line can be
+    /// matched back to the `aggregate_create` line that made it. Set in
+    /// `createAggregate(bundleID:)`, cleared in `teardown()` — mirrors
+    /// `CoreAudioSystemTap.lastAggregateUID`.
+    private var lastAggregateUID: String?
+
+    /// D2 telemetry ONLY: the bundle ID `aggregate_destroy` reports. Unlike
+    /// `CoreAudioSystemTap`, this tap has no stored bundle-ID field for its
+    /// ordinary operation (`bundleID` is only ever a call parameter, e.g.
+    /// `createAggregate(bundleID:)`) — this exists purely so `teardown()`
+    /// still knows it. Set alongside `lastAggregateUID`.
+    private var lastBundleID: String?
+
+    /// D2 telemetry ONLY: the pending ~250ms delayed nominal-rate read for
+    /// the CURRENT aggregate, if any (`scheduleDelayedRateTelemetry`).
+    /// Cancelled and cleared in `teardown()`, mirroring
+    /// `PerAppCaptureCoordinator.membershipDiffWork`'s cancellable-
+    /// `DispatchWorkItem` pattern, so a stale read can never fire once this
+    /// tap's aggregate is gone and never leaks a work item.
+    private var delayedRateTelemetryWork: DispatchWorkItem?
+
+    /// D2 telemetry ONLY: a dedicated queue for the delayed read above —
+    /// never the RT IOProc thread, never `PerAppCaptureCoordinator`'s own
+    /// state/membership queues (which is what calls
+    /// `createAggregate(bundleID:)`/`teardown()`), so this diagnostic read
+    /// can neither block nor be blocked by either.
+    private static let telemetryQueue = DispatchQueue(
+        label: "com.audiouter.perapp.capture.telemetry", qos: .utility)
+
+    /// Per-instance mach→CLOCK_MONOTONIC rebase offset — ported from
+    /// `CoreAudioSystemTap.machToMonotonicOffsetNanos` (architecture review
+    /// 2026-07-26, defect A: this tap previously called the always-resample
+    /// `CoreAudioSystemTap.timespec(fromHostTime:)` on every buffer, which
+    /// that helper's own doc comment says production code must avoid — "not
+    /// something we want to pay for on every real captured buffer"). Resampled
+    /// once at `startIOProc()` (every tap create/recreate, not once per
+    /// process) and thereafter mutated ONLY from inside the IOProc block,
+    /// which Core Audio dispatches serially onto `queue` in `startIOProc()` —
+    /// so no lock is needed on this RT-adjacent path.
+    private var machToMonotonicOffsetNanos: Int64 = 0
+
+    /// `monitor` defaults to the process-wide ``SharedDefaultOutputMonitor`` —
+    /// the parameter exists so the hermetic suite can hand in a monitor built
+    /// over a fake HAL.
+    init(name: String, monitor: DefaultOutputDeviceMonitor = SharedDefaultOutputMonitor.instance) {
+        self.name = name
+        self.monitor = monitor
+    }
 
     /// Backstop against leaking a per-process tap / aggregate device if this
     /// tap is dropped without an explicit `teardown()`. `teardown()` is
@@ -927,12 +1084,11 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             try startIOProc()
             // Correct the converter's input rate to the aggregate's REAL rate
             // BEFORE the format is returned (the converter is built from it) and
-            // before the rate listener is installed (its compare-before-rebuild
+            // before the monitor subscription is made (its compare-before-rebuild
             // guard reads `format.sampleRate`). Mirrors the whole-system tap's
             // ordering exactly — see `reconcileFormatWithAggregate`.
             reconcileFormatWithAggregate(bundleID: bundleID)
-            installDefaultDeviceListener()
-            installSampleRateListener(bundleID: bundleID)
+            subscribeToDefaultOutput(bundleID: bundleID)
         } catch {
             // Any step after the tap/aggregate was created leaves live system
             // objects; tear them down before propagating so we never orphan a
@@ -990,6 +1146,17 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         guard fErr == noErr else {
             throw PerAppCaptureError.formatReadFailed(reason: "read kAudioTapPropertyFormat \(fErr)")
         }
+        // Guard the sample rate before it reaches `Int(mSampleRate.rounded())`:
+        // a misbehaving driver can hand back NaN/±inf, and `Int(Float.nan)`
+        // TRAPS in Swift — ported from `NativeCaptureCoordinator.createTapAndReadFormat`'s
+        // identical guard (architecture review 2026-07-26, defect A). A
+        // zero/negative rate is just as poisonous downstream (infinite resample
+        // ratio, trapping `AVAudioFrameCount` conversion); fail loud into
+        // `.formatReadFailed` instead.
+        guard readASBD.mSampleRate.isFinite, readASBD.mSampleRate > 0 else {
+            throw PerAppCaptureError.formatReadFailed(
+                reason: "invalid tap sample rate \(readASBD.mSampleRate)")
+        }
         self.asbd = readASBD
         self.format = TapFormat(
             sampleRate: Int(readASBD.mSampleRate.rounded()),
@@ -1015,6 +1182,8 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         }
         self.tappedOutputDeviceID = outputID
         let aggregateUID = UUID().uuidString
+        lastAggregateUID = aggregateUID
+        lastBundleID = bundleID
 
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey as String:          "PerAppTap-\(name)-\(bundleID)",
@@ -1035,12 +1204,59 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             ]
         ]
 
+        // D2 telemetry ONLY (whole-system-dropout investigation) — see the
+        // sibling comment on `NativeCaptureCoordinator.CoreAudioSystemTap
+        // .createAggregate()`. Read before the create call below, compared
+        // against the read right after it in `aggregate_create`.
+        let rateBeforeCreate = CoreAudioSystemTap.readNominalSampleRate(outputID)
+
         var newAggregateID: AudioObjectID = kAudioObjectUnknown
         let err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
         guard err == noErr else {
             throw PerAppCaptureError.aggregateDeviceFailed(reason: "AudioHardwareCreateAggregateDevice \(err)")
         }
         self.aggregateID = newAggregateID
+
+        // D2 telemetry ONLY: which of the FOUR live aggregates this is
+        // (whole-system vs. THIS bundle ID's own), whether its sub-device
+        // looks like Bluetooth, and whether it hands us an INPUT (mic)
+        // stream alongside output — the datum that would explain a BT
+        // HFP/A2DP profile flap as self-inflicted. Logged once,
+        // synchronously, right here; never on the RT IOProc path (not
+        // created until `startIOProc()`, which runs after this returns).
+        Telemetry.log(.capturePA, "aggregate_create", [
+            "coordinator": name,
+            "bundleID": bundleID,
+            "aggregateUID": aggregateUID,
+            "transport": CoreAudioSystemTap.describeTransportType(outputID),
+            "inputStreams": CoreAudioSystemTap.describeStreamCount(
+                CoreAudioSystemTap.streamCount(outputID, scope: kAudioObjectPropertyScopeInput)),
+            "outputStreams": CoreAudioSystemTap.describeStreamCount(
+                CoreAudioSystemTap.streamCount(outputID, scope: kAudioObjectPropertyScopeOutput)),
+            "rateBeforeCreate": CoreAudioSystemTap.describeRate(rateBeforeCreate),
+            "rateAfterCreate": CoreAudioSystemTap.describeRate(CoreAudioSystemTap.readNominalSampleRate(outputID)),
+        ])
+        scheduleDelayedRateTelemetry(deviceID: outputID, aggregateUID: aggregateUID, bundleID: bundleID)
+    }
+
+    /// D2 telemetry ONLY — see `CoreAudioSystemTap.scheduleDelayedRateTelemetry`,
+    /// the whole-system sibling this ports the exact cancellable-work-item
+    /// shape from (`[weak self]` + a stored `DispatchWorkItem`, mirroring
+    /// `PerAppCaptureCoordinator.membershipDiffWork`). Off `queue`, off the
+    /// RT IOProc thread, off the create path: this schedules and returns
+    /// immediately, so it cannot slow down the create it's measuring.
+    private func scheduleDelayedRateTelemetry(deviceID: AudioObjectID, aggregateUID: String, bundleID: String) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Telemetry.log(.capturePA, "aggregate_create_rate_delayed", [
+                "coordinator": self.name,
+                "bundleID": bundleID,
+                "aggregateUID": aggregateUID,
+                "rateDelayed": CoreAudioSystemTap.describeRate(CoreAudioSystemTap.readNominalSampleRate(deviceID)),
+            ])
+        }
+        delayedRateTelemetryWork = work
+        Self.telemetryQueue.asyncAfter(deadline: .now() + .milliseconds(250), execute: work)
     }
 
     /// The current default *output* device (what the user actually hears
@@ -1070,24 +1286,49 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let onBuffer = self.onBuffer
 
+        // Seed the rebase offset fresh for THIS tap instance (not a
+        // process-wide one-time sample) — see `machToMonotonicOffsetNanos`
+        // doc. This write happens-before `AudioDeviceStart` below, which
+        // happens-before the IOProc block below ever runs, so no lock is
+        // needed for this initial handoff either.
+        self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(
             label: "com.airplaycontroller.native.perapp.\(name)", qos: .userInitiated)
 
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
-        ) { _, inInputData, inInputTime, _, _ in
+        ) { [weak self] _, inInputData, inInputTime, _, _ in
             // ---- REALTIME THREAD ----
+            guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
             let bufCount = listPtr.count
             if bufCount == 0 { return }
 
-            // pts from the IOProc's own capture clock, rebased onto
-            // CLOCK_MONOTONIC via the shared helper (reused, not duplicated —
-            // see the file-level doc comment).
+            // pts from the IOProc's own capture clock (host time → timespec).
+            // Cached, self-healing per-instance offset — ported from
+            // `CoreAudioSystemTap`'s identical RT path rather than calling
+            // the always-resample `CoreAudioSystemTap.timespec(fromHostTime:)`
+            // helper on every buffer (see `machToMonotonicOffsetNanos` doc).
+            // Drift self-heal: if the cached offset has fallen out of step
+            // with reality (e.g. the box slept mid-tap), resample it before
+            // use — two clock reads, cheap, and confined to this same serial
+            // queue so no lock is needed. `machToMonotonicOffsetNanos` is
+            // only ever touched from this block after the initial seed in
+            // `startIOProc`.
             let hostTime = inInputTime.pointee.mHostTime
-            let pts = CoreAudioSystemTap.timespec(fromHostTime: hostTime)
+            let machNanos = Self.machNanoseconds(fromHostTime: hostTime)
+            if CoreAudioSystemTap.shouldResample(
+                machNanos: machNanos,
+                offset: self.machToMonotonicOffsetNanos,
+                monotonicNowNanos: Self.currentMonotonicNanos()
+            ) {
+                self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+            }
+            let pts = CoreAudioSystemTap.timespec(
+                machNanos: machNanos, offset: self.machToMonotonicOffsetNanos)
 
             var channelData: [Data] = []
             var frameCount = 0
@@ -1122,45 +1363,65 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         }
     }
 
-    // MARK: Default-device-change listener
-
-    private func installDefaultDeviceListener() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.onDefaultDeviceChanged?()
-        }
-        self.deviceChangeBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
-    }
-
-    private func removeDefaultDeviceListener() {
-        guard let block = deviceChangeBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, nil, block)
-        deviceChangeBlock = nil
-    }
-
-    // MARK: Nominal-sample-rate listener (documented process-tap silent-buffer fix)
+    // MARK: mHostTime → CLOCK_MONOTONIC offset (cached, self-healing)
     //
-    // A process tap keeps delivering buffers at full cadence but goes SILENT
-    // (all-zero PCM) when the tapped output device renegotiates its nominal
-    // sample rate (44.1 ↔ 48 kHz) — classically triggered by another app taking
-    // the mic and forcing voice-processing mode. This is a known, Apple-
-    // unresolved Core Audio behaviour (Developer Forums thread 825780); the only
-    // reliable recovery is a FULL teardown + rebuild of the tap AND aggregate,
-    // which `handleDeviceChange` already performs. The catch: this rate change
-    // happens with the default output device's UID UNCHANGED, so the
-    // `kAudioHardwarePropertyDefaultOutputDevice` (identity) listener never fires.
-    // Listening for the device's `kAudioDevicePropertyNominalSampleRate` catches
-    // it and drives the same rebuild via `onDefaultDeviceChanged`.
+    // Ported from `CoreAudioSystemTap`'s identical trio (architecture review
+    // 2026-07-26, defect A). Duplicated rather than shared because the
+    // originals are `private` to that file; `CoreAudioSystemTap.timespec(
+    // machNanos:offset:)` and `.shouldResample(...)` — the pure arithmetic —
+    // ARE internal and reused directly above, so only the two raw clock reads
+    // and the timebase conversion are repeated here.
+
+    /// mach host ticks → nanoseconds on the mach-absolute timescale.
+    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
+        let timebase = cachedTimebase
+        return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
+    }
+
+    /// The mach timebase, read once (it never changes for the life of a process).
+    private static let cachedTimebase: mach_timebase_info_data_t = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return tb
+    }()
+
+    /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
+    private static func currentMonotonicNanos() -> UInt64 {
+        var ts = Darwin.timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+
+    /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled fresh by reading
+    /// both clocks back-to-back. See `machToMonotonicOffsetNanos`'s doc for
+    /// why callers cache this instead of calling it on every buffer.
+    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+        // Sample both clocks as close together as possible.
+        let mach = machNanoseconds(fromHostTime: mach_absolute_time())
+        let monotonic = currentMonotonicNanos()
+        return Int64(monotonic) &- Int64(mach)
+    }
+
+    // MARK: Default-output subscription (device identity + nominal sample rate)
+    //
+    // This tap used to install two private HAL property listeners of its own:
+    // `kAudioHardwarePropertyDefaultOutputDevice` (the default output changing
+    // identity) and `kAudioDevicePropertyNominalSampleRate` on the tapped device
+    // (the documented process-tap silent-buffer case — a tap keeps delivering
+    // buffers at full cadence but goes SILENT/all-zero when the tapped device
+    // renegotiates 44.1 ↔ 48 kHz, classically another app taking the mic and
+    // forcing voice-processing mode; Apple-unresolved, Developer Forums thread
+    // 825780, and the only reliable recovery is the full teardown+rebuild
+    // `handleDeviceChange` performs. It happens with the device's UID UNCHANGED,
+    // which is why the identity listener alone could never catch it).
+    //
+    // Both are now observed ONCE for the whole process by
+    // ``DefaultOutputDeviceMonitor`` and fanned out here (architecture review
+    // 2026-07-26, defect D). The compare-before-rebuild guards did NOT move: the
+    // monitor evaluates the same pure decision per subscriber, against the values
+    // `tracked` reports for THIS tap, so `onChange` runs only when this tap's own
+    // pinned device or effective rate genuinely diverged — the loop-breaker that
+    // stopped the observed per-app rebuild storm still holds.
 
     /// Best-effort human-readable label for `deviceID`, for the Telemetry
     /// `rate_rebuild` event's `device` field only — never used for any
@@ -1229,101 +1490,136 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         self.format = reconciled
     }
 
-    /// Best-effort CURRENT nominal sample rate of `deviceID`
-    /// (`kAudioDevicePropertyNominalSampleRate`), read fresh at the moment
-    /// the rate-change notification fires, so the Telemetry `newRate` field
-    /// below reflects the device's actual new rate rather than waiting for
-    /// the rebuilt tap's own ASBD read. `nil` on any HAL error (never throws
-    /// — logging must never risk the caller).
-    private static func telemetryNominalSampleRate(_ deviceID: AudioObjectID) -> Double? {
-        guard deviceID != kAudioObjectUnknown else { return nil }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var rate: Float64 = 0
-        var size = UInt32(MemoryLayout<Float64>.size)
-        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
-        return err == noErr ? rate : nil
+    func subscribeToDefaultOutput(bundleID: String) {
+        monitor.start()
+        monitorToken = monitor.subscribe(
+            label: "capturePA:\(bundleID)",
+            tracked: { [weak self] in
+                // READ LIVE at every notification — never a value snapshotted
+                // here at subscribe time. The monitor compares against each
+                // subscriber's OWN current device/rate precisely so that a tap
+                // whose format drifted independently still gets told even when
+                // the device's rate looks unchanged from the monitor's point of
+                // view. `format.sampleRate` is the right thing to report
+                // specifically because `reconcileFormatWithAggregate` already
+                // corrected it to the aggregate's real rate at start —
+                // reporting the unreconciled pre-aggregate rate would make the
+                // guard never match and rebuild on every notification (the
+                // observed per-app rebuild storm).
+                guard let self else {
+                    return DefaultOutputDeviceMonitor.Tracked(
+                        deviceID: kAudioObjectUnknown, rate: 0)
+                }
+                return DefaultOutputDeviceMonitor.Tracked(
+                    deviceID: self.tappedOutputDeviceID, rate: self.format.sampleRate)
+            },
+            onChange: { [weak self] snapshot in
+                guard let self else { return }
+                // The rebuild below is unconditional: the monitor only delivers
+                // here when a guard already said this tap diverged. The two
+                // Telemetry events are preserved verbatim from the rate listener
+                // this replaced (the live-diagnosis workflow greps them by name)
+                // and now distinguish WHICH divergence drove the delivery — a
+                // rate change, or a device-identity change at an unchanged rate.
+                // Never exercised by the hermetic suite (no live Core Audio) —
+                // see the coordinator-level emission in
+                // `handleDeviceChange(bundleID:)`, which is.
+                let rate = self.format.sampleRate
+                let device = Self.telemetryDeviceLabel(self.tappedOutputDeviceID)
+                if CoreAudioSystemTap.shouldRebuildForNominalRate(
+                    notifiedRate: snapshot.nominalRate, currentEffectiveRate: rate) {
+                    Telemetry.log(.capturePA, "rate_rebuild", [
+                        "bundleID": bundleID,
+                        "device": device,
+                        "oldRate": String(rate),
+                        "newRate": snapshot.nominalRate.map { String(Int($0.rounded())) } ?? "unknown",
+                    ])
+                } else {
+                    Telemetry.log(.capturePA, "rate_notification_skipped", [
+                        "bundleID": bundleID,
+                        "device": device,
+                        "rate": String(rate),
+                    ])
+                }
+                self.onDefaultDeviceChanged?()
+            })
     }
 
-    private func installSampleRateListener(bundleID: String) {
-        guard tappedOutputDeviceID != kAudioObjectUnknown else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            let newRate = Self.telemetryNominalSampleRate(self.tappedOutputDeviceID)
-            // COMPARE-BEFORE-REBUILD LOOP-BREAKER (reuses
-            // `CoreAudioSystemTap.shouldRebuildForNominalRate`, pure/tested):
-            // Core Audio posts this listener for a set-to-same-value too, not
-            // just a genuine change. Without this guard EVERY such spurious
-            // re-announcement tore this per-app tap down and rebuilt it —
-            // observed live as a per-app capture restarting every few seconds
-            // with no real rate change. `format.sampleRate` is safe to compare
-            // against here specifically because `reconcileFormatWithAggregate`
-            // already corrected it to the aggregate's real rate at start —
-            // comparing against the unreconciled pre-aggregate rate would make
-            // this guard never match and rebuild on every notification.
-            guard CoreAudioSystemTap.shouldRebuildForNominalRate(
-                notifiedRate: newRate, currentEffectiveRate: self.format.sampleRate) else {
-                Telemetry.log(.capturePA, "rate_notification_skipped", [
-                    "bundleID": bundleID,
-                    "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
-                    "rate": String(self.format.sampleRate),
-                ])
-                return
-            }
-            // The Telemetry call below is the real HAL detection point, so it
-            // carries the richest fields (device name, and a fresh HAL read of
-            // the NEW rate rather than waiting for the rebuilt tap's ASBD).
-            // Never exercised by the hermetic suite (no live Core Audio) — see
-            // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
-            // which is.
-            Telemetry.log(.capturePA, "rate_rebuild", [
-                "bundleID": bundleID,
-                "device": Self.telemetryDeviceLabel(self.tappedOutputDeviceID),
-                "oldRate": String(self.format.sampleRate),
-                "newRate": newRate.map { String(Int($0.rounded())) } ?? "unknown",
-            ])
-            self.onDefaultDeviceChanged?()
-        }
-        self.sampleRateBlock = block
-        AudioObjectAddPropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
+    private func unsubscribeFromDefaultOutput() {
+        guard let token = monitorToken else { return }
+        monitor.unsubscribe(token)
+        monitorToken = nil
     }
 
-    private func removeSampleRateListener() {
-        guard let block = sampleRateBlock, tappedOutputDeviceID != kAudioObjectUnknown else {
-            sampleRateBlock = nil
-            return
-        }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(tappedOutputDeviceID, &address, nil, block)
-        sampleRateBlock = nil
+    /// Test seam (hermetic suite only): seed the device/rate a live
+    /// `createAndStart` would have resolved, so the monitor subscription can be
+    /// exercised without real Core Audio.
+    func test_seedTrackedState(deviceID: AudioObjectID, sampleRate: Int) {
+        tappedOutputDeviceID = deviceID
+        format = TapFormat(
+            sampleRate: sampleRate, channels: 2, bitsPerSample: 32,
+            isFloat: true, isInterleaved: false)
     }
 
     // MARK: Teardown (order matters: stop -> destroy IOProc -> destroy aggregate -> destroy tap)
 
+    // Every destroy below is checked and logged rather than discarded: a failing
+    // `AudioHardwareDestroyProcessTap`/`…AggregateDevice` is exactly how a live
+    // per-app tap leaks a system object, and it used to vanish silently here
+    // while the whole-system tap logged the same failures. Log-and-continue —
+    // teardown must never stop partway and orphan the objects further down.
     func teardown() {
-        removeDefaultDeviceListener()
-        removeSampleRateListener()
+        // D2 telemetry ONLY: cancel any pending ~250ms delayed-rate read
+        // before anything else, so it can never fire after teardown starts,
+        // and snapshot what `aggregate_destroy` below needs to report before
+        // the fields it reads from are cleared by this same function.
+        delayedRateTelemetryWork?.cancel()
+        delayedRateTelemetryWork = nil
+        let telemetryDeviceID = tappedOutputDeviceID
+        let telemetryAggregateUID = lastAggregateUID
+        let telemetryBundleID = lastBundleID
+
+        unsubscribeFromDefaultOutput()
         tappedOutputDeviceID = kAudioObjectUnknown
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
-            _ = AudioDeviceStop(aggregateID, proc)
-            _ = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let stopErr = AudioDeviceStop(aggregateID, proc)
+            if stopErr != noErr { AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceStop failed: \(stopErr)") }
+            let destroyIOErr = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if destroyIOErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioDeviceDestroyIOProcID failed: \(destroyIOErr)")
+            }
             ioProcID = nil
         }
         if aggregateID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            // D2 telemetry ONLY: same shape as `aggregate_create`, read
+            // BEFORE the destroy call below so a reader can compare "at
+            // create" vs. "at destroy" for the SAME `aggregateUID`. We never
+            // destroy the physical sub-device itself (only our own private
+            // aggregate wrapper), so it is still live and readable here.
+            Telemetry.log(.capturePA, "aggregate_destroy", [
+                "coordinator": name,
+                "bundleID": telemetryBundleID ?? "unreadable",
+                "aggregateUID": telemetryAggregateUID ?? "unreadable",
+                "transport": CoreAudioSystemTap.describeTransportType(telemetryDeviceID),
+                "inputStreams": CoreAudioSystemTap.describeStreamCount(
+                    CoreAudioSystemTap.streamCount(telemetryDeviceID, scope: kAudioObjectPropertyScopeInput)),
+                "outputStreams": CoreAudioSystemTap.describeStreamCount(
+                    CoreAudioSystemTap.streamCount(telemetryDeviceID, scope: kAudioObjectPropertyScopeOutput)),
+                "rate": CoreAudioSystemTap.describeRate(CoreAudioSystemTap.readNominalSampleRate(telemetryDeviceID)),
+            ])
+            let destroyAggErr = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if destroyAggErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyAggregateDevice failed: \(destroyAggErr)")
+            }
             aggregateID = kAudioObjectUnknown
         }
+        lastAggregateUID = nil
+        lastBundleID = nil
         if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+            let destroyTapErr = AudioHardwareDestroyProcessTap(tapID)
+            if destroyTapErr != noErr {
+                AudioDiag.log("CoreAudioProcessTap.teardown AudioHardwareDestroyProcessTap failed: \(destroyTapErr)")
+            }
             tapID = kAudioObjectUnknown
         }
     }

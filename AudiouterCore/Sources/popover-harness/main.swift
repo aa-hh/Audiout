@@ -204,20 +204,25 @@ func run() -> Int32 {
     })
     checks.expectEqual(routed, expectedRouted, "Selected Devices routes its AirPlay members")
 
-    // --- 9. Main Out master == current target's proportional master.
-    print("\n[9] Main Out master reflects the current target")
+    // --- 9. Main Out master is a GAIN, independent of every member's own level.
+    print("\n[9] Main Out master gain is independent of member volumes")
     checks.expectEqual(popover.test_mainOutRow.test_masterValue, controller.mainOutMasterVolume,
-                       "Main Out slider shows the target's master")
-    // Drag the Main Out master and confirm members scale proportionally.
+                       "Main Out slider shows the current master gain")
+    // Move Main Out and confirm members do NOT follow. Main used to be a
+    // proportional master that rewrote every member's volume from a ratio
+    // snapshot; it is now a stored gain multiplied in at the write boundary, so a
+    // member's own level must survive a master move untouched. That independence
+    // is the entire point of the refactor, so assert it directly.
     let members = Array(controller.selectedDeviceIDs).filter { id in
         backend.devices.first { $0.id == id }?.isLocalDevice == false
     }
     if members.count >= 1 {
         backend.setVolume(40, for: members[0]); drain()
         popover.test_dragMainOutMaster(to: 80); drain()
-        // members[0] had ratio 40/master; after master→80 it scales up.
-        checks.expect((backend.devices.first { $0.id == members[0] }?.volume ?? 0) > 40,
-                      "dragging Main Out master scaled a member up")
+        checks.expectEqual(backend.devices.first { $0.id == members[0] }?.volume ?? 0, 40,
+                           "member's own volume is unchanged by a Main Out master move")
+        checks.expectEqual(controller.mainOutMasterVolume, 80,
+                           "Main Out master gain equals the value it was set to")
     }
 
     // --- 10. Mute (secondary) drives volume to 0 and restores.

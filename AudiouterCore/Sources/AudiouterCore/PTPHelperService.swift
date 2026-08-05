@@ -312,14 +312,20 @@ public enum PTPZombieReconcileOutcome: Equatable, Sendable {
 public struct PTPHelperReconciler: Sendable {
     private let helper: PTPHelperManaging
     private let probe: @Sendable () async -> PTPLivenessProbeResult
+    private let registerRetryDelay: TimeInterval
+    private let registerRetryAttempts: Int
 
     public init(
         helper: PTPHelperManaging,
         probe: @escaping @Sendable () async -> PTPLivenessProbeResult
-            = { await PTPHelperReconciler.realLivenessProbe() }
+            = { await PTPHelperReconciler.realLivenessProbe() },
+        registerRetryDelay: TimeInterval = 0.5,
+        registerRetryAttempts: Int = 10
     ) {
         self.helper = helper
         self.probe = probe
+        self.registerRetryDelay = registerRetryDelay
+        self.registerRetryAttempts = registerRetryAttempts
     }
 
     /// The PURE, side-effect-free heal decision — no `self`, no probe call, no
@@ -353,16 +359,46 @@ public struct PTPHelperReconciler: Sendable {
         }
 
         // Zombie confirmed: unregister the stale registration, then re-register
-        // to make launchd load a fresh job. Either call throwing leaves the
-        // helper as-is and reports `.healFailed`; the launch wiring can retry on
-        // the next launch.
+        // to make launchd load a fresh job.
+        //
+        // LIVE FINDING (2026-08-06, signed build): `SMAppService.unregister()`
+        // returns BEFORE launchd finishes tearing the job down, so an immediate
+        // `register()` collides with the in-flight teardown and throws — the
+        // unified log showed "Register error: 1" twice within 100ms of a
+        // successful unregister, then the SAME call succeeding once the teardown
+        // settled (and landing as `.enabled`: approval survives re-registration).
+        // So `register()` is retried with spacing; only exhausting every attempt
+        // is a real heal failure. `unregister()` throwing still fails immediately
+        // — there is nothing to retry into.
         do {
             try await helper.unregister()
-            try helper.register()
         } catch {
             Telemetry.log(.airplay, "ptp_zombie_heal", [
                 "before": Self.telemetryStatus(status),
                 "result": "heal_failed",
+            ])
+            return .healFailed
+        }
+        var registered = false
+        var attemptsUsed = 0
+        for attempt in 0..<max(1, registerRetryAttempts) {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(registerRetryDelay * 1_000_000_000))
+            }
+            attemptsUsed = attempt + 1
+            do {
+                try helper.register()
+                registered = true
+                break
+            } catch {
+                continue
+            }
+        }
+        guard registered else {
+            Telemetry.log(.airplay, "ptp_zombie_heal", [
+                "before": Self.telemetryStatus(status),
+                "result": "heal_failed",
+                "register_attempts": String(attemptsUsed),
             ])
             return .healFailed
         }

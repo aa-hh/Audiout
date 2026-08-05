@@ -41,21 +41,31 @@ extension SerializedSharedState {
             private let lock = NSLock()
             private var _status: PTPHelperStatus
             private let statusAfterRegister: PTPHelperStatus
+            /// Live-race modeling: `SMAppService.register()` right after
+            /// `unregister()` throws while launchd's async teardown is in
+            /// flight. The first N register calls throw; later ones succeed.
+            private var registerThrowsRemaining: Int
             private(set) var calls: [String] = []
 
-            init(status: PTPHelperStatus, statusAfterRegister: PTPHelperStatus) {
+            init(status: PTPHelperStatus, statusAfterRegister: PTPHelperStatus,
+                 registerThrowsFirst: Int = 0) {
                 self._status = status
                 self.statusAfterRegister = statusAfterRegister
+                self.registerThrowsRemaining = registerThrowsFirst
             }
 
-            var status: PTPHelperStatus { lock.withLock { _status } }
-
             func register() throws {
-                lock.withLock {
+                try lock.withLock {
                     calls.append("register")
+                    if registerThrowsRemaining > 0 {
+                        registerThrowsRemaining -= 1
+                        throw NSError(domain: "test.smappservice", code: 1)
+                    }
                     _status = statusAfterRegister
                 }
             }
+
+            var status: PTPHelperStatus { lock.withLock { _status } }
 
             func openSystemSettingsLoginItems() {}
 
@@ -173,6 +183,41 @@ extension SerializedSharedState {
 
             #expect(outcome == .indeterminate)
             #expect(helper.recordedCalls.isEmpty, "port contention must never be healed")
+        }
+
+        // MARK: - Register retry (the live-caught unregister/register race)
+
+        /// LIVE FINDING 2026-08-06: on real launchd, `register()` immediately
+        /// after `unregister()` throws while the async teardown is in flight —
+        /// the same call succeeds moments later. The heal must retry register,
+        /// not report failure on the first throw.
+        @Test func healRetriesRegisterThroughTheTeardownRaceAndSucceeds() async {
+            let helper = RecordingHelper(status: .enabled, statusAfterRegister: .enabled,
+                                         registerThrowsFirst: 2)
+            let probe = RecordingProbe(result: .zombie)
+            let reconciler = PTPHelperReconciler(helper: helper, probe: probe.probe,
+                                                 registerRetryDelay: 0)
+
+            let outcome = await reconciler.reconcile()
+
+            #expect(outcome == .healed(.enabled))
+            #expect(helper.recordedCalls == ["unregister", "register", "register", "register"],
+                    "two raced throws, then the settled register succeeds")
+        }
+
+        @Test func healFailsOnlyAfterExhaustingEveryRegisterAttempt() async {
+            let helper = RecordingHelper(status: .enabled, statusAfterRegister: .enabled,
+                                         registerThrowsFirst: Int.max)
+            let probe = RecordingProbe(result: .zombie)
+            let reconciler = PTPHelperReconciler(helper: helper, probe: probe.probe,
+                                                 registerRetryDelay: 0,
+                                                 registerRetryAttempts: 4)
+
+            let outcome = await reconciler.reconcile()
+
+            #expect(outcome == .healFailed)
+            #expect(helper.recordedCalls.filter { $0 == "register" }.count == 4,
+                    "every configured attempt is used before giving up")
         }
 
         // MARK: - Telemetry (ptp_zombie_heal)

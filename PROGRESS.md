@@ -56,3 +56,10 @@ Worktree: .claude/worktrees/audio-routing-consolidation-92be71, branch claude/au
 
 ## Routing arbiter (roadmap 008) — 2026-08-05
 - [research] done — code-grounded map of the converging/bindTail domains landed as docs/notes/routing-arbiter-008-research.md: both scope-transition FIFOs traced (converge slot vs global bindTail chain, plus the enqueueRebindRecovery cross-link that already rides both), UI-only exclusivity walked (clearRoutes + popover menu filter; NativeBackend has no arbiter), six concrete in-flight interleavings enumerated (I1 TOCTOU double-read resurrects defect B concurrently; I4 unbind-kills-live-stream-0 while `added` still claims it; I5 recovery-backoff ping-pong), hermetic test seams inventoried (SpyEngine liveStreams/opDelayNanos/onAddOutputBody), branch contention checked (aggregate-device-wave3 = 5 unmerged NB commits, highest risk). Docs-only commit; no Swift touched.
+
+2026-08-05 (design agent): Design committed (18a0c6b) — docs/plans/PLAN-ROUTING-ARBITER-008.md.
+Chose a whole-system-priority scope arbiter as policy over EXISTING stateQueue state (no new
+lock/map): R5 effective-route demotion extended to Selected Devices, stillOwnsRebind-style
+fire-time checks on every bindTail op, per-app replay re-driven at WS slot release. Rejected:
+merged serialization domain (PTP head-of-line blocking + 013-shape reentrancy) and blocking
+converging-slot claims (provable FIFO deadlock). T1-T8 tasks + 8 deterministic race tests specced.

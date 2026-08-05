@@ -540,7 +540,52 @@ and note the supersession in the test's doc comment.
 
 ---
 
-## 6. OUT OF SCOPE
+## 6. Implementation deviations (2026-08-05, implementation pass)
+
+All mechanisms landed as designed; four deviations, each in the design's
+spirit, none silent:
+
+1. **Release-side settle consumption re-enqueues the deferred `.unbind` instead
+   of running the case-4 arm inline.** §1 mechanism 3 says the release "re-runs
+   the `added && !converging` settle arm". The implementation instead re-enqueues
+   `.unbind(outputID)` through `enqueueBindOps` (on-`stateQueue`-safe), so the
+   deferred op re-runs `performBindOp`'s full four-case classification against
+   the post-converge world. This is strictly more correct than the letter: a
+   converge that PARKED (release with `added == false`) leaves a live per-app
+   session the demotion already evicted — the design's own case-2 analysis says
+   the right action there is today's `removeOutput`, which the re-enqueued op
+   takes and an inline case-4-only settle would have skipped (the zombie-session
+   leak the design review §1 flagged for the blanket-skip variant). A NEW claim
+   landing in the meantime re-defers (case 3) — bounded by claim transitions,
+   as designed. Telemetry: the re-enqueue is logged as `unbind_redrive`
+   (`trigger: ws_release`).
+2. **`unbind_downgraded` is emitted twice per settle**: once at conversion with
+   `settled: pending` (case 4 classification) and once at verify resolution with
+   `settled: noop | rebound`. The design asked for one event "plus `settled` once
+   the verify resolves"; two lines keep both moments in the trail without a new
+   event name.
+3. **SpyEngine hooks**: instead of converting the existing sync `onAddOutputBody`
+   to a blocking hold, the hold-open capability landed as separate ASYNC hooks
+   (`onAddOutputHold(_, stream)` on both add variants, `onRemoveOutputBody`,
+   `onRebindBody`), awaited at the exact pre-`liveStreams`-write placement points
+   — a blocked continuation never pins a cooperative-pool thread. The existing
+   sync `onAddOutputBody` is additionally invoked from `addOutput(_:streamId:)`
+   exactly as T6 required.
+4. **Test-plan adjustments discovered against the code:** (a) test 3's "no
+   `remove:` for D anywhere after the route push" is unassertable as written —
+   the spy deliberately records `rebindOutput`'s stop half into the same
+   `remove:` oplog — so the test pins "exactly ONE remove (the scope rebind's own
+   stop half)" instead, which captures the same fact (the deferred unbind issued
+   none). (b) Re-engage assertions accept any stream ≥ 1: the mixer assigns a
+   FRESH stream id when a demoted route re-engages. (c) The pre-existing metering
+   test `deviceFedBySystemAndStreamReportsMax` built its fixture on the exact
+   state the arbiter now prevents (one device simultaneously Selected and a live
+   redirect target); it was rewritten to prove each side of the MAX in the state
+   that can now carry it, with the supersession noted in its doc comment (same
+   treatment §5 prescribed for `deviceMovingFromWholeSystemToPerApp...`, which
+   became `...AfterDeselectEndsOnThePerAppStream`).
+
+## 7. OUT OF SCOPE
 
 - **GroupController / AppRoutingController / popover changes.** UI-layer
   exclusivity (clearRoutes + menu filter) stays exactly as-is; the arbiter is

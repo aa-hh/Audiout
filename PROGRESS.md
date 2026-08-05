@@ -75,3 +75,18 @@ and a self-contradictory "both T7 tests keep passing" claim. Repairs: four-case 
 a verify-first settle reusing enqueueRebindRecovery's slot/gen discipline, pendingScopeSettles
 consumed at release, stillOwnsRebind .perApp WS-claim conjunct + pre-op re-check, gate placed
 after the PTP wait, test plan fixed + new test 9 forcing the surviving interleaving.
+
+2026-08-05 (implementation agent): T1-T8 implemented. All three mechanisms landed in
+NativeBackend.swift as designed — demote-at-decision (isRouteTargetEligibleLocked + edge-triggered
+ScopeConflict record/telemetry inside effectiveAppRoutesLocked), selection-edge replay in
+setOutputSet, the fire-time gate after ensurePTPTakeover + the FOUR-CASE unbind arm with the
+verify-first settle on the shared recovery chain (verifyFirst flavor + pre-op preflight +
+stillOwnsRebind .perApp WS-claim conjunct), and release-side re-drive (ConvergeReleaseAction:
+per-app replay via generalized replayPendingPerAppBindings(trigger:) + pendingScopeSettles
+consumed by RE-ENQUEUING the deferred unbind through the four-case arm — deviation §6.1, closes
+the parked-converge zombie leak the inline case-4-only settle would have missed). 9 race tests
+added (each interleaving forced via hold-open SpyEngine hooks / an armable PTP activator /
+telemetry-observed classification); deviceMovingFromWholeSystemToPerApp rewritten to the
+sanctioned deselect-first direction; deviceFedBySystemAndStreamReportsMax rebuilt (its fixture
+was the now-prevented double-claim state). Four deviations documented in the plan's new §6;
+AGENTS.md arbiter rule + two traps added. NativeBackendTests 192/192 green; full suite running.

@@ -2,10 +2,10 @@ import AudiouterCore
 
 /// Pure decision logic for the menu-bar status item's idle-vs-streaming
 /// distinction. AppKit-free by design (no `NSImage`/`NSColor`/`NSStatusItem`)
-/// so it's unit-testable without a real status bar — `AudiouterApp`'s
-/// `StatusItemController` is the only renderer: it calls in here for the
-/// symbol name, then owns every bit of AppKit-specific work (template vs.
-/// palette rendering, `variableValue`, `NSColor.controlAccentColor`).
+/// so it's unit-testable without a real status bar. `StatusItemIcon.make`
+/// (same target) turns `symbolName` into the actual `NSImage` — always a
+/// template image, per the macOS menu-bar-status-item convention —
+/// and `AudiouterApp.StatusItemController` is the only caller of that.
 ///
 /// "Actively streaming" means ANY audio is currently leaving the Mac by ANY
 /// mechanism — err on the side of "anything counts," not just the main

@@ -12,19 +12,22 @@ import AudiouterSharedUI
 ///   deprecated);
 /// - the button image is an SF Symbol whose `variableValue` tracks master
 ///   volume (the waves fill with level) in BOTH the idle and streaming states;
-/// - **idle/passthrough**: the OUTLINE variant (`speaker.wave.3`),
-///   template-rendered so it tints automatically with the menu bar's
-///   light/dark appearance, exactly like before this distinction existed;
+/// - **idle/passthrough**: the OUTLINE variant (`speaker.wave.3`);
 /// - **actively streaming** (`MenuBarStatus.isStreaming` — anything leaving
 ///   the Mac by any mechanism, Main Out or a per-app redirect): the FILLED
-///   variant (`speaker.wave.3.fill`), rendered with the system accent color
-///   (`NSColor.controlAccentColor`, never a hardcoded hex — house UI
-///   convention) via `isTemplate = false` + an `NSImage.SymbolConfiguration`
-///   palette, instead of a plain template image.
+///   variant (`speaker.wave.3.fill`).
+///
+/// BOTH states render as a plain TEMPLATE image — that is the macOS
+/// menu-bar-status-item convention (see `AudiouterSharedUI.StatusItemIcon`'s
+/// doc comment for why an accent-colored non-template icon was tried and
+/// reverted) — so tint and legibility track the menu bar's light/dark
+/// appearance and vibrancy automatically. The idle/streaming distinction is
+/// carried entirely by the symbol shape, never by color.
 ///
 /// The idle/streaming decision itself is pure and AppKit-free
-/// (`AudiouterSharedUI.MenuBarStatus`) — this controller only turns that
-/// decision into `NSImage`/`NSColor` work.
+/// (`AudiouterSharedUI.MenuBarStatus`); the image itself is built by
+/// `AudiouterSharedUI.StatusItemIcon.make` — this controller only owns the
+/// `NSStatusItem`/button plumbing around it.
 ///
 /// Warm Signal v3 §5.5 (decision h) adds two glance rules on top:
 /// - a small **routing-active dot** at the glyph's top-trailing corner —
@@ -121,28 +124,7 @@ final class StatusItemController {
 
     private func renderButtonImage() {
         guard let button = statusItem.button else { return }
-        let symbolName = MenuBarStatus.symbolName(isStreaming: isStreaming)
-        let image = NSImage(
-            systemSymbolName: symbolName,
-            variableValue: masterVolume,
-            accessibilityDescription: "AirPlay volume"
-        )
-        if isStreaming {
-            // Actively streaming: filled symbol in the system accent color —
-            // never a hardcoded hex (house UI convention, AGENTS.md). Layering
-            // a palette `SymbolConfiguration` onto the variable-value image
-            // preserves the `variableValue` notch fill while adding color.
-            let configured = image?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(paletteColors: [NSColor.controlAccentColor])
-            )
-            configured?.isTemplate = false
-            button.image = configured ?? image
-        } else {
-            // Idle/passthrough: plain template image, exactly as before this
-            // distinction existed — tints automatically in dark/light menu bars.
-            image?.isTemplate = true
-            button.image = image
-        }
+        button.image = StatusItemIcon.make(isStreaming: isStreaming, masterVolume: masterVolume)
         // Opt-in dev disambiguator: when `AUDIOUTER_STATUS_LABEL` is set, show it
         // as a text tag beside the icon so a side-by-side test build is visually
         // distinct from an installed copy (identical bundle glyphs otherwise look

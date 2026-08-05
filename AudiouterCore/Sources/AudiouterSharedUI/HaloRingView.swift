@@ -36,7 +36,7 @@ import AudiouterCore
 ///   `ringConnected` token at the SHARED `haloRingConnectedStroke` (1.6 pt) —
 ///   deliberately thinner than Main Audio's bespoke gold/ember
 ///   `mainAudioRingConnectedStroke` (2 pt, matched to the rail's own
-///   `busLineWidth`) and never recolored via `connectedStrokeColorOverride`/
+///   `busLineWidth`) and never recolored via `connectedSpineArmed`/
 ///   `connectedStrokeWidthOverride` (those apply to `.connected` only), so a
 ///   quiet thin neutral ring is visually distinct from any real remote
 ///   `.connected` ring, which always wears the gold/ember override.
@@ -114,14 +114,19 @@ public final class HaloRingView: NSView {
     public var connectedStrokeWidthOverride: CGFloat? {
         didSet { updateLayerAppearance() }
     }
-    /// Bespoke stroke-COLOR override for the **connected** form only (Warm
-    /// Signal nitpicks): the Main Audio ring is the rail's terminus, so its
-    /// connected color must match whatever tone the rail's curve is drawn in
-    /// (gold when armed, ember otherwise — the same two-tone the rail itself
-    /// uses, not the device rows' hue-neutral `ringConnected` token) for the
-    /// join to read as one continuous line rather than two different colors
-    /// touching. `nil` keeps the shared `Tokens.Color.ringConnected`.
-    public var connectedStrokeColorOverride: NSColor? {
+    /// Makes the **connected** form wear the rail's SPINE TONE instead of the
+    /// shared `ringConnected` token (Warm Signal nitpicks): the Main Audio ring
+    /// is the rail's terminus, so its connected color must match whatever tone
+    /// the rail's curve is drawn in for the join to read as one continuous line
+    /// rather than two different colors touching. `true`/`false` = the spine is
+    /// armed / not; `nil` (every device row) keeps the hue-neutral
+    /// `Tokens.Color.ringConnected`, untouched by the accent dial.
+    ///
+    /// It carries the armed STATE, never a resolved color: the tone itself
+    /// comes from `Tokens.Color.spineTone(armed:)` at stamp time — the same
+    /// call `BusRailOverlayView` makes for the hook — so the ring and the rail
+    /// cannot pick different tokens, and a dial change re-resolves both.
+    public var connectedSpineArmed: Bool? {
         didSet { updateLayerAppearance() }
     }
 
@@ -142,6 +147,23 @@ public final class HaloRingView: NSView {
             selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil)
+        // The accent dial is the THIRD live re-resolution trigger, alongside
+        // appearance and the a11y options: the ring's stroke is a stamped
+        // static `CGColor`, so — unlike the `draw(_:)`-based rail it joins —
+        // a dial change leaves it showing the old accent until something
+        // re-stamps it. Re-stamping here is what keeps the ring and the rail's
+        // hook one continuous line THROUGH the flip, with no rebuild.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(accentStyleDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
+    }
+
+    /// A live accent-dial change: re-stamp the stroke so a spine-toned ring
+    /// follows the dial in the same instant the rail does.
+    @objc private func accentStyleDidChange() {
+        updateLayerAppearance()
     }
 
     /// A mid-session Reduce Motion / Increase Contrast toggle: re-stamp colors
@@ -215,7 +237,8 @@ public final class HaloRingView: NSView {
             width = PopoverColumnGrid.haloRingConnectingStroke
             dashed = true
         case .connected:
-            strokeToken = connectedStrokeColorOverride ?? Tokens.Color.ringConnected
+            strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
+                ?? Tokens.Color.ringConnected
             width = connectedStrokeWidthOverride ?? PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         case .failed:
@@ -223,7 +246,7 @@ public final class HaloRingView: NSView {
             width = PopoverColumnGrid.haloRingFailedStroke
             dashed = false
         case .resting:
-            // Deliberately NOT `connectedStrokeColorOverride`/
+            // Deliberately NOT `connectedSpineArmed`/
             // `connectedStrokeWidthOverride` — those exist so a real
             // `.connected` ring can match the rail's gold/ember + matched
             // stroke. `.resting` stays the shared hue-neutral token at the

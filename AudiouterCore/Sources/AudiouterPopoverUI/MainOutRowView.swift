@@ -207,11 +207,14 @@ public final class MainOutRowView: NSView {
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
         isArmedState = armed
-        // The ring's CONNECTED color matches the rail curve's own two-tone
-        // (gold armed / ember otherwise — Warm Signal nitpicks, "rail into
-        // the ring"), so the join reads as one continuous line, not a gold
-        // line touching a hue-neutral ring.
-        haloRingView.connectedStrokeColorOverride = armed ? Tokens.Color.gold : Tokens.Color.ember
+        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
+        // Signal nitpicks, "rail into the ring"), so the join reads as one
+        // continuous line, not a gold line touching a hue-neutral ring. The
+        // row hands over the armed STATE only — `HaloRingView` resolves the
+        // tone through the same `Tokens.Color.spineTone` the rail overlay
+        // uses, at stamp time, so the two cannot drift and the accent dial
+        // moves both.
+        haloRingView.connectedSpineArmed = armed
         armedDotView.apply(armed: armed)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
@@ -657,6 +660,10 @@ public final class MainOutRowView: NSView {
     public var test_ringForm: HaloRingView.Form { haloRingView.test_form }
     /// Whether the Main Out ring's pending-handshake breathing pulse is installed.
     public var test_ringIsBreathing: Bool { haloRingView.test_isBreathing }
+    /// The ring's currently STAMPED stroke color (the `CGColor` actually on the
+    /// layer) — the ring/rail tone-coupling lock reads this so it compares the
+    /// drawn ink, not a re-derived token.
+    public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
     /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
     /// target has a connected member ∧ master unmuted) — reads the dot view's

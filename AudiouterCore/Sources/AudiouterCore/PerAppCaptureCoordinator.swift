@@ -503,18 +503,23 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         // handleDeviceChange once it lands in `.capturing`. Rapid sample-rate
         // bounces (44.1 -> 48 -> 44.1) mean the LAST notification can be the one
         // that would otherwise be dropped, rebuilding against a stale rate.
-        let claim: (proceed: Bool, old: ProcessAudioTap?, oldFormat: TapFormat?) = queue.sync {
-            guard let slot = slots[bundleID] else { return (false, nil, nil) }
+        let claim: (
+            proceed: Bool, old: ProcessAudioTap?, oldFormat: TapFormat?, previousDeviceID: AudioObjectID?
+        ) = queue.sync {
+            guard let slot = slots[bundleID] else { return (false, nil, nil, nil) }
             guard case .capturing(let oldFormat) = slot.state else {
                 if case .creatingTap = slot.state {
                     slot.rebuildCoalescer.markPending()
                 }
-                return (false, nil, nil)
+                return (false, nil, nil, nil)
             }
             let old = slot.tap
             slot.tap = nil
             transition(slot, bundleID: bundleID, to: .creatingTap)
-            return (true, old, oldFormat)
+            // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
+            // clears it — the baseline the post-commit compare needs to tell a
+            // re-anchor from a like-for-like rebuild.
+            return (true, old, oldFormat, old?.tappedDeviceID)
         }
         guard claim.proceed else {
             // Pending-rebuild coalescing (STABILITY(C6)): this notification
@@ -567,22 +572,25 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             // seam, is the one exercised by PerAppCaptureCoordinatorTests.)
             //
             // The compare itself is ``TapReanchor`` — single-sourced with
-            // `NativeCaptureCoordinator`'s identical `previousRate == nil
-            // abstains` rule (architecture review 2026-07-26, defect A). Only
-            // the RATE half applies here: this coordinator doesn't track the
-            // tapped device's identity, and `TapReanchor.deviceMoved`
-            // deliberately abstains (`false`) rather than guessing, so no
-            // behaviour changes. There is also no per-app analogue of the
-            // whole-system `onDeviceRateRebuild` session reset to fire — each
-            // per-app stream is rebound by `AppRouteMixer`, not by resetting a
-            // shared RTP session.
+            // `NativeCaptureCoordinator`'s identical `previousRate == nil` /
+            // `previousDeviceID == nil` abstains rules (architecture review
+            // 2026-07-26, defect A). Both axes apply here now: this coordinator
+            // tracks the tapped device's identity via
+            // ``ProcessAudioTap/tappedDeviceID`` the same way the whole-system
+            // tap does, so a pure device move (no rate change) is now visible
+            // too. There is still no per-app analogue of the whole-system
+            // `onDeviceRateRebuild` session reset to fire — each per-app stream
+            // is rebound by `AppRouteMixer`, not by resetting a shared RTP
+            // session, so this stays telemetry-only.
             let reanchor = TapReanchor(
-                previousRate: claim.oldFormat?.sampleRate, newRate: format.sampleRate)
-            if reanchor.rateMoved, let oldFormat = claim.oldFormat {
+                previousRate: claim.oldFormat?.sampleRate, newRate: format.sampleRate,
+                previousDeviceID: claim.previousDeviceID, newDeviceID: newTap.tappedDeviceID)
+            if reanchor.didReanchor, let oldFormat = claim.oldFormat {
                 Telemetry.log(.capturePA, "rate_rebuild", [
                     "bundleID": bundleID,
                     "oldRate": String(oldFormat.sampleRate),
                     "newRate": String(format.sampleRate),
+                    "deviceMoved": reanchor.deviceMoved ? "true" : "false",
                 ])
             }
             let replay: Bool = queue.sync {
@@ -874,6 +882,20 @@ public protocol ProcessAudioTap: AnyObject {
     /// Stop and destroy the IOProc, aggregate device, and tap (in that
     /// order). Idempotent and non-throwing so teardown always completes.
     func teardown()
+
+    /// The output device this tap is currently anchored to, or nil when it isn't
+    /// running / can't say. Mirrors ``SystemAudioTap/tappedDeviceID`` — read by
+    /// ``PerAppCaptureCoordinator`` across a rebuild to tell whether the tap
+    /// actually re-anchored onto a DIFFERENT device's clock, which no rebuild
+    /// trigger alone can be trusted to report (the default output device can
+    /// move inside the window where the old tap is already torn down and the
+    /// new one hasn't armed its listener yet). Defaulted to nil so a fake that
+    /// doesn't model device identity keeps working (the compare simply abstains).
+    var tappedDeviceID: AudioObjectID? { get }
+}
+
+public extension ProcessAudioTap {
+    var tappedDeviceID: AudioObjectID? { nil }
 }
 
 /// Every way per-app capture can fail. Shaped so a UI can render an
@@ -1014,6 +1036,13 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
     /// subscription can report ITS identity/rate as what this tap is built on
     /// (see `subscribeToDefaultOutput(bundleID:)`).
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
+
+    /// The device this tap is anchored to (``ProcessAudioTap/tappedDeviceID``), or nil
+    /// before `createAndStart` resolved one / after `teardown()` cleared it.
+    var tappedDeviceID: AudioObjectID? {
+        let id = tappedOutputDeviceID
+        return id == kAudioObjectUnknown ? nil : id
+    }
 
     /// The process-wide default-output watcher this tap observes through, and the
     /// handle for its one subscription (nil until `createAndStart`, and again

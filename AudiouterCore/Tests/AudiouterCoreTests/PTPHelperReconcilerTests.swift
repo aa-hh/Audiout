@@ -35,6 +35,10 @@ extension SerializedSharedState {
         /// Records the ORDER `unregister()`/`register()` are called in and
         /// lets `status` change after `register()` runs — so a test can drive
         /// the post-heal re-read to either `.enabled` or `.requiresApproval`.
+        /// Models the live teardown drain (the 2026-08-06 root cause): after
+        /// `unregister()`, the first `drainStatusReads` reads of `status` still
+        /// see the old record (BTM accepted the teardown but hasn't drained
+        /// it), then it reads `.notRegistered` until `register()` succeeds.
         /// `@unchecked Sendable` because `NSLock` provides the synchronization
         /// the compiler cannot see (mirrors ``ProbeResumeGate``'s own posture).
         private final class RecordingHelper: PTPHelperManaging, @unchecked Sendable {
@@ -45,13 +49,18 @@ extension SerializedSharedState {
             /// `unregister()` throws while launchd's async teardown is in
             /// flight. The first N register calls throw; later ones succeed.
             private var registerThrowsRemaining: Int
+            /// 0 = the teardown drains before the first post-unregister status
+            /// read; `Int.max` = it never drains.
+            private var drainReadsRemaining: Int
+            private var unregistered = false
             private(set) var calls: [String] = []
 
             init(status: PTPHelperStatus, statusAfterRegister: PTPHelperStatus,
-                 registerThrowsFirst: Int = 0) {
+                 registerThrowsFirst: Int = 0, drainStatusReads: Int = 0) {
                 self._status = status
                 self.statusAfterRegister = statusAfterRegister
                 self.registerThrowsRemaining = registerThrowsFirst
+                self.drainReadsRemaining = drainStatusReads
             }
 
             func register() throws {
@@ -61,16 +70,29 @@ extension SerializedSharedState {
                         registerThrowsRemaining -= 1
                         throw NSError(domain: "test.smappservice", code: 1)
                     }
+                    unregistered = false
                     _status = statusAfterRegister
                 }
             }
 
-            var status: PTPHelperStatus { lock.withLock { _status } }
+            var status: PTPHelperStatus {
+                lock.withLock {
+                    guard unregistered else { return _status }
+                    if drainReadsRemaining > 0 {
+                        drainReadsRemaining -= 1
+                        return _status
+                    }
+                    return .notRegistered
+                }
+            }
 
             func openSystemSettingsLoginItems() {}
 
             func unregister() async throws {
-                lock.withLock { calls.append("unregister") }
+                lock.withLock {
+                    calls.append("unregister")
+                    unregistered = true
+                }
             }
 
             var recordedCalls: [String] { lock.withLock { calls } }
@@ -220,6 +242,42 @@ extension SerializedSharedState {
                     "every configured attempt is used before giving up")
         }
 
+        // MARK: - Teardown-drain gate (the live-caught delayed-removal loop)
+
+        /// LIVE ROOT CAUSE 2026-08-06: a `register()` accepted while the
+        /// unregister teardown is still draining creates a registration a
+        /// delayed BTM pass later removes — every launch then finds a real
+        /// zombie and heals again, forever. The heal must WAIT until the
+        /// record observably reads `.notRegistered` before registering.
+        @Test func healWaitsOutTheTeardownDrainThenRegistersAndSucceeds() async {
+            let helper = RecordingHelper(status: .enabled, statusAfterRegister: .enabled,
+                                         drainStatusReads: 3)
+            let probe = RecordingProbe(result: .zombie)
+            let reconciler = PTPHelperReconciler(helper: helper, probe: probe.probe,
+                                                 registerRetryDelay: 0)
+
+            let outcome = await reconciler.reconcile()
+
+            #expect(outcome == .healed(.enabled))
+            #expect(helper.recordedCalls == ["unregister", "register"],
+                    "register fires exactly once, only after the drain gate opened")
+        }
+
+        @Test func healFailsWithoutEverRegisteringWhenTeardownNeverDrains() async {
+            let helper = RecordingHelper(status: .enabled, statusAfterRegister: .enabled,
+                                         drainStatusReads: Int.max)
+            let probe = RecordingProbe(result: .zombie)
+            let reconciler = PTPHelperReconciler(helper: helper, probe: probe.probe,
+                                                 registerRetryDelay: 0,
+                                                 registerRetryAttempts: 4)
+
+            let outcome = await reconciler.reconcile()
+
+            #expect(outcome == .healFailed)
+            #expect(helper.recordedCalls == ["unregister"],
+                    "register must NEVER fire into an un-drained teardown — that recreates the doomed-registration loop")
+        }
+
         // MARK: - Telemetry (ptp_zombie_heal)
 
         @Test func reconcileEmitsPtpZombieHealTelemetryOnlyOnHealPath() async {
@@ -254,6 +312,27 @@ extension SerializedSharedState {
 
             let lines = capturedLines.snapshot
             #expect(!lines.contains { $0.contains("\"evt\":\"ptp_zombie_heal\"") })
+        }
+
+        @Test func reconcileEmitsHealFailedTelemetryWhenTeardownNeverDrains() async {
+            let capturedLines = TelemetryLineBox()
+            Telemetry._installTestSink { capturedLines.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let helper = RecordingHelper(status: .enabled, statusAfterRegister: .enabled,
+                                         drainStatusReads: Int.max)
+            let probe = RecordingProbe(result: .zombie)
+            let reconciler = PTPHelperReconciler(helper: helper, probe: probe.probe,
+                                                 registerRetryDelay: 0,
+                                                 registerRetryAttempts: 2)
+
+            _ = await reconciler.reconcile()
+            Telemetry._installTestSink(nil)
+
+            let lines = capturedLines.snapshot
+            #expect(lines.contains {
+                $0.contains("\"evt\":\"ptp_zombie_heal\"") && $0.contains("\"result\":\"heal_failed\"")
+            })
         }
 
         @Test func reconcileEmitsNoPtpZombieHealTelemetryForNonEnabledStatus() async {

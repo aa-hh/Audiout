@@ -309,6 +309,8 @@ public enum PTPZombieReconcileOutcome: Equatable, Sendable {
 /// test injects a closure returning any ``PTPLivenessProbeResult`` and asserts the
 /// ``PTPZombieReconcileOutcome`` without a real Mach service, launchd, or root
 /// daemon. The default closure is the real XPC probe below.
+/// `registerRetryDelay`/`registerRetryAttempts` pace BOTH heal phases — the
+/// teardown-drain poll and the register retries — one budget each.
 public struct PTPHelperReconciler: Sendable {
     private let helper: PTPHelperManaging
     private let probe: @Sendable () async -> PTPLivenessProbeResult
@@ -361,15 +363,25 @@ public struct PTPHelperReconciler: Sendable {
         // Zombie confirmed: unregister the stale registration, then re-register
         // to make launchd load a fresh job.
         //
-        // LIVE FINDING (2026-08-06, signed build): `SMAppService.unregister()`
-        // returns BEFORE launchd finishes tearing the job down, so an immediate
-        // `register()` collides with the in-flight teardown and throws — the
-        // unified log showed "Register error: 1" twice within 100ms of a
-        // successful unregister, then the SAME call succeeding once the teardown
-        // settled (and landing as `.enabled`: approval survives re-registration).
-        // So `register()` is retried with spacing; only exhausting every attempt
-        // is a real heal failure. `unregister()` throwing still fails immediately
-        // — there is nothing to retry into.
+        // LIVE ROOT CAUSE (2026-08-06, signed build): `SMAppService.unregister()`
+        // returning means BTM ACCEPTED the teardown, not that it finished. The
+        // record teardown and the launchd-side removal drain asynchronously —
+        // observed up to ~30s late — and a `register()` accepted mid-teardown
+        // ("Register error: 1", then success 0.5s later) creates a DOOMED
+        // registration: the still-queued removal later executes against it
+        // ("remove succeeded (EINPROGRESS)" in smd's log), SIGTERMs the RUNNING
+        // helper mid-session, and deletes the job — so the next launch finds a
+        // fresh, REAL zombie and heals again, forever (4 launches → 4 heals,
+        // telemetry 2026-08-05T22:30–34Z). A register that lands AFTER the
+        // teardown fully drained sticks and KEEPS Login Items approval (proven
+        // live: the one surviving heal's job outlived helper idle-exit, app
+        // quit, and 25+ minutes). So the heal (1) waits for the drain to be
+        // OBSERVABLE — status reads `.notRegistered` — before registering, and
+        // refuses to register into an un-drained teardown (that would trade
+        // "heal failed" for "heal manufactures the next launch's zombie"), then
+        // (2) still retries `register()` with spacing for any residual
+        // acceptance race. `unregister()` throwing fails immediately — there is
+        // nothing to retry into.
         do {
             try await helper.unregister()
         } catch {
@@ -378,6 +390,19 @@ public struct PTPHelperReconciler: Sendable {
                 "result": "heal_failed",
             ])
             return .healFailed
+        }
+        var drainPolls = 0
+        while helper.status != .notRegistered {
+            guard drainPolls < max(1, registerRetryAttempts) else {
+                Telemetry.log(.airplay, "ptp_zombie_heal", [
+                    "before": Self.telemetryStatus(status),
+                    "result": "heal_failed",
+                    "drain_polls": String(drainPolls),
+                ])
+                return .healFailed
+            }
+            drainPolls += 1
+            try? await Task.sleep(nanoseconds: UInt64(registerRetryDelay * 1_000_000_000))
         }
         var registered = false
         var attemptsUsed = 0
@@ -407,6 +432,7 @@ public struct PTPHelperReconciler: Sendable {
         Telemetry.log(.airplay, "ptp_zombie_heal", [
             "before": Self.telemetryStatus(status),
             "after": Self.telemetryStatus(newStatus),
+            "drain_polls": String(drainPolls),
         ])
         return .healed(newStatus)
     }

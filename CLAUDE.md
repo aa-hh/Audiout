@@ -21,7 +21,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 git config core.hooksPath .githooks
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4** runs the test suite on any commit touching Swift sources.
+Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
 
 ## Build & run
 

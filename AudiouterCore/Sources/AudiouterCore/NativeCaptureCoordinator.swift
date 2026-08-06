@@ -2218,6 +2218,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// queue-confinement discipline elsewhere.
     private var machToMonotonicOffsetNanos: Int64 = 0
 
+    /// T-5 (judder plan J-9): the claim that the HAL runs a queue-backed
+    /// IOProc at real-time priority regardless of the queue's declared QoS
+    /// (`EngineThread.swift`'s audit comment) has never been measured — if
+    /// it is wrong, the whole delivery chain is load-sensitive. One-shot
+    /// per tap generation, `AIRPLAY_AUDIO_DIAG`-gated: the IOProc block
+    /// captures its own mach thread port and hands it to `telemetryQueue`
+    /// for the (allocating) `thread_policy_get` + log. Reset alongside the
+    /// rebase-offset seed in `startIOProc()`; thereafter mutated only from
+    /// inside the IOProc block, same confinement as the offset above.
+    private var didLogIOProcPolicy = false
+
+    /// The off-thread half of the T-5 probe: `timeshare == 0` under
+    /// `THREAD_EXTENDED_POLICY` means the thread is NOT ordinary timeshare —
+    /// i.e. it runs a fixed/time-constraint policy, the real-time claim
+    /// confirmed. Emits `kr` instead when the kernel refuses the read, so a
+    /// failed probe is distinguishable from a never-run one.
+    private static func logIOProcThreadPolicy(_ machThread: mach_port_t) {
+        telemetryQueue.async {
+            var policy = thread_extended_policy_data_t()
+            var count = mach_msg_type_number_t(
+                MemoryLayout<thread_extended_policy_data_t>.size / MemoryLayout<integer_t>.size)
+            var getDefault: boolean_t = 0
+            let kr = withUnsafeMutablePointer(to: &policy) { ptr in
+                ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    thread_policy_get(
+                        machThread, thread_policy_flavor_t(THREAD_EXTENDED_POLICY),
+                        $0, &count, &getDefault)
+                }
+            }
+            let fields: [String: String] = kr == KERN_SUCCESS
+                ? ["timeshare": policy.timeshare == 0 ? "false" : "true"]
+                : ["kr": String(kr)]
+            Telemetry.log(.captureWS, "ioProc_thread_policy", fields)
+        }
+    }
+
     /// T7: the AGGREGATE device's id, which is the object publishing the I/O
     /// workgroup the engine thread should join — deliberately NOT
     /// `tappedOutputDeviceID`. The default output device publishes a different,
@@ -2454,6 +2490,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         // IOProc block below ever runs, so no lock is needed for this initial
         // handoff either.
         self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+        self.didLogIOProcPolicy = false
 
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(label: "com.audiouter.native.capture", qos: .userInitiated)
@@ -2463,6 +2500,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         ) { [weak self] _, inInputData, inInputTime, _, _ in
             // ---- REALTIME THREAD ----
             guard let self else { return }
+            // T-5 probe: a static-bool read per buffer when the diag env is
+            // off; one flag write + one async enqueue for the single probing
+            // buffer per tap generation when it is on. The introspection and
+            // logging themselves run on `telemetryQueue`.
+            if AudioDiag.isEnabled, !self.didLogIOProcPolicy {
+                self.didLogIOProcPolicy = true
+                Self.logIOProcThreadPolicy(pthread_mach_thread_np(pthread_self()))
+            }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
             let bufCount = listPtr.count

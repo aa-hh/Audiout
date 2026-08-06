@@ -19,7 +19,7 @@ import AudioToolbox
 /// Covers the plan-required path: create → buffers with advancing `mHostTime` →
 /// converted → forwarded → device-change → stop → error surfaced. Plus a focused
 /// pts-clock-domain test that would have caught the mHostTime-vs-CLOCK_MONOTONIC
-/// bug (finding 2).
+/// bug.
 ///
 /// Nested inside `SerializedSharedState` (cookbook §18): `testStartEmitsCaptureWSTransitionTelemetry`
 /// installs `Telemetry`'s process-global test sink, which would otherwise race
@@ -33,9 +33,43 @@ extension SerializedSharedState {
     /// A tap the test drives directly: `createAndStart` returns a scripted format
     /// (or throws a scripted error), and `pushBuffer`/`fireDeviceChange` inject the
     /// IOProc-thread callbacks. Records teardown so the leak fix is observable.
+    /// A process-wide ordered log of tap create/teardown/onBuffer-wire events across
+    /// MULTIPLE ``FakeTap`` instances — the only way to observe make-before-break
+    /// ordering (new tap created BEFORE old torn down; delivery wired only AFTER old
+    /// gone), since a single reused tap can't distinguish "the old" from "the new".
+    private final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var events: [String] = []
+        func record(_ e: String) { lock.withLock { events.append(e) } }
+        var all: [String] { lock.withLock { events } }
+        /// First index of an event, or nil. Used to assert relative ordering.
+        func index(of e: String) -> Int? { lock.withLock { events.firstIndex(of: e) } }
+    }
+
+    /// Hands out a fixed sequence of distinct ``FakeTap`` instances (old, then new,
+    /// …), so a make-before-break test can tell the two taps apart. Extra calls
+    /// (e.g. a coalesced replay) reuse the last tap.
+    private final class SequencedTaps: @unchecked Sendable {
+        private let lock = NSLock()
+        private let taps: [FakeTap]
+        private var i = 0
+        init(_ taps: [FakeTap]) { self.taps = taps }
+        func next() -> FakeTap { lock.withLock { let t = taps[min(i, taps.count - 1)]; i += 1; return t } }
+    }
+
     private final class FakeTap: SystemAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        /// Records `onBuffer#<id>=<wired?>` to the shared ``EventLog`` on every
+        /// assignment, so a test can prove delivery is wired only AFTER the old tap
+        /// is torn down (the no-double-capture guardrail).
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)? {
+            didSet { eventLog?.record("onBuffer#\(id)=\(onBuffer != nil)") }
+        }
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
+
+        /// Optional shared ordering log + per-instance id (default 0 / nil → the
+        /// single-reused-tap tests below are unaffected).
+        var id = 0
+        var eventLog: EventLog?
 
         let lock = NSLock()
         var format = TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
@@ -59,14 +93,24 @@ extension SerializedSharedState {
 
         func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
             lock.lock(); createCount += 1; lastExcludedProcessObjectIDs = excludedProcessObjectIDs; lock.unlock()
+            eventLog?.record("create#\(id)")
             onCreateAndStart?()
             if let startError { throw startError }
-            lock.lock(); started = true; lock.unlock()
+            // Faithful to the real IOProc: it snapshots `onBuffer` BY VALUE at start
+            // (`let onBuffer = self.onBuffer`) and delivers through that snapshot, so a
+            // handler assigned AFTER createAndStart is NEVER seen. Capturing it here
+            // (not reading the live property in `pushBuffer`) is what lets a test catch
+            // the "onBuffer wired too late → permanent silence" class of bug.
+            lock.lock(); started = true; capturedOnBuffer = onBuffer; lock.unlock()
             return format
         }
 
+        /// The IOProc's start-time snapshot of `onBuffer` — see `createAndStart`.
+        private var capturedOnBuffer: (@Sendable (CapturedBuffer) -> Void)?
+
         func teardown() {
             lock.lock(); teardownCount += 1; started = false; lock.unlock()
+            eventLog?.record("teardown#\(id)")
         }
 
         /// What this fake reports as the device it's anchored to
@@ -79,7 +123,9 @@ extension SerializedSharedState {
         func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
         func setFormat(_ f: TapFormat) { lock.withLock { format = f } }
 
-        func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
+        /// Deliver through the START-TIME snapshot, not the live property — the real
+        /// IOProc only ever calls the handler it captured at createAndStart.
+        func pushBuffer(_ b: CapturedBuffer) { lock.withLock { capturedOnBuffer }?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
         var teardowns: Int { lock.withLock { teardownCount } }
@@ -396,7 +442,7 @@ extension SerializedSharedState {
 
         coordinator.start()
         #expect(coordinator.state == .failed(.tapCreationFailed(reason: "denied")))
-        // Finding 3: a failed createAndStart must not leak the tap — teardown is called.
+        // A failed createAndStart must not leak the tap — teardown is called.
         #expect(tap.teardowns >= 1, "a failed start must tear the tap down (no leak)")
     }
 
@@ -474,6 +520,131 @@ extension SerializedSharedState {
         #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
     }
 
+    // MARK: - Make-before-break tap rebuild for device-IDENTITY changes
+    //         (audio-leak-on-device-switch fix).
+
+    /// Builds a coordinator over a SEQUENCE of distinct fake taps (old, then new)
+    /// sharing one ``EventLog``, with an injected default-output-device resolver —
+    /// the seams a make-before-break ordering test needs.
+    private func makeSequencedCoordinator(
+        _ taps: SequencedTaps,
+        sink: PCMSink = SpySink(),
+        resolveDefaultOutputDeviceID: @escaping @Sendable () -> AudioObjectID?
+    ) -> NativeCaptureCoordinator {
+        NativeCaptureCoordinator(
+            makeTap: { taps.next() },
+            sink: sink,
+            makeConverter: { _ in FakeConverter() },
+            resolveDefaultOutputDeviceID: resolveDefaultOutputDeviceID,
+            muteBehavior: .mutedWhenTapped,
+            installsProcessListListener: false
+        )
+    }
+
+    /// A device-IDENTITY change (new default output device != the one the old tap was
+    /// anchored to) rebuilds MAKE-BEFORE-BREAK: the new tap/aggregate is created and
+    /// started — muting the NEW device — BEFORE the old tap is torn down, so the new
+    /// default device is never left untapped/unmuted for the whole old-teardown gap
+    /// (the `.mutedWhenTapped` leak). Delivery (`onBuffer`) is wired BEFORE
+    /// `createAndStart`, because the real IOProc snapshots the handler at start — a
+    /// handler wired later is never seen and the tap goes permanently silent (the
+    /// bug an adversarial review caught). Double-capture during the overlap is
+    /// prevented not by deferring `onBuffer` but by `handleBuffer`'s empty-converter
+    /// gate, so the new tap must ACTUALLY DELIVER once the rebuild commits.
+    @Test func identityChangeRebuildsMakeBeforeBreak() {
+        let log = EventLog()
+        let sink = SpySink()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]), sink: sink,
+            // The new default output device (72) differs from the old tap's (71).
+            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+        #expect(old.creates == 1)
+
+        old.fireDeviceChange()   // identity change -> recreateTap(.deviceOrRateChange)
+        waitFor { self.stateIsCapturing(coordinator, sampleRate: new.format.sampleRate) && new.creates == 1 }
+
+        guard let createNew = log.index(of: "create#2"),
+              let teardownOld = log.index(of: "teardown#1"),
+              let wireNew = log.index(of: "onBuffer#2=true") else {
+            Issue.record("expected new-tap create, old-tap teardown, and new-tap onBuffer wiring; log = \(log.all)")
+            return
+        }
+        #expect(createNew < teardownOld,
+                "MAKE-BEFORE-BREAK: the new tap must be created+started BEFORE the old is torn down (log = \(log.all))")
+        #expect(wireNew < createNew,
+                "SNAPSHOT SAFETY: onBuffer must be wired BEFORE createAndStart — the real IOProc snapshots it at start (log = \(log.all))")
+
+        // The regression guard for the permanent-silence bug: a buffer captured AFTER
+        // the make-before-break rebuild must actually reach the sink. Against the
+        // buggy (deferred-onBuffer) ordering the fake's start-time snapshot is nil, so
+        // this delivers nothing and the assertion fails.
+        let before = sink.writes.count
+        new.pushBuffer(buffer(hostTime: 1_000_000))
+        #expect(sink.writes.count > before,
+                "the rebuilt tap must DELIVER buffers to the sink, not go silent")
+
+        coordinator.stop()
+    }
+
+    /// The deliberate scope limit: a SAME-device rebuild (rate-only renegotiation —
+    /// the default output device id is unchanged) must KEEP break-before-make, so two
+    /// aggregates never sit on ONE physical device mid-rate-renegotiation. Old tap
+    /// torn down BEFORE the new one is created.
+    @Test func sameDeviceRateRebuildStaysBreakBeforeMake() {
+        let log = EventLog()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(71))
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]),
+            // Same default output device (71) as the old tap: a rate-only rebuild.
+            resolveDefaultOutputDeviceID: { AudioObjectID(71) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireDeviceChange()   // same-device rebuild
+        waitFor { new.creates == 1 }
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        guard let teardownOld = log.index(of: "teardown#1"),
+              let createNew = log.index(of: "create#2") else {
+            Issue.record("expected an old-tap teardown and a new-tap create; log = \(log.all)")
+            return
+        }
+        #expect(teardownOld < createNew,
+                "BREAK-BEFORE-MAKE (unchanged): a same-device rate rebuild must tear the old tap down BEFORE creating the new one (log = \(log.all))")
+
+        coordinator.stop()
+    }
+
+    /// Failure unwind on the make-before-break path: if the new tap's `createAndStart`
+    /// throws, the old tap is still alive — BOTH must be torn down (never two taps,
+    /// never a dangling one) and the coordinator lands in `.failed`.
+    @Test func identityChangeCreateFailureTearsDownBothTaps() {
+        let log = EventLog()
+        let old = FakeTap(); old.id = 1; old.eventLog = log; old.setTappedDeviceID(AudioObjectID(71))
+        let new = FakeTap(); new.id = 2; new.eventLog = log; new.setTappedDeviceID(AudioObjectID(72))
+        new.startError = .deviceLost(reason: "gone")
+        let coordinator = makeSequencedCoordinator(
+            SequencedTaps([old, new]),
+            resolveDefaultOutputDeviceID: { AudioObjectID(72) })
+
+        coordinator.start()
+        waitFor { if case .capturing = coordinator.state { return true }; return false }
+
+        old.fireDeviceChange()   // identity change; the new createAndStart throws
+        waitFor { if case .failed = coordinator.state { return true }; return false }
+        #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
+        // No tap left dangling: the failed new tap AND the still-alive old tap are both torn down.
+        #expect(new.teardowns >= 1, "the failed new tap must be torn down")
+        #expect(old.teardowns >= 1, "the old tap (still alive on the make-before-break path) must be torn down too")
+    }
+
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
     // (.creatingTap) must be coalesced (pendingDeviceChange) and replayed once the rebuild
     // lands in .capturing, not dropped. Whole-system port of PerAppCaptureCoordinator's fix.
@@ -520,11 +691,12 @@ extension SerializedSharedState {
     // tapped device) leaves the device's UID UNCHANGED, so the identity listener
     // (`kAudioHardwarePropertyDefaultOutputDevice`) never fires and the coordinator
     // would otherwise never recover (the tap keeps delivering buffers, but silent
-    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.installSampleRateListener`
-    // (T1) closes that gap by listening on the tapped device's own
-    // `kAudioDevicePropertyNominalSampleRate` and routing the notification onto the
-    // EXACT SAME `onDefaultDeviceChanged` closure `installDefaultDeviceListener` already
-    // uses (see NativeCaptureCoordinator.swift: the listener block calls
+    // all-zero PCM — Developer Forums 825780). `CoreAudioSystemTap.subscribeToDefaultOutput`
+    // (T1) closes that gap by observing the tapped device's own
+    // `kAudioDevicePropertyNominalSampleRate` through ``DefaultOutputDeviceMonitor``
+    // and routing the notification onto the EXACT SAME `onDefaultDeviceChanged`
+    // closure the device-identity change uses (see NativeCaptureCoordinator.swift:
+    // the single `onChange` closure calls
     // `self?.onDefaultDeviceChanged?()`, identical to the identity listener's callback).
     // That closure is exactly what `FakeTap.fireDeviceChange()` fires — so it is the
     // correct and only hermetically-fakeable stand-in for "the nominal-rate listener
@@ -636,6 +808,55 @@ extension SerializedSharedState {
 
         #expect(tap.creates > createsAfterRoute, "the tap is recreated again on the flip back")
         #expect(tap.excludedProcessObjectIDs == [], "an app back on .currentDevice must re-enter the system mix")
+        coordinator.stop()
+    }
+
+    /// LIVE BUG (2026-07-26): a `.currentDevice` per-app route is rendered by
+    /// `LocalPlaybackEngine` through THIS app's own `AVAudioEngine`, into the very
+    /// device the whole-system tap taps. If our own process isn't excluded, the
+    /// `.mutedWhenTapped` tap re-captures that render and MUTES it — the app went
+    /// silent on the Mac's speakers and came out the AirPlay selection instead.
+    ///
+    /// The guard that closes this is the UNCONDITIONAL self-exclude in the shared
+    /// resolve helper, so the whole `.currentDevice` lifecycle is covered without
+    /// anyone staging a render pid. This pins the two properties that fall out of
+    /// that and that a conditional, separately-staged render pid would break:
+    /// the exclusion survives the route going AWAY (nothing has to remember to
+    /// re-arm it), and arming a `.currentDevice` route costs the tap EXACTLY ONE
+    /// rebuild — a second staging call for our own pid would rebuild the tap a
+    /// second time against a byte-identical exclusion set, which on this code path
+    /// is an audible dropout for nothing.
+    @Test func currentDeviceRouteLifecycleKeepsOwnProcessExcludedWithOneRebuild() {
+        let tap = FakeTap()
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let routedProcess = RawAudioProcess(objectID: 111, pid: 111, bundleID: "com.app.a")
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, routedProcess])))
+
+        coordinator.start()
+        #expect(tap.excludedProcessObjectIDs == [900],
+                "our own process is excluded from the first tap on, before anything routes")
+        let createsBeforeLocal = tap.creates
+
+        // A `.currentDevice` route goes live. `NativeBackend` unions those bundle
+        // ids into the exclusion set (they play via `localPlaybackEngine`, not the
+        // AirPlay mix) — one call, one rebuild.
+        coordinator.updateRouting(
+            appRoutes: [AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .currentDevice)],
+            excludedBundleIDs: ["com.app.a"])
+
+        #expect(tap.creates == createsBeforeLocal + 1,
+                "arming a .currentDevice route must rebuild the tap exactly once")
+        #expect(tap.excludedProcessObjectIDs == [111, 900],
+                "the locally-rendered app AND our own render process must both be excluded")
+
+        // The route goes away. Our own process stays excluded regardless — the
+        // guard is unconditional, so nothing can strand the echo back on.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        #expect(tap.excludedProcessObjectIDs == [900],
+                "the app re-enters the system mix; our own process never does")
         coordinator.stop()
     }
 
@@ -820,7 +1041,7 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
-    // MARK: - pts clock domain (finding 2): mHostTime must map onto CLOCK_MONOTONIC.
+    // MARK: - pts clock domain: mHostTime must map onto CLOCK_MONOTONIC.
 
     #if canImport(AudioToolbox)
     /// The real pts derivation (`CoreAudioSystemTap.timespec(fromHostTime:)`) must
@@ -988,6 +1209,71 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// The generalized echo guard (live find, 2026-07-26): the whole-system
+    /// tap's exclusion set must ALWAYS contain THIS process's own audio
+    /// process objects — `LocalPlaybackEngine` renders `.currentDevice` apps
+    /// from this process onto the very device the tap captures, so without the
+    /// self-exclude a "play on this Mac" exception echoed into the AirPlay mix
+    /// (Spotify → Mac speakers audibly replayed on the selected Sonos). The
+    /// enumerator here lists a process at OUR pid alongside an unrelated one;
+    /// only ours must be excluded, with no excluded bundles configured at all.
+    @Test func exclusionAlwaysContainsOwnProcessObjects() {
+        let ownProcess = RawAudioProcess(objectID: 900, pid: getpid(), bundleID: "com.audiouter.test-host")
+        let otherProcess = RawAudioProcess(objectID: 901, pid: 4242, bundleID: "com.other.app")
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: AudioProcessResolver(
+                enumerator: FakeProcessEnumerator(processes: [ownProcess, otherProcess])))
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: [])
+        coordinator.start()
+
+        #expect(tap.excludedProcessObjectIDs.contains(900),
+                "our own process object must always be excluded from the whole-system tap (echo guard)")
+        #expect(!tap.excludedProcessObjectIDs.contains(901),
+                "an unrelated process must not be swept up by the self-exclude")
+
+        coordinator.stop()
+    }
+
+    /// T2: every exclusion resolve emits `captureWS`/`exclusion_resolved` with
+    /// each resolved bundle's pids + attribution layer, AND calls out a bundle
+    /// that resolved to ZERO processes — the diagnostic gap the 2026-07-26
+    /// catch-all-attribution live leak exposed: `exclusion_changed` alone shows
+    /// only excluded bundle-id INTENT, never which concrete processes (or none)
+    /// a bundle id actually resolved to.
+    @Test func startEmitsExclusionResolvedTelemetryWithLayerDetailAndZeroBundles() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let coordinator = makeCoordinator(
+            tap: FakeTap(), sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.app.a": 111]))
+
+        coordinator.updateRouting(
+            appRoutes: [],
+            excludedBundleIDs: ["com.app.a", "com.app.missing"])
+        coordinator.start()
+
+        Telemetry._installTestSink(nil)
+
+        let lines = capturedLines.snapshot
+        let resolved = lines.first {
+            $0.contains("\"cat\":\"captureWS\"") && $0.contains("\"evt\":\"exclusion_resolved\"")
+        }
+        #expect(resolved != nil, "expected a captureWS/exclusion_resolved line, got: \(lines)")
+        #expect(
+            resolved?.contains("com.app.a=[111:own]") ?? false,
+            "expected the resolved pid + attribution layer, got: \(resolved ?? "nil")")
+        #expect(
+            resolved?.contains("\"zeroBundles\":\"com.app.missing\"") ?? false,
+            "expected the zero-resolution bundle called out explicitly, got: \(resolved ?? "nil")")
+
+        coordinator.stop()
+    }
+
     // MARK: - RMS metering (pure).
 
     @Test func rmsOfS16LE() {
@@ -999,9 +1285,9 @@ extension SerializedSharedState {
     }
 
     // MARK: - Compare-before-rebuild decision (TapRebuildDecision), whole-system tap
-    // (Fix 3 / CoreAudioSystemTap.installDefaultDeviceListener). The whole-system tap
-    // rebuilds on device-IDENTITY change only (it has no sample-rate listener), so its
-    // guard is the device variant, fed by the new `tappedOutputDeviceID` property.
+    // (Fix 3). Both guards are now evaluated per subscriber inside
+    // ``DefaultOutputDeviceMonitor``, against the device/rate each tap reports for
+    // itself via `subscribeToDefaultOutput`'s `tracked` closure.
     // Testing the pure decision is what makes the storm guard meaningful without a real
     // HAL — the live `defaultOutputDeviceID()` read stays a thin wrapper around it.
 
@@ -1160,6 +1446,87 @@ extension SerializedSharedState {
         #expect(abs(ratio - 44100.0 / 48000.0) <= 0.01,
             "total output length must scale by the declared-rate ratio (44100/48000), confirming rate == pitch")
     }
+
+    /// The converter's silent nil-return sites are counted, grouped by reason
+    /// (whole-system dropout investigation): before this, a converter dropping
+    /// every buffer was indistinguishable from healthy silence. A converter
+    /// built from a degenerate tap format fails every buffer as
+    /// `.converterAbsent`; a frameless buffer counts `.emptyInput`; an
+    /// interleaved buffer with no channel data counts `.missingChannelData`;
+    /// and a healthy conversion counts nothing.
+    @available(macOS 14.2, *)
+    @Test func converterFailureCountersGroupByReason() {
+        let planar = Self.planarFloat32Stereo(frameCount: 64)
+        let buffer = CapturedBuffer(channelData: planar, frameCount: 64, pts: timespec())
+
+        // Degenerate format -> AVAudioFormat/AVAudioConverter never construct,
+        // so EVERY convert fails as converterAbsent.
+        let broken = AVFormatConverter(from: TapFormat(
+            sampleRate: 0, channels: 2, bitsPerSample: 0, isFloat: true, isInterleaved: true))
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        #expect(broken.conversionFailureCount(.converterAbsent) == 2)
+
+        // A frameless buffer through a HEALTHY converter counts emptyInput.
+        let healthy = AVFormatConverter(from: TapFormat(
+            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+        #expect(healthy.convertToAirPlayPCM(
+            CapturedBuffer(channelData: planar, frameCount: 0, pts: timespec())) == nil)
+        #expect(healthy.conversionFailureCount(.emptyInput) == 1)
+
+        // An interleaved source with no channel data counts missingChannelData.
+        let interleaved = AVFormatConverter(from: TapFormat(
+            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: true))
+        #expect(interleaved.convertToAirPlayPCM(
+            CapturedBuffer(channelData: [], frameCount: 64, pts: timespec())) == nil)
+        #expect(interleaved.conversionFailureCount(.missingChannelData) == 1)
+
+        // A successful conversion moves NO counter.
+        #expect(healthy.convertToAirPlayPCM(buffer) != nil)
+        for reason in ConversionFailureReason.allCases where reason != .emptyInput {
+            #expect(healthy.conversionFailureCount(reason) == 0,
+                "a healthy conversion must not count \(reason)")
+        }
+        #expect(healthy.conversionFailureCount(.emptyInput) == 1)
+    }
+
+    /// `sampleConversionFailuresIfDue()` (the whole-system sampler family):
+    /// throttled to its interval, delta-gated to genuinely NEW failures — a
+    /// failing converter emits ONE `convert_failure` event per accrual, a
+    /// converter with no new failures emits nothing, ever. Test-sink idiom and
+    /// serialization rationale identical to
+    /// `startEmitsCaptureWSTransitionTelemetry` above.
+    @available(macOS 14.2, *)
+    @Test func converterFailureSamplerEmitsOnlyOnNewFailures() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let broken = AVFormatConverter(from: TapFormat(
+            sampleRate: 0, channels: 2, bitsPerSample: 0, isFloat: true, isInterleaved: true))
+        let buffer = CapturedBuffer(
+            channelData: Self.planarFloat32Stereo(frameCount: 64), frameCount: 64, pts: timespec())
+
+        func failureLines() -> [String] {
+            capturedLines.snapshot.filter { $0.contains("\"evt\":\"convert_failure\"") }
+        }
+
+        // One failing convert + a full sampler interval -> exactly one event
+        // (the delta-gate blocks every later tick with no NEW failures).
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        for _ in 0..<1000 { broken.sampleConversionFailuresIfDue() }
+        Telemetry._installTestSink { capturedLines.append($0) } // flush barrier
+        #expect(failureLines().count == 1,
+            "one accrual across many sampler ticks must emit exactly one event, got: \(failureLines())")
+        #expect(failureLines().first?.contains("\"converterAbsent\":\"1\"") == true)
+
+        // A NEW failure re-arms the delta gate: next interval emits again.
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        for _ in 0..<500 { broken.sampleConversionFailuresIfDue() }
+        Telemetry._installTestSink(nil) // synchronous flush barrier
+        #expect(failureLines().count == 2)
+        #expect(failureLines().last?.contains("\"failedTotal\":\"2\"") == true)
+    }
     #endif
 
     // MARK: - utils
@@ -1189,11 +1556,6 @@ extension SerializedSharedState {
     }
 
     // MARK: - R14: relaunch correctness (`refreshExcludedProcessSet`, W1-T7 Fix 1)
-    //
-    // Ported to the `AudioProcessResolver` (object-based) seam. `refreshExcludedProcessSet`
-    // + the shared compare-before-rebuild core `rebuildIfExclusionObjectsChanged`
-    // are ours-only reliability (main lacked any live exclusion re-resolution for a
-    // relaunched/child-spawning EXCLUDED app while capturing).
 
     /// An EXCLUDED app relaunches (old process gone, a fresh one under the same
     /// bundle ID). The bundle-ID union `updateRouting` tracks is unchanged, so its
@@ -1463,7 +1825,140 @@ extension SerializedSharedState {
         #expect(tap.excludedProcessObjectIDs == [111, 333], "the coalesced diff applies the SETTLED exclusion set")
         coordinator.stop()
     }
+
+    // MARK: - DefaultOutputDeviceMonitor subscription (T2 consolidation)
+
+    /// GUARD SEMANTICS. The whole-system tap must report its OWN live device/rate
+    /// to the monitor at every notification, never a snapshot taken once at
+    /// subscribe time. The middle expectation is the one that matters: the tap's
+    /// format drifts while the DEVICE's rate stays put, and only a fresh read of
+    /// the tap's own state can see that divergence. A captured snapshot would
+    /// silently reintroduce the per-subscriber blindness (the silent-tap dropout)
+    /// the monitor exists to prevent.
+    @available(macOS 14.2, *)
+    @Test func wholeSystemTapReportsItsOwnStateLiveToTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 42, rate: 48_000)
+        // Long settle window + explicit flush: fan-out happens only where this
+        // test asks for it, never on the monitor's real trailing-edge timer.
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: 60)
+        let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
+        let fires = TapMonitorFireCounter()
+        tap.onDefaultDeviceChanged = { fires.bump() }
+
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput()
+
+        // Converged: the tap is built on exactly what the HAL reports.
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
+        #expect(fires.count == 0, "a no-op re-announcement must not rebuild the tap — the storm loop-breaker still holds")
+
+        // The TAP drifts; the device's reported rate never moves.
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 44_100)
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
+        #expect(fires.count == 1,
+            "a tap whose own format drifted must still be told, even though the device's rate is unchanged — proves `tracked` is read live, not captured at subscribe time")
+
+        // A genuine default-output-device identity change fires too.
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        hal.deviceID = 43
+        hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        monitor._drainForTesting()
+        #expect(fires.count == 2, "a genuine default-output-device change must rebuild the tap")
+
+        tap.teardown()
     }
+
+    /// Teardown replaces the old paired listener removal: it must drop the
+    /// subscription (releasing everything its closures capture) and stay
+    /// idempotent, since `teardown()` also runs from `deinit`.
+    @available(macOS 14.2, *)
+    @Test func wholeSystemTapTeardownUnsubscribesFromTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 42, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput()
+        #expect(monitor.subscriberCount == 1)
+
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "teardown must release the tap's monitor subscription")
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "a second teardown must stay a no-op")
+    }
+    }
+}
+
+/// Shared fake ``DefaultOutputHAL`` for the two capture taps' monitor-subscription
+/// tests (this file and `PerAppCaptureCoordinatorTests`). No live Core Audio, no
+/// real device, no audio played. `fire` delivers on the very queue the monitor
+/// handed over — the real HAL's contract — so it returns only once the monitor has
+/// finished handling the notification.
+final class TapMonitorFakeHAL: DefaultOutputHAL, @unchecked Sendable {
+
+    private final class Token: DefaultOutputHALListenerToken, @unchecked Sendable {
+        let selector: AudioObjectPropertySelector
+        let queue: DispatchQueue
+        let handler: @Sendable () -> Void
+        init(selector: AudioObjectPropertySelector, queue: DispatchQueue,
+             handler: @escaping @Sendable () -> Void) {
+            self.selector = selector
+            self.queue = queue
+            self.handler = handler
+        }
+    }
+
+    private let lock = NSLock()
+    private var _deviceID: AudioObjectID?
+    private var _rate: Double?
+    private var tokens: [ObjectIdentifier: Token] = [:]
+
+    init(deviceID: AudioObjectID?, rate: Double?) {
+        _deviceID = deviceID
+        _rate = rate
+    }
+
+    var deviceID: AudioObjectID? {
+        get { lock.withLock { _deviceID } }
+        set { lock.withLock { _deviceID = newValue } }
+    }
+
+    var rate: Double? {
+        get { lock.withLock { _rate } }
+        set { lock.withLock { _rate = newValue } }
+    }
+
+    func defaultOutputDeviceID() -> AudioObjectID? { deviceID }
+    func nominalSampleRate(of deviceID: AudioObjectID) -> Double? { rate }
+
+    func addListener(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        queue: DispatchQueue,
+        handler: @escaping @Sendable () -> Void
+    ) -> DefaultOutputHALListenerToken? {
+        let token = Token(selector: selector, queue: queue, handler: handler)
+        lock.withLock { tokens[ObjectIdentifier(token)] = token }
+        return token
+    }
+
+    func removeListener(_ token: DefaultOutputHALListenerToken) {
+        lock.withLock { tokens[ObjectIdentifier(token as AnyObject)] = nil }
+    }
+
+    func fire(_ selector: AudioObjectPropertySelector) {
+        let matching = lock.withLock { tokens.values.filter { $0.selector == selector } }
+        for token in matching { token.queue.sync { token.handler() } }
+    }
+}
+
+/// Counts `onDefaultDeviceChanged` fires from the monitor's queue.
+final class TapMonitorFireCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.withLock { _count } }
+    func bump() { lock.withLock { _count += 1 } }
 }
 
 private extension NSLock {

@@ -5,7 +5,7 @@ import AudiouterCore
 import AudiouterSharedUI
 
 /// What the user selected in the sidebar. Drives which detail pane the window
-/// shows (a group → its editor; a device / nothing → the mixer).
+/// shows (a group → its editor; a device → its detail pane; nothing → auto-select).
 public enum SidebarSelection: Equatable, Sendable {
     case group(id: String)
     case device(id: String)
@@ -131,15 +131,12 @@ public final class SidebarViewController: NSViewController {
     // nothing here ever explicitly nudged it either) and claim first
     // responder for the outline view, the top-leading control.
     //
-    // FOLLOW-UP for the next person here: this fixes "nothing is ever
-    // tabbable from launch," which is the mechanism a live test would hit
-    // immediately on opening the window. It does NOT touch
-    // `MixerWindowController.swift` (out of this task's scope — see
-    // PROGRESS.md's A11Y-GROUPS entry) or `ContentPaneHostViewController`'s
-    // `setContent(_:)` (same file), which swaps the content pane's view
-    // hierarchy on every sidebar selection; if a live retest finds Tab still
-    // breaks specifically AFTER switching panes, the next place to look is
-    // whether that swap needs its own `window.recalculateKeyViewLoop()` call.
+    // KNOWN GAP: `ContentPaneHostViewController.setContent(_:)`
+    // (MixerWindowController.swift) re-parents the content pane's view
+    // hierarchy on every sidebar selection and never re-seeds the key-view
+    // loop; if a live retest finds Tab breaks specifically AFTER switching
+    // panes, look there first — that swap may need its own
+    // `window.recalculateKeyViewLoop()` call.
     public override func viewDidAppear() {
         super.viewDidAppear()
         guard let window = view.window else { return }

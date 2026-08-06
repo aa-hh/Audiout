@@ -39,8 +39,8 @@ import CoreGraphics
 /// see exactly what macOS returns, not this app's opinion of it.
 ///
 /// Deliberately duplicates ``SystemAudioCaptureTCC``'s `dlopen`/`dlsym`
-/// resolution rather than calling it, to stay out of that file entirely while
-/// it's under concurrent edit elsewhere.
+/// resolution rather than calling it, keeping this diagnostic independent of
+/// the production read path.
 ///
 /// ## T14 extension — one user grant, three questions
 /// The staleness finding above led to ``TCCProbeRunner``: spawn a fresh helper
@@ -111,7 +111,7 @@ public enum TCCBucketDiagnostic {
 
     // MARK: - Implementation
 
-    /// A bad TCC service name — verified, this session, to read back `1`
+    /// A bad TCC service name — verified to read back `1`
     /// (denied) rather than `2` (undetermined) or an error. If a run ever logs
     /// anything else here, the `dlsym` path failed and every other field on
     /// that line is meaningless.

@@ -59,6 +59,15 @@ extension SerializedSharedState {
             lock.lock(); teardownCount += 1; lock.unlock()
         }
 
+        /// What this fake reports as the device it's anchored to
+        /// (``ProcessAudioTap/tappedDeviceID``). Left nil by default, modelling a tap
+        /// that can't say — the protocol's own default. A test that cares about clock
+        /// re-anchoring sets it, and may change it from inside `onCreateAndStart` to
+        /// model the default output device moving mid-rebuild.
+        private var _deviceID: AudioObjectID?
+        var tappedDeviceID: AudioObjectID? { lock.withLock { _deviceID } }
+        func setTappedDeviceID(_ id: AudioObjectID?) { lock.withLock { _deviceID = id } }
+
         func pushBuffer(_ b: CapturedBuffer) { onBuffer?(b) }
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
@@ -369,6 +378,40 @@ extension SerializedSharedState {
         #expect(coordinator.state(for: "com.example.silent") == .capturing(tap.format))
     }
 
+    // MARK: - Degenerate format:
+    // a tap that hands back a non-positive sample rate must be rejected
+    // BEFORE the coordinator commits it to `.capturing`, not left to trap
+    // downstream — ported from NativeCaptureCoordinator's equivalent guard.
+
+    @Test func degenerateSampleRateIsRejectedBeforeCapturing() {
+        let tap = FakeProcessTap()
+        tap.format = TapFormat(sampleRate: 0, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        let (resolver, _) = makeResolver(bundleID: "com.example.degenerate", objectID: 1, pid: 555)
+        let coordinator = makeCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        coordinator.start(bundleID: "com.example.degenerate")
+        waitFor {
+            if case .failed = coordinator.state(for: "com.example.degenerate") { return true }
+            return false
+        }
+        #expect(coordinator.state(for: "com.example.degenerate") ==
+                       .failed(.formatReadFailed(reason: "invalid tap sample rate 0")))
+        #expect(tap.teardowns >= 1, "a rejected format must still tear the tap down (no leak)")
+
+        // A negative rate is rejected the same way.
+        tap.format = TapFormat(sampleRate: -1, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        coordinator.start(bundleID: "com.example.degenerate")
+        waitFor {
+            if case .failed(.formatReadFailed(let reason)) = coordinator.state(for: "com.example.degenerate") {
+                return reason == "invalid tap sample rate -1"
+            }
+            return false
+        }
+    }
+
     // MARK: - UnavailableProcessTap (macOS < 14.2) surfaces .osUnsupported, not retryable.
 
     #if canImport(AudioToolbox)
@@ -430,7 +473,7 @@ extension SerializedSharedState {
     // MARK: - Telemetry (T3): a sample-rate-triggered rebuild emits a
     // capturePA/rate_rebuild line with old/new rate fields populated.
     //
-    // The real HAL detection point (CoreAudioProcessTap.installSampleRateListener,
+    // The real HAL detection point (CoreAudioProcessTap.subscribeToDefaultOutput,
     // PerAppCaptureCoordinator.swift) isn't reachable hermetically — this
     // suite never touches that concrete Core Audio class (no live Core Audio
     // here; see that file's own doc comment on why FakeProcessTap exists).
@@ -484,6 +527,217 @@ extension SerializedSharedState {
         #expect(obj["newRate"] as? String == "44100")
 
         coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (roadmap 009): a DEVICE-only rebuild (no rate change)
+    // now emits the same reanchor telemetry, with `deviceMoved` true. Before
+    // this coordinator tracked `ProcessAudioTap/tappedDeviceID`, a pure device
+    // move was invisible even as a log line — `TapReanchor.deviceMoved`
+    // hardcoded `false` here, so `reanchor.rateMoved` alone gated the emission
+    // and a same-rate/different-device rebuild dropped it silently. This is
+    // the regression guard for that gap: the real-world case is the default
+    // output device moving in the window between the old tap's `teardown()`
+    // (which takes its listener with it) and the new tap arming its own.
+
+    @Test func deviceOnlyMoveEmitsCapturePARateRebuildTelemetryWithDeviceMovedTrue() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        tap.setTappedDeviceID(1)
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Same rate throughout — only the device identity moves, simulated via
+        // `onCreateAndStart` so the flip lands between the claim (which snapshots
+        // the OLD device) and the post-createAndStart compare (which reads the
+        // NEW one), exactly like the real teardown/create gap.
+        tap.onCreateAndStart = { tap.setTappedDeviceID(2) }
+        tap.fireDeviceChange()
+        waitFor { tap.creates >= 2 }
+
+        Telemetry._installTestSink(nil)
+
+        let rebuildLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") },
+            "expected a capturePA/rate_rebuild line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(rebuildLine.utf8)) as? [String: Any],
+            "not a JSON object: \(rebuildLine)")
+        #expect(obj["cat"] as? String == "capturePA")
+        #expect(obj["bundleID"] as? String == "com.example.music")
+        #expect(obj["oldRate"] as? String == "48000")
+        #expect(obj["newRate"] as? String == "48000")
+        #expect(obj["deviceMoved"] as? String == "true")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (roadmap 009): neither axis moving must NOT emit —
+    // guards against the fix over-firing on every ordinary rebuild.
+
+    @Test func neitherAxisMovingDoesNotEmitCapturePARateRebuildTelemetry() {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        tap.setTappedDeviceID(1)
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Neither rate nor device identity changes — same format, same device id.
+        tap.fireDeviceChange()
+        waitFor { tap.creates >= 2 }
+
+        Telemetry._installTestSink(nil)
+
+        #expect(
+            spy.all.first { $0.contains("\"evt\":\"rate_rebuild\"") } == nil,
+            "no reanchor on either axis should not emit rate_rebuild: \(spy.all)")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry: two coordinator instances must be tellable apart.
+    //
+    // The app runs TWO PerAppCaptureCoordinators over the SAME bundle IDs
+    // (NativeBackend.perAppCapture, routing; NativeBackend.meteringCapture,
+    // the `.unmuted` metering-only one), both emitting `capturePA` transitions
+    // into one telemetry stream. Undiscriminated, their lines interleave into
+    // a sequence no single state machine could produce — a `from: capturing`
+    // with no preceding `to: capturing` — which is exactly the "unexplained"
+    // anomaly chased in docs/plans/PLAN-LIVE-TEST-HANDOFF-2026-07-25.md. The
+    // `coordinator` field is what makes the two streams separable again.
+
+    @Test func transitionTelemetryIdentifiesWhichCoordinatorInstanceEmittedIt() throws {
+        let routingTap = FakeProcessTap()
+        let meteringTap = FakeProcessTap()
+        let (routingResolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let (meteringResolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let routing = makeCoordinator(
+            makeTap: { routingTap }, processResolver: routingResolver, muteBehavior: .mutedWhenTapped)
+        let metering = PerAppCaptureCoordinator(
+            makeTap: { meteringTap }, processResolver: meteringResolver,
+            muteBehavior: .unmuted, name: "AudiouterMeter", installsProcessListListener: false)
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Both instances drive the SAME bundle ID, as production does.
+        routing.start(bundleID: "com.example.music")
+        metering.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = routing.state(for: "com.example.music") { return true }; return false }
+        waitFor { if case .capturing = metering.state(for: "com.example.music") { return true }; return false }
+        // Only the metering instance stops — the interleaving that produced the
+        // "capturing -> stopping with no prior -> capturing" misread.
+        metering.stop(bundleID: "com.example.music")
+
+        Telemetry._installTestSink(nil) // flush barrier
+
+        let transitions: [[String: Any]] = spy.all.compactMap {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any],
+                  obj["evt"] as? String == "transition" else { return nil }
+            return obj
+        }
+        #expect(!transitions.isEmpty, "expected capturePA transition lines among: \(spy.all)")
+        for line in transitions {
+            #expect(line["coordinator"] != nil, "every transition must name its instance: \(line)")
+        }
+        let names = Set(transitions.compactMap { $0["coordinator"] as? String })
+        #expect(names == ["AirPlayController", "AudiouterMeter"],
+                "the two instances must be distinguishable, got \(names)")
+        // The stop belongs to the metering instance ALONE — the whole point.
+        let stopping = transitions.filter { $0["to"] as? String == "stopping" }
+        #expect(stopping.count == 1)
+        #expect(stopping.first?["coordinator"] as? String == "AudiouterMeter")
+
+        routing.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - Telemetry (T2): a resolve emits a capturePA/process_resolved line
+    // with each resolved pid's attribution layer — the per-app analog of
+    // NativeCaptureCoordinator's exclusion_resolved. Diagnostic gap this closes:
+    // before this, telemetry showed a route/exclusion CHANGE happened but never
+    // which concrete processes (or none) a bundle id actually resolved to.
+
+    @Test func startEmitsCapturePAProcessResolvedTelemetry() throws {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 10, pid: 500)
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        coordinator.start(bundleID: "com.example.music")
+        waitFor { if case .capturing = coordinator.state(for: "com.example.music") { return true }; return false }
+
+        Telemetry._installTestSink(nil)
+
+        let resolvedLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"process_resolved\"") },
+            "expected a capturePA/process_resolved line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(resolvedLine.utf8)) as? [String: Any],
+            "not a JSON object: \(resolvedLine)")
+        #expect(obj["cat"] as? String == "capturePA")
+        #expect(obj["bundleID"] as? String == "com.example.music")
+        #expect(obj["processCount"] as? String == "1")
+        #expect(obj["processes"] as? String == "500:own")
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
+    /// A bundle id that resolves to ZERO processes — the exact leak signature
+    /// this whole task exists to surface — must be reported explicitly, not
+    /// silently folded into `.processNotYetAudible` with no detail.
+    @Test func startWithUnresolvableBundleEmitsZeroProcessCountTelemetry() throws {
+        let tap = FakeProcessTap()
+        let coordinator = PerAppCaptureCoordinator(
+            makeTap: { tap },
+            processResolver: emptyResolver(),
+            muteBehavior: .mutedWhenTapped
+        )
+
+        let spy = TelemetryLineSpy()
+        Telemetry._installTestSink { line in spy.record(line) }
+        defer { Telemetry._installTestSink(nil) }
+
+        coordinator.start(bundleID: "com.example.ghost")
+        waitFor {
+            if case .failed(.processNotYetAudible) = coordinator.state(for: "com.example.ghost") { return true }
+            return false
+        }
+
+        Telemetry._installTestSink(nil)
+
+        let resolvedLine = try #require(
+            spy.all.first { $0.contains("\"evt\":\"process_resolved\"") },
+            "expected a capturePA/process_resolved line among: \(spy.all)")
+        let obj = try #require(
+            JSONSerialization.jsonObject(with: Data(resolvedLine.utf8)) as? [String: Any],
+            "not a JSON object: \(resolvedLine)")
+        #expect(obj["bundleID"] as? String == "com.example.ghost")
+        #expect(obj["processCount"] as? String == "0")
     }
 
     // MARK: - STABILITY(C6) coalescing: a device-change notification arriving mid-rebuild
@@ -770,6 +1024,60 @@ extension SerializedSharedState {
         #expect(tap.lastProcesses == [AudioProcess(objectID: 20, pid: 700), AudioProcess(objectID: 22, pid: 702)],
                 "the coalesced diff applies the SETTLED process set")
         coordinator.stop(bundleID: "org.mozilla.firefox")
+    }
+
+    // MARK: - DefaultOutputDeviceMonitor subscription (T2 consolidation)
+
+    /// GUARD SEMANTICS, per-app side. Same contract the whole-system tap is held
+    /// to (`wholeSystemTapReportsItsOwnStateLiveToTheMonitor`): the tap reports
+    /// its OWN live device/rate at every notification. The middle expectation is
+    /// the load-bearing one — the tap's format drifts while the device's rate
+    /// stays put, which only a fresh read can see.
+    @available(macOS 14.2, *)
+    @Test func perAppTapReportsItsOwnStateLiveToTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 7, rate: 48_000)
+        // Long settle window + explicit flush: fan-out happens only where this
+        // test asks for it, never on the monitor's real trailing-edge timer.
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: 60)
+        let tap = CoreAudioProcessTap(name: "test", monitor: monitor)
+        let fires = TapMonitorFireCounter()
+        tap.onDefaultDeviceChanged = { fires.bump() }
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput(bundleID: "com.example.app")
+
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
+        #expect(fires.count == 0, "a no-op re-announcement must not rebuild this per-app tap")
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 44_100)
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
+        #expect(fires.count == 1,
+            "a per-app tap whose own format drifted must still be told — proves `tracked` is read live, not captured at subscribe time")
+
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        hal.deviceID = 8
+        hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
+        monitor._drainForTesting()
+        #expect(fires.count == 2, "a genuine default-output-device change must rebuild the per-app tap")
+
+        tap.teardown()
+    }
+
+    @available(macOS 14.2, *)
+    @Test func perAppTapTeardownUnsubscribesFromTheMonitor() {
+        let hal = TapMonitorFakeHAL(deviceID: 7, rate: 48_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal)
+        let tap = CoreAudioProcessTap(name: "test", monitor: monitor)
+        tap.test_seedTrackedState(deviceID: 7, sampleRate: 48_000)
+        tap.subscribeToDefaultOutput(bundleID: "com.example.app")
+        #expect(monitor.subscriberCount == 1)
+
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "teardown must release the tap's monitor subscription")
+        tap.teardown()
+        #expect(monitor.subscriberCount == 0, "a second teardown must stay a no-op")
     }
     }
 }

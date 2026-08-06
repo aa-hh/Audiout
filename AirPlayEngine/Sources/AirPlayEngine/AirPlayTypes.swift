@@ -220,7 +220,10 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
     /// Total writes observed since the tracker was created/reset.
     public var writeCount: UInt64
     /// Cumulative wall-clock time the write cadence has run BEHIND the audio
-    /// time it was claiming to deliver (seconds). Monotonically non-decreasing
+    /// time actually DELIVERED (seconds) — includes the audio time of writes
+    /// the engine's own backpressure guard refused (see `refusedSeconds`), so
+    /// this equals the receiver-visible shortfall regardless of whether the
+    /// producer stalled or the engine dropped. Monotonically non-decreasing
     /// except across a `reset()`.
     public var deficitSeconds: Double
     /// Cumulative wall-clock time the write cadence has run AHEAD of the audio
@@ -231,17 +234,29 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
     /// the most recent write. Positive = currently behind (deficit), negative
     /// = currently ahead (overrun). Zero at/near steady state.
     public var lastGapSeconds: Double
+    /// Writes the engine's own backpressure guard REFUSED (never delivered).
+    /// Their audio time is already folded into `deficitSeconds` — these two
+    /// fields exist so the engine's drop-site contribution to the deficit stays
+    /// distinguishable from a slow producer. Monotonically non-decreasing
+    /// except across a `reset()`.
+    public var refusedWrites: UInt64
+    /// Cumulative audio time (seconds) of the refused writes above.
+    public var refusedSeconds: Double
 
     public init(
         writeCount: UInt64 = 0,
         deficitSeconds: Double = 0,
         overrunSeconds: Double = 0,
-        lastGapSeconds: Double = 0
+        lastGapSeconds: Double = 0,
+        refusedWrites: UInt64 = 0,
+        refusedSeconds: Double = 0
     ) {
         self.writeCount = writeCount
         self.deficitSeconds = deficitSeconds
         self.overrunSeconds = overrunSeconds
         self.lastGapSeconds = lastGapSeconds
+        self.refusedWrites = refusedWrites
+        self.refusedSeconds = refusedSeconds
     }
 }
 

@@ -166,7 +166,7 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// streamID → its running mix timeline.
     private var timelines: [Int: MixTimeline] = [:]
 
-    /// Whether per-app POST-volume RMS should be computed and handed to
+    /// Whether per-app PRE-volume source RMS should be computed and handed to
     /// ``onAppLevel`` (T2 — the per-app-routed meter). `false` until
     /// ``setMeteringActive(_:)`` first flips it on, so the common case (no
     /// meter shown) costs nothing extra in the mixing hot path. Confined to

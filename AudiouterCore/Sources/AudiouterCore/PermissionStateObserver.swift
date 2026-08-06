@@ -8,7 +8,7 @@ import CoreFoundation   // CFNotificationCenter — the Darwin `tcc.access.chang
 /// ``SystemAudioCaptureTCC``'s fresh-verdict latch.
 ///
 /// ## Why this type exists at all
-/// A live-instrumented run this session established three facts that, together,
+/// A live-instrumented run established three facts that, together,
 /// make every simpler design wrong:
 ///  1. `TCCAccessPreflight` is **cached for the lifetime of the calling
 ///     process**. After the user granted, this process's own read stayed `2`

@@ -267,7 +267,7 @@ private let tapFormat = TapFormat(
             let engine = try makeStartedEngine()
             defer { engine.stop() }
 
-            // Baseline: receive() with no listener at all (today's pre-T10 behavior).
+            // Baseline: receive() with no listener at all.
             engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
 
             // With metering active and a listener installed.

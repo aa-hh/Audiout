@@ -25,9 +25,9 @@ import CAirPlayEngine
 // SerializedEngineStateSuite.swift). Do NOT repeat `.serialized` here.
 extension SerializedEngineState {
 
-    // setUp/tearDown were symmetric (both reset the dispatcher + drain the
-    // registry), so per the cookbook's §11(a) guidance the reset folds into
-    // `init` alone — no `deinit` needed, so this stays a `struct`.
+    // The dispatcher reset + registry drain fold into `init` alone
+    // (cookbook §11(a): symmetric setup/teardown) — no `deinit` needed, so
+    // this stays a `struct`.
     @Suite struct AirPlayEngineAPITests {
 
         init() {
@@ -427,8 +427,8 @@ extension SerializedEngineState {
 
         @Test func clientNameHashDiffersPerInstallSeed() {
             // Same clientName, different per-install seed -> different, non-zero
-            // libhash. This is the collision this task fixes: two installs on one
-            // LAN advertising the same clientName used to hash identically.
+            // libhash — without the per-install seed, two installs on one LAN
+            // advertising the same clientName hash identically.
             let seedA: UInt64 = 0xdead_beef_1234_5678
             let seedB: UInt64 = 0x1357_9bdf_0246_8ace
             let a = AirPlayEngine.hashClientName("My Speakers", seed: seedA)
@@ -584,27 +584,48 @@ extension SerializedEngineState {
             #expect(state == .stopped)
         }
 
-        // MARK: - device_flush NO-OP seam (first-light hardening #5f).
+        // MARK: - device_flush re-anchor (F-REANCHOR, 2026-07-26).
         //
-        // flushOutput is a stable API surface for a FUTURE pause/seek feature; in
-        // this phase it must NOT issue the vendored device_flush. Prove it resolves
-        // immediately (no waiter armed -> would hang if it did) and that its state
-        // guard rejects an unknown output.
+        // flushOutput WIRES the vendored device_flush: an RTSP FLUSH that re-anchors
+        // the receiver's timeline WITHOUT tearing down the session (unlike
+        // removeOutput). It makes NO device->state pre-guard (that field diverges
+        // from the session->state the vendored flush acts on — the mismatch that let
+        // a no-op masquerade as success); instead it returns whether a flush was
+        // ACTUALLY issued (the vendored call returned n>0), which the caller uses to
+        // decide whether the teardown fallback is still needed. These tests drive the
+        // issue count via the headless override.
 
-        @Test func flushOutputIsNoOpSeamForKnownOutput() async throws {
+        @Test func flushOutputReturnsTrueAndKeepsSessionWhenFlushIssues() async throws {
             let id = OutputID(rawValue: 0xF1)
-            makeRegistryDevice(id: id.rawValue)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STREAMING)
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in
-                Issue.record("flushOutput is a no-op seam and must not issue any backend op")
-                return 1
-            })
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })  // vendored flush issues one op
             await engine.registerKnownOutputForTest(id, state: .streaming)
 
-            // Resolves immediately (no completion fired). State is untouched.
-            try await engine.flushOutput(id)
+            async let op: Bool = engine.flushOutput(id)
+            // Re-anchor keeps the session STREAMING — the completion is NOT a stop.
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+            let issued = try await op
+
+            #expect(issued, "a flush that issued (n>0) must report true")
             let state = await engine.stateOf(id)
-            #expect(state == .streaming, "flush seam must not alter output state")
+            #expect(state == .streaming, "flush must re-anchor in place, never tear the session down")
+        }
+
+        /// The load-bearing discriminator: when the vendored flush NO-OPs (returns 0
+        /// — device not STREAMING / session gone), flushOutput must return FALSE and
+        /// resolve immediately (no hang), so the caller falls back to a real teardown
+        /// instead of mistaking the no-op for a successful recovery.
+        @Test func flushOutputReturnsFalseWhenVendoredFlushNoOps() async throws {
+            let id = OutputID(rawValue: 0xF2)
+            makeRegistryDevice(id: id.rawValue, state: OUTPUT_STATE_STOPPED)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 0 })  // vendored no-op
+            await engine.registerKnownOutputForTest(id, state: .connected)
+
+            // Must NOT hang (n<=0 resolves inline) and must report "did not flush".
+            let issued = try await engine.flushOutput(id)
+            #expect(!issued, "a no-op flush (n==0) must report false so the caller tears down")
         }
 
         @Test func flushOutputRejectsUnknownOutput() async {

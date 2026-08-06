@@ -402,7 +402,10 @@ trailing control, a device-selector dropdown as THE routing control.
      just one more device in the set. Passthrough is DERIVED: when the selected
      set is exactly {current device}, the app captures/streams nothing.
    - **§2 Output Groups** — the saved groups.
-   The Main Out **volume = proportional master of the current target**.
+   The Main Out **volume = a master GAIN, not a proportional master**. It holds
+   its own value; what reaches a device is `Main × Group × Device`, multiplied on
+   the 0–100 scale before the dB/curve mapping. A device's own level is never
+   rewritten by a Main move, and the effective product is never stored.
 2. **"Selected Devices" section** (below System): every discovered device, split
    into two subsections: **Current Device** (the Mac, by its real name) and
    **AirPlay Devices**. Row: name · volume · **checkbox** (NSButton, .switch
@@ -479,8 +482,19 @@ trailing control, a device-selector dropdown as THE routing control.
 **Rules:**
 - **Mute stays secondary** on device rows (session-preserving quick silence).
   Solo remains removed.
-- **Master math unchanged:** proportional, ratios snapshotted at drag start,
-  clamped at 100; masters echo member averages; every group row shows its master.
+- **Master math is a gain chain** (REVISED — supersedes the proportional master):
+  `Main × Group × Device`, each stage its own stored 0–100 value. There are no
+  ratio snapshots and no drag protocol: moving a master moves nothing but itself,
+  and a device's level is always the user's own setting for that device. Per-app
+  routes are exempt — they bypass Main entirely.
+  - **The one exception:** with no real output in the current target (plain
+    passthrough), the Mac's row IS Main — its audible level is the system volume,
+    so the two are physically one control. The row both drives and displays Main
+    there, and goes back to its own remembered fader once an output joins.
+  - Main is two-way mirrored to the macOS system volume, but OWNS its value: it
+    keeps working when the default output exposes no settable volume.
+  - Effective zero, from any stage, is true silence — including the AirPlay-1
+    sentinel, rather than that protocol's −12 dB perceptual floor.
 - **Phase 1 local-speaker rule:** the Mac's own speakers are selectable ALONE
   (= passthrough) but are BLOCKED from joining a mixed Selected Speakers set,
   with a short note ("synced everywhere-audio arrives with the new engine") —

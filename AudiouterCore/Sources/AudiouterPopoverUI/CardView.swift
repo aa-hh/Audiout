@@ -5,18 +5,14 @@ import AudiouterSharedUI
 
 /// A popover **section container** — header row + collapsible body rows.
 ///
-/// **De-nested (warm-signal-v2, spec §5.1):** through 2026-07-21 this drew a
-/// raised Control Center-style tile — a drop shadow, a semantic-material
-/// `NSVisualEffectView` backing (`.menu`, masked to a rounded rect), and a
-/// raised-edge rim highlight (see git history for that implementation). The
-/// spec's "de-nest" replaces all of it: a card draws **zero chrome of its
-/// own** now. Every section sits directly on `PopoverPanelViewController`'s
-/// warm canvas (`WarmCanvasView`, spec §5.1), and the ONLY visual separation
-/// between cards is the 1px hairline divider `PopoverPanelViewController`
-/// inserts into `stackView` between them (`beginCard`) — not a floating
-/// rounded tile silhouette. `CardView` itself is now just a header +
+/// **De-nested (spec §5.1):** a card draws **zero chrome of its own** — no
+/// shadow, no material backing, no rounded-tile silhouette. Every section sits
+/// directly on `PopoverPanelViewController`'s warm canvas (`WarmCanvasView`,
+/// spec §5.1), and the ONLY visual separation between cards is the 1px
+/// hairline divider `PopoverPanelViewController` inserts into `stackView`
+/// between them (`beginCard`). `CardView` itself is just a header +
 /// collapsible-body layout container; see `contentStack`/`bodyClip`/
-/// `bodyStack` below, all UNCHANGED by the de-nest.
+/// `bodyStack` below.
 final class CardView: NSView {
 
     /// The vertical stack the rows live in. `contentView` is an alias used by the

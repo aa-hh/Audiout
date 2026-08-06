@@ -11,16 +11,13 @@ import AudiouterSharedUI
 /// macOS styling) · a `%` readout · a **named destination dropdown**
 /// (`NSPopUpButton`, `pullsDown = false`) as the trailing control.
 ///
-/// (T-U10 briefly moved the glyph into the slider's track to match a full-height
-/// capsule redesign; ahh reverted the slider to its original slim-track design,
-/// so the leading icon is back.)
+/// (Slim slider track + leading icon are ahh's locked design; T-U10's in-track
+/// glyph was reverted.)
 ///
-/// **REVISED (task B, 2026-07-14) — the circular icon button became a NAMED
-/// SoundSource-style dropdown** that SHOWS THE CURRENTLY SELECTED target's title
-/// (truncated with "…" if long), replacing the old circular AirPlay button. It is
-/// still THE routing control — one place answers "where is my audio going?" — and
-/// keeps the exact same two-section menu content (SPEC §9b — separators +
-/// headers):
+/// The **named destination dropdown** (task B) SHOWS THE CURRENTLY SELECTED
+/// target's title (truncated with "…" if long). It is THE routing control — one
+/// place answers "where is my audio going?" — and keeps the two-section menu
+/// content (SPEC §9b — separators + headers):
 ///   §1  "Selected Devices"      -> `.selectedDevices`
 ///   §2  each saved Output Group -> `.group(id)`
 /// The current target is checkmarked AND its title is the button's visible label,
@@ -33,9 +30,7 @@ public final class MainOutRowView: NSView {
 
     public protocol Delegate: AnyObject {
         func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget)
-        func mainOutRowBeginMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int)
-        func mainOutRowEndMasterDrag(_ row: MainOutRowView)
         func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool)
     }
 
@@ -65,7 +60,7 @@ public final class MainOutRowView: NSView {
 
     public weak var delegate: Delegate?
 
-    /// Leading VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
+    /// Under-name VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
     /// Main Out shares the same level as the device meters for now, until
     /// true per-output metering exists). Warm Signal v4.1 CORRECTIONS, item 1:
     /// it lives UNDER THE "Main Audio" NAME, exactly like a device meter sits
@@ -103,17 +98,16 @@ public final class MainOutRowView: NSView {
     /// Whether the master mute is currently engaged — gates the armed dot and
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
-    private var isMasterMutedState = false
+    private var isMasterMuted = false
     /// Whether the Main Audio spine is armed (connected target ∧ unmuted) — the
     /// continuous rail overlay reads this to tone the origin hook gold vs ember.
-    private var isArmedState = false
+    private var isArmed = false
     /// The System Audio row's item title — **"Main Audio"** (Warm Signal v4
-    /// §Call-1; was "Audio Out"), filling the shared name column so it aligns
+    /// §Call-1), filling the shared name column so it aligns
     /// with the device rows below.
     private let nameLabel = NSTextField(labelWithString: "Main Audio")
     /// The name cluster: **name over meter**, exactly the device-row anatomy
-    /// (Warm Signal v4.1 CORRECTIONS, item 1 — reworking the earlier,
-    /// shipped-wrong "meter below the icon" treatment). Left-aligned,
+    /// (Warm Signal v4.1 CORRECTIONS, item 1). Left-aligned,
     /// vertically centred in the row; the stack recentres its visible lines,
     /// so no manual name-offset juggling is needed when the meter shows/hides.
     private let identityStack = NSStackView()
@@ -134,8 +128,7 @@ public final class MainOutRowView: NSView {
     /// two-section menu directly.
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// The membership bus's **origin marker** (Warm Signal v4.1 CORRECTIONS,
-    /// item 2, reworking the earlier shipped-wrong "stub into the meter"
-    /// treatment): sits at the SAME left-gutter column (`railGutterCenterX`)
+    /// item 2): sits at the SAME left-gutter column (`railGutterCenterX`)
     /// the device rows below centre their own bus node on, spanning the row's
     /// full height like a device row's bus column — a clean gutter origin
     /// point that never crosses the icon and never fuses into the meter. It
@@ -168,7 +161,8 @@ public final class MainOutRowView: NSView {
     // MARK: Model
 
     /// Repopulate the selector, set the master slider + readout, and check the
-    /// current target. `master` is the proportional master of the current target.
+    /// current target. `master` is Main Out's own stored gain — NOT an average of
+    /// the target's members.
     ///
     /// `connectionState` is the AGGREGATE lifecycle of the active target's
     /// members (spec §3.2 Main Out note): `.off` → no ring; `.connecting` /
@@ -195,7 +189,7 @@ public final class MainOutRowView: NSView {
                       restingArmed: Bool = false,
                       busOriginDimmed: Bool? = nil) {
         self.options = options
-        isMasterMutedState = isMuted
+        isMasterMuted = isMuted
         muteButton.state = isMuted ? .on : .off
         updateMuteTint()
         haloRingView.apply(connectionState, restingArmed: restingArmed)
@@ -207,7 +201,7 @@ public final class MainOutRowView: NSView {
         let isConnected: Bool
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
-        isArmedState = armed
+        isArmed = armed
         // The ring's CONNECTED color matches the rail curve's own two-tone
         // (gold armed / ember otherwise — Warm Signal nitpicks, "rail into
         // the ring"), so the join reads as one continuous line, not a gold
@@ -299,7 +293,7 @@ public final class MainOutRowView: NSView {
     /// muted (S3) an incoming push is coerced to 0 so a straggling RMS event
     /// can never refill the drained master meter.
     public func setLevel(_ rms: Float) {
-        meterView.setLevel(isMasterMutedState ? 0 : rms)
+        meterView.setLevel(isMasterMuted ? 0 : rms)
     }
 
     /// Zero the master meter with no animation (popover-close discipline —
@@ -317,7 +311,7 @@ public final class MainOutRowView: NSView {
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
         // ahh's requested icon `hifispeaker.arrow.forward.fill` was introduced in
-        // macOS 15 (Sequoia); it returns nil on our macOS 13 target and on macOS 14,
+        // macOS 15 (Sequoia); it returns nil below macOS 15 (the deployment target is macOS 14),
         // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
         // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
         // visible fallback (ahh's choice).
@@ -410,8 +404,7 @@ public final class MainOutRowView: NSView {
         busOriginView.translatesAutoresizingMaskIntoConstraints = false
 
         // Name cluster (v4.1 CORRECTIONS, item 1: name over meter, the
-        // device-row anatomy — reworking the earlier "meter below the icon"
-        // treatment).
+        // device-row anatomy).
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
@@ -518,12 +511,11 @@ public final class MainOutRowView: NSView {
             destinationPopUp.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
 
-            // Bus origin marker (Warm Signal v4.1 CORRECTIONS, item 2 —
-            // reworking the earlier "hook into the meter" treatment): centred
+            // Bus origin marker (Warm Signal v4.1 CORRECTIONS, item 2): centred
             // on `railGutterCenterX` in the LEFT gutter, spanning the full row
             // height, exactly like a device row centres its own bus node/column
             // — a clean gutter origin point that never crosses the icon and
-            // never reaches into the meter (which now sits under the name,
+            // never reaches into the meter (which sits under the name,
             // clear of the gutter). `MembershipBusView.origin` draws no node
             // of its own; `BusRailOverlayView` reads this view's live frame
             // (via `railHookAnchor`) to place the small origin dot and drop
@@ -574,24 +566,28 @@ public final class MainOutRowView: NSView {
         // AppKit already flipped the pushOnPushOff state; land the engaged
         // treatment (and the "muted" AX value / meter push-gate) instantly on
         // the live click rather than waiting for the host-driven `apply`.
-        isMasterMutedState = sender.state == .on
+        isMasterMuted = sender.state == .on
         updateMuteTint()
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
-    // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
-        let event = NSApp.currentEvent
-        if !isDraggingMaster {
+        // `isDraggingMaster` exists so `apply(...)` won't yank the thumb out from
+        // under a live MOUSE drag. Set it from whether a drag is actually in flight,
+        // NOT "set on first change, clear only on .leftMouseUp": a keyboard or
+        // VoiceOver change arrives as a single event that is never a `.leftMouseUp`,
+        // so the old logic set the flag and never cleared it — the thumb then stopped
+        // tracking the model forever (stability-audit-2026-07-18 §D4). A keyboard
+        // change has no drag in flight, so it leaves the flag false and repaints stay
+        // live.
+        switch NSApp.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged:
             isDraggingMaster = true
-            delegate?.mainOutRowBeginMasterDrag(self)
+        default:
+            isDraggingMaster = false
         }
         delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
         readoutLabel.stringValue = "\(sender.integerValue)%"
-        if event?.type == .leftMouseUp {
-            isDraggingMaster = false
-            delegate?.mainOutRowEndMasterDrag(self)
-        }
     }
 
     // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill
@@ -607,7 +603,7 @@ public final class MainOutRowView: NSView {
         // for the engaged master-mute pill, "armed" for the lit route-armed
         // dot — the spoken equivalents shipped with the drawing.
         var valueParts: [String] = []
-        if isMasterMutedState { valueParts.append("muted") }
+        if isMasterMuted { valueParts.append("muted") }
         if armedDotView.test_isLit { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
@@ -724,9 +720,7 @@ public final class MainOutRowView: NSView {
 
     /// Simulate a master drag to `value`.
     public func test_dragMaster(to value: Int) {
-        delegate?.mainOutRowBeginMasterDrag(self)
         delegate?.mainOutRow(self, didSetMaster: value)
-        delegate?.mainOutRowEndMasterDrag(self)
     }
 }
 
@@ -743,6 +737,6 @@ extension MainOutRowView: RailHookProviding {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)
-        return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isArmedState)
+        return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isArmed)
     }
 }

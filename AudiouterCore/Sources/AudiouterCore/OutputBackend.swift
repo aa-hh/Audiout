@@ -56,8 +56,10 @@ public enum BackendEvent: Sendable, Equatable {
     /// streaming the capture tap MUTES that output — so the keys diligently
     /// adjusted a device nobody could hear while the AirPlay speakers actually
     /// playing ignored them. `AppDelegate` forwards this to
-    /// ``GroupController/mirrorSystemVolumeToMainOut(_:)``, which mirrors it
-    /// onto the Main Out master so the keys drive whatever is really playing.
+    /// ``GroupController/applyExternalSystemVolume(_:)``, which moves Main Out —
+    /// a master gain — so every device follows without any device's own level
+    /// being touched. That arm writes no hardware: the system volume is already
+    /// at this value, which is the whole premise of the event.
     ///
     /// Why an event rather than the backend calling the routing brain: the
     /// backend owns the system-volume listener but sits BELOW `GroupController`
@@ -344,6 +346,35 @@ public protocol OutputBackend: AnyObject {
     /// (it re-evaluates every id on every call); `NativeBackend`/`MockBackend`
     /// detect the "already desired, still `.failed`" case explicitly.
     func setOutputSet(_ ids: Set<String>)
+
+    /// Set the two master gain stages, both on the UI's 0–100 scale: what reaches
+    /// a device is `Main × Group × Device`, multiplied before the dB/curve mapping.
+    /// `group` is 100 when no group is active, making it the identity.
+    ///
+    /// **The effective (multiplied) value is never stored.** A `Device.volume` is
+    /// always the user's own setting for that device; the product is formed at the
+    /// write boundary and sent. So this re-pushes every unmuted output's wire level
+    /// and rewrites no device's level — and emits no `deviceUpdated`.
+    ///
+    /// `mirrorToSystemVolume` additionally writes `mainOut` to the Mac's own
+    /// hardware output volume. True when Main is the origin of the gesture (a Main
+    /// fader drag — the Mac's own output is one of the things Main levels); false
+    /// when the system volume is ITSELF what reported the change (the volume keys),
+    /// so mirroring it back would be a pointless echo.
+    ///
+    /// Default no-op: only ``NativeBackend`` puts levels on a wire.
+    func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool)
+
+    /// The Mac's current system output volume (0–100), or `nil` when the default
+    /// output exposes no readable volume control (many aggregate and digital/HDMI
+    /// outputs). Read-only: the write direction is
+    /// ``setMasterGain(mainOut:group:mirrorToSystemVolume:)``'s mirror flag.
+    ///
+    /// Exists so Main can ADOPT the Mac's actual level at launch, with the
+    /// persisted `AppSettings.mainOutVolume` as the fallback for the `nil` case.
+    /// Reading it never writes hardware — opening the app must not move the user's
+    /// volume. Default `nil`: only ``NativeBackend`` owns a system-volume helper.
+    var systemOutputVolume: Int? { get }
 }
 
 public extension OutputBackend {
@@ -356,6 +387,12 @@ public extension OutputBackend {
     func handleSystemWillSleep() {}
     func handleSystemDidWake() {}
     func setWakeAudioRestoreDelay(_ delay: TimeInterval?) {}
+
+    /// Backends with no wire to push a level onto, and no system-volume helper,
+    /// inherit these: the gain is simply not applied anywhere, and the Mac's level
+    /// is unknown. Only ``NativeBackend`` overrides them.
+    func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {}
+    var systemOutputVolume: Int? { nil }
 }
 
 /// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend

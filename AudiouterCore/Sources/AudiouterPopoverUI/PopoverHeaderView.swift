@@ -9,7 +9,7 @@ import AudiouterSharedUI
 ///
 /// Layout, left → right:
 /// - a **centered title** ("Audiouter", medium ~14pt, label color); and
-/// - two right-aligned, stock `NSButton` (`bezelStyle = .accessoryBar` — the
+/// - three right-aligned, stock `NSButton` (`bezelStyle = .accessoryBar` — the
 ///   system's borderless toolbar-glyph bezel: no outline at rest, a soft
 ///   rounded-rect highlight on hover/press), image-only icon buttons:
 ///   1. **Open Groups editor** — a system SF Symbol
@@ -19,6 +19,8 @@ import AudiouterSharedUI
 ///      host's existing open-mixer path.
 ///   2. **Settings** — SF Symbol `gearshape`. Wired to the Settings window
 ///      by the host's `onOpenSettings` callback.
+///   3. **Quit** — SF Symbol `power`, the trailing-most button. Terminates
+///      the app via the host's `onQuit` callback.
 ///
 /// The title is *centered* over the whole bar while the buttons float on the
 /// trailing edge, so the title stays visually centered regardless of the button
@@ -63,8 +65,7 @@ final class PopoverHeaderView: NSView {
     var onOpenGroupsEditor: (() -> Void)?
     /// Tapped Settings — wired to open the Settings window.
     var onOpenSettings: (() -> Void)?
-    /// Tapped Quit (far-right header button) — the host terminates the app. This
-    /// replaces the removed footer "Quit" action.
+    /// Tapped Quit (far-right header button) — the host terminates the app.
     var onQuit: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "Audiouter")
@@ -195,7 +196,7 @@ final class PopoverHeaderView: NSView {
     /// `button.toolTip` is set below to the same string passed for VoiceOver
     /// (`accessibilityLabel`) as a complete phrase ("Open Groups editor" /
     /// "Settings" / "Quit"), so a mouse-hover reveals in words exactly what the
-    /// icon-only button in this ask (2) is unclear about on its own.
+    /// icon-only button is unclear about on its own.
     private func configureIconButton(_ button: NSButton,
                                      symbol: String,
                                      fallbacks: [String],

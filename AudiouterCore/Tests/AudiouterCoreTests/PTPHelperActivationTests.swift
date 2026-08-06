@@ -36,6 +36,7 @@ import Testing
         let status: PTPHelperStatus
         func register() throws {}
         func openSystemSettingsLoginItems() {}
+        func unregister() async throws {}
     }
 
     /// A minimal fake ``PTPHelperActivating`` returning a canned outcome —

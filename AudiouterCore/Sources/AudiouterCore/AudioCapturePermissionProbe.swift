@@ -7,6 +7,7 @@ import AudioToolbox
 import AVFoundation
 import CoreGraphics
 import Darwin   // dlopen/dlsym for the private TCC audio-capture status read
+import Security // SecCodeCopySelfSigningInformation — public code-identity read
 #endif
 
 /// Constructs the production ``AudioCapturePermissionProbing`` for this OS.
@@ -117,7 +118,22 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// denial) while the prompt is up.
     private let pollInterval: TimeInterval = 0.15
 
-    public init() {}
+    /// Reads a fingerprint identifying the CURRENT process's code signature.
+    /// Injectable (internal designated initializer below) so tests can
+    /// simulate an identity change without depending on actual code signing.
+    /// Production supplies ``Self/currentCodeIdentity()``.
+    private let codeIdentityReader: () -> String?
+
+    public init() {
+        self.codeIdentityReader = Self.currentCodeIdentity
+    }
+
+    /// Injectable designated initializer (internal — tests pass a fake
+    /// `codeIdentityReader` and drive ``shouldRunFunctionalProbe(tccStatus:storedIdentity:currentIdentity:)``
+    /// directly rather than the real, hardware-gated `functionalGrantProbe()`).
+    init(codeIdentityReader: @escaping () -> String?) {
+        self.codeIdentityReader = codeIdentityReader
+    }
 
     /// T5: logs the final granted/denied/... verdict this file's audible
     /// ``probe()`` or silent ``currentStatusSilently()`` produced, and HOW it
@@ -151,23 +167,87 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     }
 
     /// Report the REAL outcome, triggering the prompt first if the grant is
-    /// undecided. Runs on a background queue. An already-decided grant is read
-    /// straight from TCC (fast, no tone); an undecided one (or pre-14.4, where
-    /// TCC has no readable audio-capture bucket) goes through the functional
-    /// tone probe below.
+    /// undecided. Runs on a background queue. An already-decided grant only
+    /// takes the fast TCC-only path when the CURRENT binary's code identity
+    /// matches the one that last proved the grant with the audible functional
+    /// probe (``shouldRunFunctionalProbe(tccStatus:storedIdentity:currentIdentity:)``)
+    /// — otherwise a fast `.granted` read could be a stale, cdhash-pinned grant
+    /// TCC will report but macOS will actually refuse to honor for this
+    /// rebuilt binary, which is exactly the bug the functional probe exists to
+    /// catch. An undecided grant (or pre-14.4, where TCC has no readable
+    /// audio-capture bucket) always goes through the functional tone probe.
     private func runProbe() -> PermissionStatus {
-        switch SystemAudioCaptureTCC.preflight() {
-        case .granted?:
-            logVerdict(site: "CoreAudioTonePermissionProbe.probe", .granted, method: "tcc_preflight")
-            return .granted
-        case .denied?:
+        let tccStatus = SystemAudioCaptureTCC.preflight()
+        if case .denied? = tccStatus {
             logVerdict(site: "CoreAudioTonePermissionProbe.probe", .denied, method: "tcc_preflight")
             return .denied
-        case .undetermined?, nil:
-            let result = functionalGrantProbe()
-            logVerdict(site: "CoreAudioTonePermissionProbe.probe", result, method: "self_tap_tone")
-            return result
         }
+
+        let currentIdentity = codeIdentityReader()
+        let storedIdentity = SystemAudioCaptureTCC.provenCodeIdentity()
+        if !Self.shouldRunFunctionalProbe(
+            tccStatus: tccStatus, storedIdentity: storedIdentity, currentIdentity: currentIdentity
+        ) {
+            logVerdict(site: "CoreAudioTonePermissionProbe.probe", .granted, method: "tcc_preflight")
+            return .granted
+        }
+
+        let result = functionalGrantProbe()
+        logVerdict(site: "CoreAudioTonePermissionProbe.probe", result, method: "self_tap_tone")
+        if result == .granted, let currentIdentity {
+            SystemAudioCaptureTCC.recordProvenCodeIdentity(currentIdentity)
+        }
+        return result
+    }
+
+    /// Pure gating rule for whether `runProbe()` must run the audible
+    /// functional probe rather than trusting a fast `.granted` TCC read.
+    /// Testable with no Core Audio, no TCC, no tone — the same "pure formula"
+    /// split ``SystemAudioCaptureTCC/combine(audio:screen:)`` uses.
+    ///
+    /// - `.denied` never reaches here (short-circuited by the caller).
+    /// - `.undetermined` or `nil` (pre-14.4) always needs the functional probe
+    ///   — there's no grant to trust yet.
+    /// - `.granted` only skips the functional probe when a fingerprint was
+    ///   already proven AND it matches the binary running right now. No stored
+    ///   fingerprint, or a mismatched one (a rebuild, or a stale grant pinned
+    ///   to a different cdhash), means the tone runs again.
+    static func shouldRunFunctionalProbe(
+        tccStatus: SystemAudioCaptureTCC.Preflight?,
+        storedIdentity: String?,
+        currentIdentity: String?
+    ) -> Bool {
+        guard case .granted? = tccStatus else { return true }
+        guard let storedIdentity, let currentIdentity else { return true }
+        return storedIdentity != currentIdentity
+    }
+
+    /// A stable fingerprint for the CURRENTLY RUNNING binary's code identity,
+    /// via the public `SecCodeCopySelf` + `SecCodeCopyStaticCode` +
+    /// `SecCodeCopySigningInformation` (ordinary, App-Store-safe
+    /// Security.framework calls — not the private TCC symbol
+    /// `SystemAudioCaptureTCC` uses). The fingerprint is `kSecCodeInfoUnique`:
+    /// per Apple's own doc it's "a binary identifier that uniquely identifies
+    /// the static code in question… for any existing signature, the value is
+    /// stable" — i.e. the cdhash, the same identity macOS pins a TCC grant to
+    /// (see the "TCC grants cdhash-pinned on ad-hoc builds" note this bug
+    /// matches). It is static per signed binary and changes across a rebuild,
+    /// which is exactly the signal needed to detect "TCC's cached grant no
+    /// longer matches what's actually running." `nil` on any failure (unsigned
+    /// build, API error): callers treat that the same as "no proof yet" and
+    /// fall through to the functional probe.
+    static func currentCodeIdentity() -> String? {
+        var selfCode: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(rawValue: 0), &selfCode) == errSecSuccess,
+              let selfCode else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(selfCode, SecCSFlags(rawValue: 0), &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any],
+              let unique = info[kSecCodeInfoUnique as String] as? Data else { return nil }
+        return unique.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Fire the prompt (creating the tap does that) and then WATCH for our known

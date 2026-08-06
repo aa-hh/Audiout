@@ -154,4 +154,5 @@ public struct SimulatedPTPHelper: PTPHelperManaging {
     public var status: PTPHelperStatus { simulatedStatus }
     public func register() throws {}
     public func openSystemSettingsLoginItems() {}
+    public func unregister() async throws {}
 }

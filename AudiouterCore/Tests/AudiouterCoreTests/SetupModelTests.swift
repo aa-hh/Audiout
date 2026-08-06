@@ -53,6 +53,7 @@ extension SerializedSharedState {
         private let lock = NSLock()
         private var _registerCount = 0
         private var _openSettingsCount = 0
+        private var _unregisterCount = 0
         /// What `.status` reports after `register()` (default: requires approval,
         /// the expected first-run outcome once registration succeeds).
         var statusAfterRegister: PTPHelperStatus = .requiresApproval
@@ -62,6 +63,7 @@ extension SerializedSharedState {
         var status: PTPHelperStatus = .notRegistered
         var registerCount: Int { lock.withLock { _registerCount } }
         var openSettingsCount: Int { lock.withLock { _openSettingsCount } }
+        var unregisterCount: Int { lock.withLock { _unregisterCount } }
 
         func register() throws {
             lock.withLock { _registerCount += 1 }
@@ -69,6 +71,7 @@ extension SerializedSharedState {
             status = statusAfterRegister
         }
         func openSystemSettingsLoginItems() { lock.withLock { _openSettingsCount += 1 } }
+        func unregister() async throws { lock.withLock { _unregisterCount += 1 } }
     }
 
     /// Counts `onChange` fires (reference type so the escaping closure mutates it).

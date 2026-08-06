@@ -107,7 +107,7 @@ private final class ApplicationsFooterView: NSView {
 ///
 /// Structure, top to bottom:
 /// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
-///    icon · "Main Out" · proportional master slider + `%` · a trailing
+///    icon · "Main Out" · master gain slider + `%` · a trailing
 ///    `NSPopUpButton` device selector. The selector is THE routing decision, with
 ///    two sections: "Selected Devices" and each saved Output Group.
 /// 2. **"Selected Devices" section** — every discovered device, split into
@@ -374,6 +374,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `isAvailable == false` keeps its route — see `update(devices:)`.
     private var lastValidDestinationIDs: Set<String>?
 
+    /// The set of device ids that were Main Out members at the last `update`
+    /// (`GroupController.isMainOutMember`). `nil` until the first snapshot.
+    /// A change here means a speaker joined or left the whole-system mix, which
+    /// changes what every app row's redirect menu may offer — a speaker now in
+    /// Main Out is dropped from the menus (one role per speaker), and one that
+    /// just left is offerable again. Without this, selecting a speaker into Main
+    /// Out (which fires an `update` but changes neither the route table, the
+    /// fleet, nor the valid-target set) would leave the redirect menus stale,
+    /// still offering a speaker that is now carrying the mix.
+    private var lastMainOutMemberIDs: Set<String>?
+
     /// The sentinel destination id the Applications card's "Current Device" entry
     /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device,
     /// but `AppRowView` works in plain string ids; this sentinel bridges the two
@@ -502,6 +513,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
         lastValidDestinationIDs = nowValid
 
+        // One role per speaker: a speaker joining or leaving Main Out changes what
+        // the app rows' redirect menus may offer (a Main Out member is excluded as
+        // a redirect target). Selecting a speaker fires an `update` but touches
+        // none of the three triggers below — no route reset, no fleet change, no
+        // valid-target change — so this membership diff is what keeps the menus
+        // from going stale (still offering a speaker now carrying the mix, which is
+        // the only remaining way to build the exact overlap the exclusion prevents).
+        let nowMainOutMembers = Set(devices.compactMap {
+            groupController?.isMainOutMember($0.id) == true ? $0.id : nil
+        })
+        let mainOutMembersChanged = lastMainOutMemberIDs != nil && lastMainOutMemberIDs != nowMainOutMembers
+        lastMainOutMemberIDs = nowMainOutMembers
+
         // A route reset (routesChanged) restructures the Applications card, so it
         // needs a full rebuild — but a rebuild here must NOT reset this open's
         // transient collapse state (it's a mid-open repaint, not a reopen), which
@@ -520,7 +544,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         let deviceSetChanged = Set(devicesByID.keys) != Set(deviceRowsByID.keys)
         if isEffectivelyShown {
-            if routesChanged || deviceSetChanged || validTargetsChanged {
+            if routesChanged || deviceSetChanged || validTargetsChanged || mainOutMembersChanged {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
             } else {
@@ -1418,6 +1442,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // revert on the first model repaint after a mute click.
         var device = device
         device.isMuted = device.isMuted || controller.isMuted(device.id)
+        // Same overlay pattern, for the passthrough exception: with no real output
+        // in the current target, the Mac's row IS Main — `setMemberVolume` redirects
+        // a local-row write to `setMainOutMasterVolume`, because in passthrough the
+        // Mac's audible level is the system volume and the two are physically one
+        // control. A row that WRITES Main must also READ it, or the slider would
+        // show the Mac's own remembered fader while dragging it moved Main, and the
+        // thumb would jump on the first repaint. The Mac's stored fader is
+        // deliberately left untouched underneath — it is what the row goes back to
+        // showing the moment an AirPlay device joins.
+        if device.isLocalDevice, controller.localRowDrivesMain {
+            device.volume = controller.mainOutMasterVolume
+        }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — `canSelectLocalSpeaker`
         // is unconditionally `true` now (T-GROUPCTL / Q5, synced local sink), so
         // the Mac row is never blocked/greyed any more. This no longer computes
@@ -1860,6 +1896,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   subtitle: "Plays locally with its own volume"),
         ])
         for device in available {
+            // One role per speaker: a device currently in Main Out (Selected
+            // Devices, or the active group's members) is carrying the
+            // whole-system mix, and a receiver holds ONE AirPlay session — it
+            // can't ALSO carry a private per-app redirect. So it's simply not
+            // offered as a redirect target, the same way an AirPlay-1 device
+            // isn't (`availableAirPlayDestinations`). The reverse conflict —
+            // selecting a speaker that already has a redirect — is resolved by
+            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
+            // by the time this renders, no kept route targets a Main Out member.
+            // Deliberately NOT filtered inside `availableAirPlayDestinations`:
+            // that set also drives R5 disappearance tracking, where a Main Out
+            // member must still count as present.
+            if groupController?.isMainOutMember(device.id) == true { continue }
             // R3 stopgap: a device already carrying a DIFFERENT app's redirect
             // gets an honest heads-up rather than a silent quality regression —
             // two independently-captured streams mixed onto one speaker warble
@@ -2417,9 +2466,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     public func test_dragMainOutMaster(to value: Int) {
-        groupController?.beginMainOutMasterDrag()
         groupController?.setMainOutMasterVolume(value)
-        groupController?.endMainOutMasterDrag()
         refreshMainOutRow()
     }
 
@@ -2427,9 +2474,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if groupController?.activeGroupID != groupID {
             groupController?.setMainOut(.group(id: groupID))
         }
-        groupController?.beginMasterDrag()
-        groupController?.setMasterVolume(value)
-        groupController?.endMasterDrag()
+        groupController?.setMainOutMasterVolume(value)
     }
 }
 
@@ -2496,17 +2541,9 @@ extension PopoverController: MainOutRowView.Delegate {
         rebuild()
     }
 
-    public func mainOutRowBeginMasterDrag(_ row: MainOutRowView) {
-        groupController?.beginMainOutMasterDrag()
-    }
-
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
-    }
-
-    public func mainOutRowEndMasterDrag(_ row: MainOutRowView) {
-        groupController?.endMainOutMasterDrag()
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool) {

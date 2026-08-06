@@ -19,13 +19,24 @@
 //   3. edit-group   — an existing (saved, unactivated) group selected in the
 //                      sidebar (Edit Group pane) — selecting never activates
 //   4. device-detail — a device (with a saved-group membership and an icon
-//                      OVERRIDE) selected in the sidebar; the hover scrim is
-//                      forced visible via `test_setOverlayVisible(true)` so
-//                      the approved custom-drawn element renders in the shot
+//                      OVERRIDE) selected in the sidebar; the edit badge's
+//                      hover step-up is forced visible via
+//                      `test_setOverlayVisible(true)` so the approved
+//                      custom-drawn element renders in the shot
 //   5. panel-chrome  — the control-panel shell (T11) hosting Groups content,
 //                      anchored to a mock menu-bar status item (top-right),
 //                      with the sticky NSPanel + decorative backing window
 //                      with beak, right-edge-aligned
+//   6. icon-picker   — the icon-picker popover content (Warm Signal W3),
+//                      rendered standalone like the create sheet
+//                      (`presentIconPicker` never draws in a headless run),
+//                      carrying the shown device's CURRENT override — the
+//                      gold "current icon" selection ring — in a narrowed
+//                      search grid
+//   7. edit-active-group — the Edit Group pane while the shown group is the
+//                      ACTIVE Main Out target (thin gold ring on the icon
+//                      well); activation happens through the model — the
+//                      window stays config-only
 //
 // Run: `swift run window-snapshot [output-dir]`.
 
@@ -195,11 +206,6 @@ func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppeara
     renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
 }
 
-/// Render a standalone view controller's view at its fitted size — used for
-/// the create sheet, which `presentAsSheet` never actually draws in a
-/// headless run. Mirrors `popover-snapshot`'s pattern: host the view in an
-/// offscreen borderless window so materials/vibrancy render under the
-/// requested appearance, then snapshot just the view.
 /// Remove overlay scrollers from a captured view subtree. Overlay scroller
 /// knobs fade on their own animation clock, so a capture races the fade and
 /// the PNG differs run-to-run (observed: mixer-2-create-sheet-dark drifting
@@ -287,7 +293,11 @@ func dumpStrip(in root: NSView) {
     walk(root, depth: 0)
 }
 
-
+/// Render a standalone view controller's view at its fitted size — used for
+/// the create sheet, which `presentAsSheet` never actually draws in a
+/// headless run. Mirrors `popover-snapshot`'s pattern: host the view in an
+/// offscreen borderless window so materials/vibrancy render under the
+/// requested appearance, then snapshot just the view.
 @MainActor
 func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
     let appearance = NSAppearance(named: appearanceName)
@@ -577,7 +587,7 @@ func run() -> Int32 {
 
             // 4. Device detail: select a device that's a member of the saved
             // group above (so "In groups:" renders non-empty) and carries an
-            // icon OVERRIDE, with the hover scrim forced visible so the
+            // icon OVERRIDE, with the edit badge's hover step-up forced visible so the
             // approved custom-drawn element (`../../AGENTS.md`) shows up in
             // the render.
             deviceIconController.setSymbolName("homepod.2.fill", for: "sonos-move")

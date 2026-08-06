@@ -22,12 +22,12 @@ import AppKit
 /// reaches." The last device inside the span passes `railBelow: false` so the
 /// line terminates at that node.
 ///
-/// **Cross-row continuity is achieved per-row, not by a panel overlay:** each
-/// row hosts one `MembershipBusView` sized to the FULL row height and centred on
-/// `railGutterCenterX`, drawing a top-half and bottom-half rail segment, so
-/// stacked rows' segments read as one continuous line with zero cross-view
-/// geometry to keep in sync — deterministic by construction for the snapshot
-/// gate.
+/// **Cross-row continuity is achieved by the panel-level ``BusRailOverlayView``**
+/// (Alec's continuity correction): the overlay draws the rail line, detour
+/// arcs, and origin hook as ONE continuous spine down a clear gutter; each row
+/// hosts one `MembershipBusView` centred on `railGutterCenterX` that draws
+/// ONLY its node disc/ring. The overlay reads each node's kind (via the host
+/// row) to place the rail's gap (on-spine) or detour arc (off-spine).
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
 /// `.member` (filled gold — connected member), `.connecting` (gold dashed
@@ -74,10 +74,11 @@ public final class MembershipBusView: NSView {
         /// node; the underlying checkbox is honestly disabled.
         case blocked
         /// The Main Audio **origin** (spec §Call-1 "the rail hooks UP into the
-        /// Main Audio row's meter"): no node, an L-shaped stub that rises at
-        /// `railGutterCenterX` and turns into the meter at the view's top-right.
-        /// The host frames this view so its top-right corner sits at the meter's
-        /// leading edge / centre-y.
+        /// Main Audio row's meter"): draws nothing here — the panel-level
+        /// ``BusRailOverlayView`` draws the L-shaped hook that rises at
+        /// `railGutterCenterX` and turns into the meter. The host frames this
+        /// view so its top-right corner sits at the meter's leading edge /
+        /// centre-y.
         case origin
     }
 

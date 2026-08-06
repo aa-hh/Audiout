@@ -254,26 +254,72 @@ import AppKit
         #expect(controller.isSpeakerSelected("office"), "removing local never touches the AirPlay member")
     }
 
-    @Test func mainOutMasterReflectsCurrentTarget() async throws {
+    /// The Main Out row shows MAIN'S OWN value. It used to show the members'
+    /// average, so setting a member's level moved the readout; now a member move
+    /// must leave the row exactly where it was.
+    @Test func mainOutRowShowsMainsOwnValueNotTheMembersAverage() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // set = {office}
         popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_dragMainOutMaster(to: 70); await drain()
+
         backend.setVolume(50, for: "office"); await drain()
         popover.update(devices: backend.devices)
-        #expect(controller.mainOutMasterVolume == 50)
-        #expect(popover.test_mainOutRow.test_masterValue == 50, "the Main Out slider shows the current target's master")
+        #expect(controller.mainOutMasterVolume == 70,
+                       "a member's own level does not move Main")
+        #expect(popover.test_mainOutRow.test_masterValue == 70,
+                       "the Main Out slider shows Main's own value, not the members' average")
     }
 
-    @Test func mainOutMasterDragScalesMembersProportionally() async throws {
+    @Test func mainOutMasterIsIndependentOfMemberVolumes() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
         popover.test_selectMainOut(.selectedDevices); await drain()
         backend.setVolume(40, for: "office"); backend.setVolume(80, for: "homepod-bed"); await drain()
-        #expect(controller.mainOutMasterVolume == 60)
         popover.test_dragMainOutMaster(to: 30); await drain()
-        #expect(backend.devices.first { $0.id == "office" }?.volume == 20)
-        #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 40)
+        #expect(controller.mainOutMasterVolume == 30, "master volume is the dragged value")
+        #expect(backend.devices.first { $0.id == "office" }?.volume == 40, "member volumes remain unchanged")
+        #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 80, "member volumes remain unchanged")
+    }
+
+    // MARK: The passthrough exception — the Mac's row IS Main
+
+    /// With no real output in the target, the Mac's row and Main are physically one
+    /// control (the Mac's audible level IS the system volume). The row therefore
+    /// has to READ Main, not the Mac's own stored fader — otherwise the slider
+    /// shows one number while dragging it moves another, and the thumb jumps on the
+    /// first repaint.
+    @Test func inPassthroughTheMacRowDisplaysMain() async throws {
+        let (popover, controller, _) = try await makePopover()
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is selected")
+
+        popover.test_dragMainOutMaster(to: 35); await drain()
+        popover.rebuild()
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == 35,
+                       "the Mac's row follows Main while it is the thing driving Main")
+    }
+
+    /// …and once a real output joins, the row goes back to showing the Mac's OWN
+    /// fader, which was remembered untouched underneath the whole time. This is the
+    /// half that would silently regress: the overlay must be conditional, not a
+    /// permanent aliasing of the two values.
+    @Test func armingRestoresTheMacRowToItsOwnRememberedFader() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        backend.setVolume(62, for: "local-mac"); await drain()   // the Mac's own trim
+
+        popover.test_dragMainOutMaster(to: 35); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true); await drain()
+        #expect(!controller.localRowDrivesMain, "a real output is live now")
+
+        popover.update(devices: backend.devices)   // the row reads a device value, so refresh the snapshot
+        popover.rebuild()
+        #expect(backend.devices.first { $0.id == "local-mac" }?.volume == 62,
+                       "precondition: the Mac's stored fader really is 62")
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == 62,
+                       "the Mac's own fader was remembered under the overlay, not overwritten by Main")
     }
 
     @Test func saveActionDisabledWhenSetEqualsGroup() async throws {
@@ -1335,6 +1381,39 @@ import AppKit
         #expect(!(titles.contains("Mixer")),
                 "an AirPlay-1-only device (supportsAirPlay2 == false) must never be offered as a per-app routing target")
         #expect(titles.contains("Office"), "an AirPlay-2 device is still offered normally")
+    }
+
+    /// One role per speaker: a device currently in Main Out (Selected Devices,
+    /// or the active group) is carrying the whole-system mix, so it must not be
+    /// offered as a per-app redirect target — a receiver holds ONE AirPlay
+    /// session. It reappears once it leaves Main Out. This is the "you can't
+    /// build the overlap from the redirect side" half; the reverse (selecting a
+    /// speaker that already has a redirect) is `AppRoutingController.clearRoutes`.
+    @Test func appRowDestinationMenuExcludesMainOutMembers() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, controller, backend) = try await makePopover(
+            appRouting: appRouting, runningAppsProvider: routedApps)
+
+        // Baseline: "Office" is offered while it's not in Main Out.
+        #expect(try #require(popover.test_appRowDestinationTitles(for: "com.example.music")).contains("Office"))
+
+        // Select "Office" into Main Out (Selected Devices target) → it's carrying
+        // the mix and drops out of the redirect menu.
+        controller.setMainOut(.selectedDevices)
+        _ = controller.setDeviceSelected("office", true)
+        popover.update(devices: backend.devices)
+        let titlesSelected = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(!titlesSelected.contains("Office"),
+                "a Main Out member must not be offered as a redirect target (one role per speaker)")
+        #expect(titlesSelected.contains("Living Room TV"),
+                "other, unselected AirPlay devices are still offered")
+
+        // Deselect it → it's a valid redirect target again.
+        _ = controller.setDeviceSelected("office", false)
+        popover.update(devices: backend.devices)
+        #expect(try #require(popover.test_appRowDestinationTitles(for: "com.example.music")).contains("Office"),
+                "leaving Main Out makes the speaker offerable again")
     }
 
     /// Selecting an AirPlay destination on a row calls through to

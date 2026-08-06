@@ -4,11 +4,9 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The "New Group" sheet (design revamp, SPEC.md §9 "Group setup"): group
-/// creation moves off the old in-pane unsaved draft
-/// (`GroupEditorViewController`'s `showNewDraft`/`isCreatingDraft` flow) onto a
-/// standard macOS sheet presented on the Groups window, the way Calendar
-/// presents "New Calendar". The Groups window is CONFIGURATION-ONLY under the
+/// The "New Group" sheet (design revamp, SPEC.md §9 "Group setup"): a standard
+/// macOS sheet presented on the Groups window, the way Calendar presents "New
+/// Calendar". The Groups window is CONFIGURATION-ONLY under the
 /// revamp, and that constraint reaches this sheet too: it only ever edits a
 /// group's identity and membership, never activates it — no Main Out change,
 /// no routing. Activation lives in the app's popover, not here.
@@ -26,7 +24,7 @@ import AudiouterSharedUI
 ///   every toggle.
 ///
 /// On Create: builds `memberVolumes` from each checked device's current volume
-/// (mirrors `GroupEditorViewController.commitDraft`) and calls
+/// and calls
 /// `GroupController.createGroup(name:memberIDs:memberVolumes:iconSymbolName:)`,
 /// which dedups an identical member set onto the existing group rather than
 /// making a copy (and in that case leaves the existing group's icon alone).
@@ -315,8 +313,7 @@ public final class GroupCreationSheetController: NSViewController {
     }
 
     /// Persist the checked candidates as a new group via
-    /// ``GroupController/createGroup`` (which dedups by member set). Mirrors
-    /// `GroupEditorViewController.commitDraft`'s volume-seeding: each member's
+    /// ``GroupController/createGroup`` (which dedups by member set); each member's
     /// `memberVolumes` entry is that device's current backend volume.
     private func commit() {
         guard isCreateEnabled else { return }
@@ -409,8 +406,7 @@ public final class GroupCreationSheetController: NSViewController {
 }
 
 /// A flipped document view so the checklist scrolls from the top rather than
-/// bottom-gravitating with dead space above the rows. File-scoped like
-/// the retired mixer pane's identical helper once was — file-scoped on purpose.
+/// bottom-gravitating with dead space above the rows. File-scoped on purpose.
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

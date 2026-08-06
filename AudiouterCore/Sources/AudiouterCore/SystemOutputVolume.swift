@@ -55,8 +55,8 @@ public protocol SystemVolumeControlling: Sendable {
     ///   a *different device's* pre-existing state; nobody expressed any intent
     ///   about a level. Only the fact that the device changed is news.
     ///
-    /// The volume-key mirror (``BackendEvent/systemVolumeChanged(volume:)`` →
-    /// `GroupController.mirrorSystemVolumeToMainOut(_:)`) acts only on the first:
+    /// The volume-key path (``BackendEvent/systemVolumeChanged(volume:)`` →
+    /// `GroupController.applyExternalSystemVolume(_:)`) acts only on the first:
     /// treating a headphone plug as a gesture would slam every AirPlay speaker to
     /// whatever the headphones happened to be set to. Displaying the row can and
     /// does use both.
@@ -230,8 +230,8 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// The system default output device, or `kAudioObjectUnknown`.
     ///
     /// Resolved fresh on every call rather than cached: it's a single cheap HAL
-    /// property read (the same one `NativeBackend.currentOutputDeviceName()` does
-    /// at NativeBackend.swift:554), and resolving on demand keeps the public reads
+    /// property read (the same one `NativeBackend.currentOutputDeviceName()`
+    /// does), and resolving on demand keeps the public reads
     /// lock-free and correct even before ``start()``.
     private static func currentDefaultOutputDevice() -> AudioObjectID {
         var deviceID = AudioObjectID(kAudioObjectUnknown)

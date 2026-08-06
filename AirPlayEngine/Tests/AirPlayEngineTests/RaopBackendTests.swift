@@ -1,7 +1,7 @@
 // T3 focused unit tests for the vendored RAOP (AirPlay 1) sender
 // (sender/raop.c). These are cheap, pure, no-session tests: they do NOT open a
 // socket or run a libevent loop (that is the gated live test, which needs a real
-// AirPlay-1 receiver). They pin two things this task delivers:
+// AirPlay-1 receiver). They pin two things:
 //
 //   1. `struct output_definition output_raop` — the backend descriptor — is
 //      defined, linked, and wired to the raop_* entry points with the shape

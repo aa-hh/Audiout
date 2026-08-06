@@ -96,6 +96,10 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     private let hal: DefaultOutputHAL
     private let queue = DispatchQueue(label: "com.audiouter.defaultoutput.monitor")
 
+    /// How long the reading must hold still before subscribers hear about it —
+    /// see ``handleNotification()`` for the measured burst this absorbs.
+    private let settleWindowSeconds: TimeInterval
+
     /// Tags `queue` so `runOnQueue(_:)` can tell whether it's already executing
     /// there — see that method's doc for why this matters.
     private static let queueKey = DispatchSpecificKey<Void>()
@@ -140,10 +144,24 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     private var latest = Snapshot(deviceID: nil, nominalRate: nil)
     private var started = false
 
+    /// The armed trailing-edge fan-out, replaced by every notification inside the
+    /// settle window. Only ever touched on ``queue``.
+    private var pendingFanout: DispatchWorkItem?
+
+    /// Whether a notification arrived AFTER this burst's leading-edge delivery, so
+    /// the trailing edge still owes subscribers the settled value. Only ever
+    /// touched on ``queue``. See ``handleNotification()`` for why the fan-out is
+    /// leading + trailing rather than trailing-only.
+    private var settleDirty = false
+
     // MARK: - Lifecycle
 
-    public init(hal: DefaultOutputHAL) {
+    /// - Parameter settleWindow: how long the reading must hold still before the
+    ///   fan-out runs. The 1.2s default clears the measured 0.9s Bluetooth
+    ///   profile-negotiation burst with margin; pass 0 in tests.
+    public init(hal: DefaultOutputHAL, settleWindow: TimeInterval = 1.2) {
         self.hal = hal
+        self.settleWindowSeconds = settleWindow
         queue.setSpecific(key: Self.queueKey, value: ())
     }
 
@@ -183,6 +201,9 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
         runOnQueue {
             guard started else { return }
             started = false
+            pendingFanout?.cancel()
+            pendingFanout = nil
+            settleDirty = false
             removeListeners()
         }
     }
@@ -238,11 +259,81 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
 
     // MARK: - Notification handling (on `queue`)
 
-    /// One live read, then a per-subscriber decision. Both listeners land here.
+    /// One live read, then a LEADING + trailing-edge-debounced per-subscriber
+    /// decision. Both listeners land here.
+    ///
+    /// ## Why the fan-out coalesces (F-SETTLE)
+    /// Measured live: connecting a Sony WH-1000XM3 makes the HAL post FOUR rate
+    /// notifications in 0.9s — 44100→16000→44100→16000 — as the macOS Bluetooth
+    /// stack negotiates HFP against A2DP. It happens with no app running at all,
+    /// so it is not something this process can suppress at the source. Fanning
+    /// each one out synchronously cost four full tap-pipeline rebuilds per
+    /// connect, and the intermediate readings are transient garbage.
+    ///
+    /// ## Why LEADING + trailing, not trailing-only
+    /// A rate transition SILENCES a process tap the instant it happens — the tap
+    /// goes all-zero on a 44.1↔48 renegotiation and only a full rebuild revives
+    /// it (see ``PerAppCaptureCoordinator``'s tap-silence note). The kill is the
+    /// *transition*, not the resting mismatch. So a pure trailing debounce keyed
+    /// on the settled value has a hole: a burst that flaps and RETURNS to the
+    /// value a subscriber is built on (48k→44k→48k) nets to "no change" and fires
+    /// nothing — yet the 48→44 transition already killed the tap, leaving it
+    /// silent forever. To close that, the FIRST notification of a burst delivers
+    /// immediately (leading edge): whatever transition started the burst rebuilds
+    /// the tap at once, and an ordinary single device switch never eats a settle
+    /// window of silence either. Notifications inside the window then coalesce,
+    /// and one trailing delivery reconciles to the value that actually stuck.
+    ///
+    /// The READ stays immediate regardless — ``current`` must never lag, and the
+    /// rate listener has to follow an identity change right away or the new
+    /// device's renegotiation goes unwatched.
     private func handleNotification() {
         let live = readLive()
         latest = live
         retargetRateListenerIfNeeded(to: live.deviceID)
+
+        if pendingFanout == nil {
+            // Leading edge — first notification of a (possibly one-shot) burst.
+            deliverToSubscribers()
+            settleDirty = false
+        } else {
+            // Inside the window — coalesce; the trailing edge reconciles.
+            settleDirty = true
+        }
+        scheduleTrailingFanout()
+    }
+
+    /// Arm (or re-arm) the trailing delivery one settle window out. It fires only
+    /// if a notification landed after the leading delivery (``settleDirty``), so a
+    /// lone change does not double-deliver an already-settled value.
+    ///
+    /// razor: no max-wait cap. A burst that never settles (distinct-value
+    /// notifications faster than the window, indefinitely) would starve the
+    /// trailing reconcile — but the leading edge already delivered the burst's
+    /// first change, and the real self-sustaining storm this codebase hit was
+    /// same-value (killed by ``TapRebuildDecision``'s loop-breaker), not
+    /// distinct-value. If a distinct-value storm is ever observed, cap here:
+    /// deliver at most `maxWait` after the first un-reconciled notification.
+    private func scheduleTrailingFanout() {
+        pendingFanout?.cancel()
+        var item: DispatchWorkItem!
+        item = DispatchWorkItem { [weak self] in
+            guard let self, !item.isCancelled else { return }
+            self.pendingFanout = nil
+            guard self.settleDirty else { return }
+            self.settleDirty = false
+            self.deliverToSubscribers()
+        }
+        pendingFanout = item
+        queue.asyncAfter(deadline: .now() + settleWindowSeconds, execute: item)
+    }
+
+    /// The per-subscriber decision and fan-out, one settle window after the last
+    /// notification. Reads ``latest`` rather than closing over the snapshot that
+    /// armed it, so what lands is the value that settled — never an intermediate
+    /// one from inside the burst.
+    private func deliverToSubscribers() {
+        let live = latest
 
         subscribersLock.lock()
         let snapshot = Array(subscribers.values)
@@ -268,6 +359,29 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             "subscribers": "\(snapshot.count)",
             "fired": "\(fired)",
         ])
+    }
+
+    /// Collapse the settle window NOW: if a fan-out is armed, cancel its timer
+    /// and run it synchronously. Tests only.
+    ///
+    /// Tests construct the monitor with a settle window long enough that the
+    /// real timer can never win, then call this — the same "expose the debounced
+    /// entry point so tests need not wait out the timer" seam
+    /// ``NativeCaptureCoordinator/handleMembershipChange()`` uses. A plain
+    /// `queue.sync {}` drain would NOT work: with a zero window each
+    /// notification's work item runs before the next notification's `sync` can
+    /// cancel it, so nothing ever coalesces.
+    internal func _drainForTesting() {
+        queue.sync {
+            guard let pending = pendingFanout else { return }
+            pending.cancel()
+            pendingFanout = nil
+            // Same gate the real trailing work item applies: reconcile only if a
+            // notification landed after the leading delivery.
+            guard settleDirty else { return }
+            settleDirty = false
+            deliverToSubscribers()
+        }
     }
 
     private func readLive() -> Snapshot {
@@ -319,6 +433,8 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     }
 
     private func removeListeners() {
+        pendingFanout?.cancel()
+        pendingFanout = nil
         if let deviceListener {
             hal.removeListener(deviceListener)
             self.deviceListener = nil

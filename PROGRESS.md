@@ -52,3 +52,56 @@ Each task appends one line here when it lands: `- [id] status — one line`.
 Baseline before any edits: main@fd820d5, 1510 tests / 89 suites, all green (67s).
 Worktree: .claude/worktrees/audio-routing-consolidation-92be71, branch claude/audio-routing-consolidation-92be71.
 - [T10] done — brought the 2026-07-26 re-evaluated architecture review onto this branch (docs/notes/architecture-review-audio-routing-2026-07-26.md, content from claude/audio-routing-architecture-review-3f1eff@6e1c0d1) and appended a new "Correction" section documenting what the implementation waves actually did versus its predictions: defect A landed as a deliberate PARTIAL consolidation (TapRebuildLifecycle.swift extracted only the provably-identical coalescer/reanchor pieces, not the claim/teardown/commit choreography); defect B closed for the scope-transition failure mode via AirPlayEngine's OutputBindResult/boundStreamId/rebindOutput, with two residual risks (scope exclusivity still GroupController-only, cross-FIFO ordering across an in-flight transition still unarbitrated) left explicitly open; defect C fixed by gating the functional TCC probe's fast path on code identity rather than removing the short-circuit outright; defect D consolidated behind the watcher-only DefaultOutputDeviceMonitor, matching the JUCE baseline the review cited. Also flagged a new open finding (per-app taps lack a device-identity-compare equivalent to the whole-system tap's dropout-prevention check) and recorded the unrelated T-DIAG telemetry-misattribution fix found along the way. Updated AudiouterCore/Sources/AudiouterCore/AGENTS.md (added DefaultOutputDeviceMonitor + TapRebuildLifecycle to the architecture diagram and type map) and AudiouterCore/AGENTS.md (corrected the TapRebuildDecision entry, which described per-tap raw HAL listener blocks that T2 replaced with DefaultOutputDeviceMonitor's shared fan-out). No AppRelauncher references found in either AGENTS.md file (T9 had already removed the only call site). Docs-only change; ROADMAP.jsonl and docs/plans/PLAN-AUDIO-ROUTING-CONSOLIDATION-LIVE-TESTS.md untouched per task scope.
+- [D2-JUDDER-016] plan landed — 2026-07-29: whole-system audio dropout/judder investigation plan (docs/plans/PLAN-WHOLE-SYSTEM-AUDIO-DROPOUT-JUDDER-INVESTIGATION.md) landed on claude/judder-doc; catastrophic-dropout fixes already shipped to main @ e960a7b, owner checklist 7/7 live-verified; doc coordinates roadmap 016-019; instrumentation remainder (I1, branch claude/judder-instrumentation-remainder) in flight. D2 adversarial verification gate run against this doc (see commit history for anchor corrections).
+
+## Routing arbiter (roadmap 008) — 2026-08-05
+- [research] done — code-grounded map of the converging/bindTail domains landed as docs/notes/routing-arbiter-008-research.md: both scope-transition FIFOs traced (converge slot vs global bindTail chain, plus the enqueueRebindRecovery cross-link that already rides both), UI-only exclusivity walked (clearRoutes + popover menu filter; NativeBackend has no arbiter), six concrete in-flight interleavings enumerated (I1 TOCTOU double-read resurrects defect B concurrently; I4 unbind-kills-live-stream-0 while `added` still claims it; I5 recovery-backoff ping-pong), hermetic test seams inventoried (SpyEngine liveStreams/opDelayNanos/onAddOutputBody), branch contention checked (aggregate-device-wave3 = 5 unmerged NB commits, highest risk). Docs-only commit; no Swift touched.
+
+2026-08-05 (design agent): Design committed (18a0c6b) — docs/plans/PLAN-ROUTING-ARBITER-008.md.
+Chose a whole-system-priority scope arbiter as policy over EXISTING stateQueue state (no new
+lock/map): R5 effective-route demotion extended to Selected Devices, stillOwnsRebind-style
+fire-time checks on every bindTail op, per-app replay re-driven at WS slot release. Rejected:
+merged serialization domain (PTP head-of-line blocking + 013-shape reentrancy) and blocking
+converging-slot claims (provable FIFO deadlock). T1-T8 tasks + 8 deterministic race tests specced.
+
+2026-08-05 (design reviewer): Adversarial review done — verdict REPAIRED, plan edited in place.
+Found the draft's I1/I2 closure argument false (converge starting after a bind op does not order
+its boundStreamId read after that op's addOutput — a written-out interleaving left the engine
+stuck on stream 1 with the blanket unbind-downgrade freezing it forever), the recovery chains
+ungated (performRebindRecovery never passes performBindOp's gate), a zombie-session regression
+in the blanket downgrade (desiredOn-only park), a missing !suspended guard on re-drive, one
+unforceable test (onAddOutputBody never fires in the per-app addOutput), one flaky-by-race test,
+and a self-contradictory "both T7 tests keep passing" claim. Repairs: four-case unbind arm with
+a verify-first settle reusing enqueueRebindRecovery's slot/gen discipline, pendingScopeSettles
+consumed at release, stillOwnsRebind .perApp WS-claim conjunct + pre-op re-check, gate placed
+after the PTP wait, test plan fixed + new test 9 forcing the surviving interleaving.
+
+2026-08-05 (implementation agent): T1-T8 implemented. All three mechanisms landed in
+NativeBackend.swift as designed — demote-at-decision (isRouteTargetEligibleLocked + edge-triggered
+ScopeConflict record/telemetry inside effectiveAppRoutesLocked), selection-edge replay in
+setOutputSet, the fire-time gate after ensurePTPTakeover + the FOUR-CASE unbind arm with the
+verify-first settle on the shared recovery chain (verifyFirst flavor + pre-op preflight +
+stillOwnsRebind .perApp WS-claim conjunct), and release-side re-drive (ConvergeReleaseAction:
+per-app replay via generalized replayPendingPerAppBindings(trigger:) + pendingScopeSettles
+consumed by RE-ENQUEUING the deferred unbind through the four-case arm — deviation §6.1, closes
+the parked-converge zombie leak the inline case-4-only settle would have missed). 9 race tests
+added (each interleaving forced via hold-open SpyEngine hooks / an armable PTP activator /
+telemetry-observed classification); deviceMovingFromWholeSystemToPerApp rewritten to the
+sanctioned deselect-first direction; deviceFedBySystemAndStreamReportsMax rebuilt (its fixture
+was the now-prevented double-claim state). Four deviations documented in the plan's new §6;
+AGENTS.md arbiter rule + two traps added. NativeBackendTests 192/192 green; full suite running.
+
+2026-08-05 (final adversarial reviewer): independent verification pass done — every commit's diff
+audited against the reviewed design (no undocumented deviations beyond the plan's own §6 four),
+concurrency re-attacked with the real code, losing-domain telemetry force-read, single-domain
+op traces re-confirmed pinned, tests 3+9 confirmed honest by running them red against a locally
+neutered four-case arm. ONE real defect found + fixed: the release-side settle consumption
+re-enqueued a deferred .unbind unconditionally — after a deselect-while-converging the restored
+route's .bind sits FIFO-ahead, so the stale unbind killed the freshly re-engaged per-app session
+with streamBindings still set (silent stranding, no replay guard could ever re-drive it). Fix:
+consume drops the settle loudly (unbind_redrive outcome=dropped_route_reengaged) when
+streamBindings[id] != nil; atomic vs the restore replay under stateQueue in both orders. New
+test 10 staleDeferredUnbindMustNotKillAReengagedRoute forces the interleaving (held rebind →
+deferred unbind → deselect → bind parked pre-gate on the armed PTP activator → release):
+confirmed red pre-fix (session dead, remove after the re-engaged bind), green post-fix.
+Plan §6b documents the review. Full suite 1645/1645 green via scripts/run-tests.sh.

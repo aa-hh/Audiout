@@ -557,7 +557,20 @@ plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null
 #   AUDIOUTER_TCC_DIAG — starts `TCCBucketDiagnostic`'s once-per-second raw
 #     TCC-bucket poll (T1); needed here for the same reason as the others — an
 #     `open`ed bundle never sees the shell's env.
-for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUTER_TCC_DIAG; do
+#   AIRPLAY_AUDIO_DIAG — `AudioDiag`'s coreaudiod-object event log + live-handle
+#     counters, written to the file this names.
+#   AIRPLAY_DEBUG_LATENCY — enables the engine's `WriteLatencyProbe`
+#     (pts-freshness stats on the write path).
+#
+# A dev BUNDLE_ID without AUDIOUTER_STATUS_LABEL gets one defaulted here (owner
+# rule, 2026-07-29): an unlabeled dev build is visually indistinguishable from
+# the live menu-bar app. APP_NAME override wins, else the BUNDLE_ID suffix.
+if [ "$BUNDLE_ID" != "com.audiouter.Audiouter" ] && [ -z "${AUDIOUTER_STATUS_LABEL:-}" ]; then
+  if [ "$APP_NAME" != "Audiouter" ]; then AUDIOUTER_STATUS_LABEL="$APP_NAME"; else AUDIOUTER_STATUS_LABEL="${BUNDLE_ID##*.}"; fi
+  echo "==> AUDIOUTER_STATUS_LABEL unset with dev BUNDLE_ID — defaulting to \"$AUDIOUTER_STATUS_LABEL\""
+fi
+for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUTER_TCC_DIAG \
+            AIRPLAY_AUDIO_DIAG AIRPLAY_DEBUG_LATENCY; do
   eval "val=\${$diag:-}"
   if [ -n "$val" ]; then
     plutil -insert "LSEnvironment.$diag" -string "$val" "$PLIST"

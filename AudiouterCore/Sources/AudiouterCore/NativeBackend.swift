@@ -561,6 +561,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// to avoid.
     private var bufferReAdding: Set<String> = []
 
+    /// Ids whose next add-success should take the CONFIGURED CONNECT DEFAULT rather
+    /// than the level the device was already streaming at (F-REBIND). Armed by
+    /// `setOutputSet` on the user's off→on edge — the one place a connect is
+    /// USER-intended — and consumed by ``connectVolumeSeed(_:outputID:)``.
+    ///
+    /// Everything else that re-issues an `addOutput` for a device the user never
+    /// turned off leaves it unarmed. The case this exists for: a Bluetooth headset
+    /// connecting makes macOS fire a burst of default-output-device changes, each
+    /// rebuilding the whole-system tap, each firing a session rebind
+    /// (`resetAirPlaySessionForWholeSystem` → removeOutput → addOutput). The engine's
+    /// `.stopped` drops the id from `added`, so the following `.connected` reads
+    /// `wasAdded == false` and looks exactly like a fresh connect — which used to
+    /// slam a Sonos the user had set to 80% back to the 35% connect default, once per
+    /// notification. Intent is the honest discriminator here: `added`/`known` can't
+    /// tell the two apart (every discovered device already carries a volume — the
+    /// `Device` default is 50), and a window flag keyed on the recovery chain's
+    /// lifetime would race the state-stream events that arrive after it clears.
+    ///
+    /// One-shot token, so neither failure direction can hurt: a missed arm means a
+    /// user connect keeps the last level (audible, just not the default), and a
+    /// missed consume means the next rebind reseeds (today's behavior). Nothing here
+    /// can produce silence — the seed always pushes a level either way. Note this is
+    /// the INVERSE of the `volumeSeeded: Set` the seed's doc warns about: that one
+    /// suppressed a seed while set and had to be hand-cleared at every teardown,
+    /// whereas this one is consumed on use and only ever selects WHICH level is
+    /// pushed.
+    private var userConnectSeed: Set<String> = []
+
     private var stateStreamTask: Task<Void, Never>?
 
     /// Drains the engine's remote-control stream (speaker transport keys). Same
@@ -625,6 +653,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// on change instead of once per sample. Same queue confinement as above.
     private var lastReportedDroppedWrites: UInt64 = 0
 
+    /// Mixed-buffer counter driving the rate-limited write-CADENCE sampling
+    /// (see `sampleWriteCadenceIfDue`) — its OWN counter, independent of
+    /// `backlogSampleCounter` above, mirroring how `EngineSink`'s own backlog
+    /// sampler (`NativeCaptureCoordinator.swift`, commit `9965bd9`) keeps its
+    /// own counter rather than sharing one across samplers. Confined to the
+    /// mixer's `onMixedBuffer` queue.
+    private var cadenceSampleCounter = 0
+    /// Last cumulative deficit/overrun seconds reported to Telemetry, so the
+    /// sampler emits only when the cadence has actually degraded further
+    /// since the last sample, not once per sample. Same queue confinement.
+    private var lastReportedCadenceDeficitSeconds: Double = 0
+    private var lastReportedCadenceOverrunSeconds: Double = 0
+
     /// deviceID → the sorted app display names last published via `.routedApps`, so
     /// the event fires only when a device's live app mapping actually changes.
     private var routedAppNames: [String: [String]] = [:]
@@ -635,6 +676,47 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue` (submitted in decision order under the lock), mirroring how
     /// `captureControlQueue` replays capture-gate decisions in order.
     private var bindTail: Task<Void, Never> = Task {}
+
+    // MARK: Scope arbiter (roadmap 008 — whole-system priority, all on `stateQueue`)
+
+    /// Device ids whose `.unbind` op was DEFERRED because a whole-system converge
+    /// op was in flight for the device (`performBindOp`'s four-case unbind arm,
+    /// case 3): the converge's outcome — success vs park — decides what the right
+    /// teardown would have been, and is unknowable while it runs. Consumed on the
+    /// whole-system release path (`releaseConvergingAndRequeueIfNeeded`, release
+    /// WITHOUT requeue) by re-enqueuing the `.unbind`, whose fire-time
+    /// classification then settles it against the post-converge world. A
+    /// deferred-op note in the exact species of `pendingRebindRecoveries` — never
+    /// an ownership map: a stale entry costs one redundant re-classification that
+    /// finds no claim and issues a tolerated no-op removeOutput. Cleared in
+    /// `stop()` and by the sleep suspension handler (sleep tears every session
+    /// down, so there is nothing left to settle).
+    private var pendingScopeSettles: Set<String> = []
+
+    /// The currently ACTIVE scope conflicts (device id → record): `.device` routes
+    /// demoted because whole-system routing claims their target. DIAGNOSTIC ONLY —
+    /// written on the engage edge, removed on disengage, cleared in `stop()`,
+    /// exposed via ``test_scopeConflict(deviceID:)``; never read by any decision
+    /// path (deliberately NOT a third bookkeeping system — the existing maps ARE
+    /// the claims).
+    private var lastScopeConflicts: [String: ScopeConflict] = [:]
+
+    /// A queryable record of one active whole-system-vs-per-app scope conflict
+    /// (roadmap 008): the device is whole-system-claimed (a Selected Device) while
+    /// the user's route table still `.device`-routes the listed apps to it, so
+    /// those routes are demoted (effective `.noRedirect`) for the duration and the
+    /// apps play in the whole-system mix instead. The record is removed the moment
+    /// the conflict disengages (deselect or route edit). Diagnostic only.
+    struct ScopeConflict: Equatable {
+        /// Always `"routeDemoted"` while the record exists — restore removes it.
+        let stage = "routeDemoted"
+        /// The demoted routes' bundle ids, sorted.
+        let bundleIDs: [String]
+        /// The per-app stream the device was bound to when the conflict engaged,
+        /// if any.
+        let stream: UInt32?
+        let date: Date
+    }
 
     // MARK: Per-app routing edge cases (T8)
     //
@@ -795,6 +877,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// recovery (`.capturing`) or a deliberate deselect.
     func test_hasPendingCaptureRetry() -> Bool {
         stateQueue.sync { pendingCaptureRetry != nil }
+    }
+
+    /// Test-only (`@testable`): whether the scheduling-snapshot poll (T2,
+    /// `send_sched` telemetry) currently has a work item scheduled in
+    /// `schedulingSnapshotPollWork` — lets a test prove the poll (re-)arms on
+    /// the `captureRunning` false→true edge and is cancelled on the true→false
+    /// edge, mirroring `test_hasPendingCaptureRetry()` above.
+    func test_hasPendingSchedulingPoll() -> Bool {
+        stateQueue.sync { schedulingSnapshotPollWork != nil }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -1055,6 +1146,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // counter increment per buffer; a snapshot read + possible log only
             // once every `backlogSampleInterval` buffers.
             self?.sampleWriteBacklogIfDue()
+            // CADENCE VISIBILITY (T-ENG-CADENCE-1, whole-system-dropout
+            // investigation): same rationale and throttling as the backlog
+            // sample above, for the engine's write-cadence deficit/overrun
+            // counters instead of its backpressure-drop counter, tagged
+            // `path: "perApp"` — `EngineSink.write` in
+            // `NativeCaptureCoordinator.swift` mirrors this for stream 0
+            // (`path: "wholeSystem"`), so this event now has full coverage
+            // whether or not any per-app route is active.
+            self?.sampleWriteCadenceIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -1497,6 +1597,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.pendingRebindRecoveries.removeAll()
             self.rebindConverging.removeAll()
             self.bufferReAdding.removeAll()
+            // Roadmap 008: the scope arbiter's deferred-op notes and diagnostic
+            // conflict records reset with the rest — the engine sessions they
+            // describe are torn down above.
+            self.pendingScopeSettles.removeAll()
+            self.lastScopeConflicts.removeAll()
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
             self.meteringActive = false
@@ -1702,6 +1807,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // on the always-on silence delay, not the wake-restore preference.
             self.awaitingWakeReconnect = false
 
+            // Roadmap 008 (selection-edge replay): a device flipping into or out of
+            // the whole-system claim changes route-target ELIGIBILITY exactly like a
+            // reachability edge does. If any `.device` route targets a flipped id,
+            // replay the (unedited) route table so `effectiveAppRoutesLocked`
+            // re-resolves it — select demotes the route (the app audibly rejoins the
+            // whole-system mix), deselect restores it, with no route-table edit in
+            // either direction. Enqueue-only, same guard shape as
+            // `rerunAppRoutesIfTargeted`: `rerunAppRoutesForReachabilityChange` is
+            // documented safe to call with `stateQueue` held.
+            let claimFlips = previouslySelected.symmetricDifference(ids)
+            if !claimFlips.isEmpty, self.lastRoutes.contains(where: {
+                if case .device(let deviceID) = $0.destination { return claimFlips.contains(deviceID) }
+                return false
+            }) {
+                self.rerunAppRoutesForReachabilityChange()
+            }
+
             // Only ids we can actually stream to — a known discovered receiver
             // (AP1 or AP2) with an engine handle — can be desired-on. The local Mac
             // is excluded (`isLocalDevice`, and it has no `outputIDs` entry); AP1
@@ -1761,6 +1883,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // alongside the "connect_addoutput_*" timestamps in
                     // convergeDevice below.
                     if wantOn {
+                        // F-REBIND: the USER asked for this connect, so whichever
+                        // add-success site wins the race seeds the configured connect
+                        // default. Deliberately only here, not in `convergeToTarget`
+                        // (which flaps `desiredOn` for `applyStartBuffer`'s internal
+                        // re-add) — see `userConnectSeed`.
+                        self.userConnectSeed.insert(id)
                         Telemetry.log(.airplay, "connect_requested", ["device": id])
                     }
                 }
@@ -1975,6 +2103,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         known[id]?.isAvailable == true && outputIDs[id] != nil
     }
 
+    /// Whether whole-system routing (stream 0) CLAIMS `id` at the DECISION layer —
+    /// pure selection intent (`expectedSelected`), set atomically in one place
+    /// (`setOutputSet`; `activateGroup` funnels through it) and stable across
+    /// `applyStartBuffer`'s internal `desiredOn` flap. Roadmap 008 mechanism 1
+    /// (demote-at-decision): whole-system always wins a contested device, and the
+    /// losing `.device` route reads as effective-`.noRedirect` so the app audibly
+    /// rejoins the whole-system mix — the exact semantics R5 already gives an
+    /// unreachable target. On `stateQueue`.
+    private func isWholeSystemClaimedLocked(_ id: String) -> Bool {   // on stateQueue
+        expectedSelected.contains(id)
+    }
+
+    /// Whether whole-system routing OPERATIONALLY claims `id` at the EXECUTION
+    /// layer: desired on, mid-converge, or holding a live stream-0 session
+    /// (`added`). The fire-time gates (roadmap 008 mechanism 2) key on this — not
+    /// on intent alone — because their job is precisely the in-flight window
+    /// intent cannot see: a deselected device whose teardown `removeOutput` is
+    /// still in flight is still whole-system-owned at the engine. On `stateQueue`.
+    private func isWholeSystemOperationallyClaimedLocked(_ id: String) -> Bool {   // on stateQueue
+        desiredOn[id] == true || converging.contains(id) || added.contains(id)
+    }
+
+    /// Reachable AND not whole-system-claimed — the full eligibility test a
+    /// `.device` route target must pass to be honored (R5 + roadmap 008). The
+    /// reachability helper above stays pure on purpose. On `stateQueue`.
+    private func isRouteTargetEligibleLocked(_ id: String) -> Bool {   // on stateQueue
+        isRouteTargetReachableLocked(id) && !isWholeSystemClaimedLocked(id)
+    }
+
     /// `routes` with every `.device` route whose target is unreachable right now
     /// demoted to `.noRedirect` — the EFFECTIVE table, which is what all of the
     /// per-app machinery keys off (R5). On `stateQueue`.
@@ -1993,12 +2150,49 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `rerunAppRoutesForReachabilityChange` restore the redirect with no
     /// route-table edit and no user action.
     private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> [AppRoute] {   // on stateQueue
-        routes.map { route in
-            guard case .device(let id) = route.destination,
-                  !isRouteTargetReachableLocked(id) else { return route }
+        // Roadmap 008: demotion now keys on ELIGIBILITY (reachable AND not
+        // whole-system-claimed), not bare reachability — a route whose target is a
+        // Selected Device is demoted exactly like an unreachable one, so the app
+        // rejoins the whole-system mix (which includes the contested device)
+        // instead of streaming into the void. Claim demotions additionally keep an
+        // edge-triggered, queryable conflict record (loud loser).
+        var claimDemotions: [String: [String]] = [:]   // device id → demoted bundle ids
+        let mapped = routes.map { route -> AppRoute in
+            guard case .device(let id) = route.destination else { return route }
+            let claimed = isWholeSystemClaimedLocked(id)
+            guard claimed || !isRouteTargetReachableLocked(id) else { return route }
+            if claimed { claimDemotions[id, default: []].append(route.bundleID) }
             var demoted = route
             demoted.destination = .noRedirect
             return demoted
+        }
+        reconcileScopeConflictsLocked(claimDemotions)
+        return mapped
+    }
+
+    /// Edge-triggered bookkeeping for demote-at-decision (roadmap 008): diff the
+    /// whole-system-claim demotions this resolve produced against the active
+    /// conflict records, emitting `scope_conflict` telemetry only when a
+    /// (device, routes) conflict engages, changes shape, or disengages — repeated
+    /// resolves of an unchanged table are silent, so the single-domain op traces
+    /// stay byte-identical. On `stateQueue`.
+    private func reconcileScopeConflictsLocked(_ demotions: [String: [String]]) {   // on stateQueue
+        for (deviceID, bundleIDs) in demotions {
+            let sorted = bundleIDs.sorted()
+            if lastScopeConflicts[deviceID]?.bundleIDs == sorted { continue }
+            lastScopeConflicts[deviceID] = ScopeConflict(
+                bundleIDs: sorted, stream: streamBindings[deviceID], date: Date())
+            Telemetry.log(.airplay, "scope_conflict", [
+                "device": deviceID, "winner": "wholeSystem", "stage": "routeDemoted",
+                "bundleIDs": "[" + sorted.joined(separator: ",") + "]",
+                "stream": streamBindings[deviceID].map(String.init) ?? "-",
+            ])
+        }
+        for deviceID in lastScopeConflicts.keys where demotions[deviceID] == nil {
+            lastScopeConflicts.removeValue(forKey: deviceID)
+            Telemetry.log(.airplay, "scope_conflict", [
+                "device": deviceID, "winner": "wholeSystem", "stage": "routeRestored",
+            ])
         }
     }
 
@@ -2222,9 +2416,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //
             // R5: the EFFECTIVE table, so an app whose target is unreachable is NOT
             // excluded — that omission is exactly what puts it back in the system mix.
-            // Our own process (LocalPlaybackEngine's render of every `.currentDevice`
-            // route) is unconditionally excluded inside the coordinator itself —
-            // see `resolveExcludedObjectIDsLoggingAttribution`'s self-exclude.
+            //
+            // OUR OWN render process needs no staging here: the coordinator's
+            // exclusion resolve unconditionally self-excludes `getpid()` (the
+            // generalized echo guard in `resolveExcludedObjectIDsLoggingAttribution`),
+            // which covers `localPlaybackEngine`'s `.currentDevice` render and the
+            // synced-local sink alike. An earlier version of this call also handed the
+            // coordinator a `.currentDevice`-conditional render pid; with the
+            // unconditional guard in place that only bought an extra tap rebuild whose
+            // exclusion set was byte-identical to the one already in force.
             self.captureCoordinator?.updateRouting(
                 appRoutes: plan.effectiveRoutes,
                 excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
@@ -2522,6 +2722,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     "stream": "0",
                     "gen": "\(gen)",
                     "trigger": "recapture",
+                    "recovery": "flush_first",
                 ])
                 self.emit(.streamHealth(id: deviceID, recovering: true))
                 self.enqueueRebindRecovery(
@@ -2552,7 +2753,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private func stillOwnsRebind(deviceID: String, scope: RebindScope) -> Bool {
         switch scope {
-        case .perApp(let stream): return self.streamBindings[deviceID] == stream
+        case .perApp(let stream):
+            // Roadmap 008: the WS-claim conjunct. A `.perApp` recovery firing in
+            // the demotion-latency window (claim landed, eviction not yet
+            // propagated through the mixer topology) still sees its
+            // `streamBindings` slot set — without this conjunct it would
+            // removeOutput→addOutput(N) and tear down the user's fresh stream-0
+            // session. The `.wholeSystem` arm is NOT gated on the claim: it IS
+            // the whole-system domain and holds the `converging` slot.
+            return self.streamBindings[deviceID] == stream
+                && !self.isWholeSystemOperationallyClaimedLocked(deviceID)
         case .wholeSystem:        return self.added.contains(deviceID)
         }
     }
@@ -2584,8 +2794,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// whole-system: `!added.contains(deviceID)`, i.e. deselected). Called on
     /// `stateQueue` (the async body hops back onto `stateQueue` only for the
     /// bookkeeping mutation, never holding it across the engine op).
+    ///
+    /// `verifyFirst` (roadmap 008, whole-system scope only) selects the settle
+    /// flavor `performBindOp`'s four-case unbind arm uses: read
+    /// `engine.boundStreamId` and rebind ≥ 1 → 0, with ZERO engine ops when the
+    /// session is already on 0 — instead of the teardown+re-add.
     private func enqueueRebindRecovery(
-        deviceID: String, outputID: OutputID, scope: RebindScope, gen: Int, attempt: Int
+        deviceID: String, outputID: OutputID, scope: RebindScope, gen: Int, attempt: Int,
+        verifyFirst: Bool = false
     ) {   // on stateQueue
         // T4: every call into this function — attempt 1 from
         // `resetAirPlaySessionForRoutedApp`, or a later attempt recursing from the
@@ -2604,7 +2820,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.bindTail = Task { [weak self] in
             await prev.value
             guard let self else { return }
-            let ok = await self.performRebindRecovery(outputID: outputID, scope: scope)
+            // Roadmap 008 pre-op gate: the same gen + ownership guard the
+            // completion below runs, re-checked BEFORE the engine op. These chain
+            // ops execute `performRebindRecovery` directly on `bindTail` — they
+            // never pass through `performBindOp`'s fire-time gate — so without
+            // this a superseded/ownership-lost chain would still issue its
+            // remove/add pair and only THEN notice. On failure, skip the op and
+            // fall through with `ok = false`: the completion's own guard takes
+            // the terminal `superseded` exit (telemetry + slot release) exactly
+            // as it always has. Uncontested chains pass both checks and their op
+            // traces are unchanged.
+            let preflightOK: Bool = self.stateQueue.sync {
+                self.rebindRecoveryGen[deviceID] == gen
+                    && self.stillOwnsRebind(deviceID: deviceID, scope: scope)
+            }
+            let ok = preflightOK
+                ? await self.performRebindRecovery(outputID: outputID, scope: scope, verifyFirst: verifyFirst)
+                : false
             // Finding 1: for whole-system scope, every TERMINAL exit of this chain
             // (bailed-because-superseded/deselected, succeeded, or gave-up) must
             // release the `converging` slot claimed in
@@ -2616,7 +2848,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // slot — the recovery chain is still in progress, and releasing
             // early would let a concurrent convergeDevice op interleave with
             // the next attempt's removeOutput/addOutput, reopening the race.
-            let requeue: OutputID? = self.stateQueue.sync {
+            let action: ConvergeReleaseAction = self.stateQueue.sync {
                 // Superseded by a newer reset, or the device stopped owning this
                 // session (per-app unbind/teardown cleared the binding, or a
                 // whole-system deselect dropped it from `added`): we no longer own it.
@@ -2636,7 +2868,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if case .wholeSystem = scope {
                         return self.releaseRebindConverging(id: deviceID)
                     }
-                    return nil
+                    return .none
                 }
                 if ok {
                     Telemetry.log(.airplay, "rebind", [
@@ -2649,7 +2881,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if case .wholeSystem = scope {
                         return self.releaseRebindConverging(id: deviceID)
                     }
-                    return nil
+                    return .none
                 }
                 guard attempt < self.maxRebindRecoveryAttempts else {
                     Telemetry.log(.airplay, "rebind", [
@@ -2661,7 +2893,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if case .wholeSystem = scope {
                         return self.releaseRebindConverging(id: deviceID)
                     }
-                    return nil
+                    return .none
                 }
                 let delay = self.rebindRecoveryRetryDelay * pow(2.0, Double(attempt - 1))
                 // T4: an explicit 5th outcome beyond the task's four named ones
@@ -2677,7 +2909,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 ])
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
-                    let requeue: OutputID? = self.stateQueue.sync {
+                    let action: ConvergeReleaseAction = self.stateQueue.sync {
                         // Superseded while waiting out the delay: a newer chain now
                         // owns this device's bookkeeping AND — for whole-system scope —
                         // its `converging` slot, so touch neither. Releasing or
@@ -2692,7 +2924,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 "trigger": "recapture", "outcome": "superseded",
                                 "reason": "gen_superseded_before_retry_fired",
                             ])
-                            return nil
+                            return .none
                         }
                         // Still the reigning chain, but the device no longer owns this
                         // session (or went away): a TERMINAL exit. The scheduling
@@ -2716,14 +2948,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             if case .wholeSystem = scope {
                                 return self.releaseRebindConverging(id: deviceID)
                             }
-                            return nil
+                            return .none
                         }
                         self.enqueueRebindRecovery(
                             deviceID: deviceID, outputID: out, scope: scope,
-                            gen: gen, attempt: attempt + 1)
-                        return nil
+                            gen: gen, attempt: attempt + 1, verifyFirst: verifyFirst)
+                        return .none
                     }
-                    if let requeue {
+                    if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
+                    if let requeue = action.requeue {
                         Task { [weak self] in
                             await self?.convergeDevice(id: deviceID, outputID: requeue)
                         }
@@ -2732,9 +2965,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 self.pendingRebindRecoveries[deviceID] = work
                 DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
-                return nil // still in progress — keep the `converging` slot held
+                return .none // still in progress — keep the `converging` slot held
             }
-            if let requeue {
+            if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
+            if let requeue = action.requeue {
                 Task { [weak self] in await self?.convergeDevice(id: deviceID, outputID: requeue) }
             }
         }
@@ -2747,19 +2981,95 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that is what actually re-establishes the RTP session with a clean timeline
     /// anchor. Whole-system uses the single-stream `addOutput(_:)` (stream 0, the
     /// exact op `convergeDevice` used); per-app uses `addOutput(_:streamId:)`.
-    private func performRebindRecovery(outputID: OutputID, scope: RebindScope) async -> Bool {
+    private func performRebindRecovery(
+        outputID: OutputID, scope: RebindScope, verifyFirst: Bool = false
+    ) async -> Bool {
         let label = Self.rebindScopeLabel(scope)
-        // Same T5+T4 gate as every other session-establishing op: a clockless
-        // re-add would re-establish a silent session. Practically instant
-        // mid-session (the clock is already up); on a genuine refusal the
-        // `false` return feeds this chain's own backoff/give-up machinery.
+        Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
+
+        // Roadmap 008 verify-first settle (whole-system only; see `performBindOp`'s
+        // four-case unbind arm): arbitrate on ENGINE truth read AFTER the racing op
+        // completed. Already on 0 (or no live session at all) → success with ZERO
+        // engine ops; astray on a per-app stream (≥ 1, the silent-`.alreadyBound`
+        // corruption) → one serialized `rebindOutput` to 0. No PTP gate here: an
+        // astray session is a LIVE session, so the clock is already up (the same
+        // reasoning the F-REANCHOR flush documents below). A throw feeds this
+        // chain's normal backoff/give-up.
+        if verifyFirst, case .wholeSystem = scope {
+            let device = deviceID(for: outputID) ?? "\(outputID)"
+            let live = await engine.boundStreamId(for: outputID)
+            guard let live, live != 0 else {
+                Telemetry.log(.airplay, "unbind_downgraded", ["device": device, "settled": "noop"])
+                return true
+            }
+            do {
+                try await engine.rebindOutput(outputID, toStreamId: 0)
+                Telemetry.log(.airplay, "unbind_downgraded", ["device": device, "settled": "rebound"])
+                return true
+            } catch {
+                Telemetry.log(.airplay, "rebind_recover_failed", [
+                    "output": "\(outputID)", "scope": label, "error": "\(error)",
+                ])
+                return false
+            }
+        }
+
+        // F-REANCHOR (2026-07-26): a tap rebuild's recovery used to be a full
+        // removeOutput→addOutput (fresh RTSP/RTP session = the audible Sonos drop the
+        // user hears on every headphone mode-change). For whole-system scope, try an
+        // RTSP FLUSH re-anchor FIRST instead: it keeps the session alive and only
+        // re-syncs the receiver's timeline. Observed to hold on the tested Sonos; not
+        // yet proven across receiver models, so this is defended two ways: a flush
+        // that DIDN'T issue (returns false — device not streaming / session gone) or
+        // that throws falls through to the teardown+rebuild below, and the silence
+        // watchdog remains the backstop if an issued flush fails to re-anchor on some
+        // receiver. A flush can therefore never silently leave the device dead.
+        // razor: whole-system only (that's the reported bug); per-app rebinds keep
+        // the teardown path — per-app has no delivery gate for a two-tap overlap.
+        if case .wholeSystem = scope {
+            do {
+                if try await engine.flushOutput(outputID) {
+                    // A flush was ACTUALLY issued (re-anchored in place) — done.
+                    Telemetry.log(.airplay, "rebind_recover_flush", [
+                        "output": "\(outputID)", "scope": label, "outcome": "issued",
+                    ])
+                    return true
+                }
+                // flushOutput returned false: the vendored flush no-op'd (device not
+                // STREAMING / session gone), so nothing re-anchored. Do NOT report
+                // success — fall through to the teardown+re-add, which re-establishes
+                // the session. Treating a no-op as success here was a silent-forever
+                // regression an adversarial review caught.
+                Telemetry.log(.airplay, "rebind_recover_flush", [
+                    "output": "\(outputID)", "scope": label, "outcome": "noop_fallback",
+                ])
+            } catch {
+                Telemetry.log(.airplay, "rebind_recover_flush", [
+                    "output": "\(outputID)", "scope": label, "outcome": "failed_fallback",
+                    "error": "\(error)",
+                ])
+                // fall through to teardown+rebuild
+            }
+        }
+
+        // T5+T4 takeover gate, the same one every session-establishing engine op
+        // runs behind — and DELIBERATELY only in front of the teardown+re-add
+        // below, never the F-REANCHOR flush above it. The flush re-anchors the
+        // session that is already up; it establishes nothing, needs no clock, and
+        // gating it would have made the cheap in-place recovery inherit the gate's
+        // real side effects — a default-output switch-away, the "taking over" strip
+        // and a bounded activation wait — on a path whose entire point is to avoid
+        // the audible drop a fresh session costs. A re-add is a different animal: a
+        // clockless one re-establishes a session that plays silence, so it stays
+        // gated. Practically instant mid-session (the clock is already up); on a
+        // genuine refusal the `false` return feeds this chain's backoff/give-up.
         guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
             Telemetry.log(.airplay, "rebind_recover_failed", [
                 "output": "\(outputID)", "scope": label, "error": "timingUnavailable",
             ])
             return false
         }
-        Telemetry.log(.airplay, "rebind_recover_starting", ["output": "\(outputID)", "scope": label])
+
         try? await engine.removeOutput(outputID)
         do {
             switch scope {
@@ -3109,6 +3419,57 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         ])
     }
 
+    /// Sample the engine's write-CADENCE deficit/overrun counters
+    /// (T-ENG-CADENCE-1, whole-system-dropout investigation) on the identical
+    /// throttled/delta-gated shape as `sampleWriteBacklogIfDue()` above (own
+    /// counter, own last-reported baseline, same `backlogSampleInterval` —
+    /// reused rather than duplicated as a second constant, since the
+    /// instruction behind this sampler is explicitly to reuse that cadence,
+    /// not invent a new one). Emits a NEW event, `write_cadence_drift`, only
+    /// when the cumulative deficit OR overrun has grown since the last sample
+    /// — `writeCadenceSnapshot()` was previously referenced nowhere in
+    /// `AudiouterCore`, so this is the first time it is ever read outside the
+    /// engine's own package.
+    ///
+    /// `writeCadenceSnapshot()` is engine-wide (fed by every `write` call —
+    /// whole-system stream 0 AND per-app streams alike, see
+    /// `AirPlayEngine.write(streams:pts:)`), but this sampler's own TRIGGER is
+    /// the per-app mixer's buffer arrivals (`onMixedBuffer`, the only
+    /// per-buffer-adjacent hook available inside `NativeBackend.swift` — the
+    /// whole-system tap writes straight to `EngineSink` in
+    /// `NativeCaptureCoordinator.swift`). So a session with no active
+    /// `.device` route never fires THIS sampler — the same shape of blind
+    /// spot `write_backlog_drop` had for the whole-system path before
+    /// `9965bd9` closed it there. `EngineSink.write` (that file) now mirrors
+    /// this exact sampler for stream 0, tagged `path: "perApp"` here vs.
+    /// `path: "wholeSystem"` there so the two call sites of the same event
+    /// stay distinguishable — the discriminator `write_backlog_drop` itself
+    /// never got, added here for both so they're symmetrical and greppable.
+    private func sampleWriteCadenceIfDue() {
+        cadenceSampleCounter &+= 1
+        guard cadenceSampleCounter % Self.backlogSampleInterval == 0 else { return }
+        let snap = engine.writeCadenceSnapshot()
+        guard snap.deficitSeconds != lastReportedCadenceDeficitSeconds
+            || snap.overrunSeconds != lastReportedCadenceOverrunSeconds else { return }
+        let deficitDelta = snap.deficitSeconds - lastReportedCadenceDeficitSeconds
+        let overrunDelta = snap.overrunSeconds - lastReportedCadenceOverrunSeconds
+        lastReportedCadenceDeficitSeconds = snap.deficitSeconds
+        lastReportedCadenceOverrunSeconds = snap.overrunSeconds
+        Telemetry.log(.airplay, "write_cadence_drift", [
+            "path": "perApp",
+            "writeCount": String(snap.writeCount),
+            "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
+            "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
+            "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
+            "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
+            "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+            // How much of the deficit is the ENGINE's own drop site (writes the
+            // backpressure guard refused) rather than a slow producer.
+            "refusedWrites": String(snap.refusedWrites),
+            "refusedTotalSeconds": String(format: "%.3f", snap.refusedSeconds),
+        ])
+    }
+
     private func handleDestinationSetsChanged(_ sets: [AppRouteMixer.DestinationSet]) {
         stateQueue.sync {
             // Remember the topology so a LATER device discovery can re-drive this
@@ -3231,6 +3592,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     error: PTPClockUnavailableError(), clearBinding: true)
                 return
             }
+            // Roadmap 008 fire-time gate — AFTER the PTP wait (the widest window
+            // in the file; a gate before it would re-open the whole window it
+            // exists to close), immediately before the engine call.
+            guard perAppOpMayFire(outputID: outputID, op: "bind", stream: stream) else { return }
             Telemetry.log(.airplay, "engine_bind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream)
@@ -3244,6 +3609,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     error: PTPClockUnavailableError(), clearBinding: true)
                 return
             }
+            guard perAppOpMayFire(outputID: outputID, op: "rebind", stream: stream) else { return }
             Telemetry.log(.airplay, "engine_rebind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream, tearDownWhenBindingUnknown: true)
@@ -3251,8 +3617,80 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 handleBindFailure(outputID: outputID, stream: stream, op: "rebind", error: error)
             }
         case .unbind(let outputID):
+            // Roadmap 008 four-case unbind arm (mechanism 2). A blanket
+            // removeOutput under a whole-system claim is the I4 bug (it kills the
+            // stream-0 session the user just asked for, while `added` still
+            // claims it); a blanket SKIP has two provable failure modes of its
+            // own (a stranded astray session after the engine's silent
+            // `.alreadyBound` no-op, and a zombie per-app session leaked when the
+            // converge parked). Classification runs under `stateQueue`:
+            //   1. no operational claim            → removeOutput (today's op);
+            //   2. `desiredOn`-only claim (parked) → removeOutput (today's op —
+            //      correct teardown of the per-app session; whole-system re-adds
+            //      fresh via retry/re-toggle);
+            //   3. a converge op is in flight      → defer (`pendingScopeSettles`;
+            //      the release side re-drives this exact op);
+            //   4. settled stream-0 session owned  → claim the `converging` slot
+            //      Finding-1 style and enqueue a VERIFY-FIRST whole-system
+            //      recovery: read engine truth after the racing op completed,
+            //      rebind astray (≥ 1) → 0, zero engine ops when already 0.
+            enum UnbindAction { case remove, deferred, settled }
+            let action: UnbindAction = stateQueue.sync {
+                guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else {
+                    return .remove   // vanished device: proceed as today (engine tolerates)
+                }
+                if self.converging.contains(id) {
+                    Telemetry.log(.airplay, "unbind_deferred", ["device": id])
+                    self.pendingScopeSettles.insert(id)
+                    return .deferred
+                }
+                if self.added.contains(id) {
+                    // Case 4 — this IS `resetAirPlaySessionForWholeSystem`'s own
+                    // claim shape, reused: slot + gen bump + the shared recovery
+                    // chain (its backoff / terminal-exit / slot-release
+                    // discipline applies unchanged), with the verify-first
+                    // flavor instead of a teardown.
+                    self.converging.insert(id)
+                    self.rebindConverging.insert(id)
+                    let gen = (self.rebindRecoveryGen[id] ?? 0) + 1
+                    self.rebindRecoveryGen[id] = gen
+                    self.pendingRebindRecoveries.removeValue(forKey: id)?.cancel()
+                    Telemetry.log(.airplay, "unbind_downgraded", ["device": id, "settled": "pending"])
+                    self.emit(.streamHealth(id: id, recovering: true))
+                    self.enqueueRebindRecovery(
+                        deviceID: id, outputID: outputID, scope: .wholeSystem,
+                        gen: gen, attempt: 1, verifyFirst: true)
+                    return .settled
+                }
+                return .remove   // cases 1 and 2 — byte-identical to today
+            }
+            guard case .remove = action else { return }
             Telemetry.log(.airplay, "engine_unbind", ["output": "\(outputID)"])
             try? await engine.removeOutput(outputID)
+        }
+    }
+
+    /// Roadmap 008 fire-time gate for `.bind`/`.rebind`: re-check the whole-system
+    /// claim under `stateQueue` immediately before the engine call and BOW OUT
+    /// loudly if whole-system operationally owns the device — under a claim,
+    /// per-app ops only ever bow out (never move a session), which is what makes
+    /// the trailing `.unbind`/settle the deterministic last word. Clearing
+    /// `streamBindings` is what lets the re-drives re-issue the op later (the
+    /// `handleBindFailure(clearBinding: true)` precedent: both replay paths key on
+    /// `streamBindings[id] == nil`). A vanished device (no reverse entry) proceeds
+    /// as today. Deliberately NO topology-supersession check here, so the
+    /// per-app-only op trace stays byte-identical (within-FIFO ordering already
+    /// handles supersession).
+    private func perAppOpMayFire(outputID: OutputID, op: String, stream: UInt32) -> Bool {
+        stateQueue.sync {
+            guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else { return true }
+            guard self.isWholeSystemOperationallyClaimedLocked(id) else { return true }
+            let reason = self.converging.contains(id) ? "ws_in_flight" : "ws_claimed"
+            Telemetry.log(.airplay, "bind_superseded", [
+                "device": id, "op": op, "stream": "\(stream)", "reason": reason,
+            ])
+            self.streamBindings.removeValue(forKey: id)
+            return false
         }
     }
 
@@ -3393,7 +3831,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// is up: `activate` short-circuits on its first probe.
     ///
     /// On the not-ready → ready EDGE it also replays the cached per-app
-    /// topology (``replayPerAppBindingsAfterClockRecovery``), so a redirect
+    /// topology (``replayPendingPerAppBindings(trigger:)``), so a redirect
     /// that was refused clockless re-binds by itself the moment a later
     /// connect wins the ports — no user re-pick.
     private func ensurePTPTakeover(telemetryDeviceID: String) async -> Bool {
@@ -3416,19 +3854,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.setTakeoverStatus(TakeoverStatus.resolved(from: outcome))
             return ready && !was
         }
-        if becameAvailable { replayPerAppBindingsAfterClockRecovery() }
+        if becameAvailable { replayPendingPerAppBindings(trigger: "clock_recovery") }
         return ready
     }
 
-    /// Re-run the cached per-app binding pass after the clock came back (the
-    /// not-ready → ready edge above). A device whose bind was refused while
-    /// clockless had its `streamBindings` slot cleared
-    /// (`handleBindFailure(clearBinding: true)`), so the topology diff
-    /// re-issues exactly those `.bind` ops; devices already bound are
-    /// untouched (same stream ⇒ no op). Guarded on there being something to
-    /// re-bind, so an ordinary ready connect never churns the mixer path.
-    /// Mirrors `addOrUpdate`'s discovery-time re-drive of the same pass.
-    private func replayPerAppBindingsAfterClockRecovery() {
+    /// Re-run the cached per-app binding pass for devices the table wants but
+    /// whose binding slot is cleared. Two triggers share it (roadmap 008
+    /// generalized the clock-recovery-only original): `"clock_recovery"` — the
+    /// not-ready → ready PTP edge (a bind refused clockless had its slot cleared
+    /// via `handleBindFailure(clearBinding: true)`) — and `"ws_release"` — the
+    /// whole-system domain fully released a device whose bind bowed out at fire
+    /// time (`perAppOpMayFire` cleared the slot). The guard is the same either
+    /// way (`outputIDs != nil && streamBindings == nil`), so the topology diff
+    /// re-issues exactly the missing `.bind` ops; devices already bound are
+    /// untouched (same stream ⇒ no op) and an ordinary pass never churns the
+    /// mixer path. Mirrors `addOrUpdate`'s discovery-time re-drive of the same
+    /// pass. Call OFF `stateQueue` only.
+    private func replayPendingPerAppBindings(trigger: String) {
         let sets: [AppRouteMixer.DestinationSet] = stateQueue.sync {
             guard self.lastDestinationSets.contains(where: { set in
                 set.deviceIDs.contains { self.outputIDs[$0] != nil && self.streamBindings[$0] == nil }
@@ -3436,7 +3878,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return self.lastDestinationSets
         }
         guard !sets.isEmpty else { return }
-        Telemetry.log(.airplay, "app_route_rebind_on_clock_recovery", [:])
+        if trigger == "clock_recovery" {
+            // The pre-008 event name, kept as-is for its existing trigger.
+            Telemetry.log(.airplay, "app_route_rebind_on_clock_recovery", [:])
+        } else {
+            Telemetry.log(.airplay, "per_app_redrive", ["trigger": trigger])
+        }
         handleDestinationSetsChanged(sets)
     }
 
@@ -3471,25 +3918,101 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// slot leaked, `handleSystemDidWake`'s `!converging.contains(id)` kick and
     /// every later `setOutputSet` skipped it forever, so a selected speaker stayed
     /// silent with no self-recovery until the app was restarted.
-    private func releaseRebindConverging(id: String) -> OutputID? {
+    private func releaseRebindConverging(id: String) -> ConvergeReleaseAction {
         self.rebindConverging.remove(id)
         return self.releaseConvergingAndRequeueIfNeeded(id: id)
     }
 
-    private func releaseConvergingAndRequeueIfNeeded(id: String) -> OutputID? {
+    /// What a whole-system slot release asks its (off-lock) caller to do next
+    /// (roadmap 008 widened the old bare `OutputID?` requeue): re-kick a converge
+    /// for the moved target, and/or replay the cached per-app topology now that
+    /// the whole-system domain fully released the device. Losers never WAIT on
+    /// the other FIFO — they bow out and are re-driven here, by the releasing
+    /// side.
+    private struct ConvergeReleaseAction {
+        /// Re-kick `convergeDevice` (the pre-008 requeue, unchanged).
+        var requeue: OutputID?
+        /// Call `replayPendingPerAppBindings(trigger: "ws_release")` OFF the
+        /// lock: the per-app table still wants this device and its binding was
+        /// cleared by a fire-time bow-out.
+        var redrivePerApp = false
+        static let none = ConvergeReleaseAction(requeue: nil)
+    }
+
+    private func releaseConvergingAndRequeueIfNeeded(id: String) -> ConvergeReleaseAction {
         self.converging.remove(id)
         // Never requeue into a suspension. `convergeDevice` has no `suspended` guard
         // of its own, so a slot released mid-sleep would otherwise kick a loop that
         // issues addOutput at engine sessions sleep has already torn down. The slot
         // stays FREE instead, which is exactly what `handleSystemDidWake` needs: it
         // re-kicks every still-desired device that isn't already `converging`.
-        guard !self.suspended else { return nil }
-        guard !self.failedGate.contains(id),
-              let want = self.desiredOn[id],
-              let out = self.outputIDs[id],
-              want != self.added.contains(id) else { return nil }
-        self.converging.insert(id)
-        return out
+        // Roadmap 008: the re-drive/settle arms below are ALSO behind this guard —
+        // a sleep-window release must re-drive NOTHING (the sessions are dead; the
+        // wake re-kick + discovery re-drive are the recovery, and the suspension
+        // handler clears `pendingScopeSettles`).
+        guard !self.suspended else { return .none }
+        if !self.failedGate.contains(id),
+           let want = self.desiredOn[id],
+           let out = self.outputIDs[id],
+           want != self.added.contains(id) {
+            self.converging.insert(id)
+            // Requeued: a deferred scope settle stays pending and defers to THAT
+            // converge's own release — no waiting, bounded by claim transitions.
+            return ConvergeReleaseAction(requeue: out)
+        }
+        // Release WITHOUT requeue (roadmap 008 mechanism 3) — the whole-system
+        // domain is fully done with this device for now.
+        //
+        // 1. Consume a deferred scope settle by RE-ENQUEUING the deferred
+        //    `.unbind`: its four-case fire-time classification settles it against
+        //    the post-converge world (settled session → verify-first settle;
+        //    parked converge → today's teardown of the leaked per-app session; a
+        //    NEW claim in the meantime → defers again). One mechanism, no
+        //    duplicated settle logic, and every case lands on the arm the design
+        //    assigns it. `enqueueBindOps` is on-`stateQueue`-safe (it only
+        //    appends Tasks).
+        if self.pendingScopeSettles.contains(id) {
+            self.pendingScopeSettles.remove(id)
+            if let out = self.outputIDs[id] {
+                if self.streamBindings[id] == nil {
+                    Telemetry.log(.airplay, "unbind_redrive", ["device": id, "trigger": "ws_release"])
+                    self.enqueueBindOps([.unbind(out)])
+                } else {
+                    // Adversarial-review fix (008): the route RE-ENGAGED while the
+                    // settle was deferred (deselect → restore replay re-decided a
+                    // binding), so the deferred unbind is STALE — re-enqueued, it
+                    // would fire FIFO-behind the restored `.bind` with no claim
+                    // left (case 1) and removeOutput-kill the user's freshly
+                    // re-engaged session; with `streamBindings` set, every replay
+                    // guard (`streamBindings == nil`) then skips the device
+                    // forever — silent stranding. Any session the settle existed
+                    // to tear down is already handled: this release's own converge
+                    // tore the engine session down on the way to `added == false`,
+                    // and a still-live astray session is moved by the restored
+                    // `bindOutput` itself (it reads engine truth). Drop it loudly.
+                    // The `streamBindings` read and the restore diff's write are
+                    // both under `stateQueue`, so this decision is atomic against
+                    // the replay: diff-before-release → drop (the queued bind is
+                    // the last word); release-before-diff → the re-enqueued unbind
+                    // runs FIFO-ahead of the diff's bind, a tolerated no-op remove.
+                    Telemetry.log(.airplay, "unbind_redrive", [
+                        "device": id, "trigger": "ws_release",
+                        "outcome": "dropped_route_reengaged",
+                    ])
+                }
+            }
+        }
+        // 2. Per-app re-drive: the per-app table still wants this device, its
+        //    binding was cleared (a fire-time bow-out), and whole-system no
+        //    longer desires it — tell the caller to replay the cached topology
+        //    off the lock.
+        var action = ConvergeReleaseAction.none
+        if self.desiredOn[id] != true,
+           self.streamBindings[id] == nil,
+           self.lastDestinationSets.contains(where: { $0.deviceIDs.contains(id) }) {
+            action.redrivePerApp = true
+        }
+        return action
     }
 
     private func convergeDevice(id: String, outputID: OutputID) async {
@@ -3498,10 +4021,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // settling (e.g. a flip arrived after our last op but the slot was still
             // held), re-kick so we chase it — the release + re-check is atomic under
             // stateQueue so a concurrent setOutputSet can't slip a kick past us.
-            let requeue: OutputID? = stateQueue.sync {
+            // Roadmap 008: a release without requeue may also re-drive the per-app
+            // side (bow-outs whose re-issue this release unblocks) — off the lock.
+            let action: ConvergeReleaseAction = stateQueue.sync {
                 self.releaseConvergingAndRequeueIfNeeded(id: id)
             }
-            if let requeue {
+            if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
+            if let requeue = action.requeue {
                 Task { [weak self] in await self?.convergeDevice(id: id, outputID: requeue) }
             }
         }
@@ -3585,8 +4111,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // connect first (the dispatcher mirrors the completion onto
                         // the state stream), but whichever site runs first flips
                         // `added` under `stateQueue` and the second sees `wasAdded ==
-                        // true` and skips — so exactly one push per connect. See
-                        // `connectVolumeSeed`.
+                        // true` and skips — so exactly one push per connect. Whether
+                        // that push is the connect default or the level the device was
+                        // already streaming at is `connectVolumeSeed`'s call, off
+                        // `userConnectSeed` (F-REBIND). See `connectVolumeSeed`.
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
@@ -3990,6 +4518,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// still mid-converge, since that device's own fresh add re-anchors it).
     var test_isConverging: Bool { stateQueue.sync { !converging.isEmpty } }
 
+    /// Test-only (`@testable`): the active scope-conflict record for `deviceID`
+    /// (roadmap 008), or `nil` when no conflict is engaged — a `.device` route
+    /// whose target is a Selected Device is demoted for the duration and recorded
+    /// here (removed again on deselect/route edit). Diagnostic only; never read by
+    /// any decision path.
+    func test_scopeConflict(deviceID: String) -> ScopeConflict? {
+        stateQueue.sync { lastScopeConflicts[deviceID] }
+    }
+
     /// System will sleep: proactively remove every streaming engine output so the
     /// receivers get a clean RTSP TEARDOWN before sleep severs the sockets, while
     /// PRESERVING the selection intent (`expectedSelected` / `desiredOn`) so
@@ -4048,6 +4585,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.emit(.streamHealth(id: deviceID, recovering: false))
             }
             self.rebindConverging.removeAll()
+            // Roadmap 008: sleep tears every session down, so there is nothing
+            // left to settle — a deferred unbind surviving the sleep would only
+            // re-classify against post-wake state it has no business touching.
+            self.pendingScopeSettles.removeAll()
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }
@@ -4449,7 +4990,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let id = discovered.id                        // colon-hex TXT id, verbatim
         // R5: sampled BEFORE anything below can change it, so the tail of this
         // method can tell a real reachability EDGE from a repeated `.updated`.
-        let wasRouteTargetReachable = isRouteTargetReachableLocked(id)
+        let wasRouteTargetEligible = isRouteTargetEligibleLocked(id)
         self.outputIDs[id] = discovered.outputID
         // "Streamable right now" = currently reachable (AP1 or AP2 — both drive
         // through the shared engine). A sticky-AP2 device that went offline
@@ -4540,21 +5081,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Devices / Main Out); a redirect target is deliberately never in that set
         // (`AudiouterCore/AGENTS.md`), so it needs its own replay — which is also
         // what disengages a route whose target just went offline.
-        rerunAppRoutesIfTargeted(id, wasReachable: wasRouteTargetReachable)
+        rerunAppRoutesIfTargeted(id, wasEligible: wasRouteTargetEligible)
     }
 
-    /// Replay the per-app route table iff `id`'s reachability actually FLIPPED and
-    /// some route points at it (R5). Both guards matter: discovery re-resolves the
-    /// same device repeatedly, and a replay per `.updated` event would churn the
-    /// per-app taps and the whole-system tap's exclusion set for nothing. On
+    /// Replay the per-app route table iff `id`'s ELIGIBILITY (reachable AND not
+    /// whole-system-claimed, roadmap 008) actually FLIPPED and some route points
+    /// at it (R5). Both guards matter: discovery re-resolves the same device
+    /// repeatedly, and a replay per `.updated` event would churn the per-app taps
+    /// and the whole-system tap's exclusion set for nothing. Keying on eligibility
+    /// (not bare reachability) also suppresses a pointless replay when a CLAIMED
+    /// target's reachability flips — the route stays demoted either way. On
     /// `stateQueue` (the replay itself hops off it).
-    private func rerunAppRoutesIfTargeted(_ id: String, wasReachable: Bool) {   // on stateQueue
-        let isReachable = isRouteTargetReachableLocked(id)
-        guard isReachable != wasReachable,
+    private func rerunAppRoutesIfTargeted(_ id: String, wasEligible: Bool) {   // on stateQueue
+        let isEligible = isRouteTargetEligibleLocked(id)
+        guard isEligible != wasEligible,
               lastRoutes.contains(where: { $0.destination == .device(id: id) })
         else { return }
         AudioDiag.log(
-            "app routes: redirect target \(id) became \(isReachable ? "REACHABLE" : "UNREACHABLE")"
+            "app routes: redirect target \(id) became \(isEligible ? "ELIGIBLE" : "INELIGIBLE")"
             + " — re-resolving effective routes (route table unchanged)")
         rerunAppRoutesForReachabilityChange()
     }
@@ -4572,10 +5116,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// excluded from the whole-system tap while its per-app stream has nowhere to
     /// go, i.e. silence with no user-visible cause.
     private func commitKnownDevice(_ id: String, _ device: Device) {   // on stateQueue
-        let wasReachable = isRouteTargetReachableLocked(id)
+        let wasEligible = isRouteTargetEligibleLocked(id)
         known[id] = device
         emit(.deviceUpdated(device))
-        rerunAppRoutesIfTargeted(id, wasReachable: wasReachable)
+        rerunAppRoutesIfTargeted(id, wasEligible: wasEligible)
     }
 
     /// A device dropped off the network. It stays in the model as unavailable (so a
@@ -4681,6 +5225,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // Suppressed during an `applyStartBuffer` re-add so a buffer change
                 // whose good-state event races this branch can't reset the level —
                 // see `connectVolumeSeed`.
+                //
+                // F-REBIND: this is the branch a session rebind lands on. The rebind's
+                // `removeOutput` makes the engine report `.stopped` (dropping `added`),
+                // so its `addOutput` arrives here reading `!wasAdded` — indistinguishable
+                // from a fresh connect. `connectVolumeSeed` tells them apart by intent
+                // (`userConnectSeed`) and keeps the in-session level for the rebind.
                 if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
@@ -5195,10 +5745,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
-    /// Seed a just-(re)connected engine output's starting volume from the
-    /// configured connect-volume default. Pushes the level to the engine and
-    /// returns the value to display on the model, or `nil` when the seed is
-    /// suppressed (leave the model volume untouched). On `stateQueue`.
+    /// Seed a just-(re)connected engine output's starting volume — from the
+    /// configured connect-volume default on a connect the user asked for, or from the
+    /// level the device was already streaming at on one it didn't (F-REBIND, see
+    /// ``userConnectSeed``). Pushes the level to the engine and returns the value to
+    /// display on the model, or `nil` when the seed is suppressed (leave the model
+    /// volume untouched). On `stateQueue`.
     ///
     /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
     /// The engine's per-output volume field is zero-initialized and is only ever set
@@ -5209,9 +5761,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// push a real starting volume; this is that push, called from BOTH add-success
     /// sites (`convergeDevice` and `applyEngineState`).
     ///
-    /// Source of the level (G1-N1): ``connectVolumeProvider`` — the user's
-    /// configured connect volume (``AppSettings/connectVolume``, default 35%), NOT
-    /// the Mac's current system level. An earlier design inherited the system level,
+    /// Source of the level (G1-N1) for a USER-intended connect: ``connectVolumeProvider``
+    /// — the user's configured connect volume (``AppSettings/connectVolume``, default
+    /// 35%), NOT the Mac's current system level. An earlier design inherited the system level,
     /// but Mac speakers often run loud, so connecting a real AirPlay speaker could
     /// BLAST the user on first connect. A fixed moderate default is predictable and
     /// safe. The value is clamped to ``AppSettings/minConnectVolume``… so the seed
@@ -5247,16 +5799,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// there is no second set that can be stuck-set while `added` is clear, so every
     /// genuine reconnect (which necessarily re-flips `added` false→true) reseeds.
     ///
-    /// The seed reads ``connectVolumeProvider`` (a `UserDefaults`-backed
-    /// `AppSettings` read — cheap, non-blocking, unlike the old system-volume HAL
-    /// read) and clamps it to ``AppSettings/minConnectVolume``…
-    /// ``AppSettings/maxConnectVolume``. The clamp is the load-bearing safety net:
-    /// even if the setting or an injected test provider returns 0 or something out
-    /// of range, the value that reaches the wire is always audible — 0/silent is
-    /// unreachable.
+    /// On a connect the USER asked for, the seed reads ``connectVolumeProvider``
+    /// (a `UserDefaults`-backed `AppSettings` read — cheap, non-blocking, unlike
+    /// the old system-volume HAL read) and clamps it to
+    /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume``. That
+    /// clamp is the load-bearing safety net for the DEFAULT: even if the setting
+    /// or an injected test provider returns 0 or something out of range, the
+    /// default that reaches the wire is always audible.
+    ///
+    /// The clamp does NOT bound the F-REBIND preserve branch: a level the user
+    /// dialled in themselves is theirs to keep, INCLUDING a deliberate 0 (an
+    /// unmuted device the user set to silence stays silent across a rebind —
+    /// re-blasting it to the default on a Bluetooth-connect glitch would be the
+    /// worse surprise). So 0/silent IS reachable via preserve — but only when the
+    /// user chose it, never as an accidental −30 dB trap: the trap is a *re-made
+    /// session sitting at engine 0 because nobody set a level*, and both branches
+    /// here always set one.
     private func connectVolumeSeed(_ id: String, outputID: OutputID) -> Int? {   // on stateQueue
         guard !bufferReAdding.contains(id) else { return nil }
-        let seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
+        // F-REBIND: the connect default belongs to a connect the USER asked for. An
+        // add nobody asked for — the session rebind a tap rebuild fires when macOS
+        // changes the default output device — keeps the level the device was already
+        // streaming at. Either way a level IS pushed: the re-made session sits at
+        // engine volume 0 = the −30 dB trap no matter what re-made it, so returning
+        // early here would trade a reset volume for a silent device.
+        //
+        // `known[id].volume` reads 0 while muted (the stash shim, `setMuted`), so the
+        // in-session level comes from `stashedVolume` first — the same read
+        // `restoreEffectiveVolume` and `applyStartBuffer` use. A preserved level is
+        // NOT re-clamped to the connect range: that clamp bounds the DEFAULT, and a
+        // level the user dialled in themselves is theirs to keep.
+        let isUserConnect = userConnectSeed.remove(id) != nil
+        let seed: Int
+        if !isUserConnect, let inSession = stashedVolume[id] ?? known[id]?.volume {
+            seed = inSession
+        } else {
+            seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
+        }
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
             // Via `engineVolume(forID:)` rather than the static AP2-only map, so a
@@ -5314,7 +5893,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             && expectedSelected.contains { known[$0]?.isLocalDevice == false }
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
-        if !want {
+        if want {
+            // T2 (send_sched dead-code fix, whole-system-dropout investigation):
+            // capture just started — (re-)arm the scheduling snapshot poll HERE,
+            // on every true edge, not just once at `start()` (before any device
+            // is ever selected, when this gate's `want` is always still false —
+            // the exact reason `send_sched` never fired in production).
+            // `startSchedulingSnapshotPolling()` is idempotent on its own (it
+            // cancels any previously-scheduled work item before arming a fresh
+            // one), and this call site is additionally guarded by the
+            // `want != captureRunning` check above, so a second selection while
+            // already capturing never reaches here to re-arm a second time.
+            startSchedulingSnapshotPolling()
+        } else {
             // T16/E10 hygiene: capture is no longer desired — cancel any
             // pending whole-system-tap retry rather than let it fire later.
             // `scheduleCaptureRetry`'s own fire-time `captureRunning` re-check
@@ -5324,6 +5915,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // let a stale timer linger past the moment its outcome is decided.
             pendingCaptureRetry?.cancel()
             pendingCaptureRetry = nil
+            // T2: same hygiene for the scheduling poll — capture just stopped,
+            // so cancel its pending work item rather than let it fire once more
+            // (harmlessly, since `pollSchedulingSnapshot`'s own guard re-checks
+            // `captureRunning`) 5s from now.
+            schedulingSnapshotPollWork?.cancel()
+            schedulingSnapshotPollWork = nil
         }
         // W3-T3: streaming just started or stopped — re-evaluate the double-path
         // guard (it also depends on the system default output, which didn't
@@ -5629,6 +6226,14 @@ protocol EngineControlling: Sendable {
     /// third stream. Default is the historical stop-then-re-add pair.
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws
     func removeOutput(_ id: OutputID) async throws
+    /// Re-anchor `id`'s receiver timeline in place via RTSP FLUSH, WITHOUT tearing
+    /// down the session (F-REANCHOR — see ``AirPlayEngine/AirPlayEngine/flushOutput(_:)``).
+    /// Returns `true` only if a flush was ACTUALLY issued; `false` means the vendored
+    /// flush no-op'd (device not streaming), and the caller MUST fall back to a real
+    /// teardown+re-add. Default returns `false` (didn't flush) so a conformer with no
+    /// real session safely drives the caller to teardown; ``EngineAdapter`` overrides
+    /// it with the real flush.
+    func flushOutput(_ id: OutputID) async throws -> Bool
     func setVolume(_ id: OutputID, _ volume: Double) async throws
     func setStartBufferMs(_ ms: Int) async
     /// Feed one finished mixed per-app buffer tagged with its `streamId` (T2/T6).
@@ -5669,6 +6274,16 @@ protocol EngineControlling: Sendable {
     /// a conformer that predates this (e.g., a test spy) compiles unchanged.
     /// Called by T2 polling every ~5s to log to telemetry while capture is active.
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot
+
+    /// Snapshot of the write-cadence deficit/overrun counters (T-ENG-CADENCE-1
+    /// — mirrors `AirPlayEngine/writeCadenceSnapshot()`). `nonisolated` and
+    /// cheap to read from any thread, same rationale as
+    /// `writeSchedulingSnapshot()`. Returns an empty (zeroed) snapshot by
+    /// default so a conformer that predates this (e.g., a test spy) compiles
+    /// unchanged. Sampled by `sampleWriteCadenceIfDue()` on the per-app
+    /// mixer's write path, same throttled/delta-gated cadence as
+    /// `writeBacklogSnapshot()`/`write_backlog_drop`.
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot
 }
 
 extension EngineControlling {
@@ -5698,6 +6313,11 @@ extension EngineControlling {
         if streamId == 0 { try await addOutput(id) } else { try await addOutput(id, streamId: streamId) }
     }
 
+    /// Default: `false` — "did not flush" (F-REANCHOR). A conformer with no live
+    /// receiver timeline to re-anchor safely drives the caller to the teardown
+    /// fallback; ``EngineAdapter`` overrides this to forward to the real engine.
+    func flushOutput(_ id: OutputID) async throws -> Bool { false }
+
     /// Default: drop the buffer. ``EngineAdapter`` overrides this to forward to the
     /// real engine; a conformer that never receives per-app mixed audio ignores it.
     func write(pcm: Data, streamId: UInt32, pts: timespec) {}
@@ -5715,6 +6335,14 @@ extension EngineControlling {
     /// and reports no metrics.
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         WriteSchedulingSnapshot()
+    }
+
+    /// Default: empty snapshot (T-ENG-CADENCE-1). ``EngineAdapter`` overrides
+    /// this to forward to the real engine's `writeCadenceSnapshot()`; a
+    /// conformer that predates this (existing `NativeBackendTests` spies)
+    /// compiles unchanged and reports no metrics.
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
+        WriteCadenceSnapshot()
     }
 }
 
@@ -5743,6 +6371,7 @@ struct EngineAdapter: EngineControlling {
         try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
+    func flushOutput(_ id: OutputID) async throws -> Bool { try await engine.flushOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
     func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
     func write(pcm: Data, streamId: UInt32, pts: timespec) {
@@ -5756,6 +6385,9 @@ struct EngineAdapter: EngineControlling {
     }
     nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         engine.writeSchedulingSnapshot()
+    }
+    nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot {
+        engine.writeCadenceSnapshot()
     }
 }
 
@@ -5854,7 +6486,6 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Default no-op so a capture-gate-only fake compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
-
 }
 
 extension CaptureControlling {

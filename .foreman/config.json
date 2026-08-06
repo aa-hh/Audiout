@@ -1,0 +1,11 @@
+{
+  "discoverySuggestions": true,
+  "usePersona": false,
+  "omitSections": [],
+  "requireVerification": true,
+  "taskCloseGate": "block",
+  "fableEnabled": true,
+  "decisionLog": {
+    "enabled": false
+  }
+}

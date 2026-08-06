@@ -1,0 +1,587 @@
+[
+  {
+    "family": "Sonos app + ecosystem (2024\u20132026 app-rewrite backlash, group/volume/room UX, Trueplay/EQ)",
+    "findings": [
+      {
+        "feature": "Instant, reliable group volume adjustment (sub-second latency)",
+        "evidence": "Sonos Community 'Workaround for delay when adjusting volume or changing songs' (en.community.sonos.com/.../6905208) \u2014 users reporting 3-5s and up to 20s volume lag; phonearena.com/news/sonos-fixes-volume-bug-app_id167297; techradar.com 'Sonos may have finally fixed its app's biggest remaining problem'",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "THE single loudest complaint of the rewrite era; Sonos itself called group volume its 'biggest remaining problem' into 2025. Audiouter has live per-device volume plus speaker-input responsiveness (absolute DACP setproperty) merged. Lesson: responsiveness here is existential, not polish \u2014 regressions get users to abandon the app entirely."
+      },
+      {
+        "feature": "Group master slider that expands to per-speaker sliders, preserving relative proportions",
+        "evidence": "support.sonos.com/en-us/article/group-and-ungroup-rooms; docs.sonos.com/docs/volume (set group volume vs relative group volume, snapshot-based proportion keeping); Sonos patent 'Group volume control' (patents.justia.com/patent/12260064)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "has-it",
+        "notes": "Sonos considers this important enough to patent. The tap-slider-to-expand-into-individual-sliders interaction is the canonical UX. Audiouter's Main x Group x Device multiplicative model matches the mechanism; worth confirming the popover exposes the expand-to-individual gesture as smoothly."
+      },
+      {
+        "feature": "Saved speaker groups / one-tap group presets",
+        "evidence": "support.sonos.com/en-us/article/saved-groups (official, shipped 2025 after years of requests); Sonos Community 'Can you create preset groupings?' (6905089), 'Save Group Settings' (6089491)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "has-it",
+        "notes": "Users requested this 'almost from the day Sonos was introduced'; Sonos only recently shipped it. Audiouter already has saved groups \u2014 a genuine parity win to advertise."
+      },
+      {
+        "feature": "Scenes: preset = group + per-speaker volume levels (+ optionally content) recalled by name",
+        "evidence": "Sonos Community 'Easily accessible group & volume scenes' (5107580), 'Presets/Scenes' (6851053), 'Party Mode is a problem...' (5451386) \u2014 multi-year threads asking for volume-level snapshots, still unfulfilled",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "partial",
+        "notes": "The step beyond saved groups users actually beg for: the group AND the tuned per-device volume mix restored together. Audiouter has saved groups; unclear whether restoring a group also restores its per-device volume/mute snapshot. Cheap differentiator if not."
+      },
+      {
+        "feature": "One-tap 'everywhere' / party mode (group all speakers instantly)",
+        "evidence": "Sonos Community 'Party Mode is a problem' thread (5451386); the-ambient.com how-to on preset speaker groups; sonos-mcp-server exposes a dedicated partymode tool (glama.ai)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "unknown",
+        "notes": "Long-standing Sonos affordance; users treat 'play everywhere with one action' as baseline. If Audiouter requires per-speaker toggling to select all, a select-all control is low-cost table stakes."
+      },
+      {
+        "feature": "Fully local control \u2014 no cloud round-trip for playback/volume/config",
+        "evidence": "theregister.com/2024/05/20/sonos_app_update_borks_users; Sonos Community 'The new Sonos app is it all cloud based?' (6904138) and 'What happened to the Sonos app? A technical analysis' (6899540)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "The rewrite's cloud dependency (app phones home before local control works) was a core backlash theme and a stated reason users fled to third-party apps. Audiouter is inherently LAN-local \u2014 a positioning point worth stating explicitly in marketing, since Sonos users now actively distrust cloud-mediated control."
+      },
+      {
+        "feature": "Rock-solid speaker discovery (rooms never silently disappear from the list)",
+        "evidence": "Sonos Community 'speakers keep disappearing and coming back' (6885456), 'So - why do Sonos speakers just disappear then?' (6890530), 'system disappearing after app 80.04 update' (6892256); aol.com Sonos apology coverage",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Impatient discovery (assume-absent on slow mDNS response) plus subnet/AP quirks made rooms vanish daily for some users. Audiouter uses Bonjour discovery; worth auditing grace periods before dropping a known speaker from the popover, and keeping last-known devices visible-but-unreachable rather than gone."
+      },
+      {
+        "feature": "Sleep timer",
+        "evidence": "digitaltrends.com/home-theater/sonos-app-redesign-2024-work-in-progress; soundguys.com/sonos-app-not-working-123602 \u2014 sleep timers among features stripped in May 2024 and loudly mourned until restored",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "missing",
+        "notes": "Alarms are less relevant to a Mac audio router, but a sleep timer ('stop streaming to bedroom speaker in 30 min') maps cleanly to Audiouter's domain and was one of the mourned features. Small, well-understood, high goodwill."
+      },
+      {
+        "feature": "Queue / playlist management in the controller",
+        "evidence": "soundguys.com/sonos-app-not-working-123602; mjtsai.com/blog/2024/07/26/sonos-apologizes-for-app-redesign \u2014 queue editing, playlist management, library shuffle among removed features driving the backlash",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "missing",
+        "notes": "Largely N/A by design: Audiouter routes system/app audio, so the source app (Music, Spotify) owns the queue. Recorded so the roadmap consciously skips it rather than misses it; per-app routing keeps the user in the app that already has a good queue UI \u2014 arguably the better architecture."
+      },
+      {
+        "feature": "Screen-reader / VoiceOver accessibility of speaker and volume controls",
+        "evidence": "soundguys.com/sonos-app-not-working-123602 and mjtsai.com (broken screen-reader support for blind users called one of the app's 'most damning issues'); widely covered in rewrite backlash press",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Breaking accessibility generated some of the harshest press Sonos got. Audiouter's 2026-08 accessibility audit (92 findings, waves planned, not merged) covers this \u2014 the Sonos episode is external proof the remediation waves are release-blocking, not nice-to-have."
+      },
+      {
+        "feature": "Basic per-speaker EQ: bass, treble, balance, loudness compensation",
+        "evidence": "support.sonos.com/en-us/article/adjust-the-bass-treble-balance-and-loudness (official feature page)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "Shipped quietly by Sonos (and by HomePod/most ecosystems) \u2014 weakish signal on its own, but combined with the full-EQ requests below it suggests a simple per-device tone control is the expected floor. Loudness (low-volume bass compensation) is the sleeper feature users toggle most."
+      },
+      {
+        "feature": "Full graphic/parametric EQ exposed to the user",
+        "evidence": "Sonos Community 'Full Equalizer?' (6882262) and 'Advanced eq settings' (6872124) \u2014 users note the hardware runs a 16-filter parametric EQ reachable only via Trueplay and ask for manual access",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "Persistent request Sonos refuses. Audiouter sits in the audio path on the Mac and could offer per-device or per-group EQ before encode \u2014 something Sonos structurally won't give. Genuine differentiator candidate, but it is DSP scope creep; classify as roadmap-optional, not table stakes."
+      },
+      {
+        "feature": "Room correction (Trueplay-style auto-tuning), with cross-platform parity",
+        "evidence": "whathifi.com Trueplay coverage; Sonos Community 'New App Android Missing Trueplay' (6927790), 'Trueplay for Android users' (6889867) \u2014 Android users buying cheap iPads as workaround",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Trueplay is a marquee differentiator Sonos ships, but the loud user signal is about parity/lockout (iOS-only), not demand for the tuning itself. For Audiouter this is low priority: mic-based room correction is a large project, and target speakers (Sonos etc.) already self-tune. Skip; noted for completeness."
+      },
+      {
+        "feature": "Group volume leveling / normalizing mismatched speakers",
+        "evidence": "Sonos Community 'Group Volume Leveling' (6865189) and 'Volume for individual speakers when playing as a group' (6863470)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "partial",
+        "notes": "Users with mixed hardware (e.g. One + Five) want per-speaker trim that persists so a group sounds balanced at any master level. Audiouter's multiplicative Device gain under a Main/Group master is exactly this mechanism \u2014 the gap, if any, is persistence per saved group and framing it as 'trim' in the UI."
+      },
+      {
+        "feature": "Fast, utilitarian controller beats feature-rich app (SonoPhone lesson)",
+        "evidence": "soundguys.com/sonos-unofficial-app-159806; techradar.com 'Sonos fans are turning to this alternative app'; Sonos Community 'any third-party sonos app recommendations?' (6894325); cultivatingmentalsilence.com SonoPhone/SonoPad review",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "Meta-finding: users paid $3 for SonoPhone \u2014 a spartan, purely local controller \u2014 over the free official app, because it was fast and reliable at grouping/volume/queue. Validates Audiouter's native-menu-bar, local-first, controls-only positioning; the priority order users revealed is reliability > speed > completeness > polish."
+      },
+      {
+        "feature": "Volume control from hardware keys / lock screen without opening the app",
+        "evidence": "Sonos Community volume-delay threads (6905208, 6923060) \u2014 friction of opening the app and waiting to connect just to change volume is a recurring sub-complaint; tomsguide.com 'New Sonos app update just fixed this huge headache'",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "On Mac this maps to media/volume keys adjusting Audiouter's Main Out without opening the popover. Audiouter's volume-key interception work (aggregate-device interceptor mode) is queued but unmerged \u2014 this finding supports its priority. For the iOS companion, lock-screen/Control-Center volume is the analogous expectation."
+      }
+    ]
+  },
+  {
+    "family": "Rogue Amoeba suite (Airfoil, SoundSource, Loopback, Audio Hijack)",
+    "findings": [
+      {
+        "feature": "Multi-speaker synced streaming with speaker groups/zones",
+        "evidence": "https://rogueamoeba.com/airfoil/mac/ and whatsnew page \u2014 'combine multiple outputs into one using Speaker Groups', 'everything will play in perfect sync, even between different speaker types'",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "has-it",
+        "notes": "Core parity. Airfoil is 20+ years old; groups/zones are the baseline expectation for this category."
+      },
+      {
+        "feature": "Chromecast / Google Cast output",
+        "evidence": "https://rogueamoeba.com/airfoil/mac/ \u2014 'stream to Google Chromecast and other Cast devices'; Airfoil Satellite App Store reviews praise playing 'on Chromecast and AirPlay devices simultaneously'",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Airfoil mixes Cast and AirPlay targets in one synced session \u2014 a differentiator Audiouter explicitly does not ship yet."
+      },
+      {
+        "feature": "Bluetooth speakers/headphones as synced outputs alongside AirPlay",
+        "evidence": "https://rogueamoeba.com/airfoil/mac/ \u2014 'thousands of different Bluetooth speakers or headphones', synced with other output types",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter has multi-BT feasibility decided but gated on a hardware spike; Airfoil already ships BT-in-the-sync-group. Universal Sync plan covers this."
+      },
+      {
+        "feature": "Built-in equalizer (Airfoil 10-band; SoundSource per-app EQ + Headphone EQ profiles)",
+        "evidence": "https://rogueamoeba.com/airfoil/mac/whatsnew.php (built-in Equalizer); https://rogueamoeba.com/support/manuals/soundsource/?page=controls-applications (per-app 10-band EQ, Volume Overdrive); SoundSource 6 added per-app Headphone EQ",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "Both direct competitors ship EQ; Audiouter roadmap lists EQ as unbuilt. Table stakes in the audio-utility niche, though not begged-for in forums I found."
+      },
+      {
+        "feature": "Per-speaker manual sync/latency offset sliders",
+        "evidence": "https://rogueamoeba.com/support/knowledgebase/?showArticle=AudioDelaysAndSync \u2014 Advanced Speaker Options sliders to manually offset sync between devices; users on forums.indigodomo.com and Apple Communities ask how to fix AirPlay delay this way",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "unknown",
+        "notes": "Users actively seek per-device delay trim when auto-sync drifts (mixed local + network outputs). Audiouter does auto anchor/re-anchor (FLUSH re-anchor work) but I found no user-facing manual offset. Strong candidate: an escape hatch for stubborn devices."
+      },
+      {
+        "feature": "Low/adjustable capture latency \u2014 AirPlay's ~2s buffer is the #1 user complaint",
+        "evidence": "https://nicolasamiot.wordpress.com/2015/06/01/minimize-airfoil-audio-delay/; Airfoil Satellite App Store reviews ('~2 second lag with Netflix'); https://forums.whathifi.com/threads/time-delay-with-airfoil-and-youtube.55169; Rogue Amoeba KB concedes 'inherent delays'",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Recurring, decade-long complaint about Airfoil: audio lags video. Audiouter's synced-local pipeline addresses lip-sync differently; a marketing + engineering wedge if Audiouter can document lower/compensated latency for video watching."
+      },
+      {
+        "feature": "Per-app routing to AirPlay while rest of audio stays local (SoundSource 6, Dec 2025)",
+        "evidence": "https://weblog.rogueamoeba.com/2025/12/04/soundsource-6-is-here/ and https://rogueamoeba.com/soundsource/whatsnew.php \u2014 'route an individual application to one or more AirPlay devices while playing the rest of your audio from a local output'",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "has-it",
+        "notes": "Rogue Amoeba just moved directly onto Audiouter's core turf (SoundSource 6 shipped Dec 2025, $49/$25 upgrade). Audiouter already has per-app routing; competitive pressure, not a gap \u2014 but shows the market validated the concept."
+      },
+      {
+        "feature": "Grouped output devices selectable system-wide (SoundSource 6)",
+        "evidence": "https://rogueamoeba.com/soundsource/whatsnew.php \u2014 custom output groups usable from any output selector, per-app and whole-system",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "has-it",
+        "notes": "Parallels Audiouter's Wave 3 public 'Audiouter' aggregate device. Convergent evolution; Audiouter's seamless-handoff work may actually be ahead on the AirPlay-exclusivity edge cases."
+      },
+      {
+        "feature": "Quick Configs / saved audio profiles (whole-setup snapshots, one-click switch)",
+        "evidence": "https://rogueamoeba.com/soundsource/whatsnew.php \u2014 'save complete audio setups... instantly switch configurations'; echoed in AlternativeTo news coverage",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter has saved speaker groups; SoundSource's version snapshots the entire routing/volume/EQ state including per-app routes. A natural superset of Audiouter's groups."
+      },
+      {
+        "feature": "Shortcuts app automation actions + hotkeys for audio control",
+        "evidence": "https://rogueamoeba.com/soundsource/whatsnew.php \u2014 'Expanded Shortcuts automation actions', custom hotkeys per device; Indigo home-automation forum threads show demand for scriptable Airfoil control (forums.indigodomo.com)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Home-automation users script speaker connect/volume; an Airfoil Indigo plugin exists solely for this. Cheap win for a native AppKit app via App Intents."
+      },
+      {
+        "feature": "iOS remote-control companion app (Airfoil Satellite)",
+        "evidence": "https://rogueamoeba.com/airfoil/satellite/ios/ and App Store reviews \u2014 free receiver + remote controlling sources, per-speaker volume from phone",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter's companion iPhone app is built but unmerged. Satellite reviews complain about sync drops needing reconnect and clunky controls \u2014 bar to beat is low."
+      },
+      {
+        "feature": "Mac/iPhone as an AirPlay *receiver* (Satellite receiving audio)",
+        "evidence": "https://rogueamoeba.com/airfoil/satellite/ \u2014 turn any Mac/iOS/Windows device into an output; 2018 blog notes AirPlay-2 receiving 'remains to be seen' (https://weblog.rogueamoeba.com/2018/06/25/current-notes-on-airfoil-airplay-2/)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter's synced-local playback covers the host Mac itself but not other devices as receivers. Niche; note Rogue Amoeba never achieved AirPlay-2-protocol receiving either."
+      },
+      {
+        "feature": "Sonos firmware regression handling for multi-device AirPlay streams",
+        "evidence": "https://en.community.sonos.com/portable-speakers-229130/sonos-move-2-issues-with-airplay-2-via-airfoil-on-mac-or-via-roon-6930008 \u2014 Rogue Amoeba contacted Sonos Oct 2024 about a firmware regression breaking multi-device AirPlay from third-party senders",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "unknown",
+        "notes": "Shared ecosystem risk, not a feature: Sonos firmware updates break third-party multi-device AirPlay senders. Audiouter (heavy Sonos testing already) should track this failure mode; users blame the app."
+      },
+      {
+        "feature": "One-time-purchase pricing, with suite seen as expensive at the top end",
+        "evidence": "Airfoil $29 (rogueamoeba.com/airfoil/mac/), SoundSource $49/upgrade $25, Audio Hijack $69, Loopback $99; mac-forums.com thread calls Loopback 'a ridiculous price for that functionality'; soundshine.app/soundpipe.app blogs exist purely to sell cheaper alternatives",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "unknown",
+        "notes": "Market accepts one-time $29-49 for streaming/routing; complaints start at $69-99. Audiouter combining Airfoil + part of SoundSource functionality could price at/below $49 one-time and undercut the suite (users otherwise need 2+ apps). No subscriptions anywhere in this family \u2014 a subscription would be off-market."
+      },
+      {
+        "feature": "Free trial with quality degradation (static after 10 minutes) instead of time limit",
+        "evidence": "https://www.macworld.com/article/550431/mac-gems-airfoil-review.html \u2014 free version overlays static after 10 minutes per session",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "unknown",
+        "notes": "Category-standard trial mechanic; lets users fully validate their speaker setup before paying, which matters for a hardware-compatibility-sensitive product."
+      },
+      {
+        "feature": "No kernel/system-extension install friction (ARK vs legacy ACE)",
+        "evidence": "https://rogueamoeba.com/support/knowledgebase/?showArticle=ACE-BigSur-Install-Troubleshooting and ACE-Legacy article \u2014 years of documented ACE authorization failures; replaced by ARK on macOS 14+ specifically to kill the install pain",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "Rogue Amoeba's biggest historical support burden was capture-driver installation. Audiouter uses the native process-tap API (TCC prompt only) \u2014 worth marketing as 'no drivers, no extensions'. Audiouter's own analog is TCC cdhash-pinning quirks."
+      },
+      {
+        "feature": "Special/hidden system sources (Notification Center, Spoken Content, FaceTime capture)",
+        "evidence": "https://rogueamoeba.com/support/releasenotes/?product=Airfoil+for+Mac \u2014 5.12.5 (Aug 2025) added 'Spoken Content' and 'Notification Center' sources; 5.12.6 notes FaceTime/Phone capture broken on macOS 26 pending Apple fixes",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Fine-grained capture of system-owned audio processes is an Airfoil niche strength; also a warning that macOS 26 currently breaks some capture paths for everyone in this space."
+      },
+      {
+        "feature": "Per-device max-volume limiting and settings lock",
+        "evidence": "https://rogueamoeba.com/soundsource/whatsnew.php \u2014 'Maximum volume limiting per device', 'Settings lock feature to prevent accidental changes'",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Small safety/QoL features that fit naturally into Audiouter's per-device volume model (Main-as-ceiling architecture already has the plumbing). Low demand evidence beyond Rogue Amoeba shipping it."
+      }
+    ]
+  },
+  {
+    "family": "OwnTone / shairport-sync / snapcast / LMS-squeezelite (open-source multiroom)",
+    "findings": [
+      {
+        "feature": "Per-speaker/per-client EQ",
+        "evidence": "snapcast/snapcast#917 'Equalizer option on client side' (user offered to write the PR), Discussion #1230 'Any EQ options available per speaker?', badaix/snapcast#424 (ALSA-equalizer workarounds); third-party ESP32 snapclients ship DSP/EQ because upstream doesn't",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "One of the loudest recurring asks in snapcast; motivation is explicitly 'speakers differ, rooms differ'. Community routes around it with hacks, which is strong latent demand. Per-DEVICE EQ (not just global) is the specific want."
+      },
+      {
+        "feature": "Room-correction DSP (convolution + loudness compensation)",
+        "evidence": "shairport-sync wiki 'Digital Signal Processing with Shairport Sync' (github.com/mikebrady/shairport-sync/wiki) \u2014 shipped convolution filter (REW impulse responses) and volume-dependent loudness filter; issue #1174 requested the docs page",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "shairport-sync ships this quietly; hobbyists use REW-generated filters. Weaker signal than #917-style begging, but shows the power-user ceiling for 'EQ' in this family goes beyond a 10-band graphic EQ."
+      },
+      {
+        "feature": "Manual per-device latency/delay offset",
+        "evidence": "snapcast --latency flag + JSON-RPC per-client latency (github.com/snapcast/snapcast README); ejurgensen/forked-daapd#560 'Independent speaker delay?' (mixed shairport + official AirPlay devices consistently offset)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "In snapcast it's table stakes; in OwnTone users request it for heterogeneous device mixes. Audiouter auto-syncs AirPlay 2, but a user-visible per-device trim (esp. for the planned Bluetooth outputs and synced-local, where hardware latencies vary) has no UI today. Related complaint: snapcast#476 \u2014 the latency setting was forgotten after volume changes, i.e. users expect these trims to PERSIST."
+      },
+      {
+        "feature": "Keeping Bluetooth outputs in sync with network speakers",
+        "evidence": "owntone/owntone-server#543 'Speaker synchronization - Airplay and Bluetooth coexistence' (BT drifts out of sync and never recovers); snapcast#50 'bluetooth speaker lag?', badaix/snapcast#912, #108",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Every project in the family has an open wound here \u2014 BT drift is unsolved upstream. Audiouter's PLAN-UNIVERSAL-SYNC (not executed) targets exactly this; the complaints validate it as a differentiator if the drift-correction actually works, since competitors gave up."
+      },
+      {
+        "feature": "Speakers that need manual restarting / robust auto-reconnect",
+        "evidence": "owntone/owntone-server#1760 'Regularly needing to restart Airplay speakers for Owntone to connect (iOS works)' \u2014 iOS reconnects fine, OwnTone doesn't, so users blame the app",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "The killer detail: users benchmark against iOS's reconnect behavior. Audiouter has reconnect/warm-signal work on main, but the 'reconnecting device resumes own level vs Mac's' question is still open per project notes \u2014 same territory."
+      },
+      {
+        "feature": "Coherent master-volume vs per-speaker-volume model",
+        "evidence": "owntone/owntone-server#1011 'Inconsistent volume levels and sync with master volume' (single speaker near-muted because master sat at 20%), #1077 (API sets all speakers to 1), #1657 (Spotify Connect volume jumps to 100%)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "OwnTone's master\u00d7device coupling confuses and occasionally blasts users. Audiouter's merged Main-as-ceiling (sent = Main \u00d7 Group \u00d7 Device) is precisely the fix users ask for \u2014 worth marketing explicitly ('volume never jumps to 100%')."
+      },
+      {
+        "feature": "Speaker hardware buttons/remote controlling app volume (two-way volume)",
+        "evidence": "owntone/owntone-server#1094 'Can't use volume buttons from my Symfonisk speaker'; #873 'Better remote support from shairport-sync' (wants relative volume, AdvancedRemoteControl only takes absolute)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "has-it",
+        "notes": "Audiouter's speaker-input responsiveness work (Sonos absolute DACP setproperty, merged) covers the Sonos case. Validation that two-way device-initiated volume is a real want, not a nicety."
+      },
+      {
+        "feature": "AirPlay 2 as an OUTPUT from a non-Apple sender",
+        "evidence": "snapcast/snapcast#688 (stream server audio to AirPlay devices that can't run snapclient), #750 'Chromecast / Airplay / Sonos / X support', badaix/snapcast#172; community workaround docs (scoot-technology.github.io AirPlay+Snapcast post) only cover AirPlay as INPUT",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "has-it",
+        "notes": "Snapcast users repeatedly ask to target off-the-shelf smart speakers without installing a client \u2014 exactly Audiouter's core premise. OwnTone is the only one in the family that ships an AP2 sender. Strong validation of Audiouter's whole category."
+      },
+      {
+        "feature": "One virtual 'All Rooms' endpoint fanning out to many devices",
+        "evidence": "mikebrady/shairport-sync#186 'Output to multiple soundcards' (wants a single instance named All Rooms), #987 (Spotify can only pick one device \u2014 wants one client to restream to a group), #384, #540 (users hand-roll 8-instance ALSA rigs)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "has-it",
+        "notes": "shairport-sync users build elaborate multi-instance contraptions to get what Audiouter's groups + aggregate 'Audiouter' device do natively. Also validates the per-app angle: #987's pain is single-endpoint sources (Spotify)."
+      },
+      {
+        "feature": "Source switching with priority + auto-fallback (meta streams)",
+        "evidence": "snapcast meta streams (shipped, snapcast docs) plus active enhancement stream: snapcast#1316 (default stream per client / per-stream priority), badaix#1187 (wants ducking/fading on switch), badaix#1224 (hidden meta-only sources), snapcast#1123",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Snapcast ships it and users keep asking for refinements \u2014 sustained engagement signal. Audiouter's analog is per-app routing (which source app feeds which speakers); 'when app X starts playing, it takes over speakers Y' style automation has no equivalent."
+      },
+      {
+        "feature": "Mixing a second source over playback (notifications/doorbell ducking)",
+        "evidence": "snapcast/snapcast#1005 'Playing multiple sources at the same time (for example: voice notifications)', badaix#700 'Cross fade meta channels (was: feature request Notification channel)', snapcast#666 (client listening to multiple streams / stream merge)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "Home-automation crowd wants announcements mixed/ducked over music. Niche for a Mac menu-bar app, but Audiouter already mixes multiple app streams per speaker \u2014 closer than any competitor. Low priority; noting because it recurs."
+      },
+      {
+        "feature": "Public control API (JSON-RPC/REST/WebSocket) for automation",
+        "evidence": "snapcast JSON-RPC API (change client volume/latency/group, in README); OwnTone JSON API + websockets; both are load-bearing for the ecosystems around them",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "partial",
+        "notes": "Every project in this family treats a scriptable API as table stakes \u2014 it's what the power-user audience automates with. Audiouter's companion-iPhone protocol is a private remote-control channel, not a public API; a documented local HTTP/WebSocket API (or even AppleScript/Shortcuts support, the Mac-native equivalent) is the gap."
+      },
+      {
+        "feature": "Home Assistant integration",
+        "evidence": "Official OwnTone integration in Home Assistant core (home-assistant.io/integrations/forked_daapd/ \u2014 outputs auto-load as HA entities); snapcast also has an official HA integration",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "Follows from the API finding: HA integration is how these projects reach their users' automations. For Audiouter this is downstream of shipping any public API; Shortcuts support may serve the same job for Mac users with less work."
+      },
+      {
+        "feature": "Streaming-service capture as a source (Spotify Connect)",
+        "evidence": "owntone/owntone-server#295 'Spotify Connect' feature request; OwnTone docs (docs/integrations/spotify.md) \u2014 solved via librespot-to-named-pipe, users accept significant config pain to get it",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "has-it",
+        "notes": "Linux users jump through librespot/pipe hoops to route Spotify to multiroom. Audiouter's per-app capture of the Spotify macOS app gives the same outcome with zero config \u2014 a marketable contrast ('no librespot, no pipes')."
+      },
+      {
+        "feature": "Volume normalization across tracks/sources",
+        "evidence": "owntone/owntone-server#1583 'Normalize audio' (open enhancement request)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "Single-issue signal, weaker than the EQ cluster. For Audiouter (system-audio capture) the source app usually owns normalization, so this is likely a legitimate skip \u2014 noting for completeness."
+      },
+      {
+        "feature": "Simple drag-and-drop group management UI",
+        "evidence": "forums.lyrion.org thread 'Sync more than 2 players?' \u2014 user confused by stock LMS sync UI; community answer: install Material Skin, which lets you drag a player onto another to sync",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "LMS's stock grouping UX confuses users badly enough that a third-party skin became the de-facto answer. Validates Audiouter's saved-groups + native popover investment; the drag-to-group interaction specifically tested well with this audience."
+      }
+    ]
+  },
+  {
+    "family": "Native platform baselines: macOS/iOS AirPlay UI, Windows/Android equivalents, plus BubbleUPnP",
+    "findings": [
+      {
+        "feature": "System audio to multiple AirPlay speakers from the macOS menu bar",
+        "evidence": "Apple's own support doc (support.apple.com/en-us/105068) states you can't AirPlay audio to multiple speakers from the Mac menu bar; user threads asking for it: forums.macrumors.com/threads/2350418, discussions.apple.com/thread/254418406",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "This is Audiouter's core reason to exist. The OS ceiling is one speaker at a time for system audio; multi-speaker is Apple Music-only. Strongest possible validation signal."
+      },
+      {
+        "feature": "Multi-speaker selection with per-speaker volume sliders inside Music.app",
+        "evidence": "TidBITS 'Improve Your Mac's Audio by Combining Speakers' (tidbits.com/2021/09/09) and Apple support notes: the Music toolbar AirPlay picker allows multiple destinations with independent volumes \u2014 but only for Music's own playback",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "has-it",
+        "notes": "The free baseline UI Audiouter must beat: Apple already trained users on per-speaker sliders in a popover. Audiouter generalizes it to all system audio + Main-as-ceiling master gain."
+      },
+      {
+        "feature": "Low-latency system-audio AirPlay (macOS adds a fixed ~2s buffer, breaking A/V sync)",
+        "evidence": "iina/iina GitHub issue #4540 (fixed 2s AirPlay delay, not modifiable by third parties), forums.macrumors.com/threads/2306123, Sonos community threads on 2-3s delay from Mac",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Users watching video with AirPlay output loudly complain. Audiouter controls its own sender buffering (Settings has numeric ms buffer), but AirPlay 2 protocol latency floor still applies \u2014 worth marketing honestly if Audiouter's latency is lower/tunable."
+      },
+      {
+        "feature": "Reliable multi-output workaround (Audio MIDI Setup aggregate w/ AirPlay: devices vanish, drift, dead volume keys)",
+        "evidence": "discussions.apple.com/thread/255079124 (AirPlay device disappears from multi-output), discussions.apple.com/thread/254277037, TidBITS notes volume keys dead on aggregate devices",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "The DIY route Apple points power users at is broken in exactly the ways Audiouter fixed (aggregate Wave 3 + volume-decoupling interceptor A2 queued). Good comparison-table material."
+      },
+      {
+        "feature": "Per-app audio output routing",
+        "evidence": "macOS has no native per-app routing (unlike Windows' per-app volume mixer); active third-party market fills it: SoundSource $49 (Rogue Amoeba), github.com/toolab-dev/SoundRoute, FineTune (alternativeto.net/software/finetune-1) \u2014 all pitched explicitly on 'macOS can't do this'",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "has-it",
+        "notes": "OS gap, paid-utility validation. Audiouter ships it; note competitors bundle per-app EQ and per-app volume/balance with routing \u2014 EQ is the adjacent ask Audiouter lacks."
+      },
+      {
+        "feature": "Session persistence \u2014 Mac AirPlay output silently reverts to internal speakers after silence/inactivity",
+        "evidence": "discussions.apple.com/thread/7695116 ('Airplay stops after each song'), mikebrady/shairport-sync issue #804 (Mac drops AirPlay after inactivity, silence-timeout mechanism), talk.tidbits.com/t/27547",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Long-standing macOS behavior; users invent keep-iTunes-open hacks. Audiouter has silence/redirect handling work on main (redirect-follow-main-silence) \u2014 verify it survives long silences and never falls back to internal speakers unannounced; this is a headline reliability claim if provable."
+      },
+      {
+        "feature": "Per-speaker volume + predictable device add/remove in the iOS AirPlay picker",
+        "evidence": "discussions.apple.com/thread/253205462 (multi-speaker playback broken), 9to5mac.com/2022/01/03 'Apple needs to address AirPlay issues' (tapping a device ADDS it instead of switching, hard to undo; per-speaker volume gaps), discussions.apple.com/thread/252954197",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Baseline for the iOS companion app: Apple's own picker frustrates users on add-vs-switch semantics and reliability. Companion app (Sonos-style, in dev) should make add/switch explicit \u2014 that's the differentiator users articulate."
+      },
+      {
+        "feature": "Lossless / transparent codec path over AirPlay 2 (Apple silently transcodes to AAC-256)",
+        "evidence": "audiophilestyle.com 'Apple Music Lossless Mess Part 2: AirPlay', darko.audio/2023/10 'Apple AirPlay isn't always lossless', discussions.apple.com/thread/252848734; AirPlay 1/RAOP was bit-perfect ALAC",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "unknown",
+        "notes": "Audiophiles are loud about the silent AAC downgrade and the lack of any indicator. Could not verify which codec Audiouter's vendored AP2 sender uses (ALAC vs AAC). If it's ALAC/lossless-capable, 'we tell you the codec and keep it lossless' is a cheap, loud differentiator for the exact forum crowd that buys these tools."
+      },
+      {
+        "feature": "Windows system-audio AirPlay sender (market abandoned: TuneBlade discontinued 2018, discovery/connection complaints)",
+        "evidence": "tuneblade.com (last release Dec 2018, marked discontinued on alternativeto.net/software/tuneblade), user reports of speakers found 1-in-5 times / recognized-but-won't-connect; macobserver.com + techjunkie.com guides confirm no native Windows AirPlay output",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "Windows users with HomePods/AirPlay speakers have effectively no maintained system-wide option (Airfoil Windows is also stagnant). Not on Audiouter's roadmap \u2014 file as an expansion signal, not a near-term gap."
+      },
+      {
+        "feature": "System-audio capture to network speakers with acceptable latency (BubbleUPnP Audio Cast benchmark)",
+        "evidence": "bubblesoftapps.com/bubbleupnp (Audio Cast captures most apps' audio to UPnP/Chromecast, hardware-volume-key takeover); official tips page admits 5-8s Chromecast delay; groups.google.com/g/bubbleupnp/c/YtGjIfxvzG0 reports 12-14s with UPnP renderers",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "has-it",
+        "notes": "The Android power-user benchmark ships the feature but with unusable latency for anything interactive. Audiouter's real-time AP2 path is categorically better \u2014 a fair 'latency vs BubbleUPnP' comparison lands well."
+      },
+      {
+        "feature": "Synced playback to multiple renderers from one sender (BubbleUPnP cannot)",
+        "evidence": "groups.google.com/g/bubbleupnp/c/XKGGYl0FKVM \u2014 developer confirms BubbleUPnP can't play synced audio to multiple renderers it detects; sync only via external AudioCast-app grouping or Chromecast groups made in Google Home",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "Even the deepest Android power tool punts multi-device sync to the platform (Google-made groups). Audiouter doing its own ad-hoc groups with per-device volume is beyond the benchmark."
+      },
+      {
+        "feature": "Per-device group delay correction (Google Home's ms-slider for out-of-sync group speakers)",
+        "evidence": "support.google.com/googlecast/answer/6318642 (official Group delay correction slider), androidcentral.com 'Chromecast Audio devices playing out of sync? Here's your fix!'",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "partial",
+        "notes": "Google ships a user-facing per-speaker latency nudge because real rooms drift. Audiouter has a global numeric buffer setting; a per-device trim (esp. for the synced-local + future Bluetooth path, where BT latency varies wildly) is the analogous control. Fits Alec's bare-numbers-over-presets preference."
+      },
+      {
+        "feature": "OS-level 'cast phone/system audio to speaker group' (Android baseline)",
+        "evidence": "Google Home app 'Cast my audio' + Chromecast speaker groups are built into the Android ecosystem (androidcentral.com/what-you-need-know-about-chromecast-audio-groups); iOS/macOS have no Chromecast equivalent, Android has no AirPlay",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "Context finding: each platform gives away casting to its own ecosystem only. Cross-ecosystem (Mac system audio \u2192 Chromecast) remains unserved; Audiouter is AirPlay-only today. Chromecast output would be the cross-ecosystem play \u2014 noted, out of current scope."
+      },
+      {
+        "feature": "Mac system output to HomePod stereo pairs",
+        "evidence": "macrumors.com/2020/11/18 PSA: stereo-paired HomePod minis can't be selected as Mac system audio output (workaround = un-pair or use Music.app); long comment thread of annoyed owners",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "unknown",
+        "notes": "Dated (2020) \u2014 macOS has since improved, but pair-handling remains a recurring gripe in newer threads. Could not verify how Audiouter's Bonjour discovery presents a stereo pair (single AP2 endpoint expected). Cheap live check on real hardware; if it just works, say so explicitly on the site."
+      }
+    ]
+  },
+  {
+    "family": "Google Home/Cast audio groups, AirParrot, TuneBlade, Porthole",
+    "findings": [
+      {
+        "feature": "Per-device delay trim to align out-of-sync speakers (group delay correction)",
+        "evidence": "Google Home ships a per-device 'Group delay correction' slider (https://support.google.com/googlehome/answer/6318642); TuneBlade 1.5.1 shipped a per-receiver delay offset up to 500ms to compensate DSP/DAC latency (http://www.tuneblade.com/releaseNotes.html)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "missing",
+        "notes": "Both the giant and the closest small-vendor peer ship it; Google's help doc exists because users actually hit per-speaker skew. Natural fit next to Audiouter's per-device volume row."
+      },
+      {
+        "feature": "User-facing streaming mode choice: real-time (minimal lag) vs buffered (reliable on congested Wi-Fi), buffer up to 5s",
+        "evidence": "TuneBlade homepage headlines both modes as its core pitch (http://www.tuneblade.com/); Softpedia notes buffer configurable to 5s (https://www.softpedia.com/get/Internet/Remote-Utils/TuneBlade.shtml)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter ships a numeric buffer-ms setting in Settings > Audio > Advanced; TuneBlade's framing is the same capability marketed as a latency-vs-reliability tradeoff."
+      },
+      {
+        "feature": "Low latency for audio-video sync (lipsync while watching video)",
+        "evidence": "TuneBlade ships 'Synchronized audio with video' for VLC (http://www.tuneblade.com/); AirParrot reviewers complain of 100ms+ latency and stutter (https://www.askwoody.com/forums/topic/review-airparrot-3/)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "unknown",
+        "notes": "System-audio senders get judged on lipsync; AirParrot's loudest complaints are latency/stutter. Audiouter's low-buffer path may already cover this but it is not surfaced as a video-watching mode."
+      },
+      {
+        "feature": "Built-in equalizer (3-band lows/mids/highs)",
+        "evidence": "TuneBlade feature list, 3-band EQ (http://www.tuneblade.com/)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Audiouter explicitly does not ship EQ yet. Shipped quietly by TuneBlade \u2014 moderate signal only."
+      },
+      {
+        "feature": "HTTP remote API for automation / Home Assistant integration",
+        "evidence": "TuneBlade ships a Simple HTTP Remote API (release 1.7.3, http://www.tuneblade.com/releaseNotes.html); HA feature request with 18+ replies over 4 years plus three community-built integrations incl. https://github.com/spycle/tuneblade (https://community.home-assistant.io/t/add-support-for-tuneblade-windows-airplay-multi-room/103642)",
+        "demand_signal": "requested-unbuilt",
+        "audiouter_status_guess": "missing",
+        "notes": "Strongest demand signal in this family: users kept rebuilding TuneBlade integrations for years to automate connect/disconnect and per-device + master volume from home automation. A small local HTTP API on Audiouter would capture the same crowd."
+      },
+      {
+        "feature": "Phone remote app for volume and connection state",
+        "evidence": "TuneBlade iOS remote (release 1.2.0, http://www.tuneblade.com/releaseNotes.html); AirParrot Remote for iOS (https://www.airsquirrels.com/airparrot/features/mac); Porthole added remote control in 2015 (https://www.dangercove.com/porthole/)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "partial",
+        "notes": "All three small-vendor peers shipped one. Audiouter's iOS companion app is in development \u2014 this validates it as table stakes, not a nice-to-have."
+      },
+      {
+        "feature": "Speaker hardware buttons/remote adjust sender volume (DACP server)",
+        "evidence": "TuneBlade 1.6.0 added a DACP server specifically because receivers' hardware volume buttons did nothing and volume drifted out of sync (http://www.tuneblade.com/releaseNotes.html)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "Audiouter already handles speaker-input volume (absolute DACP setproperty, live-verified). TuneBlade's changelog confirms users notice and complain when this is absent \u2014 worth keeping regression-protected."
+      },
+      {
+        "feature": "Auto-connect chosen receivers on discovery + force-reconnect on error (always-on streaming)",
+        "evidence": "TuneBlade 1.2.0 per-receiver auto-connect; 1.3.1 'Force reconnection on connection error' explicitly for always-on scenarios (http://www.tuneblade.com/releaseNotes.html)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter has saved groups and reconnection work, but an explicit per-speaker 'auto-connect when it appears' toggle for set-and-forget whole-home audio is the TuneBlade shape. Audiouter's open question 'reconnecting device resumes own level vs Mac's' is adjacent."
+      },
+      {
+        "feature": "Connection standby: silence detection drops/idles the stream, resumes on audio",
+        "evidence": "TuneBlade 'Connection Standby' with silence detection, refined across 1.2.0-1.3.2 incl. optional dithered silence (http://www.tuneblade.com/releaseNotes.html)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "unknown",
+        "notes": "Keeps speakers from holding a session (and some receivers from auto-switching input) during long silence. Interacts with Audiouter's silence/keepalive handling \u2014 status unclear."
+      },
+      {
+        "feature": "Manually add receivers by IP:port when mDNS/Bonjour is broken",
+        "evidence": "TuneBlade 1.2.0 (http://www.tuneblade.com/releaseNotes.html), motivated by 'networks where Zeroconf is disabled or doesn't work properly'; multiple later releases fix discovery-failure bugs",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "missing",
+        "notes": "Discovery failure is a recurring support-load theme in TuneBlade's changelog (Avast firewall port changes, Bonjour bundling, Win10 discovery failures). A manual-IP escape hatch is cheap insurance."
+      },
+      {
+        "feature": "Password/passcode-protected receiver support with saved credentials",
+        "evidence": "TuneBlade 1.5.1 save-AirPlay-password; 1.7.7 supports all Apple TV security modes (one-time passcode, password, every-time passcode) (http://www.tuneblade.com/releaseNotes.html)",
+        "demand_signal": "shipped-table-stakes",
+        "audiouter_status_guess": "partial",
+        "notes": "Audiouter's AP1 auth-setup/MFi (AirPort Express) is deferred; AP2 password receivers status unclear. TuneBlade treated each auth mode as a must-fix compat item."
+      },
+      {
+        "feature": "Cross-protocol groups: AirPlay + Google Cast destinations simultaneously",
+        "evidence": "AirParrot 3 streams audio to AirPlay speakers and Google Cast audio devices at the same time, multiple destinations (https://www.airsquirrels.com/airparrot/ and https://www.airsquirrels.com/airparrot/features/mac); 3.1 added AirPlay 2 + Chromecast built-in compat (https://blog.airsquirrels.com/airparrot-3.1-introduces-audio-improvements-and-compatibility-with-certain-airplay-2-and-chromecast-built-in-devices)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "AirParrot's main structural edge over Audiouter. But its reviews show cross-protocol audio is fragile in practice (Android TV Chromecast audio broken, stutter) \u2014 differentiator, not proven table stakes. Aligns with Audiouter's roadmapped Chromecast + universal-sync BT direction."
+      },
+      {
+        "feature": "Whole-group master volume (one slider over a speaker group)",
+        "evidence": "Google removed group volume after the Sonos ITC ruling and 'buyers are fuming' (https://www.tomsguide.com/news/google-nest-speakers-just-lost-a-key-feature-and-buyers-are-fuming); Google later restored it (https://www.phonearena.com/news/google-home-officially-restores-multi-speaker-volume-control-after-sonos-dispute_id158933)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "has-it",
+        "notes": "Rare natural experiment: the feature was taken away and users revolted loudly. Validates Audiouter's Main x Group x Device volume model as high-value; also a reminder that group-volume mechanics are Sonos-patent territory worth a look before any US commercial launch."
+      },
+      {
+        "feature": "Resilience to Apple firmware/protocol changes (fast compat fixes as a product duty)",
+        "evidence": "Porthole was discontinued because every AirPort Express/Apple TV firmware release could and did break it (https://www.dangercove.com/porthole/); TuneBlade's changelog is dominated by compat fixes (tvOS device verification 1.7.1, AirPlay 2 receivers 1.7.7, oldest AirPort Express regression 1.7.9)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "The defining survival trait of small-vendor AirPlay senders. Users still hunt for Porthole replacements (https://alternativeto.net/software/porthole/?platform=mac). Audiouter's vendored C sender inherits the same exposure; changelog cadence after Apple updates is effectively a feature."
+      },
+      {
+        "feature": "Stream from line-in/mic or any audio endpoint (not just system mix)",
+        "evidence": "TuneBlade 1.2.0 'Specific Endpoint' capture mode for Mic-In/Line-In (http://www.tuneblade.com/releaseNotes.html); Softpedia lists it as a headline feature (https://www.softpedia.com/get/Internet/Remote-Utils/TuneBlade.shtml)",
+        "demand_signal": "shipped-differentiator",
+        "audiouter_status_guess": "missing",
+        "notes": "Turns the app into a whole-home distributor for turntables/consoles plugged into the Mac. Audiouter's per-app tap architecture could likely add an input-device source; low urgency."
+      },
+      {
+        "feature": "Glitch-free capture under heavy CPU load",
+        "evidence": "TuneBlade 1.5.1 shipped dedicated capture-engine performance work for 'smooth capture without glitches under heavy CPU usage' (http://www.tuneblade.com/releaseNotes.html); AirParrot stutter complaints echo it (https://www.askwoody.com/forums/topic/review-airparrot-3/)",
+        "demand_signal": "complained-about-gap",
+        "audiouter_status_guess": "partial",
+        "notes": "Matches Audiouter's own RT-thread Stage 2 work (gated on live T10 measurement). Peers confirm users hear and report this class of failure."
+      }
+    ]
+  }
+]

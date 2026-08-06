@@ -84,9 +84,11 @@ symbol you cannot find in source, believe the source and fix the doc.
   and `scripts/make-app.sh` whenever a build starts) does two things: it
   removes any worktree whose root contains a `.prunable` marker — but only if
   it is clean, unreferenced by any running process, and its HEAD is merged
-  into `main` or pushed — and it caps machine-wide `.build` caches at
-  `AUDIOUTER_BUILD_CACHE_CAP` (default 2: the building checkout plus the most
-  recently built other), skipping any checkout a live process references.
+  into `main` or pushed — and it sweeps machine-wide `.build` caches: any
+  cache untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
+  below `AUDIOUTER_MIN_FREE_GB` (10) free disk, caches go least-recently-
+  built-first until the floor is restored. The building checkout and any
+  checkout a live process references are never touched.
   When a branch is merged AND live-verified (or abandoned with everything
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed

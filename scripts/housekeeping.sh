@@ -4,12 +4,12 @@
 #   A. PRUNE worktrees explicitly flagged as finished: a worktree whose root
 #      contains a `.prunable` marker file is removed (and its branch deleted if
 #      merged) — but only after safety gates prove nothing can be lost.
-#   B. CAP build caches machine-wide: each worktree accumulates its own
+#   B. SWEEP build caches machine-wide: each worktree accumulates its own
 #      SwiftPM `.build` (~1 GB each; 15 worktrees once filled the disk to
-#      zero bytes free mid-build). At most CAP (default 2) checkouts keep a
-#      cache: the one building now plus the most recently built other. The
-#      rest are deleted — they are pure compiler output, regenerable at the
-#      cost of one cold build.
+#      zero bytes free mid-build). Caches untouched for a week are deleted
+#      (worthless after that much source drift), and when free disk falls
+#      below a floor, caches go least-recently-built-first until the floor
+#      is restored. Pure compiler output, regenerable by one cold build.
 #
 # Called best-effort (never blocking, never failing the caller) from
 # scripts/run-tests.sh and scripts/make-app.sh, so it runs whenever a build or
@@ -39,8 +39,9 @@
 #              this script is invoked from) — always protected from both jobs
 #   --dry-run  report what would happen, touch nothing
 #
-# Env: AUDIOUTER_BUILD_CACHE_CAP  how many .build caches survive (default 2)
-#      AUDIOUTER_NO_HOUSEKEEPING=1  do nothing (escape hatch for odd states)
+# Env: AUDIOUTER_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
+#      AUDIOUTER_MIN_FREE_GB         free-disk floor (default 15)
+#      AUDIOUTER_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
 set -u
 
 [ "${AUDIOUTER_NO_HOUSEKEEPING:-0}" = "1" ] && exit 0
@@ -135,8 +136,26 @@ for wt in "$worktrees_dir"/*/; do
     fi
 done
 
-# --- B. cap build caches ----------------------------------------------------
-cap=${AUDIOUTER_BUILD_CACHE_CAP:-2}
+# --- B. build caches: staleness sweep + disk-pressure floor ------------------
+# NOT a fixed count. Caches on a roomy disk cost nothing, and a count cap
+# forces cold rebuilds (minutes of heavy compile per Guard-4 commit) exactly
+# on the busy multi-agent days run-tests.sh exists to keep survivable. The
+# harm was only ever disk exhaustion, so target that directly:
+#   1. STALENESS: a cache untouched for AUDIOUTER_CACHE_MAX_AGE_DAYS (7) is
+#      deleted unconditionally — after that much source drift SwiftPM largely
+#      rebuilds from scratch anyway, so it saves ~nothing and holds ~1 GB.
+#   2. PRESSURE: below AUDIOUTER_MIN_FREE_GB (15) free, delete caches least-
+#      recently-built first until back above the floor. This is the hard
+#      guarantee the disk can never again hit zero mid-build.
+# The current checkout and anything a live process references are never
+# touched by either rule.
+max_age_days=${AUDIOUTER_CACHE_MAX_AGE_DAYS:-7}
+# 10, not higher: this machine's normal free space hovers around 13 GB (APFS
+# purgeable space is held elsewhere), so a floor above that would put every
+# build permanently in reclaim mode. 10 leaves ~2 builds' worth of margin
+# above zero while staying comfortably below the everyday baseline.
+min_free_gb=${AUDIOUTER_MIN_FREE_GB:-10}
+now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the
 # newest mtime among them (a build touches its .build root).
@@ -147,36 +166,55 @@ newest_mtime() {
     m=$(caches_of "$1" | while IFS= read -r d; do stat -f %m "$d" 2>/dev/null; done | sort -rn | head -1)
     echo "${m:-0}"
 }
+free_kb() { df -k "$primary" | awk 'NR==2 {print $4}'; }
+delete_caches() {  # $1 = unit, $2 = reason
+    sz=$(du -sh "$1/AudiouterCore/.build" 2>/dev/null | cut -f1)
+    if [ "$dry_run" -eq 1 ]; then
+        say "would delete build cache in $(basename "$1")${sz:+ (~$sz)} — $2."
+    else
+        caches_of "$1" | while IFS= read -r d; do rm -rf "$d"; done
+        say "deleted build cache in $(basename "$1")${sz:+ (~$sz)} — $2 (regenerable)."
+    fi
+}
+skippable() { [ "$1" = "$current" ] && return 1; in_use "$1" && return 1; return 0; }
 
-# Enumerate units (primary + every worktree), newest first. Paths contain
-# spaces, so the sort key rides in front and is stripped after.
+# Enumerate units (primary + every worktree) that have caches, oldest first —
+# the deletion order for both rules. Paths contain spaces, so the mtime sort
+# key rides in front, tab-separated.
 units=$(
     { printf '%s\n' "$primary"; for wt in "$worktrees_dir"/*/; do printf '%s\n' "${wt%/}"; done; } |
     while IFS= read -r u; do
         [ -n "$(caches_of "$u")" ] || continue
         printf '%s\t%s\n' "$(newest_mtime "$u")" "$u"
-    done | sort -rn | cut -f2-
+    done | sort -n
 )
 
-kept=1  # the current checkout always holds a slot — it is building right now
-printf '%s\n' "$units" | while IFS= read -r u; do
+# Rule 1: staleness.
+max_age_s=$((max_age_days * 86400))
+printf '%s\n' "$units" | while IFS='	' read -r mt u; do
     [ -n "$u" ] || continue
-    [ "$u" = "$current" ] && continue
-    if in_use "$u"; then
-        [ "$dry_run" -eq 1 ] && say "keeping cache in $(basename "$u") (in use)."
-        continue
-    fi
-    if [ "$kept" -lt "$cap" ]; then
-        kept=$((kept + 1))
-        continue
-    fi
-    sz=$(du -sh "$u/AudiouterCore/.build" 2>/dev/null | cut -f1)
-    if [ "$dry_run" -eq 1 ]; then
-        say "would delete build cache in $(basename "$u")${sz:+ (~$sz)}."
-    else
-        caches_of "$u" | while IFS= read -r d; do rm -rf "$d"; done
-        say "deleted build cache in $(basename "$u")${sz:+ (~$sz)} — regenerable, cap is $cap."
-    fi
+    [ $((now - mt)) -gt "$max_age_s" ] || continue
+    skippable "$u" || continue
+    delete_caches "$u" "untouched for >${max_age_days}d"
 done
+
+# Rule 2: pressure floor. Re-read df before each delete — earlier deletions
+# (including rule 1's) count toward the floor, so this removes the minimum
+# needed. Dry-run reports the floor state and the deletion order instead of
+# simulating df.
+min_free_kb=$((min_free_gb * 1024 * 1024))
+if [ "$(free_kb)" -lt "$min_free_kb" ]; then
+    say "under ${min_free_gb} GB free — reclaiming build caches, oldest first."
+    printf '%s\n' "$units" | while IFS='	' read -r mt u; do
+        [ -n "$u" ] || continue
+        [ -n "$(caches_of "$u")" ] || continue   # rule 1 may have emptied it
+        [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -ge "$min_free_kb" ] && break
+        skippable "$u" || continue
+        delete_caches "$u" "disk below ${min_free_gb} GB free"
+    done
+    if [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -lt "$min_free_kb" ]; then
+        say "still under the floor after reclaiming everything deletable."
+    fi
+fi
 
 exit 0

@@ -10,9 +10,8 @@ import AudiouterSharedUI
 /// reference). Each option renders a tiny window mock *in that appearance* —
 /// light chrome for Light, dark chrome for Dark, a diagonal light/dark split for
 /// Match System — with the label beneath and an accent ring on the selection.
-/// This replaced a first pass of bare gearshape/sun/moon glyph tiles, which read
-/// as placeholder (2026-07-17): a literal preview of the appearance is far more
-/// legible than an abstract icon.
+/// A literal preview of the appearance is far more legible than abstract
+/// glyph tiles.
 ///
 /// Custom-drawn (`ThemeTileButton`) — justified because AppKit ships no control
 /// that renders an appearance preview; this is the codebase's one custom-drawn
@@ -108,8 +107,8 @@ public final class AppearanceSettingsViewController: NSViewController {
             return radio
         }
         // Horizontal on purpose: the three dial names fit comfortably in the
-        // fixed 460 pt form width, and the merged one-screen Settings column
-        // is height-precious (see `testContentSizeIsFittedNotDegenerate`).
+        // fixed 460 pt form width and keep the pane short (see
+        // `eachTabHasNonDegenerateFittedSize`).
         let radioColumn = NSStackView(views: accentRadios)
         radioColumn.orientation = .horizontal
         radioColumn.alignment = .firstBaseline

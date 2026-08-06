@@ -120,20 +120,6 @@ func makeController() -> SettingsWindowController {
         latency: latency)
 }
 
-/// Render one tab's pane, in one appearance, to
-/// `settings-{tabLabel}-{appearanceLabel}.png`.
-///
-/// **Pin the pane with CONSTRAINTS, never by assigning `frame`.** Panes come
-/// from `SettingsForm.paneView(rows:)` with
-/// `translatesAutoresizingMaskIntoConstraints = false`, so an assigned frame
-/// is advisory — the layout engine overwrites it at the next pass, and
-/// `cacheDisplay` runs exactly such a pass. Measuring after a manual frame
-/// set therefore reports 460pt-wide wrapped text while the PNG draws the
-/// unwrapped, clipped layout the engine settled on. Pinning to the host
-/// makes the measured layout and the drawn layout the same layout.
-///
-/// A fresh controller per snapshot (see `makeController()`) keeps each render
-/// independent of tab order and of any size a previous tab left behind.
 /// Resolve every wrapping label's `preferredMaxLayoutWidth` from the width it
 /// has actually been given.
 ///

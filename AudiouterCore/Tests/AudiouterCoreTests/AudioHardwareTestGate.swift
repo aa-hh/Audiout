@@ -69,7 +69,7 @@ import XCTest
 /// }
 /// ```
 ///
-/// Notes for whoever converts those files:
+/// Notes on the applied shape:
 ///  - `.enabled(if:)` on a suite applies to every test in it, including tests
 ///    in suites nested further inside. A per-`@Test` trait does not inherit,
 ///    which is why the suite-level form is the required shape here.

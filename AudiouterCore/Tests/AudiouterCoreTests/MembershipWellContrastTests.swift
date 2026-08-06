@@ -20,7 +20,7 @@ import AppKit
 /// `Tokens.Color.panel` the task specifies, in BOTH appearances, using the
 /// SAME real WCAG relative-luminance math `AppTetherColorTests` already
 /// established for a token contrast floor (its `relativeLuminance`/
-/// `contrastRatio` at lines ~293-310 are `private` to that file, so this file
+/// `contrastRatio` are `private` to that file, so this file
 /// carries its own copies rather than reaching across files).
 @MainActor
 @Suite final class MembershipWellContrastTests: IsolatedSuite {

@@ -18,7 +18,7 @@ public enum MainOutTarget: Equatable, Sendable {
 }
 
 /// Codable, versioned JSON persistence for the routing state that lives
-/// alongside groups (SPEC.md §9 2026-07-14): the persistent "Selected Speakers"
+/// alongside groups (SPEC.md §9 2026-07-14): the persistent "Selected Devices"
 /// set and the current Main Out target. Sibling of ``GroupStore``; same
 /// Application Support directory, its own file so the two evolve independently.
 ///

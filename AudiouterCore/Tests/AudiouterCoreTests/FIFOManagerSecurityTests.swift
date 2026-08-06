@@ -23,15 +23,9 @@ import Foundation
         try? FileManager.default.removeItem(at: dir)
     }
 
-    /// The original XCTest form skipped the test with `throw XCTSkip(...)` when
-    /// `lstat` failed on a path we had just created/expect to exist — a defensive
-    /// fallback for filesystem-probe failure, not an intentional condition anyone
-    /// wants to exercise. swift-testing traits are evaluated before the test body
-    /// runs (cookbook §9) so a mid-body dynamic "skip" has no equivalent — this
-    /// path, if ever hit, now fails the test loudly via `#require` instead of
-    /// silently skipping it. Flagged per the migration's ambiguity protocol: this
-    /// is a deliberate one-site behavior change (skip → fail), not a mechanical
-    /// translation, because there is no dynamic-skip primitive in swift-testing.
+    /// `#require`, not a skip: an `lstat` failure on a path this test just
+    /// created is a real failure and must fail loudly (swift-testing has no
+    /// mid-body dynamic-skip primitive — cookbook §9).
     private func mode(of path: String) throws -> mode_t {
         var st = stat()
         try #require(lstat(path, &st) == 0, "could not stat \(path)")

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudiouterSharedUI
 import QuartzCore
 
 /// The **under-name VU meter** (Warm Signal v4 §Call-1, relocated from the
@@ -24,11 +23,11 @@ import QuartzCore
 ///
 /// Three layers on one custom `CALayer`-backed view: a faint rounded "track"
 /// (the recess the bar sits in), the full-height warm gradient, and the
-/// gradient's mask whose height is the displayed level. Only the mask's
-/// height changes per frame.
+/// gradient's mask whose width is the displayed level. Only the mask's
+/// width changes per frame.
 ///
 /// **Ballistics, not a snap-to-target bar**: `setLevel` only records a target;
-/// a `CVDisplayLink`-driven loop eases the *displayed* level toward it every
+/// a display-link-driven loop eases the *displayed* level toward it every
 /// frame via ``ballisticsStep(displayed:target:)``, with a faster attack
 /// (rising) than decay (falling) — the classic VU-meter feel where the needle
 /// jumps up but eases down. The pure step function is exposed standalone so it
@@ -41,7 +40,7 @@ import QuartzCore
 /// restarts it. Every popover row gets one of these, so an always-running
 /// per-row display link would be a real cost with several devices visible.
 ///
-/// Mirrors `StatusDotView`'s layer + Reduce-Motion idioms: `updateLayer` /
+/// Mirrors `HaloRingView`'s layer + Reduce-Motion idioms: `updateLayer` /
 /// `viewDidChangeEffectiveAppearance` for colour re-resolution, and a Reduce
 /// Motion check that snaps instead of animating.
 public final class LevelMeterView: NSView {
@@ -93,9 +92,8 @@ public final class LevelMeterView: NSView {
     /// The currently-drawn level, eased toward `target` each frame.
     private var displayed: CGFloat = 0
 
-    /// Display link driven by the modern NSView.displayLink API (macOS 14.0+),
-    /// eliminating manual Unmanaged pointer management. The API keeps a strong
-    /// reference to the target (self) while the display link is active.
+    /// `NSView.displayLink` (macOS 14.0+) keeps a strong reference to the
+    /// target (self) while the display link is active.
     private var activeLink: CADisplayLink?
 
     /// - Parameter thickness: bar thickness (height). Defaults to the shared
@@ -191,10 +189,6 @@ public final class LevelMeterView: NSView {
         redrawFill()
     }
 
-    /// Sizes the fill layer's height to the current `displayed` level,
-    /// growing from the bottom, inside a disabled-action transaction so
-    /// per-frame updates never trigger implicit Core Animation animations or
-    /// Auto Layout passes.
     /// The quietest level (dBFS) shown as any fill. Raw RMS for normal program
     /// material reads very low (music RMS ≈ 0.03–0.15 ≈ −30…−16 dBFS), so mapping
     /// it LINEARLY onto the bar made real audio a near-invisible sliver
@@ -232,7 +226,7 @@ public final class LevelMeterView: NSView {
     /// Push a new RMS reading. Clamps to `0...1`, records it as the ballistics
     /// target, and starts the display link if it isn't already running.
     /// Reduce Motion snaps `displayed` to the target immediately instead of
-    /// easing (mirrors `StatusDotView`).
+    /// easing.
     public func setLevel(_ rms: Float) {
         let clamped = CGFloat(min(max(rms, 0), 1))
         target = clamped
@@ -265,8 +259,7 @@ public final class LevelMeterView: NSView {
         stopDisplayLink()
     }
 
-    /// True while the OS is set to reduce motion — a static bar is shown then
-    /// (mirrors `StatusDotView.reduceMotion`).
+    /// True while the OS is set to reduce motion — a static bar is shown then.
     private var reduceMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
@@ -284,10 +277,7 @@ public final class LevelMeterView: NSView {
 
     // MARK: Display link
 
-    /// Create and activate a display link using the modern NSView.displayLink API
-    /// (macOS 14.0+). This API manages strong references to the target
-    /// automatically, eliminating the manual Unmanaged pointer dance and its
-    /// dependency on precise cleanup ordering.
+    /// Create and activate the display link (retention contract: see `activeLink`).
     private func startDisplayLinkIfNeeded() {
         guard activeLink == nil else { return }
         let link = self.displayLink(target: self, selector: #selector(tick))
@@ -295,8 +285,7 @@ public final class LevelMeterView: NSView {
         activeLink = link
     }
 
-    /// Stop and invalidate the display link. The modern NSView.displayLink API
-    /// handles cleanup of the target reference automatically upon invalidation.
+    /// Stop and invalidate the display link.
     private func stopDisplayLink() {
         guard let link = activeLink else { return }
         link.invalidate()

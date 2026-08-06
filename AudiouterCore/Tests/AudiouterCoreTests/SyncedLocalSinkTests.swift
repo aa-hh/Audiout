@@ -522,14 +522,13 @@ import Foundation
         let chunkSize = 16
         let chunkCount = 500
         var nextValue: Float = 1
-        for c in 0..<chunkCount {
+        for _ in 0..<chunkCount {
             var chunk = [Float](repeating: 0, count: chunkSize)
             for i in 0..<chunkSize { chunk[i] = nextValue; nextValue += 1 }
             chunk.withUnsafeMutableBufferPointer { buf in
                 sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: chunkSize,
                              pts: timespec(tv_sec: anchorSec, tv_nsec: 0))
             }
-            _ = c
         }
 
         // Drain well past the tiny target delay; collect every non-zero sample.

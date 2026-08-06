@@ -21,7 +21,7 @@ public protocol LoginItemManaging {
 
 /// Production `LoginItemManaging` over `SMAppService.mainApp` — the macOS 13+
 /// API that registers the main app itself as a login item (no separate helper
-/// bundle). Matches the package's `.macOS(.v13)` floor.
+/// bundle); the package's `.macOS(.v14)` floor covers it.
 public struct SMAppServiceLoginItem: LoginItemManaging {
 
     public init() {}

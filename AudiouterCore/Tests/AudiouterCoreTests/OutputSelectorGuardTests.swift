@@ -32,7 +32,6 @@ import Foundation
 
         var violations: [(filePath: String, lineNumber: Int, line: String)] = []
 
-        // Check both source directories
         for sourceDir in [audiouterCoreSources, airPlayEngineSources] {
             violations += try checkSourceDirectory(sourceDir)
         }
@@ -51,7 +50,6 @@ import Foundation
     private func checkSourceDirectory(_ sourceDir: URL) throws -> [(filePath: String, lineNumber: Int, line: String)] {
         var violations: [(filePath: String, lineNumber: Int, line: String)] = []
 
-        // Verify the directory exists before walking it
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: sourceDir.path, isDirectory: &isDir),
               isDir.boolValue else {
@@ -136,7 +134,6 @@ import Foundation
                 currentIndex = line.index(after: currentIndex)
             }
 
-            // Now check the processed line for the bad selector
             if processedLine.contains("kAudioHardwarePropertyDefaultSystemOutputDevice") {
                 violations.append((filePath: filePath, lineNumber: lineNumber, line: line))
             }

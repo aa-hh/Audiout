@@ -2,18 +2,17 @@ import Foundation
 import Testing
 @testable import AudiouterCore
 
-/// Unit tests for the two pieces of tap-rebuild choreography that
-/// ``NativeCaptureCoordinator`` and ``PerAppCaptureCoordinator`` now share
-/// (architecture review 2026-07-26, defect A).
+/// Unit tests for the two pieces of tap-rebuild choreography
+/// ``NativeCaptureCoordinator`` and ``PerAppCaptureCoordinator`` share
+/// (`TapRebuildLifecycle.swift`).
 ///
 /// These are pure-value tests of the mechanisms in isolation. The END-TO-END
-/// behaviour each one exists for is covered where it always was, and those
-/// tests were NOT weakened by the extraction:
+/// behaviour each one exists for is covered by
 ///   - `NativeCaptureCoordinatorTests.deviceChangeDuringRebuildIsCoalescedAndReplayed`
 ///   - `PerAppCaptureCoordinatorTests.deviceChangeDuringRebuildIsCoalescedAndReplayed`
-/// both still fire a SECOND device-change notification from inside the
-/// in-flight rebuild's `createAndStart` (i.e. while the owner is genuinely
-/// `.creatingTap`) and assert a third tap creation follows — proving the
+/// — both fire a SECOND device-change notification from inside the in-flight
+/// rebuild's `createAndStart` (i.e. while the owner is genuinely
+/// `.creatingTap`) and assert a third tap creation follows, proving the
 /// trigger was coalesced and replayed rather than dropped.
 @Suite struct TapRebuildLifecycleTests {
 

@@ -4,12 +4,11 @@ import AppKit
 import AudiouterCore
 
 /// The **connection halo ring** (Warm Signal v3 §3.2): a ring drawn AROUND the
-/// device icon that carries the connection lifecycle, replacing the retired
-/// corner connection dot (`StatusDotView`, deleted 2026-07-22). The corner
-/// position is repurposed for the gold route-armed dot in a later task (spec
-/// §3.3) — this view owns ONLY the connection channel, driven by
-/// `Device.connectionState` alone (teal is retired, so there is no
-/// routing/teal rung on the ring — spec §0 decision c / §3.1).
+/// device icon that carries the connection lifecycle. The corner position the
+/// retired connection dot held now hosts the gold route-armed dot
+/// (`RouteArmedDotView`, spec §3.3) — this view owns ONLY the connection
+/// channel, driven by `Device.connectionState` alone (teal is retired, so
+/// there is no routing/teal rung on the ring — spec §0 decision c / §3.1).
 ///
 /// The FORM carries the state, not just the color — so the ladder survives
 /// Reduce Motion (the **blocking** stress-test break §8.2):

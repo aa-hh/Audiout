@@ -105,3 +105,4 @@ test 10 staleDeferredUnbindMustNotKillAReengagedRoute forces the interleaving (h
 deferred unbind → deselect → bind parked pre-gate on the armed PTP activator → release):
 confirmed red pre-fix (session dead, remove after the re-engaged bind), green post-fix.
 Plan §6b documents the review. Full suite 1645/1645 green via scripts/run-tests.sh.
+- [VERBOSITY-CLEANUP] done — staff-reviewed slop/staleness audit (12 audit agents, 240 findings): ~185 comment/naming fixes across 70 files (+392/−609) on claude/verbosity-cleanup; only 9 sanctioned mechanical code edits, zero behavior change; 39 hot-file findings + 9 owner decisions + naming roadmap ledgered in dev/notes/verbosity-audit-2026-08-06.md; 1646/1647 green — the 1 failure (redirectToASelectedDeviceNeverBindsAtAll) reproduces on unmodified main (pre-existing, task chip filed).

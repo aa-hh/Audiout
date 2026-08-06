@@ -149,7 +149,7 @@ public func usage() -> String {
 }
 
 public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
-    var a = ProbeArgs()
+    var parsed = ProbeArgs()
     var defaults = ProbeDevice()   // edited by per-device options before the first --address
     var current = ProbeDevice()
     var currentTouched = false     // a per-device flag landed in `current` since the last commit
@@ -162,7 +162,7 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
     func value(for flag: String) -> String? {
         i += 1
         if i < argv.count { return argv[i] }
-        a.problems.append("\(flag) is missing its value")
+        parsed.problems.append("\(flag) is missing its value")
         return nil
     }
 
@@ -173,17 +173,17 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
     // problem instead of misparsing silently.
     func commit(because reason: String) {
         if current.address.isEmpty {
-            a.problems.append(
-                "device[\(a.devices.count)] (\"\(current.deviceName)\") has no --address "
+            parsed.problems.append(
+                "device[\(parsed.devices.count)] (\"\(current.deviceName)\") has no --address "
                 + "(committed by \(reason))")
         }
         if current.deviceID.isEmpty {
-            a.problems.append(
-                "device[\(a.devices.count)] (\"\(current.deviceName)\" @ \(current.address)) "
+            parsed.problems.append(
+                "device[\(parsed.devices.count)] (\"\(current.deviceName)\" @ \(current.address)) "
                 + "has no --device-id (committed by \(reason)) — per-device flags amend the "
                 + "device being described until BOTH --address and --device-id are given")
         }
-        a.devices.append(current)
+        parsed.devices.append(current)
         current = defaults
         currentTouched = false
     }
@@ -233,7 +233,7 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
                 if let p = Int(v), (1...65535).contains(p) {
                     applyPerDeviceOption("--port \(v)") { $0.port = p }
                 } else {
-                    a.problems.append("--port \(v) is not a valid port number")
+                    parsed.problems.append("--port \(v) is not a valid port number")
                 }
             }
         case "--features":
@@ -253,13 +253,13 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
                 applyPerDeviceOption("--password") { $0.password = v }
             }
         case "--pcm":
-            if let v = value(for: "--pcm") { a.pcmPath = v }
+            if let v = value(for: "--pcm") { parsed.pcmPath = v }
         case "--i-have-a-receiver-and-owntone-is-stopped":
-            a.gated = true
+            parsed.gated = true
         case "-h", "--help":
-            a.wantsHelp = true
+            parsed.wantsHelp = true
         default:
-            a.problems.append("unknown argument: \(argv[i])")
+            parsed.problems.append("unknown argument: \(argv[i])")
         }
         i += 1
     }
@@ -270,12 +270,12 @@ public func parseProbeArgs(_ argv: [String]) -> ProbeArgs {
     if !current.address.isEmpty || !current.deviceID.isEmpty {
         commit(because: "end of arguments")
     } else if currentTouched {
-        a.problems.append(
+        parsed.problems.append(
             "trailing per-device flags never got an --address/--device-id — per-device "
             + "flags apply to the device being described; give them before the flag "
             + "that completes it")
-    } else if defaultsTouched && a.devices.isEmpty {
-        a.problems.append("per-device flags were given but no --address ever arrived")
+    } else if defaultsTouched && parsed.devices.isEmpty {
+        parsed.problems.append("per-device flags were given but no --address ever arrived")
     }
-    return a
+    return parsed
 }

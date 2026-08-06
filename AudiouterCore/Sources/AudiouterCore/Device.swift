@@ -5,7 +5,7 @@ import Foundation
 /// This is a *value type* on purpose: the backend owns the source of truth and
 /// hands out snapshots via ``BackendEvent``. The UI never mutates a `Device`
 /// directly — it calls a backend method (`setVolume`, `setMuted`, …) and waits
-/// for the echoed update. That keeps the mock and the real (OwnTone) backend
+/// for the echoed update. That keeps the mock and the real backends
 /// behaving identically from the UI's point of view.
 public struct Device: Identifiable, Equatable, Sendable {
 
@@ -51,11 +51,9 @@ public struct Device: Identifiable, Equatable, Sendable {
     public var supportsAirPlay2: Bool
 
     /// This is the Mac's own output (built-in speakers / whatever the system
-    /// default is), NOT an AirPlay receiver. It is the target of
-    /// `MainOutTarget.localSpeakers` (passthrough). SPEC.md §9 (2026-07-14): the
-    /// local device may be targeted ALONE but is BLOCKED from joining the
-    /// Selected Speakers set while that set contains AirPlay devices (pre-engine
-    /// sync limit). Exactly one device in a fleet should carry this flag.
+    /// default is), NOT an AirPlay receiver. Targeting only this device is
+    /// passthrough (SPEC.md §9b). Exactly one device in a fleet should carry
+    /// this flag.
     public var isLocalDevice: Bool
 
     // MARK: Control state (0–100 volume model, matching the UI sliders)

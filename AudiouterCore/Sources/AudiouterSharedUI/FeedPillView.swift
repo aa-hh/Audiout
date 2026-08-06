@@ -4,11 +4,10 @@ import AppKit
 
 /// One **bordered pill** in `DeviceRowView`'s FEED column (Warm Signal — the
 /// product owner's ported-verbatim call: "each feed value gets its own
-/// bordered pill, not one packed string joined by middle dots"). Replaces the
-/// retired single `feedLabel` composite: `DeviceRowView` now hosts a
-/// left-aligned horizontal row of these, one per visible feed segment (plus
-/// an optional trailing "+N" overflow pill and a single error-override pill),
-/// inside a plain `NSStackView`.
+/// bordered pill, not one packed string joined by middle dots").
+/// `DeviceRowView` hosts a left-aligned horizontal row of these, one per
+/// visible feed segment (plus an optional trailing "+N" overflow pill and a
+/// single error-override pill), inside a plain `NSStackView`.
 ///
 /// A pill hosts a text label — optionally prefixed with the same
 /// derived-colour `FeedChip` square a redirected app's tether wears elsewhere

@@ -198,8 +198,8 @@ import CAirPlayEngine
 // `StateStreamTests` / `RemoteEventStreamTests` / `AirPlayEngineAPITests` /
 // `E1StabilityTests` / `MultiStreamWriteRoutingTests` /
 // `StartBufferAndLatencyProbeTests` is driving — those tests then simply never
-// see their events and time out. Every other `enterHeadlessTestMode()` caller
-// in this target already nests here; this file was the one that did not.
+// see their events and time out. Every `enterHeadlessTestMode()` caller
+// in this target nests here.
 // (These two also stall on `Task.sleep` and assert tight cadence bounds, so
 // serialising them removes a second, independent source of flake.)
 //

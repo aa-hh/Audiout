@@ -103,21 +103,13 @@ enum SyncTiming {
 /// §1/§4/§5.1). We are the PTP grandmaster, so this is a one-shot measured offset,
 /// not a slave-side PTP feedback loop (brief §2).
 ///
-/// ## Ownership / hot file
-/// This file is the shared foundation also edited by T-CORRECTION (continuous
-/// micro-rate correction) and T-OFFSET-UI (user ms bias) — never concurrently.
-/// T-LIFECYCLE (device-change / sleep-wake rebuild) has landed here — see
-/// "MARK: T-LIFECYCLE" below. The graph topology and the render block's
-/// `AVAudioTime` handling below leave explicit seams for the remaining two.
-///
-/// ## What this v1 does and does NOT do
-/// It establishes the timeline anchor and the frame-accurate release gate, and
-/// (T-LIFECYCLE) rebuilds cleanly on a default-output-device change or a
-/// sleep/wake cycle. It does NOT do drift correction (the source-device vs
-/// output-device ppm-clock skew that accrues over long sessions) — that is
-/// T-CORRECTION, which plugs into the graph seam and the `latestPhaseErrorNanos`
-/// readout marked below. It also does NOT own the tap self-exclude that
-/// prevents an echo feedback loop (T-FANOUT).
+/// ## Scope
+/// The frame-accurate release gate, the T-LIFECYCLE device-change /
+/// sleep-wake rebuild ("MARK: T-LIFECYCLE" below), the T-CORRECTION
+/// continuous drift correction (`PhaseController.swift`'s resampler + PI
+/// loop, driven from `renderInterleaved`), and the T-OFFSET-UI user bias
+/// (`userOffsetMs`) all live here. The tap self-exclude that prevents an
+/// echo feedback loop is the fan-out's job (T-FANOUT), not this file's.
 ///
 /// `@unchecked Sendable`: the render (consumer) and enqueue (producer) paths meet
 /// only through the lock-free SPSC ``InterleavedFloatRing``; the scalar release
@@ -130,7 +122,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// audible effect (brief §4 "a small negative safety margin is standard
     /// practice"). Kept intentionally small (the brief floats 10–20 ms; T-SINK
     /// scopes it to a few ms — the manual T-OFFSET-UI slider is the real tuning
-    /// knob later).
+    /// knob).
     public static let defaultSafetyMarginMs: Double = 3.0
 
     /// The device-native render rate this sink was built for (read ONCE at
@@ -215,7 +207,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// Signed residual (actual scheduled first-real-sample instant − target) from
     /// the release cycle. The phase-readout seam T-SPIKE-PHASE measures and
     /// T-CORRECTION's control loop nulls; with frame-accurate placement it is < 1
-    /// frame at release, and a future correction loop keeps it there over time.
+    /// frame at release, and the correction loop keeps it there over time.
     private var lastPhaseErrorNanos: Int64 = 0
     /// `group × device` gain applied to this sink's real-time output — deliberately
     /// EXCLUDING Main, which the Mac's own system volume already applies to this
@@ -306,8 +298,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     // MARK: Lifecycle
 
     /// Build the graph and start the engine against the current default output
-    /// device. Idempotent. (Device-change / sleep-wake teardown-and-rebuild is
-    /// T-LIFECYCLE; v1 builds once.)
+    /// device. Idempotent.
     public func start() throws {
         try graphQueue.sync {
             guard !started else { return }

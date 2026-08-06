@@ -6,7 +6,7 @@ import AudiouterSharedUI
 
 /// The read-only device detail pane (design revamp, CONFIGURATION-ONLY —
 /// `../../AGENTS.md`): shown in the Groups window's detail area when the
-/// sidebar selects a device (wiring that selection up is a separate task).
+/// sidebar selects a device.
 /// This view controller never activates a group, changes routing, or moves
 /// audio — it only ever renders a `Device` snapshot plus which saved groups
 /// it belongs to.
@@ -40,7 +40,7 @@ import AudiouterSharedUI
 /// - a minimal, single-line secondary-colour hint ("View-only — control
 ///   playback from the menu-bar popover.") under the form. Deliberately
 ///   terse: the fuller "configure here / play in the popover" teaching lives
-///   in a footer elsewhere in this window (a sibling task), not restated here.
+///   in a footer elsewhere in this window, not restated here.
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group-activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -270,7 +270,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// Minimal one-line view-only hint. Deliberately terse — the fuller
     /// "configure here / play in the popover" teaching lives in a footer
-    /// elsewhere in this window (a sibling task); this pane only needs to
+    /// elsewhere in this window; this pane only needs to
     /// mark itself as non-interactive.
     private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
 

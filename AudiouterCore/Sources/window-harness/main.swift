@@ -7,29 +7,10 @@
 //
 // The window isn't visible to an agent shell, so this instantiates the real
 // `MixerWindowController` with a MockBackend-backed `GroupController`, drives
-// the same code paths the toolbar / sidebar / editor / create-sheet actions
-// call (via the `test_*` hooks), and asserts the built structure:
-//   - chrome: the toolbar mounts ONLY the master item (no presets popup);
-//     window.title == "Groups";
-//   - baseline: the sidebar always shows "Groups" + "Devices" (even at zero
-//     groups, via the empty-state row) and the mixer pane shows by default;
-//   - create: the standard macOS sheet — enablement gating, member count,
-//     commit creates a group WITHOUT activating it, sidebar selects it and
-//     the editor shows it;
-//   - dedup: committing the same member set again resolves to the existing
-//     group instead of duplicating it;
-//   - select != activate: selecting a group in the sidebar shows its editor
-//     but never touches `activeGroupID`;
-//   - editor: rename / membership edits go through `GroupController`, and the
-//     candidate list excludes unavailable non-members;
-//   - master: the toolbar's master drag still scales an ACTIVE group's
-//     members proportionally (activated via the model directly, since the
-//     window itself never activates);
-//   - beginNewGroup(): presents the create sheet;
-//   - delete: removes the group, the mixer pane returns, and the "Groups"
-//     section itself stays (empty-state row comes back).
-// Prints PASS/FAIL per check; exits nonzero on any failure so it can gate CI
-// alongside `swift test`.
+// the same code paths the sidebar / editor / create-sheet actions call (via
+// the `test_*` hooks), and asserts the built structure — see the numbered
+// checks below. Prints PASS/FAIL per check; exits nonzero on any failure so
+// it can gate CI alongside `swift test`.
 
 import AppKit
 import AudiouterCore

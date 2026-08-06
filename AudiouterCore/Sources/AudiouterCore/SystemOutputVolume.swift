@@ -230,8 +230,8 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// The system default output device, or `kAudioObjectUnknown`.
     ///
     /// Resolved fresh on every call rather than cached: it's a single cheap HAL
-    /// property read (the same one `NativeBackend.currentOutputDeviceName()` does
-    /// at NativeBackend.swift:554), and resolving on demand keeps the public reads
+    /// property read (the same one `NativeBackend.currentOutputDeviceName()`
+    /// does), and resolving on demand keeps the public reads
     /// lock-free and correct even before ``start()``.
     private static func currentDefaultOutputDevice() -> AudioObjectID {
         var deviceID = AudioObjectID(kAudioObjectUnknown)

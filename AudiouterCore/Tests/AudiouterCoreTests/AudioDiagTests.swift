@@ -8,7 +8,6 @@ import Testing
 /// Focused unit tests for ``AudioDiag``'s live-handle counter API:
 /// ``AudioDiag/HandleCounter``, ``AudioDiag/handleCreated(_:)``,
 /// ``AudioDiag/handleDestroyed(_:)``, and ``AudioDiag/dumpLiveHandles()``.
-/// `AudioDiag` had zero test coverage before this file.
 ///
 /// ## Why the mechanism is tested via a fresh `HandleCounter`, not the gated API
 /// `AudioDiag.isEnabled` is a `static let` read once from `$AIRPLAY_AUDIO_DIAG`

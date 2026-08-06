@@ -2,15 +2,15 @@
 
 import AppKit
 import AudiouterCore
-import AudiouterSharedUI
 
 /// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
 /// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
-/// The Groups window, Settings window, and future Setup surfaces are unifying
-/// onto ONE of these instead of each owning its own orphaned `NSWindow` — the
-/// app keeps exactly one `ControlPanelWindowController` alive and calls
-/// `setContent(_:)` to swap what it's showing, so opening Settings replaces
-/// Groups in the same shell rather than opening a second window.
+/// The shell hosts Groups only today — Settings is its own standalone
+/// window (`AudiouterSettingsUI.SettingsWindowController`), and Setup may
+/// return onto the shell later, so it stays content-agnostic: the app
+/// keeps exactly one `ControlPanelWindowController` alive and calls
+/// `setContent(_:)` to swap what it's showing rather than opening a
+/// second window.
 ///
 /// Panel behavior (decided, do not drift):
 /// - ACTIVATING: takes focus on open. Deliberately NOT `.nonactivatingPanel` —
@@ -21,12 +21,9 @@ import AudiouterSharedUI
 /// - On a REAL close (✕ / Esc / `performClose`) the app "lands home": `onClose`
 ///   fires so the caller can re-present the menu-bar popover.
 /// - Anchored just under the menu-bar status item via `show(anchorRect:)`,
-///   RIGHT-EDGE aligned to it (T11) with a custom-drawn arrow "beak" tying the
-///   two together — see `ControlPanelBackingView`.
-///
-/// Lifted from `MixerWindowController.makeContainer`'s `.panel` branch /
-/// `showPanel` (the Groups-only prototype) — this type is the reusable
-/// extraction; `MixerWindowController` itself is untouched by this change.
+///   CENTERED on its midX like `NSPopover` (clamped on-screen), with a
+///   custom-drawn arrow "beak" tying the two together — see
+///   `ControlPanelBackingView`.
 @MainActor
 public final class ControlPanelWindowController: NSWindowController {
 
@@ -80,8 +77,7 @@ public final class ControlPanelWindowController: NSWindowController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Build the sticky floating panel. Config lifted verbatim from
-    /// `MixerWindowController.makeContainer`'s `.panel` branch: ACTIVATING
+    /// Build the sticky floating panel: ACTIVATING
     /// (no `.nonactivatingPanel`), floats above other apps, never claims a
     /// Dock slot, tucks away on app-switch and is restored on return, takes
     /// key for text editing, and isn't released on close so it can be reused.
@@ -262,13 +258,11 @@ public final class ControlPanelWindowController: NSWindowController {
     /// Show the panel anchored just under `anchorRect` (the menu-bar status
     /// item's frame, in screen coordinates); `nil` centers it.
     ///
-    /// T11: RIGHT-EDGE aligned to the anchor (previously center-aligned) —
-    /// matches how macOS's own menu-bar panels (Control Center, Notification
-    /// Center) sit under a narrow status item without the bulk of a wide panel
-    /// overhanging both sides. The backing window is kept in lockstep (same
-    /// x/width, `beakHeight` taller) and its beak tip repositioned to track
-    /// wherever the anchor actually ends up after clamping. The signature is
-    /// unchanged from T1 on purpose.
+    /// The panel is CENTERED on the anchor's midX, like `NSPopover` (see
+    /// the body comment for why edge-pinning was rejected), clamped fully
+    /// on screen. The backing window is kept in lockstep (same x/width,
+    /// `beakHeight` taller) and its beak tip repositioned to track wherever
+    /// the anchor actually ends up after clamping.
     public func show(anchorRect: NSRect?) {
         guard let panel = window else { return }
         lastAnchorRect = anchorRect

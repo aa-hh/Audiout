@@ -38,7 +38,7 @@ public struct ConnectScript: Sendable {
 }
 
 /// An `OutputBackend` with no network and no audio — it fabricates a fleet of
-/// devices and behaves the way the real one will, so the entire AppKit UI
+/// devices and behaves the way the real one does, so the entire AppKit UI
 /// (menu bar, mixer, groups, sliders, mute, level meters) can be built and
 /// iterated with no AirPlay speakers anywhere in sight.
 ///
@@ -251,9 +251,8 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                         self.dropFromExpectedSet(id)
                     }
                 } else if shouldSelect {
-                    // Un-scripted device: exact pre-existing synchronous
-                    // behaviour, now also carrying `.connected` in the same
-                    // event (brief §5 back-compat requirement).
+                    // Un-scripted device: synchronous — selection + `.connected`
+                    // land in one event (brief §5).
                     var updated = device
                     updated.isSelected = true
                     updated.connectionState = .connected
@@ -561,8 +560,7 @@ public extension MockBackend {
     /// process environment). `AIRPLAY_MOCK_SCENARIO=connection-demo` selects
     /// ``connectionDemoScripts()``, giving every fleet device not explicitly
     /// listed there a plain quick connect so the whole fleet still finishes
-    /// connecting. Any other/missing value returns an empty dict (exact
-    /// current behaviour — no scripting).
+    /// connecting. Any other/missing value returns an empty dict (no scripting).
     static func resolveScenarioScripts(
         fleet: [Device] = .demoFleet,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -584,9 +582,9 @@ public extension Array where Element == Device {
     /// the groups UI has enough to work with.
     static var demoFleet: [Device] {
         [
-            // The Mac's own output. Not an AirPlay receiver — it is the
-            // MainOutTarget.localSpeakers target (passthrough). Starts unselected
-            // (it can't join a mixed Selected-Speakers set pre-engine; SPEC §9).
+            // The Mac's own output. Not an AirPlay receiver — the local device
+            // in Selected Devices; passthrough is DERIVED when the set is
+            // exactly {local} (SPEC §9). Starts unselected.
             Device(id: "local-mac",    name: "MacBook Pro Speakers", kind: .localMac,
                    supportsAirPlay2: false, volume: 65, isLocalDevice: true),
             Device(id: "sonos-move",   name: "Sonos Move",    kind: .sonos,          volume: 40, isSelected: true),
@@ -599,13 +597,12 @@ public extension Array where Element == Device {
     }
 
     /// `demoFleet` PLUS one extra, explicitly-named AP1-only fixture
-    /// (T-UI-AP1-1, PLAN-PHASE-2B D6, superseded T10): AP1 devices are now LIVE —
-    /// `NativeBackend` `addOutput`s them same as AP2, and the popover renders the
-    /// row enabled/full-alpha with a normal, drivable checkbox/slider/mute (the
-    /// earlier "coming soon"/dimmed gate was retired). A SEPARATE array (not
-    /// appended to `demoFleet` itself) so the many existing hardcoded `count == 7`
-    /// assertions elsewhere stay untouched; tests that want the AP1-only row
-    /// opt in with this fleet instead.
+    /// (T-UI-AP1-1, PLAN-PHASE-2B D6, T10): AP1 devices are LIVE — `NativeBackend`
+    /// `addOutput`s them same as AP2, and the popover renders the row
+    /// enabled/full-alpha with a normal, drivable checkbox/slider/mute. A SEPARATE
+    /// array (not appended to `demoFleet` itself) so the many existing hardcoded
+    /// `count == 7` assertions elsewhere stay untouched; tests that want the
+    /// AP1-only row opt in with this fleet instead.
     static var demoFleetWithAP1Only: [Device] {
         demoFleet + [
             Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,

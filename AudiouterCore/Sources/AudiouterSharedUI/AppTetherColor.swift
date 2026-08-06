@@ -9,8 +9,7 @@ import AppKit
 /// the same warm tint on both endpoints (App Exceptions row + the target
 /// device's sublabel) is the tether; no line crosses the panel. This utility
 /// is the single, standalone, deterministic source of that tint. It does NOT
-/// draw anything and is not yet wired into any row — a later agent consumes the
-/// API below to tint names.
+/// draw anything — rows consume the API below to tint names.
 ///
 /// ## What it does
 /// 1. **Dominant-hue extraction** — downscale the app icon to a small bitmap,

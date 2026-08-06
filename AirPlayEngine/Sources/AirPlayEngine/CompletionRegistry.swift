@@ -27,9 +27,9 @@ import CAirPlayEngine
 import os
 
 /// Bridges C completions to Swift continuations, keyed by the dispatcher's
-/// `callback_id`. All mutation happens on the engine thread (the hook fires
-/// there, and waiters are armed there), so no lock is needed — but we guard with
-/// one anyway for defensiveness against a stray call.
+/// `callback_id`. Waiters are armed and delivered on the engine thread, but
+/// the per-op timeout timers fire on `timerQueue` and resolve under the same
+/// `lock` — the lock is load-bearing, not defensive.
 final class CompletionRegistry: @unchecked Sendable {
 
     /// The single active registry the C hook reads. Set by `install()`.
@@ -207,7 +207,7 @@ final class CompletionRegistry: @unchecked Sendable {
 
     /// Called by the C hook on the engine thread. Resolves the state enum and
     /// resumes the matching waiter (once). Intermediate progress states
-    /// (startup/connected) do NOT resolve the waiter — only terminal states do,
+    /// (startup) do NOT resolve the waiter — only terminal states do,
     /// matching the dispatcher's completion semantics (contract: STARTUP is
     /// intermediate).
     private func deliver(callbackId: Int32, state: output_device_state) {

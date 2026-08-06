@@ -22,7 +22,7 @@ import CoreAudio
 /// system mix. This primitive returns every process object the bundle owns so a
 /// consumer can tap or exclude all of them.
 ///
-/// ## Consumers (later tasks — this file does not wire them)
+/// ## Consumers (wired in the two coordinators, not here)
 /// Both consumers ultimately feed a `CATapDescription` that takes
 /// `[AudioObjectID]`:
 /// - the per-app capture path (`PerAppCaptureCoordinator`) builds a

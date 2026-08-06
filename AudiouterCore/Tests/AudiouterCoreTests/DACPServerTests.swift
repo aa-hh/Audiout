@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import Network   // still used by this file's NWEndpoint-based fakes
+import Network
 @testable import AudiouterCore
 
 /// Unit tests for the DACP request parsing + volume mapping (speaker-input task,
@@ -131,11 +131,11 @@ import Network   // still used by this file's NWEndpoint-based fakes
         while !isReady && Date() < readyDeadline {
             Thread.sleep(forTimeInterval: 0.005)
         }
-        // BEHAVIOR CHANGE (swift-testing migration): this used to `throw XCTSkip`.
-        // swift-testing has no runtime skip, so an environment that cannot bind
-        // loopback now FAILS loudly instead of passing silently. The bind was
-        // deliberately narrowed to 127.0.0.1 (see the comment above) precisely so
-        // this is reliable; if it ever does flake, that should be visible.
+        // swift-testing has no runtime skip, so an environment that cannot
+        // bind loopback FAILS loudly instead of passing silently. The bind
+        // is deliberately narrowed to 127.0.0.1 (see the comment above)
+        // precisely so this is reliable; if it ever does flake, that should
+        // be visible.
         try #require(isReady, "test loopback listener never reached .ready")
         let port = try #require(listener.port, "listener bound no port")
         try #require(port.rawValue != 0, "listener port never left the placeholder 0")
@@ -226,8 +226,8 @@ import Network   // still used by this file's NWEndpoint-based fakes
 }
 
 /// Thrown when the same-process loopback pair cannot be established at all.
-/// Previously an `XCTSkip`; swift-testing has no runtime skip, so this surfaces
-/// as a real failure rather than a silent pass.
+/// swift-testing has no runtime skip, so this surfaces as a real failure
+/// rather than a silent pass.
 private struct LoopbackUnavailable: Error, CustomStringConvertible {
     var description: String { "loopback connection was never accepted" }
 }

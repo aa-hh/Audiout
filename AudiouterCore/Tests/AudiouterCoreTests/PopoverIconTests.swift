@@ -18,8 +18,7 @@ import AppKit
 /// CI, so this asserts the rendered `NSImage` via the same subview-traversal
 /// technique `PopoverControllerTests.testExactFitSizeMatchesContentNoScroll`
 /// uses for `NSScrollView`, since neither `DeviceRowView` nor `GroupRowView`
-/// exposes a `test_iconSymbolName` hook (out of scope — this task touches only
-/// this file).
+/// exposes a `test_iconSymbolName` hook.
 @MainActor
 @Suite struct PopoverIconTests {
 

@@ -509,7 +509,7 @@ import Testing
 
 extension MockBackendTests {
     /// Discover the (single-device) fleet used by the scripted-choreography
-    /// tests below, starting the backend.
+    /// tests above, starting the backend.
     func collectFleetDiscovery(_ backend: MockBackend, timeout: TimeInterval = 2) async throws -> [BackendEvent] {
         try await collect(1, from: backend, timeout: timeout)
     }

@@ -98,13 +98,13 @@ enum AboutCredits {
 
 /// The About/Credits surface content: app identity/version, GPL license +
 /// source-code link, scrollable third-party credits, and a support-contact
-/// placeholder. A standalone pane — not folded into the single-screen
-/// Settings window's General section — because its full required content
-/// (per-component license breakdown) would roughly double that window's
-/// height, breaking the "single, fixed-size, scrolling-free" Settings window
-/// design (`AudiouterSettingsUI/AGENTS.md`). `AboutWindowController` hosts
-/// this in its own small window instead; `GeneralSettingsViewController` only
-/// adds one button row to reach it, exactly like its existing "Setup" row.
+/// placeholder. A standalone pane — not folded into the Settings window's
+/// General tab — because its full required content (per-component license
+/// breakdown) would roughly double that pane's height, breaking the short,
+/// scannable per-tab Settings design (`AudiouterSettingsUI/AGENTS.md`).
+/// `AboutWindowController` hosts this in its own small window instead;
+/// `GeneralSettingsViewController` only adds one button row to reach it,
+/// exactly like its existing "Setup" row.
 @MainActor
 public final class AboutViewController: NSViewController {
 

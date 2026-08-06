@@ -7,9 +7,10 @@ import AudiouterSharedUI
 /// A saved group's header row in the Control-Center-style popover (SPEC §9
 /// revised — "Groups section"). Left to right: an **activate** button (a
 /// selectable circle that turns the group's members ON as a preset), a
-/// disclosure **chevron**, the group **name**, a numeric master **readout**, and
-/// a group-**master slider** shown on EVERY group (SPEC §9 revised — "every
-/// group row shows its master consistently, not just the active one").
+/// disclosure **chevron**, the group **icon** and **name**, a **mute** button,
+/// and a group-**master slider** + numeric **readout** shown on EVERY group
+/// (SPEC §9 revised — "every group row shows its master consistently, not
+/// just the active one").
 ///
 /// **Click anywhere on the row toggles expansion** (SPEC §9 revised — the whole
 /// reason for leaving NSMenu). The row is a control surface: a click on empty
@@ -181,8 +182,9 @@ public final class GroupRowView: NSView {
         // row's toggle); the name is the flexible column; the master slider and
         // `%` readout are anchored off the TRAILING edge so they line up exactly
         // with the device-row and Main-Out sliders. Group rows have no trailing
-        // control (no mute), so that slot is left empty — but the readout/slider
-        // still align because they clear the reserved trailing-control column.
+        // control (no Selected checkbox), so that slot is left empty — but the
+        // readout/slider still align because they clear the reserved
+        // trailing-control column.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 

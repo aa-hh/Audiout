@@ -71,6 +71,11 @@ git-owned history and comments that had drifted into being *wrong*.
   every guard.
 - razor: ceiling — the reviewing intelligence is the committing agent itself
   reading its own staged diff; there is no LLM call in the hook (latency and
-  cost train people to bypass gates — 2026 consensus). Upgrade path if this
-  proves too weak: an async second-model review at PR time in CI, not a
-  synchronous hook call.
+  cost train people to bypass gates — 2026 consensus). The PR-time second
+  review exists as the `/pr-review` skill (`.claude/skills/pr-review/`):
+  adversarial, evidence-only, published as PR comments in one idempotent
+  sweep. Invoke it deliberately on a PR; it never runs automatically.
+- Review discipline (both self-review and PR review): fewer correct findings
+  beat many doubtful ones, and a complexity finding must name exactly what to
+  delete and what replaces it — never call something over-engineered without
+  showing the smaller shape.

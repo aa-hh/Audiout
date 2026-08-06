@@ -558,6 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // path skips entirely. Give every native-backend launch one silent
             // registration attempt so their Login Items entry appears too.
             registerPTPHelperIfNeeded()
+            healPTPHelperZombieIfNeeded()
             // If audio capture is already NOT granted at launch (revoked or reset
             // since setup completed), present setup NOW — synchronously, since the
             // grant is a silent read — so it's the first thing on screen. Without
@@ -674,6 +675,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("PTP helper registered at launch (existing-user path)")
         } catch {
             log("PTP helper registration failed at launch: \(error)")
+        }
+    }
+
+    /// One-shot launch-time auto-heal for the PTP helper "zombie" state
+    /// (T-ZOMBIE, T4): `SMAppService` reports `.enabled` (Login Items approved)
+    /// yet launchd has no loaded job for the label, so every AirPlay 2 session
+    /// silently loses its shared clock. WHY `auditRequiredPermissionsIfNeeded()`
+    /// just below can't catch this: that audit is a STATUS-only read
+    /// (`SetupModel.auditRequiredPermissions()` calls `PTPHelperManaging
+    /// .status`), and a zombie helper reports `.enabled` right through it — a
+    /// status-only check PASSES a zombie silently. Only an ACTIVE liveness probe
+    /// distinguishes an `.enabled`-but-dead job from a genuinely healthy one,
+    /// which is exactly what `PTPHelperReconciler.reconcile()` runs. This method
+    /// is both the detection and the auto-repair; a false zombie verdict on a
+    /// valid, merely-contended connection is impossible by construction (only
+    /// `XPC_ERROR_CONNECTION_INVALID` ever maps to `.zombie` — see
+    /// `PTPLivenessProbeResult`), so healing here can never tear down a daemon
+    /// that is still mid-takeover for its ports.
+    ///
+    /// `reconcile()` is async (a bounded XPC probe, ~1.5s worst case), so this
+    /// fires it inside its own `Task` rather than awaiting inline — launch must
+    /// never block on it. Native-backend-gated, same posture as
+    /// `registerPTPHelperIfNeeded()` above: the mock/OwnTone paths never
+    /// register the helper, so there is nothing to reconcile. On `.healed`
+    /// landing back in `.requiresApproval`, or on `.healFailed` (the auto-heal
+    /// itself didn't work and the user needs the manual recovery), presents the
+    /// `.permissionLost([.ptpHelper])` approval screen — guarded on
+    /// `onboardingWindowController == nil`, the same guard the launch-time
+    /// audio-capture `.permissionLost` call site above uses, so this can't
+    /// double-present against another site opening onboarding first.
+    @MainActor
+    private func healPTPHelperZombieIfNeeded() {
+        guard case .native = backendKind else { return }
+        let reconciler = PTPHelperReconciler(helper: permissionProviders.ptpHelper)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await reconciler.reconcile()
+            switch outcome {
+            case .healed(let newStatus) where newStatus == .requiresApproval:
+                self.log("PTP helper zombie healed at launch — re-registration needs Login Items approval")
+                if self.onboardingWindowController == nil {
+                    self.presentSetup(reason: .permissionLost([.ptpHelper]))
+                }
+            case .healFailed:
+                self.log("PTP helper zombie heal failed at launch — surfacing manual recovery")
+                if self.onboardingWindowController == nil {
+                    self.presentSetup(reason: .permissionLost([.ptpHelper]))
+                }
+            case .notEnabled, .healthy, .indeterminate, .healed:
+                break
+            }
         }
     }
 

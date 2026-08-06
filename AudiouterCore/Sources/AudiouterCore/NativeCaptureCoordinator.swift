@@ -2229,6 +2229,17 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// inside the IOProc block, same confinement as the offset above.
     private var didLogIOProcPolicy = false
 
+    /// T-6 (judder plan): `.capturing` is committed on create SUCCESS, not on
+    /// first delivery — a tap can be "capturing" while delivering nothing,
+    /// invisible in gap metrics. `first_buffer_latency_ms` measures
+    /// `AudioDeviceStart` → first IOProc buffer per tap generation, so a
+    /// slow-to-wake or never-delivering generation becomes readable from the
+    /// log. Both fields seeded in `startIOProc()` before the start call;
+    /// thereafter touched only from inside the IOProc block (the
+    /// `machToMonotonicOffsetNanos` confinement discipline).
+    private var createCompletionMachTime: UInt64 = 0
+    private var didEmitFirstBufferLatency = false
+
     /// The off-thread half of the T-5 probe: `timeshare == 0` under
     /// `THREAD_EXTENDED_POLICY` means the thread is NOT ordinary timeshare —
     /// i.e. it runs a fixed/time-constraint policy, the real-time claim
@@ -2491,6 +2502,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         // handoff either.
         self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
         self.didLogIOProcPolicy = false
+        self.createCompletionMachTime = mach_absolute_time()
+        self.didEmitFirstBufferLatency = false
 
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(label: "com.audiouter.native.capture", qos: .userInitiated)
@@ -2507,6 +2520,18 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             if AudioDiag.isEnabled, !self.didLogIOProcPolicy {
                 self.didLogIOProcPolicy = true
                 Self.logIOProcThreadPolicy(pthread_mach_thread_np(pthread_self()))
+            }
+            // T-6 probe: one flag write + one delta per tap generation; the
+            // (allocating) formatting and log run on `telemetryQueue`.
+            if !self.didEmitFirstBufferLatency {
+                self.didEmitFirstBufferLatency = true
+                let deltaNanos = Self.machNanoseconds(
+                    fromHostTime: mach_absolute_time() &- self.createCompletionMachTime)
+                Self.telemetryQueue.async {
+                    Telemetry.log(.captureWS, "first_buffer_latency_ms", [
+                        "ms": String(format: "%.1f", Double(deltaNanos) / 1_000_000.0),
+                    ])
+                }
             }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)

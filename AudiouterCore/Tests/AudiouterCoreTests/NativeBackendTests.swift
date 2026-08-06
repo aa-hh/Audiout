@@ -4793,6 +4793,14 @@ extension SerializedSharedState {
         #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"])
         #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
                 "demoted at decision: no per-app bind op may ever be issued for a Selected Device")
+        // The record above is set synchronously under `stateQueue`, but the line
+        // reaches the sink via Telemetry's own writer queue — poll for delivery
+        // (exactly as Tests 1/3/4 do) before asserting on the box. Without it the
+        // expect races the async hop and loses deterministically in isolation.
+        await pollUntil {
+            self.telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
         #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
                     .contains { $0["stage"] as? String == "routeDemoted" })
         #expect(engine.liveStream(of: device.outputID) == 0,

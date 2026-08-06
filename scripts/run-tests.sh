@@ -32,6 +32,15 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 core="$repo_root/AudiouterCore"
 
+# Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
+# the moment disk pressure actually appears: a build starting. Best-effort by
+# construction — a housekeeping failure must never fail or block a test run.
+# Same resolution order as Guard 4 uses for this script: this worktree's own
+# copy first, else the copy beside this script (the primary checkout's).
+hk="$repo_root/scripts/housekeeping.sh"
+[ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
+if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
+
 workers=${AUDIOUTER_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUTER_TEST_LOCK_TIMEOUT:-1800}
 # How many suite runs may proceed at once, machine-wide. Default 2: a single run

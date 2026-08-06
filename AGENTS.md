@@ -78,6 +78,19 @@ symbol you cannot find in source, believe the source and fix the doc.
   repo's own path contains a space, which silently breaks unquoted loops.
 - **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
   guidance on scoping tests with `--filter`.
+- **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
+  worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
+  `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
+  and `scripts/make-app.sh` whenever a build starts) does two things: it
+  removes any worktree whose root contains a `.prunable` marker — but only if
+  it is clean, unreferenced by any running process, and its HEAD is merged
+  into `main` or pushed — and it caps machine-wide `.build` caches at
+  `AUDIOUTER_BUILD_CACHE_CAP` (default 2: the building checkout plus the most
+  recently built other), skipping any checkout a live process references.
+  When a branch is merged AND live-verified (or abandoned with everything
+  pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
+  collect it. The flag is a request, not a command — a dirty or unpushed
+  worktree is refused with the reason printed.
 - **Sweep stale PTP-helper daemons routinely — and always before a native live
   test.** Old dev builds and side-by-side copies leave `*.ptphelper` launchd
   jobs bound to UDP 319/320; a single stale one makes a healthy on-demand helper

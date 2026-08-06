@@ -238,14 +238,14 @@ import Testing
         #expect(retry.last?.isSelected == true)
     }
 
-    /// R12/W2-T3: `GroupController.retryConnection(for:)` no longer clears
-    /// intent before retrying — it re-issues `setOutputSet` with the id
-    /// STILL in the requested set (unlike the test above, which cleans up
-    /// to `[]` before re-adding). `setOutputSet` must still treat that as a
-    /// fresh attempt: it detects "already expected, still `.failed`" and
-    /// re-kicks anyway, rather than silently no-op'ing via the membership
-    /// -delta guard.
-    @Test func retryOfFailedWithUnchangedMembershipStillReconnects() async throws {
+    /// Storm fix (2026-08-06, reverses the earlier R12-era contract): a
+    /// membership-NEUTRAL `setOutputSet` — the id still in the requested set,
+    /// nothing added or removed — must NOT restart a `.failed` device's
+    /// choreography. Under R12 every unrelated routing call re-issues the same
+    /// set, and treating that as a retry is what made the autonomous retry
+    /// storm self-sustaining. The deliberate retry is `retryOutput(_:)`, which
+    /// `GroupController.retryConnection(for:)` now calls.
+    @Test func membershipNeutralSetOutputSetDoesNotRetryButRetryOutputDoes() async throws {
         let failure = ConnectionFailure(cause: .notResponding)
         let backend = MockBackend(
             fleet: [Device(id: "a", name: "A", kind: .generic)],
@@ -259,10 +259,19 @@ import Testing
         _ = try await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])       // attempt 1: fails
         }
-        // No cleanup call in between — "a" is still in the requested set (R12
-        // never dropped it). Re-issuing the SAME set must still retry.
+
+        // "a" is still in the requested set (R12 never dropped it). Re-issuing
+        // the SAME set is routing noise, not a retry — the device must stay in
+        // its resting `.failed`, with attempt 2 left unconsumed.
+        backend.setOutputSet(["a"])
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let resting = try #require(backend.devices.first { $0.id == "a" })
+        #expect(resting.connectionState == .failed(failure),
+                "a membership-neutral setOutputSet must not restart a .failed device's script")
+
+        // The dedicated retry entry point consumes attempt 2 and connects.
         let retry = try await collectUpdates(for: "a", count: 2, from: backend) {
-            backend.setOutputSet(["a"])       // attempt 2: connects
+            backend.retryOutput("a")
         }
         #expect(retry.map(\.connectionState) == [.connecting, .connected])
         #expect(retry.last?.isSelected == true)

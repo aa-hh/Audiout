@@ -274,6 +274,7 @@ import AirPlayEngine
             lastOutputSet = ids
             onSetOutputSet?(ids)
         }
+        func retryOutput(_ id: String) {}
     }
 
     private func makeRoutingBrain() -> (GroupController, RecordingBackend) {

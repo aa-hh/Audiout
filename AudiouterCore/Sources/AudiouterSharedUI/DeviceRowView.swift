@@ -450,8 +450,18 @@ public final class DeviceRowView: NSView {
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
         // hide the toggle entirely (task C) — membership there is fixed.
+        //
+        // Enablement is INTENT-derived, not availability-derived (live bug,
+        // 2026-08-06): the native backend's failure paths force
+        // `isAvailable = false` while the user's selection intent stays true,
+        // and an intent control that renders ON but can never be turned OFF is
+        // a dead end — every deselect affordance (checkbox hit-test, name
+        // click, node click, keyboard/VoiceOver) rides this one flag, so a
+        // stuck-`.failed` row was physically un-deselectable. A SELECTED row
+        // therefore keeps a live toggle regardless of availability; an
+        // unavailable+UNselected row keeps the dead toggle (nothing to drop).
         enableCheckbox.state = selected ? .on : .off
-        enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked
+        enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected) && !blocked
         enableCheckbox.toolTip = (showsToggle && blocked) ? blockReason : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
         // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):

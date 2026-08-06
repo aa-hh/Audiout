@@ -1579,10 +1579,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // automatically once discovery reports the device reachable again
     // (`NativeBackend.addOrUpdate`'s `desiredOn`-driven re-kick) — no user
     // action required. On `→ .connected` / `→ .off` any panel for the id is
-    // torn down. "Try again" re-adds membership (the toggle-on path IS the
-    // retry path, and remains a no-op if the device was never removed). The
-    // panel is purely auto-driven off these transitions — the manual
-    // warning-button toggle was retired 2026-07-17.
+    // torn down. "Try again" is `OutputBackend.retryOutput(_:)` via
+    // `GroupController.retryConnection(for:)` — a single-device re-kick that
+    // never touches membership. The panel is purely auto-driven off these
+    // transitions — the manual warning-button toggle was retired 2026-07-17.
 
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
@@ -1703,13 +1703,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// "Try again": under R12 (W2-T3) the id is normally ALREADY selected/a
     /// group member (`.failed` no longer drops it), so this can't ride a
-    /// plain `setDeviceSelected(id, true)` off→on edge any more —
-    /// `GroupController.retryConnection(for:)` is the dedicated entry point
-    /// that re-applies routing regardless, so the backend gets another
-    /// `setOutputSet` call and can re-kick the `.failed` id back to
-    /// `.connecting`. Same call whether `id` is a Selected-Devices member or
-    /// an active group's member (Groups and Selected Devices behave
-    /// identically here).
+    /// plain `setDeviceSelected(id, true)` off→on edge —
+    /// `GroupController.retryConnection(for:)` is the dedicated entry point,
+    /// which calls `OutputBackend.retryOutput(id)`: a single-device re-kick
+    /// back to `.connecting` that touches no other device (a broad routing
+    /// re-apply used to re-kick EVERY parked `.failed` id — the retry storm,
+    /// fixed 2026-08-06). Same call whether `id` is a Selected-Devices member
+    /// or an active group's member (Groups and Selected Devices behave
+    /// identically here). The eager `.failed → .connecting` edge this produces
+    /// is also what marks the attempt USER-INITIATED for the episode
+    /// semantics above — the backend's autonomous recovery never emits it.
     private func retryConnection(for id: String) {
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)

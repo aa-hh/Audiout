@@ -61,17 +61,7 @@ public final class BusRailOverlayView: NSView {
         needsDisplay = true
     }
 
-    /// How many times this overlay has actually been drawn. The rail's geometry is
-    /// resolved from live frames AT DRAW TIME, so it is only ever as fresh as its
-    /// last INVALIDATION — which makes "was it asked to redraw?" the whole
-    /// correctness question, and one that `needsDisplay` can't answer for a test
-    /// (AppKit ignores the flag on a windowless view, and won't let you clear it on
-    /// a view it has already scheduled). Counting real draws is the observable that
-    /// distinguishes an invalidated overlay from a stale one.
-    public private(set) var test_drawCount = 0
-
     public override func draw(_ dirtyRect: NSRect) {
-        test_drawCount += 1
         guard let plan = resolvePlan() else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             drawPlan(plan)

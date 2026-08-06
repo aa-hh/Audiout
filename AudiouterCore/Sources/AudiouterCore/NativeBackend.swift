@@ -303,6 +303,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// default `AUDIOUTER_PTP_BIND_RETRY_SECS`.
     private static let ptpActivationTimeout: TimeInterval = 10
 
+    /// How long a clock wait must actually run before the `.takingOver` strip
+    /// mounts (banner-flash fix, 2026-08-06): a wait that resolves inside this
+    /// window — the common case on a warm helper, including every failed manual
+    /// retry — shows NO transient blue strip and causes no double panel re-fit;
+    /// the strip only appears when the takeover is genuinely slow. `<= 0` keeps
+    /// the old synchronous emit (tests that pin the strip's ordering use that).
+    private let takeoverStripDelay: TimeInterval
+
     /// Frees UDP 319/320 before a connect by moving the Mac's own default
     /// output off an AirPlay receiver (T5). **`nil` = inert**, and that is the
     /// default deliberately: this is the one component in the backend that
@@ -1052,6 +1060,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        takeoverStripDelay: TimeInterval = 0.75,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
@@ -1085,6 +1094,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
+        self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
         // here, never mutated after, so no `stateQueue` synchronization is needed
@@ -1835,48 +1845,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
 
-                // A user re-toggle to ON clears a terminal-failure park so the
-                // device is re-enableable after a NACK (root cause 4: no permanent
-                // wedge). Toggling OFF a parked device likewise clears the park (the
-                // device is being deselected — nothing to retry).
-                if self.failedGate.contains(id) { self.failedGate.remove(id) }
-
                 let previous = self.desiredOn[id]
                 self.desiredOn[id] = wantOn
 
-                // R12/W2-T3: `.failed` no longer drops the id from the desired
-                // set (the popover's "Try again" keeps Selected-Devices intent
-                // through a failure — it never toggles membership off first), so
-                // a retry now arrives here with `wantOn` UNCHANGED (already
-                // `true`) rather than as an off→on edge. Detect that case
-                // explicitly and treat it as a fresh attempt too — this mirrors
-                // OwnToneBackend's `setOutputSet`, which never gated retry on a
-                // membership delta in the first place: it re-checks every id's
-                // CURRENT `connectionState` on every call and re-kicks anything
-                // `.off`/`.failed` regardless of whether that id was already in
-                // the requested set.
-                var isRetryOfFailed = false
-                if wantOn, previous == true, case .failed? = self.known[id]?.connectionState {
-                    isRetryOfFailed = true
-                }
+                // A genuine MEMBERSHIP EDGE clears a terminal-failure park: a
+                // re-toggle to ON is an explicit retry after a NACK (root cause
+                // 4: no permanent wedge), and toggling OFF deselects the device
+                // (nothing left to retry). A membership-NEUTRAL call must leave
+                // a parked id ALONE — this used to be an unconditional clear
+                // plus an `isRetryOfFailed` re-kick, which turned EVERY routing
+                // call that left the set unchanged (a This-Mac toggle, a
+                // Main-Out re-pick, an unrelated selection change) into a full
+                // retry of every still-desired `.failed` device, sustaining an
+                // autonomous zero-backoff retry storm (live, 2026-08-06). The
+                // deliberate same-membership retry ("Try again") now travels
+                // its own entry point, `retryOutput(_:)`.
+                if previous != wantOn { self.failedGate.remove(id) }
 
                 // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
                 // `setOutputSet`): a device newly desired ON goes `.connecting`
                 // immediately, before the engine op resolves, so the UI spinner is
-                // immediate. This also clears a sticky `.failed` on retry (the
-                // `failedGate` clear above is the routing-side twin of this). A
-                // device newly desired OFF drops any in-flight/failed indication
-                // back to `.off` right away — NativeBackend has no "sticky failed
-                // survives deselect" behavior (its park is cleared on toggle
-                // unconditionally, above), so the connection dot follows suit.
-                if previous != wantOn || isRetryOfFailed {
+                // immediate. This also clears a sticky `.failed` on a re-toggle
+                // (the `failedGate` clear above is the routing-side twin of
+                // this). A device newly desired OFF drops any in-flight/failed
+                // indication back to `.off` right away — NativeBackend has no
+                // "sticky failed survives deselect" behavior (its park is
+                // cleared on any toggle edge, above), so the connection dot
+                // follows suit and a deselect genuinely ENDS a failure episode.
+                if previous != wantOn {
                     self.setConnectionState(wantOn ? .connecting : .off, for: id)
                 }
-                // Kick if the desired state changed, OR this is a same-membership
-                // retry of a `.failed` device (R12) — AND no loop is already
+                // Kick iff the desired state changed AND no loop is already
                 // running for this id (a running loop re-reads `desiredOn` when
                 // its op settles).
-                if (previous != wantOn || isRetryOfFailed), !self.converging.contains(id) {
+                if previous != wantOn, !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
                     // Connect-latency diagnosis: T0 for "click to first audio," read
@@ -1974,6 +1976,41 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 await self.convergeDevice(id: id, outputID: outputID)
             }
         }
+    }
+
+    public func retryOutput(_ id: String) {
+        // Same routing-action chokepoint discipline as `setOutputSet` (T6-rev):
+        // a retry is a user routing gesture, and this must run OUTSIDE the lock.
+        onRoutingAction?()
+        let kick: OutputID? = stateQueue.sync {
+            // Only a still-DESIRED id can be retried — intent lives in
+            // `expectedSelected` (what the routing brain last asked for), and a
+            // retry never invents membership. An already-`.connected` id has
+            // nothing to retry.
+            guard self.expectedSelected.contains(id),
+                  let device = self.known[id], !device.isLocalDevice,
+                  device.connectionState != .connected,
+                  let outputID = self.outputIDs[id] else { return nil }
+            // THE explicit un-park site for a same-membership retry: `setOutputSet`
+            // only clears the park on a genuine membership edge now (storm fix,
+            // 2026-08-06), so "Try again" clears it here — for THIS id only.
+            self.failedGate.remove(id)
+            self.desiredOn[id] = true
+            // Eager `.connecting`, mirroring `setOutputSet`'s newly-desired-ON arm:
+            // the spinner is immediate, and the fresh `.failed → .connecting` edge
+            // is what marks a USER-initiated attempt (a new failure episode) for
+            // the popover's diagnosis-panel semantics — the backend's autonomous
+            // recovery paths deliberately never produce this edge.
+            self.setConnectionState(.connecting, for: id)
+            guard !self.converging.contains(id) else { return nil }
+            self.converging.insert(id)
+            // F-REBIND: the USER asked for this connect, same as a fresh toggle.
+            self.userConnectSeed.insert(id)
+            Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
+            return outputID
+        }
+        guard let kick else { return }
+        Task { [weak self] in await self?.convergeDevice(id: id, outputID: kick) }
     }
 
     /// Execute the "play everywhere" enable/disable transition decided by
@@ -3843,12 +3880,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 ])
             }
         }
+        // Banner-flash fix (2026-08-06): the `.takingOver` strip is DEBOUNCED —
+        // armed only after `takeoverStripDelay` of genuine waiting, cancelled if
+        // the wait resolves first. Pre-fix the strip mounted synchronously on
+        // every attempt that waited at all, so each manual retry-that-fails
+        // flashed the blue strip (mount + unmount, two panel re-fits) over the
+        // steady-state orange fallback banner. A wait that outlives the delay
+        // still mounts it, and the `.timedOut` backstop is unaffected.
+        var takingOverArm: DispatchWorkItem?
         if ptpHelperActivator.willWaitForClock {
-            stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+            if takeoverStripDelay <= 0 {
+                stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+            } else {
+                let arm = DispatchWorkItem { [weak self] in self?.setTakeoverStatus(.takingOver) }
+                takingOverArm = arm
+                stateQueue.asyncAfter(deadline: .now() + takeoverStripDelay, execute: arm)
+            }
         }
         let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
         let ready = (outcome == .ready)
         let becameAvailable: Bool = stateQueue.sync {
+            // Cancel inside the critical section: the arm runs on `stateQueue`
+            // too, so past this point it either already fired (a genuinely long
+            // wait — the resolved status below supersedes it) or never will.
+            takingOverArm?.cancel()
             let was = self.ptpClockAvailable
             self.ptpClockAvailable = ready
             self.setTakeoverStatus(TakeoverStatus.resolved(from: outcome))
@@ -5002,13 +5057,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `isAvailable == true`, so it IS streamable and its descriptor is kept.
         let streamableNow = discovered.isAvailable
         if streamableNow {
+            // Availability recovery (root cause 4), EDGE-GATED (storm fix,
+            // 2026-08-06): clear a terminal-failure park only when this
+            // re-resolve is evidence the device actually CAME BACK — no
+            // descriptor was on file (first sighting, back from sticky-AP2
+            // offline, or re-appeared after a `disappeared`, all of which nil
+            // the memo) or the announced descriptor CHANGED (the receiver
+            // restarted / moved). A dead-but-still-announcing receiver
+            // re-resolving the SAME descriptor is NOT evidence of recovery:
+            // the old unconditional clear here (STABILITY(C7), "no backoff")
+            // plus the `desiredOn` re-kick below re-armed a failed device on
+            // every mDNS re-announce, one driver of the autonomous retry
+            // storm. The edge IS the backoff; a same-descriptor receiver
+            // recovers via its next engine good-state transition
+            // (`applyEngineState` clears the park), a user re-toggle, or
+            // "Try again" (`retryOutput`).
+            let cameBack = self.lastDescriptors[id].map {
+                !Self.descriptorsEqual($0, discovered.descriptor)
+            } ?? true
             self.lastDescriptors[id] = discovered.descriptor
-            // Availability recovery (root cause 4): a fresh AP2 (re-)resolution is
-            // evidence the device is reachable again, so clear any terminal-failure
-            // park — the device becomes re-enableable on the next user toggle (or,
-            // if it's still desired-on, the loop below re-kicks it).
-            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
-            self.failedGate.remove(id)
+            if cameBack { self.failedGate.remove(id) }
         } else {
             self.lastDescriptors[id] = nil
             // The AP2 advert is gone (downgrade) or the device went offline: the
@@ -5044,7 +5112,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
            !self.failedGate.contains(id),
            let outputID = self.outputIDs[id] {
             self.converging.insert(id)
-            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
+            // STABILITY(C7) resolved (storm fix, 2026-08-06): a parked id keeps
+            // its gate across same-descriptor re-resolves (the edge-gated clear
+            // above), so this re-kick fires only for a genuine came-back /
+            // never-failed device. Deliberately NO eager `.connecting` here —
+            // autonomous recovery must not churn the connection state machine
+            // (a fresh `.failed → .connecting → .failed` cycle would resurrect
+            // a user-dismissed diagnosis panel); success lands `.connected`
+            // via the add path, failure leaves the resting `.failed` alone.
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
 
@@ -5130,6 +5205,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // The engine descriptor is deregistered on disappear; a future re-add must
         // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
         self.fedDescriptors[id] = nil
+        // A full disappear ends any failure episode (the state clears to `.off`
+        // below), so drop the park with it — a later re-appearance is then a
+        // clean `desiredOn`-driven auto-reconnect in `addOrUpdate` even when the
+        // receiver comes back announcing the identical descriptor (the edge-gated
+        // clear there would not fire for it; this is the drop-off-and-return arm
+        // of the storm fix, 2026-08-06). The descriptor memo stays: it's what
+        // `removeEngineDiscovery` reconstructs the deregistration from.
+        self.failedGate.remove(id)
         guard var device = known[id] else { return }
         var changed = false
         if device.isAvailable { device.isAvailable = false; changed = true }

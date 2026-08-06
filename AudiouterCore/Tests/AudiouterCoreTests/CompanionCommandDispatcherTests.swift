@@ -391,6 +391,20 @@ import AudiouterProtocol
         #expect(ctx.appRouting.appRoutes.first?.destination == .noRedirect, "unresolved — never applied")
     }
 
+    @Test func setAppDestinationMainOutMemberIsRefused() async throws {
+        // One-role-per-speaker from the wire: the popover picker and the
+        // phone's own picker filter Main Out members out, but the dispatcher
+        // is the trust boundary — an arbitrary client sending the command
+        // must get an honest refusal, not a silently-demoted route.
+        let ctx = try await makeContext()
+        _ = ctx.dispatcher.execute(.setDeviceSelected(id: "office", selected: true))
+        ctx.appRouting.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        let result = ctx.dispatcher.execute(.setAppDestination(bundleID: "com.apple.Music", kind: "device", deviceID: "office"))
+        #expect(!result.applied)
+        #expect(result.refusalReason?.contains("Main Out") == true)
+        #expect(ctx.appRouting.appRoutes.first?.destination == .noRedirect, "never applied")
+    }
+
     @Test func setAppDestinationUnknownKindIsRefused() async throws {
         let ctx = try await makeContext()
         ctx.appRouting.addRoute(bundleID: "com.apple.Music", displayName: "Music")

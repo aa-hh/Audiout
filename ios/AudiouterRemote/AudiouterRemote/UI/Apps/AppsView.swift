@@ -69,11 +69,16 @@ struct AppsView: View {
     }
 
     /// Speakers offerable as a redirect target: available, AirPlay-capable,
-    /// non-local — the exact filter `PopoverController.availableAirPlayDestinations`
-    /// uses for the same menu on the Mac side, so the phone never offers a
-    /// destination the Mac itself wouldn't.
+    /// non-local, and not carrying the Main Out — the popover applies the
+    /// same one-role-per-speaker skip on top of
+    /// `PopoverController.availableAirPlayDestinations` (a Main Out member is
+    /// never offered as a redirect target), so the phone never offers a
+    /// destination the Mac itself wouldn't. The Mac's dispatcher also refuses
+    /// it server-side; this filter keeps the refusal from ever being needed.
     private func redirectableDevices(in snapshot: Snapshot) -> [DeviceState] {
-        snapshot.devices.filter { !$0.isLocalDevice && $0.isAvailable && $0.supportsAirPlay2 }
+        snapshot.devices.filter {
+            !$0.isLocalDevice && $0.isAvailable && $0.supportsAirPlay2 && !$0.isMainOutMember
+        }
     }
 }
 

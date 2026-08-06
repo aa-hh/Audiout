@@ -415,7 +415,17 @@ final class ConnectionController: @unchecked Sendable {
 
     private func startPathMonitor() {
         guard pathMonitor == nil else { return }
+        // The .wifi requirement is meaningless in the simulator: its network
+        // rides the host Mac's interface (typed wired/other), so a
+        // required-Wi-Fi monitor never satisfies even though Bonjour works
+        // fine there — which would pin the UI on "Not on Wi-Fi" and hide
+        // every discovered Mac. Any satisfied path counts in the simulator;
+        // real devices keep the honest Wi-Fi requirement.
+        #if targetEnvironment(simulator)
+        let monitor = NWPathMonitor()
+        #else
         let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        #endif
         monitor.pathUpdateHandler = { [weak self] path in
             self?.handlePathUpdate(satisfied: path.status == .satisfied)
         }

@@ -486,7 +486,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing down the
         // now-stale per-app tap. The popover's picker refuses the mirror-image
         // conflict up front (a Main Out member is never offered as a redirect
-        // target), so the two directions can never build the overlap.
+        // target), and the companion dispatcher refuses the same conflict from
+        // remote clients (applySetAppDestination), so no direction can build
+        // the overlap.
         groupController.onMainOutMembersChanged = { [weak self] memberIDs in
             self?.appRouting.clearRoutes(toDevices: memberIDs)
         }

@@ -447,8 +447,18 @@ public final class CompanionCommandDispatcher {
         case "currentDevice":
             destination = .currentDevice
         case "device":
-            guard let deviceID, groupController.devices.contains(where: { $0.id == deviceID }) else {
+            guard let deviceID, let device = groupController.devices.first(where: { $0.id == deviceID }) else {
                 return .refused("Unknown device.")
+            }
+            // One-role-per-speaker, server side: the popover's redirect picker
+            // skips Main Out members (PopoverController.appDestinations), and
+            // AppRoutingController.clearRoutes(toDevices:) resolves the reverse
+            // direction. A remote client is the third way to build the overlap —
+            // post-008 the arbiter would silently demote the route, so refuse
+            // honestly instead. The phone's own picker filters too (AppsView);
+            // this guard is the trust boundary for any client.
+            guard !groupController.isMainOutMember(deviceID) else {
+                return .refused("\u{201C}\(device.name)\u{201D} is carrying the Main Out — deselect it as a speaker first.")
             }
             destination = .device(id: deviceID)
         default:

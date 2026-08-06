@@ -940,11 +940,53 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         snapshotLock.unlock()
     }
 
+    // MARK: Stage-boundary sample conservation (T-2, judder investigation)
+
+    /// Cumulative frames at the two stage boundaries this coordinator owns:
+    /// delivered INTO `handleBuffer` by the IOProc, and written OUT to the
+    /// engine sink. Together with ``AVFormatConverter``'s in/out pair they
+    /// bracket every stage a frame can silently vanish in, so a sustained
+    /// timeline slide can be pinned to one stage by comparing deltas.
+    /// Delivery-thread-confined, no lock — the single-caller discipline
+    /// `EngineSink`'s counters already rely on.
+    private var ioprocFramesIn: UInt64 = 0
+    private var engineWriteFrames: UInt64 = 0
+
+    /// Sampler state for ``sampleWriteConservationIfDue(converter:)`` — same
+    /// interval and delta-gate shape as `EngineSink.sampleWriteCadenceIfDue()`
+    /// (this event joins that family).
+    private static let conservationSampleInterval = 500
+    private var conservationSampleCounter = 0
+    private var lastReportedConservation: (UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0)
+
+    /// Throttled (1-in-`conservationSampleInterval`), delta-gated emission of
+    /// all four conservation counters as ONE `write_conservation` event.
+    /// Runs on the tap delivery thread, after a successful engine write —
+    /// per-buffer cost is one increment + one compare; formatting only on
+    /// emission, exactly like `EngineSink`'s samplers.
+    private func sampleWriteConservationIfDue(converter: PCMConverting) {
+        conservationSampleCounter &+= 1
+        guard conservationSampleCounter % Self.conservationSampleInterval == 0 else { return }
+        let (converterIn, converterOut) = converter.conservationFrameCounts()
+        let current = (ioprocFramesIn, converterIn, converterOut, engineWriteFrames)
+        guard current != lastReportedConservation else { return }
+        lastReportedConservation = current
+        Telemetry.log(.captureWS, "write_conservation", [
+            "ioprocIn": String(ioprocFramesIn),
+            "converterIn": String(converterIn),
+            "converterOut": String(converterOut),
+            "engineWrite": String(engineWriteFrames),
+        ])
+    }
+
     /// Convert one captured buffer to the engine's fixed S16LE/44100/2ch format
     /// and forward it with a `pts` derived from the buffer's own `mHostTime`.
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
     /// beyond the converter's own scratch is avoided on this path where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
+        // Counted before ANY early-out below, so a buffer dropped by a missed
+        // snapshot or an absent converter still shows as ioprocIn > converterIn.
+        ioprocFramesIn &+= UInt64(buffer.frameCount)
         // T8 (plan finding F12): REAL-TIME THREAD — never take `queue` here.
         //
         // This used to be `queue.sync { (converter, meteringActive, sink,
@@ -988,6 +1030,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)
+        // S16LE stereo interleaved = 4 bytes/frame (`PCMFormat.airplay`).
+        engineWriteFrames &+= UInt64(pcm.count / 4)
+        sampleWriteConservationIfDue(converter: converter)
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
         // sink — ONE capture, two consumers. Widened to interleaved Float32 and
@@ -1628,10 +1673,20 @@ public protocol PCMConverting: Sendable {
     /// buffers whose conversion just FAILED, so a 100%-failing converter still
     /// surfaces its failures. Default: no-op (fakes count nothing).
     func sampleConversionFailuresIfDue()
+
+    /// Cumulative (frames offered, frames produced) across SUCCESSFUL
+    /// conversions — the converter's half of the `write_conservation` stage-
+    /// boundary ledger (T-2, judder investigation). Failed conversions are
+    /// excluded on both sides: they are already counted per-reason by the
+    /// `convert_failure` counters, and a drop must surface as ioprocIn >
+    /// converterIn, not as a converter that "consumed" frames it produced
+    /// nothing for. Default: (0, 0) (fakes count nothing).
+    func conservationFrameCounts() -> (framesIn: UInt64, framesOut: UInt64)
 }
 
 extension PCMConverting {
     public func sampleConversionFailuresIfDue() {}
+    public func conservationFrameCounts() -> (framesIn: UInt64, framesOut: UInt64) { (0, 0) }
 }
 
 /// Why `AVFormatConverter.convertToAirPlayPCM` dropped a buffer — one case per
@@ -2916,6 +2971,18 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
     private var failureSampleCounter = 0
     private var lastReportedFailureTotal: UInt64 = 0
 
+    /// The converter's `write_conservation` pair (T-2) — see the
+    /// ``PCMConverting/conservationFrameCounts()`` doc for the success-only
+    /// semantics. Written inside the locked convert body, in-place scalar
+    /// bumps only, same as `failureCounts`.
+    private var converterFramesIn: UInt64 = 0
+    private var converterFramesOut: UInt64 = 0
+
+    func conservationFrameCounts() -> (framesIn: UInt64, framesOut: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        return (converterFramesIn, converterFramesOut)
+    }
+
     init(from format: TapFormat) {
         self.sourceFormat = format
 
@@ -3057,6 +3124,8 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
         guard let outData = outABL.mData, outABL.mDataByteSize > 0 else {
             return failed(.extractionEmpty)
         }
+        converterFramesIn &+= UInt64(buffer.frameCount)
+        converterFramesOut &+= UInt64(outBuf.frameLength)
         return Data(bytes: outData, count: Int(outABL.mDataByteSize))
     }
 

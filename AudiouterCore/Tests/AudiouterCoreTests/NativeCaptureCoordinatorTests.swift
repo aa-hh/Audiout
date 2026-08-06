@@ -1527,7 +1527,79 @@ extension SerializedSharedState {
         #expect(failureLines().count == 2)
         #expect(failureLines().last?.contains("\"failedTotal\":\"2\"") == true)
     }
+
+    /// The converter's `write_conservation` pair accrues on SUCCESSFUL
+    /// conversions only — a failing converter moves neither side (its drops
+    /// are the `convert_failure` counters' job), and a successful conversion
+    /// accrues exactly the frames offered and the frames the output actually
+    /// carried (which differ across a resample: 48000 in, 44100 out).
+    @available(macOS 14.2, *)
+    @Test func converterConservationCountersAccrueOnSuccessOnly() {
+        let buffer = CapturedBuffer(
+            channelData: Self.planarFloat32Stereo(frameCount: 64), frameCount: 64, pts: timespec())
+
+        let broken = AVFormatConverter(from: TapFormat(
+            sampleRate: 0, channels: 2, bitsPerSample: 0, isFloat: true, isInterleaved: true))
+        #expect(broken.convertToAirPlayPCM(buffer) == nil)
+        #expect(broken.conservationFrameCounts() == (0, 0),
+            "a failed conversion must move neither conservation counter")
+
+        let healthy = AVFormatConverter(from: TapFormat(
+            sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false))
+        let pcm = healthy.convertToAirPlayPCM(buffer)
+        #expect(pcm != nil)
+        let counts = healthy.conservationFrameCounts()
+        #expect(counts.framesIn == 64)
+        // S16LE stereo interleaved = 4 bytes/frame.
+        #expect(counts.framesOut == UInt64((pcm?.count ?? 0) / 4))
+        #expect(counts.framesOut > 0)
+        #expect(counts.framesOut < counts.framesIn,
+            "48000 -> 44100 must produce fewer frames than offered — the in/out split this pair exists to expose")
+    }
     #endif
+
+    /// `sampleWriteConservationIfDue(converter:)`: one `write_conservation`
+    /// event per full sampler interval of successful writes, carrying the
+    /// cumulative stage-boundary counters (frames into `handleBuffer`, frames
+    /// written to the engine sink; the fake converter reports the protocol
+    /// default (0, 0)). Test-sink idiom identical to
+    /// `startEmitsCaptureWSTransitionTelemetry` above.
+    @Test func writeConservationSamplerEmitsStageCountersPerInterval() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.start()
+
+        func conservationLines() -> [String] {
+            capturedLines.snapshot.filter { $0.contains("\"evt\":\"write_conservation\"") }
+        }
+
+        // 500 buffers x 4 frames each (FakeConverter emits 4 S16LE frames per
+        // buffer) -> exactly one event at the interval boundary.
+        for i in 0..<500 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 1_000_000)) }
+        waitFor { sink.forwarded.count == 500 }
+        Telemetry._installTestSink { capturedLines.append($0) } // flush barrier
+        #expect(conservationLines().count == 1,
+            "500 writes must emit exactly one write_conservation event, got: \(conservationLines())")
+        #expect(conservationLines().first?.contains("\"ioprocIn\":\"2000\"") == true)
+        #expect(conservationLines().first?.contains("\"engineWrite\":\"2000\"") == true)
+        #expect(conservationLines().first?.contains("\"converterIn\":\"0\"") == true)
+        #expect(conservationLines().first?.contains("\"converterOut\":\"0\"") == true)
+
+        // The counters are cumulative: the next full interval reports totals.
+        for i in 500..<1000 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 1_000_000)) }
+        waitFor { sink.forwarded.count == 1000 }
+        Telemetry._installTestSink(nil) // synchronous flush barrier
+        #expect(conservationLines().count == 2)
+        #expect(conservationLines().last?.contains("\"ioprocIn\":\"4000\"") == true)
+        #expect(conservationLines().last?.contains("\"engineWrite\":\"4000\"") == true)
+
+        coordinator.stop()
+    }
 
     // MARK: - utils
 

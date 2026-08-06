@@ -224,10 +224,11 @@ import Testing
 
     // MARK: Companion — allow remote control (T6)
 
-    @Test func allowRemoteControlDefaultsFalseWhenUnset() {
-        // Opt-in only: a fresh install/upgrade never starts the companion
-        // server's always-on listener without the user choosing it.
-        #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    @Test func allowRemoteControlDefaultsTrueWhenUnset() {
+        // T22 flip: enabled out of the box — the per-phone approval gate is
+        // what protects the listener, not the checkbox. Unchecking still
+        // stores false and wins (see allowRemoteControlRoundTrips).
+        #expect(AppSettings(defaults: defaults).allowRemoteControl)
     }
 
     @Test func allowRemoteControlRoundTrips() {

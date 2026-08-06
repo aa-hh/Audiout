@@ -40,7 +40,7 @@
 #   --dry-run  report what would happen, touch nothing
 #
 # Env: AUDIOUTER_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
-#      AUDIOUTER_MIN_FREE_GB         free-disk floor (default 15)
+#      AUDIOUTER_MIN_FREE_GB         free-disk floor (default 8)
 #      AUDIOUTER_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
 set -u
 
@@ -144,17 +144,17 @@ done
 #   1. STALENESS: a cache untouched for AUDIOUTER_CACHE_MAX_AGE_DAYS (7) is
 #      deleted unconditionally — after that much source drift SwiftPM largely
 #      rebuilds from scratch anyway, so it saves ~nothing and holds ~1 GB.
-#   2. PRESSURE: below AUDIOUTER_MIN_FREE_GB (15) free, delete caches least-
+#   2. PRESSURE: below AUDIOUTER_MIN_FREE_GB (8) free, delete caches least-
 #      recently-built first until back above the floor. This is the hard
 #      guarantee the disk can never again hit zero mid-build.
 # The current checkout and anything a live process references are never
 # touched by either rule.
 max_age_days=${AUDIOUTER_CACHE_MAX_AGE_DAYS:-7}
-# 10, not higher: this machine's normal free space hovers around 13 GB (APFS
+# 8, not higher: this machine's normal free space hovers around 13 GB (APFS
 # purgeable space is held elsewhere), so a floor above that would put every
-# build permanently in reclaim mode. 10 leaves ~2 builds' worth of margin
+# build permanently in reclaim mode. 8 leaves ~2 builds' worth of margin
 # above zero while staying comfortably below the everyday baseline.
-min_free_gb=${AUDIOUTER_MIN_FREE_GB:-10}
+min_free_gb=${AUDIOUTER_MIN_FREE_GB:-8}
 now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the

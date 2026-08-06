@@ -86,7 +86,7 @@ symbol you cannot find in source, believe the source and fix the doc.
   it is clean, unreferenced by any running process, and its HEAD is merged
   into `main` or pushed — and it sweeps machine-wide `.build` caches: any
   cache untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
-  below `AUDIOUTER_MIN_FREE_GB` (10) free disk, caches go least-recently-
+  below `AUDIOUTER_MIN_FREE_GB` (8) free disk, caches go least-recently-
   built-first until the floor is restored. The building checkout and any
   checkout a live process references are never touched.
   When a branch is merged AND live-verified (or abandoned with everything

@@ -647,7 +647,12 @@ final class ResolvedWebSocketTransport: MacTransport, @unchecked Sendable {
         let hostString: String
         switch host {
         case .ipv4(let address):
-            hostString = "\(address)"
+            // The resolved address can carry an interface scope
+            // ("192.168.4.84%en0" — seen live on iOS 27); a bare "%" is an
+            // illegal URL escape, so interpolating it makes URL(string:)
+            // return nil and the connect die as "no usable IPv4 address".
+            // IPv4 needs no scope to dial — drop it.
+            hostString = "\(address)".split(separator: "%").first.map(String.init) ?? "\(address)"
         case .name(let name, _):
             hostString = name
         case .ipv6:

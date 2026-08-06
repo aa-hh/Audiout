@@ -136,6 +136,24 @@ import AudiouterProtocol
         return (conn, transport, queue, log)
     }
 
+    // MARK: - wsURL (probe → dial handoff)
+
+    @Test func wsURLDropsTheIPv4InterfaceScope() throws {
+        // Live-caught (iOS 27 sim → real Mac): the probe's resolved address
+        // arrives as "192.168.4.84%en0" — a bare "%" is an illegal URL
+        // escape, so keeping it makes URL(string:) nil and the whole connect
+        // dies as "no usable IPv4 address" without ever dialing.
+        let host = NWEndpoint.Host.ipv4(try #require(IPv4Address("192.168.4.84%en0")))
+        let url = ResolvedWebSocketTransport.wsURL(host: host, port: 53224)
+        #expect(url?.absoluteString == "ws://192.168.4.84:53224/")
+    }
+
+    @Test func wsURLPlainIPv4AndNameStillBuild() throws {
+        let plain = NWEndpoint.Host.ipv4(try #require(IPv4Address("10.0.0.7")))
+        #expect(ResolvedWebSocketTransport.wsURL(host: plain, port: 1)?.absoluteString == "ws://10.0.0.7:1/")
+        #expect(ResolvedWebSocketTransport.wsURL(host: .name("mac.local", nil), port: 2)?.absoluteString == "ws://mac.local:2/")
+    }
+
     // MARK: - Backoff schedule
 
     @Test func backoffScheduleMirrorsNativeDiscovery() {

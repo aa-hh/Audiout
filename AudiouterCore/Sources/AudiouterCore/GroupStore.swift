@@ -99,10 +99,28 @@ public struct GroupStore: Sendable {
 
     /// `~/Library/Application Support/Audiouter/` — created lazily by
     /// `save(_:)`, not here (this is just a pure path computation).
+    ///
+    /// A side-by-side dev copy (make-app.sh's `BUNDLE_ID` override) gets its
+    /// own folder named after its bundle id: defaults and the PTP helper
+    /// label were already per-bundle-id, but this directory was hardcoded,
+    /// so a dev copy read AND wrote the live app's groups/app-routes/
+    /// approvals (live-caught 2026-08-06). The canonical id and bundle-less
+    /// callers (swift test, CLI tools) keep the historical folder — no
+    /// existing install migrates.
     public static var defaultDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("Audiouter", isDirectory: true)
+        // Only an Audiouter-FAMILY override diverges: foreign hosts (the
+        // swift-test runner is com.apple.dt.xctest.tool, CLI tools have
+        // none) stay on the historical folder too.
+        let folder: String
+        if let id = Bundle.main.bundleIdentifier,
+           id.hasPrefix("com.audiouter."), id != "com.audiouter.Audiouter" {
+            folder = id
+        } else {
+            folder = "Audiouter"
+        }
+        return base.appendingPathComponent(folder, isDirectory: true)
     }
 
     /// Load saved groups. Missing file → empty (first run, nothing saved yet).

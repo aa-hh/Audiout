@@ -57,6 +57,12 @@ final class AppSessionModel {
     func start() {
         guard !started else { return }
         started = true
+        // UI-test isolation: the smoke test walks the Demo system, which
+        // needs the deterministic no-Mac empty state. With a real Audiouter
+        // on the LAN, browsing would fill the list and the remembered-Mac
+        // reconnect would navigate away mid-test (both live-caught once a
+        // real Mac existed). Demo mode needs no controller.
+        guard !ProcessInfo.processInfo.arguments.contains("-uitest-isolated") else { return }
         controller.start()
     }
 

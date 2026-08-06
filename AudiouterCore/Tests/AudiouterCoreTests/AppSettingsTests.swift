@@ -222,6 +222,18 @@ import Testing
         #expect((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
     }
 
+    // MARK: Store directory — side-by-side isolation
+
+    @Test func storeDirectoryKeepsTheHistoricalFolderForNonAudiouterHosts() {
+        // The swift-test host (com.apple.dt.xctest.tool) is not an
+        // Audiouter-family bundle id, so it must resolve to the historical
+        // "Audiouter" folder — the no-migration pin. Only a BUNDLE_ID
+        // override like com.audiouter.Audiouter.dev diverges (not
+        // constructible from this host; the predicate is exercised by the
+        // side-by-side dev-build flow).
+        #expect(GroupStore.defaultDirectory.lastPathComponent == "Audiouter")
+    }
+
     // MARK: Companion — allow remote control (T6)
 
     @Test func allowRemoteControlDefaultsTrueWhenUnset() {

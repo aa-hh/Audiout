@@ -36,6 +36,10 @@ final class CompanionSmokeUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
+        // Keep the walkthrough deterministic on a LAN that has a real
+        // Audiouter: the app skips ConnectionController.start() entirely
+        // (no browsing, no remembered-Mac reconnect). Demo needs neither.
+        app.launchArguments += ["-uitest-isolated"]
         app.launch()
         dismissLocalNetworkAlertIfPresent()
         try FileManager.default.createDirectory(at: screenshotDir, withIntermediateDirectories: true)

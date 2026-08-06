@@ -117,8 +117,10 @@ loose edits looks like helpfulness.**
 Merge-only makes docs-ahead-of-code structurally impossible: a doc and its code
 ride the same branch and become true on `main` in the same instant.
 
-**Two pre-commit guards** (`.githooks/`; enable once per clone with
-`git config core.hooksPath .githooks`, override once with `--no-verify`):
+**Pre-commit guards** (`.githooks/pre-commit`; enable once per clone with
+`git config core.hooksPath .githooks`, override once with `--no-verify`). The
+two that shape how you work, plus the review gate; the rest (test suites 4/6,
+warn-only 3/5) are documented in the hook file itself:
 
 - **Guard 1 blocks** a direct commit on `main`. Merges are unaffected; it never
   fires in a worktree.
@@ -128,6 +130,13 @@ ride the same branch and become true on `main` in the same instant.
   truth is still true) and not the working tree (which would have let `f1f3e94`
   through). Known false positives: AppKit types named as design guidance but used
   nowhere.
+- **Guard 7 blocks** a Swift commit until the staged-diff readability
+  self-review has run: `scripts/self-review.sh` shows the checklist and writes
+  a receipt keyed to the exact staged bytes — READ your staged diff against
+  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md) (change-log narration, stale
+  claims, misleading names, reviewer-speak) before committing; restaging
+  invalidates the receipt on purpose. It also hard-blocks near-certain slop
+  patterns in added comments (trailing `slop-ok` exempts a legitimate line).
 
 ## UI / Design Conventions (all targets)
 

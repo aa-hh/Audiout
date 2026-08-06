@@ -30,9 +30,11 @@ import Testing
         var status: PTPHelperStatus
         private(set) var registerCount = 0
         private(set) var openSettingsCount = 0
+        private(set) var unregisterCount = 0
         init(status: PTPHelperStatus = .notRegistered) { self.status = status }
         func register() throws { registerCount += 1 }
         func openSystemSettingsLoginItems() { openSettingsCount += 1 }
+        func unregister() async throws { unregisterCount += 1 }
     }
     private final class ChangeCounter { var count = 0 }
 

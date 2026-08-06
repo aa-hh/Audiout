@@ -42,6 +42,7 @@ struct SnapshotPTPHelper: PTPHelperManaging {
     var status: PTPHelperStatus { statusToReport }
     func register() throws {}
     func openSystemSettingsLoginItems() {}
+    func unregister() async throws {}
 }
 
 @MainActor

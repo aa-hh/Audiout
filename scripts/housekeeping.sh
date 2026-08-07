@@ -40,7 +40,8 @@
 #   --dry-run  report what would happen, touch nothing
 #
 # Env: AUDIOUTER_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
-#      AUDIOUTER_MIN_FREE_GB         free-disk floor (default 8)
+#      AUDIOUTER_MIN_FREE_GB         headroom target, our caches only (default 8)
+#      AUDIOUTER_CRITICAL_FREE_GB    take everything below this (default 2)
 #      AUDIOUTER_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
 set -u
 
@@ -164,16 +165,21 @@ done
 #      deleted unconditionally — after that much source drift SwiftPM largely
 #      rebuilds from scratch anyway, so it saves ~nothing and holds ~1 GB.
 #   2. PRESSURE: below AUDIOUTER_MIN_FREE_GB (8) free, delete caches least-
-#      recently-built first until back above the floor. This is the hard
-#      guarantee the disk can never again hit zero mid-build.
+#      recently-built first — but ONLY when doing so actually reaches the
+#      floor, so builds never eat the last of the disk while a shortfall
+#      caused elsewhere is left for a human to deal with. See rule 2 below.
 # The current checkout and anything a live process references are never
 # touched by either rule.
 max_age_days=${AUDIOUTER_CACHE_MAX_AGE_DAYS:-7}
-# 8, not higher: this machine's normal free space hovers around 13 GB (APFS
-# purgeable space is held elsewhere), so a floor above that would put every
-# build permanently in reclaim mode. 8 leaves ~2 builds' worth of margin
-# above zero while staying comfortably below the everyday baseline.
+# The headroom a build should be able to count on: ~2 builds' worth (~1 GB
+# each) plus room for the OS to breathe. Deliberately below this machine's
+# ~13 GB everyday baseline — a floor above the baseline would ask for reclaim
+# on every single build (observed live at 15).
 min_free_gb=${AUDIOUTER_MIN_FREE_GB:-8}
+# Emergency line. Above it, a shortfall we cannot fix is reported and left
+# alone; below it, every reclaimable cache goes regardless, because a build
+# dying on a full disk is the incident this whole script exists to prevent.
+critical_gb=${AUDIOUTER_CRITICAL_FREE_GB:-2}
 now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the
@@ -234,22 +240,60 @@ printf '%s\n' "$units" | while IFS='	' read -r mt u; do
     delete_caches "$u" "untouched for >${max_age_days}d"
 done
 
-# Rule 2: pressure floor. Re-read df before each delete — earlier deletions
-# (including rule 1's) count toward the floor, so this removes the minimum
-# needed. Dry-run reports the floor state and the deletion order instead of
-# simulating df.
+# Rule 2: pressure floor — scoped to OUR OWN footprint.
+#
+# The floor is headroom this script tries to guarantee using the caches it
+# owns. It is NOT a promise about the disk as a whole, because build caches
+# are only one input to free space and the others are not ours to manage: the
+# day this was written, 6.4 GB of Xcode iOS DeviceSupport (downloaded for the
+# companion-app work) put the machine under the floor all by itself.
+#
+# That case is why "delete oldest until free >= floor" is the wrong loop. It
+# cannot reach a floor the caches did not cause, so it deletes every warm
+# cache, makes the next build in each worktree cold, and STILL reports
+# failure — pure loss. Observed live, and the reason this rule was rewritten.
+#
+# So: measure what is actually reclaimable first, and only reclaim when doing
+# so reaches the floor. When it cannot, keep the caches and say plainly that
+# the shortfall came from somewhere else — that is a message for a human, not
+# a problem this script should thrash trying to fix.
+#
+# The exception is genuine emergency: below AUDIOUTER_CRITICAL_FREE_GB, take
+# everything reclaimable even though it falls short. Preventing a build that
+# dies on a full disk beats keeping caches warm, and a zero-byte disk is the
+# incident that started all of this.
 min_free_kb=$((min_free_gb * 1024 * 1024))
-if [ "$(free_kb)" -lt "$min_free_kb" ]; then
-    say "under ${min_free_gb} GB free — reclaiming build caches, oldest first."
-    printf '%s\n' "$units" | while IFS='	' read -r mt u; do
+critical_kb=$((critical_gb * 1024 * 1024))
+free_now=$(free_kb)
+if [ "$free_now" -lt "$min_free_kb" ]; then
+    # Candidates, oldest first, each with its total size. Skip reasons print
+    # to stderr from skippable(), so they never pollute this capture.
+    candidates=$(printf '%s\n' "$units" | while IFS='	' read -r mt u; do
         [ -n "$u" ] || continue
         [ -n "$(caches_of "$u")" ] || continue   # rule 1 may have emptied it
-        [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -ge "$min_free_kb" ] && break
         skippable "$u" || continue
-        delete_caches "$u" "disk below ${min_free_gb} GB free"
-    done
-    if [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -lt "$min_free_kb" ]; then
-        say "still under the floor after reclaiming everything deletable."
+        sz=$(caches_of "$u" | while IFS= read -r d; do du -sk "$d" 2>/dev/null | cut -f1; done |
+             awk '{s+=$1} END {print s+0}')
+        printf '%s\t%s\n' "$sz" "$u"
+    done)
+    reclaimable=$(printf '%s\n' "$candidates" | awk -F'\t' '{s+=$1} END {print s+0}')
+
+    if [ -z "$candidates" ]; then
+        say "under ${min_free_gb} GB free, but every build cache is in use or protected — nothing to reclaim."
+    elif [ $((free_now + reclaimable)) -ge "$min_free_kb" ] || [ "$free_now" -lt "$critical_kb" ]; then
+        say "under ${min_free_gb} GB free — reclaiming build caches, oldest first."
+        printf '%s\n' "$candidates" | while IFS='	' read -r sz u; do
+            [ -n "$u" ] || continue
+            # Re-read df per delete so this stops at the minimum needed. In a
+            # dry run nothing is freed, so this would never stop — hence the
+            # dry_run guard, which lists the full order instead.
+            [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -ge "$min_free_kb" ] && break
+            delete_caches "$u" "disk below ${min_free_gb} GB free"
+        done
+    else
+        say "under ${min_free_gb} GB free ($((free_now / 1024 / 1024)) GB), but this repo's reclaimable"
+        say "caches total only $((reclaimable / 1024)) MB — the shortfall is not ours, so they stay warm."
+        say "Look outside the repo: ~/Library/Developer (Xcode DeviceSupport, simulators, DerivedData)."
     fi
 fi
 

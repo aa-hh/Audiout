@@ -4191,13 +4191,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 } catch {
                     // D4: no rollback of anything else. Mark THIS device
                     // unavailable + deselected and PARK it so the loop stops issuing
-                    // new sessions post-failure (root cause 5). Recoverable via a
-                    // later discovery/state update or a user re-toggle (root cause 4).
+                    // new sessions post-failure (root cause 5). The park clears only
+                    // on a genuine edge (storm fix, 2026-08-06): a came-back
+                    // discovery edge, an engine good-state transition, a membership
+                    // edge, or `retryOutput`.
+                    //
+                    // Cause mapping mirrors `applyEngineState`'s `.passwordRequired`
+                    // arm: an auth rejection is the one connect failure with a
+                    // known, actionable cause — never flatten it to `.unknown`.
+                    var cause: ConnectionFailure.Cause = .unknown
+                    if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
                     stateQueue.sync {
                         self.added.remove(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
-                        self.enterFailure(id)
+                        self.enterFailure(id, cause: cause)
                     }
                     return
                 }
@@ -5336,7 +5344,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.added.remove(id)
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
-                    device.connectionState = .failed(ConnectionFailure(cause: .unknown))
+                    // `.passwordRequired` is the one engine failure with a KNOWN,
+                    // actionable cause — don't flatten it to `.unknown` (live
+                    // 2026-08-06: an auth-blocked receiver was debugged blind
+                    // because the panel said "failed for an unknown reason" while
+                    // the engine knew it wanted a password).
+                    let cause: ConnectionFailure.Cause =
+                        state == .passwordRequired ? .authRequired : .unknown
+                    device.connectionState = .failed(ConnectionFailure(cause: cause))
                 }
             case .stopped:
                 device.isSelected = false

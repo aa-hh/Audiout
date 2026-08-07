@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SystemConfiguration
 import AirPlayEngine
 
 // NativeDiscovery (T-NB-DISCOVERY-1).
@@ -238,6 +239,21 @@ public final class NativeDiscovery: @unchecked Sendable {
     private var known: [String: Entry] = [:]
     private var started = false
 
+    /// This machine's own mDNS hostname ("<LocalHostName>.local", normalized),
+    /// used to drop THIS MAC'S OWN AirPlay receiver from discovery (Alec's call,
+    /// 2026-08-07). macOS's AirPlay Receiver announces under the machine's own
+    /// hostname, so without this filter the app offers the Mac it is running on
+    /// as a speaker — a self-loop that mostly can't work (the live 2026-08-06
+    /// "Couldn't connect" storm was exactly this row: same name as the Mac, so
+    /// it even READS like a remote device) and that the separate "This Mac"
+    /// local-device row already covers for the legitimate local-playback intent.
+    /// `nil` disables the filter (hostname unavailable — fail open: a phantom
+    /// self row is annoying, a silently missing REAL speaker is a support case).
+    private let localHostname: String?
+    /// Instance names whose self-drop was already logged — one stderr line per
+    /// service, not one per re-announce (D6: drops are loud, but not spam).
+    private var loggedSelfDrops: Set<String> = []
+
     /// Per-device tracking of which service types are currently advertising it,
     /// and the best descriptor seen. De-dupe + AP1↔AP2 transitions live here.
     private struct Entry {
@@ -257,9 +273,15 @@ public final class NativeDiscovery: @unchecked Sendable {
         var hasEverBeenAP2: Bool = false
     }
 
-    /// - Parameter browser: the browse layer. Defaults to a real
-    ///   Network.framework browser over both service types; tests inject a double.
-    public init(browser: ServiceBrowsing? = nil) {
+    /// - Parameters:
+    ///   - browser: the browse layer. Defaults to a real Network.framework
+    ///     browser over both service types; tests inject a double.
+    ///   - localHostname: this machine's own mDNS hostname for the self-receiver
+    ///     filter (see `localHostname` above). Defaults to the system's
+    ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
+    public init(browser: ServiceBrowsing? = nil,
+                localHostname: String? = NativeDiscovery.systemLocalHostname()) {
+        self.localHostname = localHostname.map(Self.normalizedHostname)
         self.browser = browser ?? NetworkFrameworkBrowser()
         self.browser.onResolve = { [weak self] service in
             guard let self else { return }
@@ -297,9 +319,42 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
     }
 
+    // MARK: Self-receiver identity
+
+    /// This machine's own mDNS hostname in announce form ("<LocalHostName>.local"),
+    /// or `nil` when the system doesn't report one (the filter then disables —
+    /// fail open, see `localHostname`).
+    public static func systemLocalHostname() -> String? {
+        guard let name = SCDynamicStoreCopyLocalHostName(nil) as String? else { return nil }
+        return name + ".local"
+    }
+
+    /// Bonjour hostnames compare loosely: announcements carry a trailing dot
+    /// ("Alecs-MacBook-Pro-2.local.") and mDNS names are case-insensitive.
+    static func normalizedHostname(_ hostname: String) -> String {
+        let lowered = hostname.lowercased()
+        return lowered.hasSuffix(".") ? String(lowered.dropLast()) : lowered
+    }
+
     // MARK: Resolve / remove handling (all on `queue`)
 
     private func handleResolve(_ service: ResolvedService) {
+        // Self-receiver filter (Alec's call, 2026-08-07): this Mac's own AirPlay
+        // receiver announces under the machine's own mDNS hostname — drop it
+        // BEFORE identity extraction so it never becomes an entry, an event, or a
+        // popover row. Both service types funnel through here, so one check
+        // covers `_airplay._tcp` and `_raop._tcp`. Logged once per instance name
+        // (D6: no silent drops), then quiet across re-announces.
+        if let localHostname, Self.normalizedHostname(service.hostname) == localHostname {
+            if loggedSelfDrops.insert(service.name).inserted {
+                let message = "[Audiouter] NativeDiscovery: dropping " +
+                    "\(service.serviceType.rawValue) service \"\(service.name)\" — it is this " +
+                    "Mac's own AirPlay receiver (\(service.hostname)); use the This Mac row instead\n"
+                FileHandle.standardError.write(Data(message.utf8))
+            }
+            return
+        }
+
         // Every surfaced device MUST have a stable identity (its colon-hex id and
         // the engine's OutputID). Preferred source: the `deviceid` TXT key. But
         // real shairport-sync AP1 receivers (and other DIY/legacy RAOP gear)

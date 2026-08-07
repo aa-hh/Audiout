@@ -85,6 +85,11 @@ extension SerializedSharedState {
 
         /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
         var addFailures: Set<UInt64> = []
+        /// The error `addFailures` throws — defaults to the generic session
+        /// failure; the auth-mapping test sets `.passwordRequired` to prove the
+        /// connect path surfaces `.authRequired` instead of flattening to
+        /// `.unknown`.
+        var addFailureError: AirPlayEngineError = .sessionFailed
         /// Ids that should THROW on `removeOutput`.
         var removeFailures: Set<UInt64> = []
         /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
@@ -179,7 +184,7 @@ extension SerializedSharedState {
                 hook?(id)
                 let hold = self.lock.withLock { self.onAddOutputHold }
                 if let hold { await hold(id, 0) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound.
                 self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
             }
@@ -229,7 +234,7 @@ extension SerializedSharedState {
                 }
                 let hold = self.lock.withLock { self.onRebindBody }
                 if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 self.lock.withLock {
                     if streamId == 0 {
                         self.added.append(id)
@@ -258,7 +263,7 @@ extension SerializedSharedState {
                 hook?(id)
                 let hold = self.lock.withLock { self.onAddOutputHold }
                 if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound to
                 // `streamId` — that silent no-op is exactly defect B.
                 self.lock.withLock {
@@ -2066,6 +2071,72 @@ extension SerializedSharedState {
                        "an auto-recovery reconnect (userConnectSeed unarmed) must PRESERVE the pre-drop in-session level (75), not reseed to the connect default")
         #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.75) < 0.001 } ?? false,
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
+    }
+
+    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
+    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
+    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
+    /// debugged blind because the panel said "failed for an unknown reason"
+    /// while the engine knew it wanted a password).
+    @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "a password rejection carries its known cause, not .unknown")
+    }
+
+    /// The same mapping on the CONNECT path: an `addOutput` that throws the
+    /// engine's `.passwordRequired` parks the device with `.authRequired` —
+    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "the add-throw catch maps the engine's passwordRequired, not .unknown")
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY

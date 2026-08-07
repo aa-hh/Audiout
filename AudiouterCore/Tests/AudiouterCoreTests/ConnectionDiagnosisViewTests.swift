@@ -156,18 +156,20 @@ import AudiouterSharedUI
 
     @Test func longSuggestionWrapsIntoTallerHeightThanShortOne() {
         let short = ConnectionDiagnosisView(
-            failure: ConnectionFailure(cause: .authRequired), deviceName: "Loft")
+            failure: ConnectionFailure(cause: .timedOut), deviceName: "Loft")
         short.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
         short.layoutSubtreeIfNeeded()
 
         let long = ConnectionDiagnosisView(
-            failure: ConnectionFailure(cause: .notResponding), deviceName: "Loft")
+            failure: ConnectionFailure(cause: .authRequired), deviceName: "Loft")
         long.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
         long.layoutSubtreeIfNeeded()
 
-        // `.notResponding`'s suggestion is the longest copy in the table; a
-        // narrower fixed-width row should force it to wrap across more lines
-        // than the (shorter) `.authRequired` copy, i.e. a taller fitting height.
+        // `.authRequired` became the longest copy in the table when it gained
+        // the Mac receiver-side fix instructions (2026-08-07 — it was the
+        // SHORTEST before, and this test's short fixture); at a fixed narrow
+        // width it must wrap across more lines than the brief `.timedOut`
+        // copy, i.e. a taller fitting height.
         #expect(long.fittingSize.height > short.fittingSize.height)
     }
 
